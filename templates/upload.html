@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pharma Batch Checker</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="container">
+        <h1>🏭 Pharma Batch Checker</h1>
+        <p class="subtitle">GMP 批生产记录半自动合规检查系统</p>
+        <div class="upload-area" id="upload-area">
+            <p>拖拽 PDF 文件到此处，或点击选择文件</p>
+            <input type="file" id="file-input" accept=".pdf" hidden>
+            <button onclick="document.getElementById('file-input').click()">选择 PDF</button>
+        </div>
+        <div id="status"></div>
+        <footer>
+            <p>v0.1.0 — Phase 0 MVP</p>
+        </footer>
+    </div>
+    <script src="/static/app.js"></script>
+</body>
+</html>

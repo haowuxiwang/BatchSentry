@@ -1,0 +1,20 @@
+# Env / secrets
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.spec.bak
+
+# Data
+data/
+output/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+OCR_BAIDU/
