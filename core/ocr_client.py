@@ -32,8 +32,12 @@ def submit_pdf(pdf_path: str, retries: int = 3) -> str:
     with open(pdf_path, "rb") as f:
         file_content = f.read()
 
+    file_size_mb = len(file_content) / 1024 / 1024
     files = {"file": (Path(pdf_path).name, file_content, "application/pdf")}
-    logger.info(f"Submitting {pdf_path} ({len(file_content)/1024/1024:.1f} MB) to PaddleOCR-VL...")
+    logger.info(
+        f"Submitting to PaddleOCR-VL: file={Path(pdf_path).name} "
+        f"size={file_size_mb:.1f}MB model={cfg.model} url={cfg.api_url}"
+    )
 
     last_error = None
     for attempt in range(1, retries + 1):
@@ -51,13 +55,17 @@ def submit_pdf(pdf_path: str, retries: int = 3) -> str:
             job_id = result.get("data", {}).get("jobId") or result.get("jobId")
             if not job_id:
                 raise RuntimeError(f"No jobId in response: {result}")
-            logger.info(f"Job submitted: {job_id}")
+            logger.info(f"OCR job submitted: jobId={job_id}")
             return job_id
         except Exception as e:
             last_error = e
-            logger.warning(f"Submit attempt {attempt}/{retries} failed: {e}")
+            logger.warning(
+                f"Submit attempt {attempt}/{retries} failed: {type(e).__name__}: {e}"
+            )
             if attempt < retries:
-                time.sleep(2 * attempt)
+                backoff = 2 * attempt
+                logger.info(f"Submit retry: backing off {backoff}s before attempt {attempt + 1}")
+                time.sleep(backoff)
     raise RuntimeError(f"Submit failed after {retries} attempts: {last_error}")
 
 
@@ -90,6 +98,8 @@ def poll_job(job_id: str) -> dict:
             total = progress.get("totalPages", "?")
             logger.info(f"Poll state={state} pages={extracted}/{total}")
             if state in ("done", "success"):
+                elapsed = int(time.time() - start)
+                logger.info(f"Poll done: job_id={job_id} elapsed={elapsed}s pages={extracted}/{total}")
                 return j
             if state in ("failed", "error"):
                 raise RuntimeError(f"Job failed: {j}")
@@ -100,7 +110,10 @@ def poll_job(job_id: str) -> dict:
             if consecutive_errors >= 5:
                 raise RuntimeError(f"Poll failed after {consecutive_errors} consecutive network errors: {e}")
             time.sleep(POLL_INTERVAL * 2)  # 网络错误时退避更久
-    raise RuntimeError(f"Polling timed out after {POLL_TIMEOUT}s for job {job_id}")
+    elapsed = int(time.time() - start)
+    raise RuntimeError(
+        f"Polling timed out after {elapsed}s (limit={POLL_TIMEOUT}s) for job {job_id}"
+    )
 
 
 def download_result(poll_response: dict) -> list[dict]:
@@ -121,12 +134,13 @@ def download_result(poll_response: dict) -> list[dict]:
     if not json_url:
         raise RuntimeError(f"No result URL in poll response: {poll_response}")
 
-    logger.info(f"Downloading result from {json_url}...")
+    logger.info(f"Downloading OCR result from {json_url}...")
     resp = requests.get(json_url, timeout=180, verify=True)
     if resp.status_code != 200:
         raise RuntimeError(f"Download failed HTTP {resp.status_code}")
 
     raw = resp.text
+    raw_size_kb = len(raw) / 1024
     pages: list[dict] = []
 
     # Try single JSON first
@@ -140,6 +154,9 @@ def download_result(poll_response: dict) -> list[dict]:
             for i, p in enumerate(pages):
                 if not p.get("page_count"):
                     p["page_count"] = i + 1
+        logger.info(
+            f"OCR download complete (single JSON): {len(pages)} pages, {raw_size_kb:.1f}KB"
+        )
         return pages
     except json.JSONDecodeError:
         pass
@@ -162,6 +179,9 @@ def download_result(poll_response: dict) -> list[dict]:
             for i, p in enumerate(pages):
                 if not p.get("page_count"):
                     p["page_count"] = i + 1
+    logger.info(
+        f"OCR download complete (JSONL): {len(pages)} pages, {raw_size_kb:.1f}KB"
+    )
     return pages
 
 

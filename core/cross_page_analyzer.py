@@ -47,6 +47,11 @@ _DATE_RE = re.compile(
     r"((?:19|20)\d{2})[.\-/](\d{1,2})[.\-/](\d{1,2})"  # year-mon-day
     r"(?:\s+(\d{1,2}):(\d{2}))?"                      # optional HH:MM
 )
+# Match Chinese date format: 2024年5月7日 / 2024年05月07日 (with optional HH:MM)
+_CN_DATE_RE = re.compile(
+    r"((?:19|20)\d{2})年(\d{1,2})月(\d{1,2})日"
+    r"(?:\s*(\d{1,2})[时:](\d{2})分?)?"
+)
 # Match a standalone HH:MM
 _TIME_ONLY_RE = re.compile(r"^\s*(\d{1,2}):(\d{2})\s*$")
 # Glued name+date like "庞明女署2027.01.17" — we already extract via _DATE_RE,
@@ -65,6 +70,7 @@ def _parse_time(s: Optional[str], fallback_date: Optional[str] = None) -> Option
     Supported formats (in priority order):
       - "2015.01.27 14:30" / "2015-01-27 14:30" / "2015/1/7 9:05"
       - "2015.01.27"        / "2015-01-27"      / "2015/1/7"
+      - "2024年5月7日" / "2024年05月07日 14时30分" (Chinese format)
       - "11:04"              -> uses fallback_date (e.g. page production_date)
       - "2022/4/202205.07"   -> OCR noise, clean to "2022.05.07"
       - "庞明女署2027.01.17"  -> extract via regex
@@ -98,7 +104,18 @@ def _parse_time(s: Optional[str], fallback_date: Optional[str] = None) -> Option
         except ValueError:
             pass
 
-    # 3) Normal date / datetime
+    # 3) Chinese date format "2024年5月7日" / "2024年05月07日 14时30分"
+    m = _CN_DATE_RE.search(raw)
+    if m:
+        year, mon, day = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        hh = int(m.group(4)) if m.group(4) else 0
+        mm = int(m.group(5)) if m.group(5) else 0
+        try:
+            return datetime(year, mon, day, hh, mm)
+        except ValueError:
+            return None
+
+    # 4) Normal date / datetime (YYYY.MM.DD / YYYY-MM-DD / YYYY/MM/DD)
     m = _DATE_RE.search(raw)
     if m:
         year, mon, day = int(m.group(1)), int(m.group(2)), int(m.group(3))
@@ -109,7 +126,7 @@ def _parse_time(s: Optional[str], fallback_date: Optional[str] = None) -> Option
         except ValueError:
             return None
 
-    # 4) Bare year "2022"
+    # 5) Bare year "2022"
     m = _YEAR_RE.search(raw)
     if m:
         try:

@@ -77,20 +77,20 @@ PROMPTS = {
 ## findings 字段（每条必填）
 {"page":页码, "type":"time_reversal|year_contradiction|signature_time_anomaly|suspicious_date|param_out_of_spec|completeness", "severity":"critical|warning|info", "description":"问题描述", "ocr_text":"原文摘录"}
 
-## 矩阵示例（page9 上柱记录）
-表格 9 行时间 × 4 设备 × 2 指标（流速/压力），应抽成：
+## 矩阵示例（仅展示数据结构，实际设备编号/指标名/时间行数因批记录而异）
+表格多行时间 × N 设备 × M 指标，应抽成：
 measurements: [
-  {"time":"11:04", "values":{"T2101a_流速":{"spec":"0.5-1.0","actual":"0.974","unit":"m³/h","in_spec":true}, "T2101a_压力":{"spec":"<0.3","actual":"0.15","unit":"MPa","in_spec":true}, "T2101b_流速":{...}, ...}},
+  {"time":"11:04", "values":{"设备A_流速":{"spec":"0.5-1.0","actual":"0.974","unit":"m³/h","in_spec":true}, "设备A_压力":{"spec":"<0.3","actual":"0.15","unit":"MPa","in_spec":true}, "设备B_流速":{...}, ...}},
   {"time":"12:06", "values":{...}},
   ...
 ]
-列名格式: "{设备编号}_{指标}" 如 "T2101a_流速"、"T2101d_压力"。
+列名格式: "{设备编号}_{指标}"，编号和指标名从实际表格中提取，不要臆造。
 
-## 签名粘连示例（page2）
-"庞明女署2027.01.17"（姓名+日期粘连）应拆成：
-signatures: [{"role":"issuer", "name":"庞明女署", "sign_time":"2027.01.17", "confidence":"low"}]
-"王2728 2025.01.30" 应拆成：
-signatures: [{"role":"workshop_reviewer", "name":"王2728", "sign_time":"2025.01.30", "confidence":"medium"}]
+## 签名粘连示例（姓名+日期粘连是常见 OCR 现象，需拆分）
+"张三2027.01.17"（姓名+日期粘连）应拆成：
+signatures: [{"role":"issuer", "name":"张三", "sign_time":"2027.01.17", "confidence":"low"}]
+"李四 2025.01.30" 应拆成：
+signatures: [{"role":"workshop_reviewer", "name":"李四", "sign_time":"2025.01.30", "confidence":"medium"}]
 
 ## 关键约束
 - findings 必须结构化输出，不要把异常塞 ocr_noise 文本字段

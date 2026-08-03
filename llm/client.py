@@ -63,6 +63,18 @@ class LLMClient:
                 llm_call_audit table for GMP traceability. Set to None for
                 ad-hoc calls (health probe, etc.).
         """
+        # Build a short context tag for log correlation (e.g. "[job=abc123 page=5 stage=page_analysis]")
+        ctx_tag = ""
+        if audit_ctx:
+            parts = []
+            if audit_ctx.get("job_id"):
+                parts.append(f"job={audit_ctx['job_id'][:8]}")
+            if audit_ctx.get("page") is not None:
+                parts.append(f"page={audit_ctx['page']}")
+            if audit_ctx.get("stage"):
+                parts.append(f"stage={audit_ctx['stage']}")
+            ctx_tag = f" [{', '.join(parts)}]" if parts else ""
+
         last_error = None
         last_result: "ChatResult | None" = None
         last_latency_ms = 0
@@ -80,17 +92,17 @@ class LLMClient:
                 last_latency_ms = int(elapsed * 1000)
                 last_result = result
 
-                # Log token usage (handles None for providers that don't report)
+                # Log token usage with context tag for correlation
                 if result.total_tokens is not None:
                     logger.info(
-                        f"LLM {self.model}: "
+                        f"LLM {self.model}{ctx_tag}: "
                         f"prompt={result.prompt_tokens} "
                         f"completion={result.completion_tokens} "
                         f"total={result.total_tokens} latency={elapsed:.1f}s"
                     )
                 else:
                     logger.info(
-                        f"LLM {self.model}: latency={elapsed:.1f}s (no usage info)"
+                        f"LLM {self.model}{ctx_tag}: latency={elapsed:.1f}s (no usage info)"
                     )
 
                 # Phase 7: GMP audit — record this call for traceability
@@ -103,10 +115,13 @@ class LLMClient:
             except Exception as e:
                 last_error = e
                 logger.warning(
-                    f"LLM call attempt {attempt}/{retries} failed: {e}"
+                    f"LLM call attempt {attempt}/{retries} failed{ctx_tag}: "
+                    f"{type(e).__name__}: {e}"
                 )
                 if attempt < retries:
-                    await asyncio.sleep(2 * attempt)
+                    backoff = 2 * attempt
+                    logger.info(f"LLM retry{ctx_tag}: backing off {backoff}s before attempt {attempt + 1}")
+                    await asyncio.sleep(backoff)
         # Final failure — record audit if requested
         if audit_ctx is not None:
             await _record_llm_call(
@@ -114,7 +129,7 @@ class LLMClient:
                 success=False, error=str(last_error)[:200]
             )
         raise RuntimeError(
-            f"LLM call failed after {retries} attempts: {last_error}"
+            f"LLM call failed after {retries} attempts{ctx_tag}: {last_error}"
         )
 
     async def chat_json(
@@ -136,7 +151,26 @@ class LLMClient:
             timeout=timeout,
             audit_ctx=audit_ctx,
         )
-        return self._parse_json(raw)
+        result = self._parse_json(raw)
+
+        # Log parse failures with context for production debugging
+        if isinstance(result, dict) and result.get("_parse_error"):
+            ctx_tag = ""
+            if audit_ctx:
+                parts = []
+                if audit_ctx.get("job_id"):
+                    parts.append(f"job={audit_ctx['job_id'][:8]}")
+                if audit_ctx.get("page") is not None:
+                    parts.append(f"page={audit_ctx['page']}")
+                if audit_ctx.get("stage"):
+                    parts.append(f"stage={audit_ctx['stage']}")
+                ctx_tag = f" [{', '.join(parts)}]" if parts else ""
+            logger.warning(
+                f"JSON parse failed{ctx_tag}: "
+                f"response_length={len(raw)}, first_200={raw[:200]!r}"
+            )
+
+        return result
 
     @staticmethod
     def _parse_json(raw: str) -> dict | list:
