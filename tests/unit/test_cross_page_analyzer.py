@@ -9,7 +9,7 @@
 """
 import pytest
 import asyncio
-from unittest.mock import patch, AsyncMock
+from unittest.mock import patch, AsyncMock, MagicMock
 
 from core.cross_page_analyzer import (
     analyze_cross_page,
@@ -182,7 +182,20 @@ class TestUnitNormalization:
 
 
 class TestAnalyzeCrossPage:
-    """analyze_cross_page 主入口。"""
+    """analyze_cross_page 主入口。
+
+    所有测试 mock get_llm_client，避免调用真实 DeepSeek API（120s 超时）。
+    mock 返回空 findings，让规则层逻辑独立验证。
+    """
+
+    @pytest.fixture(autouse=True)
+    def mock_llm_client(self):
+        """自动 mock get_llm_client，返回空结果，避免真实 API 调用。"""
+        mock_client = MagicMock()
+        mock_client.chat_json = AsyncMock(return_value=[])
+        with patch('core.cross_page_analyzer.get_llm_client',
+                   return_value=mock_client):
+            yield mock_client
 
     def test_returns_list(self, sample_pages):
         findings = asyncio.run(analyze_cross_page(sample_pages))

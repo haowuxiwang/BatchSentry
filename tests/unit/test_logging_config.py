@@ -7,6 +7,7 @@
 """
 import pytest
 import logging
+import os
 from unittest.mock import patch
 
 from logging_config import (
@@ -76,7 +77,17 @@ class TestRequestIdFilter:
 
 
 class TestSetupLogging:
-    """setup_logging。"""
+    """setup_logging。
+
+    注意：conftest.py 设置 PBC_NO_FILE_LOG=1 跳过文件 handler，
+    这两个测试需要清除该环境变量才能验证文件 handler 创建逻辑。
+    """
+
+    @pytest.fixture(autouse=True)
+    def enable_file_logging(self, monkeypatch):
+        """临时清除 PBC_NO_FILE_LOG，让 setup_logging 创建文件 handler。"""
+        monkeypatch.delenv("PBC_NO_FILE_LOG", raising=False)
+        yield
 
     def test_setup_creates_handlers(self, tmp_path):
         """应创建 console + file + pipeline + error handlers。"""
@@ -93,3 +104,17 @@ class TestSetupLogging:
         assert any("pipeline" in str(h.__class__.__name__).lower() or
                    "RotatingFileHandler" in str(h.__class__.__name__)
                    for h in pipeline_logger.handlers)
+
+    def test_no_file_log_env_skips_file_handlers(self, tmp_path, monkeypatch):
+        """PBC_NO_FILE_LOG=1 时应跳过文件 handler 创建。"""
+        monkeypatch.setenv("PBC_NO_FILE_LOG", "1")
+        log_dir = str(tmp_path / "logs")
+        # 记录调用前的 handler 数量（root logger 是全局单例，可能有残留）
+        root = logging.getLogger()
+        before_file_handlers = [h for h in root.handlers
+                                if isinstance(h, logging.FileHandler)]
+        setup_logging(log_dir=log_dir, level="INFO")
+        after_file_handlers = [h for h in root.handlers
+                               if isinstance(h, logging.FileHandler)]
+        # 新增的文件 handler 应为 0（PBC_NO_FILE_LOG=1 跳过文件 handler）
+        assert len(after_file_handlers) == len(before_file_handlers)

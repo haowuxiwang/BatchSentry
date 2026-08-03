@@ -6,11 +6,17 @@
 - mock_ocr: OCR 后端 mock（避免真实 HTTP 调用）
 - mock_llm: LLM 客户端 mock
 - sample_pdf: 临时 PDF 文件
+
+测试环境日志策略：
+- 禁用 RotatingFileHandler（避免 Windows WinError 32 文件占用冲突）
+- 设置 multipart logger 为 WARNING（避免上传测试中 65536 字节 chunk 产生海量 debug 日志）
+- 上述两项曾导致 pytest 输出 19MB 噪音 + 测试结果被淹没
 """
 import os
 import sys
 import tempfile
 import sqlite3
+import logging
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -21,6 +27,31 @@ from httpx import AsyncClient
 # 将项目根加入 sys.path（确保 tests/ 能导入项目模块）
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
+
+# ── 测试环境日志净化（必须在 import main 之前） ──────────────────────
+# 1. 告知 logging_config 不要创建文件 handler（Windows 下多进程持有同一日志文件
+#    会导致 RotatingFileHandler.doRollover 触发 PermissionError [WinError 32]，
+#    每次 log 都打印完整异常堆栈，淹没测试输出。）
+os.environ.setdefault("PBC_NO_FILE_LOG", "1")
+
+# 2. 抑制 python-multipart 的 debug 日志（上传测试中每读 65536 字节打一条日志，
+#    放大日志轮转问题）
+logging.getLogger("multipart").setLevel(logging.WARNING)
+logging.getLogger("python_multipart").setLevel(logging.WARNING)
+
+
+@pytest.fixture(autouse=True)
+def _suppress_noisy_loggers():
+    """每个测试前静噪第三方库的 debug 日志（autouse）。
+
+    - multipart / python_multipart: 上传解析的逐 chunk debug 日志
+    - asyncio: 事件循环内部 debug 日志
+    - urllib3 / httpx: HTTP 请求 debug 日志（测试中用 mock，无需）
+    """
+    for name in ("multipart", "python_multipart", "asyncio", "urllib3", "httpx",
+                 "httpcore", "h11"):
+        logging.getLogger(name).setLevel(logging.WARNING)
+    yield
 
 
 @pytest_asyncio.fixture

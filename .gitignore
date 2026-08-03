@@ -74,6 +74,14 @@ _flip_status.py
 pytest_out.txt
 pytest_full.txt
 pytest_subset.txt
+pytest_result.txt
+pytest_clean.txt
+pytest_final.txt
+pytest_final2.txt
+pytest_v3.txt
+cov_result.txt
+cov_tmp.json
+coverage.json
 test_results.xml
 .coverage.*
 cache/

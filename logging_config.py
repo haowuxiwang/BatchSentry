@@ -13,6 +13,7 @@
 """
 import logging
 import logging.handlers
+import os
 import uuid
 from contextvars import ContextVar
 from pathlib import Path
@@ -43,9 +44,12 @@ def generate_request_id() -> str:
 
 
 def setup_logging(log_dir: str = "logs", level: str = "INFO"):
-    """配置日志系统 — console + file + pipeline。"""
-    Path(log_dir).mkdir(exist_ok=True)
+    """配置日志系统 — console + file + pipeline。
 
+    环境变量 PBC_NO_FILE_LOG=1 时跳过所有文件 handler（用于测试环境，
+    避免 Windows 下多进程持有同一日志文件导致 RotatingFileHandler
+    doRollover 触发 PermissionError [WinError 32]）。
+    """
     # 人类可读格式（含 request_id + job_id）
     fmt = "%(asctime)s [%(levelname)s] [req=%(request_id)s job=%(job_id)s] %(name)s: %(message)s"
     datefmt = "%Y-%m-%d %H:%M:%S"
@@ -57,6 +61,23 @@ def setup_logging(log_dir: str = "logs", level: str = "INFO"):
     console.setFormatter(formatter)
     console.addFilter(RequestIdFilter())
 
+    # Configure root logger
+    root = logging.getLogger()
+    root.setLevel(logging.DEBUG)
+    # 避免重复添加 console handler（测试中可能多次 import main）
+    has_console = any(
+        isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler)
+        for h in root.handlers
+    )
+    if not has_console:
+        root.addHandler(console)
+
+    # 文件 handler — 测试环境跳过（PBC_NO_FILE_LOG=1）
+    if os.getenv("PBC_NO_FILE_LOG", "").lower() in ("1", "true", "yes"):
+        return
+
+    Path(log_dir).mkdir(exist_ok=True)
+
     # File handler (rotate at 10MB, keep 5 backups)
     file_handler = logging.handlers.RotatingFileHandler(
         f"{log_dir}/pharma.log",
@@ -67,17 +88,7 @@ def setup_logging(log_dir: str = "logs", level: str = "INFO"):
     file_handler.setLevel(logging.DEBUG)
     file_handler.setFormatter(formatter)
     file_handler.addFilter(RequestIdFilter())
-
-    # Pipeline-specific log
-    pipeline_handler = logging.handlers.RotatingFileHandler(
-        f"{log_dir}/pipeline.log",
-        maxBytes=10 * 1024 * 1024,
-        backupCount=5,
-        encoding="utf-8",
-    )
-    pipeline_handler.setLevel(logging.DEBUG)
-    pipeline_handler.setFormatter(formatter)
-    pipeline_handler.addFilter(RequestIdFilter())
+    root.addHandler(file_handler)
 
     # Error-only log（便于运维快速定位）
     error_handler = logging.handlers.RotatingFileHandler(
@@ -89,13 +100,18 @@ def setup_logging(log_dir: str = "logs", level: str = "INFO"):
     error_handler.setLevel(logging.ERROR)
     error_handler.setFormatter(formatter)
     error_handler.addFilter(RequestIdFilter())
-
-    # Configure root logger
-    root = logging.getLogger()
-    root.setLevel(logging.DEBUG)
-    root.addHandler(console)
-    root.addHandler(file_handler)
     root.addHandler(error_handler)
+
+    # Pipeline-specific log
+    pipeline_handler = logging.handlers.RotatingFileHandler(
+        f"{log_dir}/pipeline.log",
+        maxBytes=10 * 1024 * 1024,
+        backupCount=5,
+        encoding="utf-8",
+    )
+    pipeline_handler.setLevel(logging.DEBUG)
+    pipeline_handler.setFormatter(formatter)
+    pipeline_handler.addFilter(RequestIdFilter())
 
     # Pipeline loggers write to pipeline.log too
     for name in ("core.pipeline", "core.ocr_client", "core.mineru_client",
