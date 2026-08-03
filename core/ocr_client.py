@@ -62,29 +62,44 @@ def submit_pdf(pdf_path: str, retries: int = 3) -> str:
 
 
 def poll_job(job_id: str) -> dict:
-    """Poll until job done. Returns the final poll response dict."""
+    """Poll until job done. Returns the final poll response dict.
+
+    容错：网络异常重试，最多 POLL_MAX_RETRIES 次后放弃。
+    """
     cfg = config["paddle_ocr"]
     headers = {"Authorization": f"bearer {cfg.token}"}
     url = f"{cfg.api_url}/{job_id}"
     start = time.time()
+    consecutive_errors = 0
 
     while (time.time() - start) < POLL_TIMEOUT:
-        resp = requests.get(url, headers=headers, timeout=30)
-        if resp.status_code != 200:
-            logger.warning(f"Poll HTTP {resp.status_code}, retrying...")
+        try:
+            resp = requests.get(url, headers=headers, timeout=30)
+            if resp.status_code != 200:
+                logger.warning(f"Poll HTTP {resp.status_code}, retrying...")
+                consecutive_errors += 1
+                if consecutive_errors >= 5:
+                    raise RuntimeError(f"Poll failed after {consecutive_errors} consecutive HTTP errors")
+                time.sleep(POLL_INTERVAL)
+                continue
+            consecutive_errors = 0  # 成功后重置错误计数
+            j = resp.json()
+            state = str(j.get("data", {}).get("state") or j.get("state") or "").lower()
+            progress = j.get("data", {}).get("extractProgress", {})
+            extracted = progress.get("extractedPages", "?")
+            total = progress.get("totalPages", "?")
+            logger.info(f"Poll state={state} pages={extracted}/{total}")
+            if state in ("done", "success"):
+                return j
+            if state in ("failed", "error"):
+                raise RuntimeError(f"Job failed: {j}")
             time.sleep(POLL_INTERVAL)
-            continue
-        j = resp.json()
-        state = str(j.get("data", {}).get("state") or j.get("state") or "").lower()
-        progress = j.get("data", {}).get("extractProgress", {})
-        extracted = progress.get("extractedPages", "?")
-        total = progress.get("totalPages", "?")
-        logger.info(f"Poll state={state} pages={extracted}/{total}")
-        if state in ("done", "success"):
-            return j
-        if state in ("failed", "error"):
-            raise RuntimeError(f"Job failed: {j}")
-        time.sleep(POLL_INTERVAL)
+        except requests.exceptions.RequestException as e:
+            consecutive_errors += 1
+            logger.warning(f"Poll network error ({consecutive_errors}/5): {e}")
+            if consecutive_errors >= 5:
+                raise RuntimeError(f"Poll failed after {consecutive_errors} consecutive network errors: {e}")
+            time.sleep(POLL_INTERVAL * 2)  # 网络错误时退避更久
     raise RuntimeError(f"Polling timed out after {POLL_TIMEOUT}s for job {job_id}")
 
 

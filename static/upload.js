@@ -123,6 +123,11 @@
         v instanceof File ? v.name : v,
       ]),
     });
+
+    // 禁用上传区域，防止重复提交
+    const dropZone = document.getElementById("drop-zone");
+    if (dropZone) dropZone.style.pointerEvents = "none";
+
     fetch("/api/jobs", { method: "POST", body: fd })
       .then((r) => {
         log("uploadFile — response", { status: r.status, ok: r.ok });
@@ -147,11 +152,13 @@
         } else {
           log.err("uploadFile — response missing job_id", data);
           setStatus(`上传失败: ${JSON.stringify(data)}`, "err");
+          if (dropZone) dropZone.style.pointerEvents = "";
         }
       })
       .catch((err) => {
         log.err("uploadFile — fetch failed", err);
         setStatus(`错误: ${err}`, "err");
+        if (dropZone) dropZone.style.pointerEvents = "";
       });
   }
 
