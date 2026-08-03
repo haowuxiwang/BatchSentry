@@ -346,61 +346,109 @@ async def _run_pipeline_impl(job_id: str, pdf_path: str):
         if await _is_cancelled(job_id):
             return
 
-        # ── Stage 2: Per-page LLM analysis ──────────────────────
+        # ── Stage 2: Per-page LLM analysis (concurrent) ─────────
         await transition_status(db, job_id, "analyzing", "Stage 2 start")
-        logger.info(f"[{job_id}] Stage 2: Analyzing {len(pages)} pages...")
+        concurrency = config["app"].llm_concurrency
+        logger.info(
+            f"[{job_id}] Stage 2: Analyzing {len(pages)} pages (concurrency={concurrency})..."
+        )
 
         stage2_start = time.time()
-        failed_pages = []
+        failed_pages: list[int] = []
 
         # Get already-analyzed pages for resume
         analyzed_pages = await _get_analyzed_pages(db, job_id)
-        logger.info(f"[{job_id}] Stage 2: {len(analyzed_pages)} pages already analyzed, resuming from {len(analyzed_pages)+1}")
+        logger.info(
+            f"[{job_id}] Stage 2: {len(analyzed_pages)} pages already analyzed, "
+            f"resuming from {len(analyzed_pages) + 1}"
+        )
 
+        # Build list of pages that still need analysis
+        todo: list[tuple[int, dict]] = []
         for i, page in enumerate(pages):
             page_num = i + 1
-
-            # Skip already analyzed pages (resume)
             if page_num in analyzed_pages:
                 continue
+            todo.append((page_num, page))
 
-            # Check cancellation before each page
+        # Shared state guards — aiosqlite single connection does NOT support
+        # concurrent execute, so all DB writes must be serialized via db_lock.
+        # failed_pages list and completed counter also need a lock.
+        db_lock = asyncio.Lock()
+        state_lock = asyncio.Lock()
+        completed = 0
+        total_pages = len(pages)
+        remaining = len(todo)
+        sem = asyncio.Semaphore(concurrency)
+
+        async def _analyze_one(page_num: int, page: dict) -> None:
+            """Concurrent LLM analysis for a single page.
+
+            LLM call runs concurrently (semaphore-limited); DB write is
+            serialized via db_lock to avoid aiosqlite "Recursive use of
+            cursors" error on the shared connection.
+            """
+            nonlocal completed
+
+            # Check cancellation before starting — if cancelled, skip without
+            # spawning an LLM call. Already-running tasks will finish on
+            # their own (LLM HTTP calls can't be aborted mid-flight).
             if await _is_cancelled(job_id):
-                logger.info(f"[{job_id}] Cancelled at page {page_num}")
+                logger.info(f"[{job_id}] Stage 2: Skipped page {page_num} (cancelled)")
                 return
 
             raw_html = page.get("markdown", {}).get("text", "")
-            try:
-                page_start = time.time()
-                structured = await analyze_page(raw_html, page_num=page_num, job_id=job_id)
-                page_ms = int((time.time() - page_start) * 1000)
+            async with sem:
+                try:
+                    page_start = time.time()
+                    structured = await analyze_page(
+                        raw_html, page_num=page_num, job_id=job_id
+                    )
+                    page_ms = int((time.time() - page_start) * 1000)
 
-                await db.execute(
-                    "UPDATE page_cache SET structured_json = ?, analyzed_at = CURRENT_TIMESTAMP "
-                    "WHERE job_id = ? AND page = ?",
-                    (json.dumps(structured, ensure_ascii=False), job_id, page_num),
-                )
-                await db.commit()
-                logger.info(f"[{job_id}] Stage 2: Page {page_num}/{len(pages)} analyzed in {page_ms}ms")
-            except Exception as e:
-                logger.error(f"[{job_id}] Stage 2: Page {page_num} failed: {e}")
-                failed_pages.append(page_num)
-                # Save error marker so we don't retry forever
-                error_data = {
-                    "page_number": page_num,
-                    "_parse_error": True,
-                    "_error": str(e)[:200],
-                    "overall_confidence": "low",
-                }
-                await db.execute(
-                    "UPDATE page_cache SET structured_json = ?, analyzed_at = CURRENT_TIMESTAMP "
-                    "WHERE job_id = ? AND page = ?",
-                    (json.dumps(error_data, ensure_ascii=False), job_id, page_num),
-                )
-                await db.commit()
+                    payload = json.dumps(structured, ensure_ascii=False)
+                    async with db_lock:
+                        await db.execute(
+                            "UPDATE page_cache SET structured_json = ?, analyzed_at = CURRENT_TIMESTAMP "
+                            "WHERE job_id = ? AND page = ?",
+                            (payload, job_id, page_num),
+                        )
+                        await db.commit()
+                except Exception as e:
+                    logger.error(f"[{job_id}] Stage 2: Page {page_num} failed: {e}")
+                    async with state_lock:
+                        failed_pages.append(page_num)
+                    error_data = {
+                        "page_number": page_num,
+                        "_parse_error": True,
+                        "_error": str(e)[:200],
+                        "overall_confidence": "low",
+                    }
+                    async with db_lock:
+                        await db.execute(
+                            "UPDATE page_cache SET structured_json = ?, analyzed_at = CURRENT_TIMESTAMP "
+                            "WHERE job_id = ? AND page = ?",
+                            (json.dumps(error_data, ensure_ascii=False), job_id, page_num),
+                        )
+                        await db.commit()
+                    return
+
+            async with state_lock:
+                completed += 1
+            logger.info(
+                f"[{job_id}] Stage 2: Page {page_num}/{total_pages} analyzed in {page_ms}ms "
+                f"({completed}/{remaining} done)"
+            )
+
+        # Run all page analyses concurrently
+        tasks = [_analyze_one(pn, pg) for pn, pg in todo]
+        await asyncio.gather(*tasks)
 
         stage2_ms = int((time.time() - stage2_start) * 1000)
-        logger.info(f"[{job_id}] Stage 2: Complete in {stage2_ms}ms, {len(failed_pages)} pages failed")
+        logger.info(
+            f"[{job_id}] Stage 2: Complete in {stage2_ms}ms, "
+            f"{len(failed_pages)} pages failed"
+        )
         await _audit_log(db, job_id, "stage2_complete",
                          f"duration={stage2_ms}ms failed={failed_pages}")
 

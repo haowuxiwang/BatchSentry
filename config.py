@@ -115,6 +115,7 @@ class AppConfig:
     output_dir: str
     llm_provider: str
     ocr_backend: str  # "paddle" | "mineru"
+    llm_concurrency: int  # Stage 2 并发 LLM 页面分析数
 
 
 def _load_provider(name: str) -> ProviderConfig:
@@ -216,6 +217,7 @@ def load_config():
             output_dir=os.getenv("OUTPUT_DIR", default_output),
             llm_provider=llm_provider,
             ocr_backend=os.getenv("OCR_BACKEND", "paddle"),
+            llm_concurrency=int(os.getenv("LLM_CONCURRENCY", "5")),
         ),
     }
 
