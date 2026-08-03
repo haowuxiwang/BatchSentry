@@ -27,6 +27,13 @@
                 {{ status_zh.get(status, status) }}
             </span>
             <span class="text-[11px] text-muted-foreground font-mono">{{ job_id }}</span>
+            {# SSE 实时进度条：仅在非终态显示 #}
+            <span id="progress-bar-container" class="hidden items-center gap-2 text-[11px] text-muted-foreground">
+                <span id="progress-text">—</span>
+                <span class="w-24 h-1 bg-muted rounded overflow-hidden">
+                    <span id="progress-fill" class="block h-full bg-foreground transition-all duration-500" style="width:0%"></span>
+                </span>
+            </span>
             <div class="flex-1"></div>
             <!-- 上下文按钮：取消/重试/报告 — 按状态显示 -->
             <nav class="flex items-center gap-2">

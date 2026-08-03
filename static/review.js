@@ -56,6 +56,84 @@
       setTimeout(hideLoading, 6000);
     }
 
+    // === SSE 实时进度订阅 ===
+    // 非终态时订阅 /api/jobs/{id}/stream，每 2s 收到进度更新
+    // 终态时服务端推送 done 事件并关闭流
+    const initialStatus = ctx.status;
+    const terminalStatuses = [
+      "review",
+      "partial_review",
+      "error",
+      "cancelled",
+      "archived",
+    ];
+
+    if (jobId && !terminalStatuses.includes(initialStatus)) {
+      subscribeProgress(jobId);
+    }
+
+    function subscribeProgress(jid) {
+      const bar = document.getElementById("progress-bar-container");
+      const txt = document.getElementById("progress-text");
+      const fill = document.getElementById("progress-fill");
+      if (!bar || !txt || !fill) return;
+
+      bar.classList.remove("hidden");
+      bar.classList.add("inline-flex");
+      txt.textContent = "连接中...";
+
+      const url = `/api/jobs/${jid}/stream`;
+      log("SSE subscribe", url);
+      const es = new EventSource(url);
+
+      es.onmessage = (e) => {
+        try {
+          const d = JSON.parse(e.data);
+          const total = d.total_pages || 0;
+          let pct = 0;
+          let label = d.status;
+
+          // 计算进度百分比
+          if (d.status === "pending") {
+            pct = 0;
+            label = "排队中";
+          } else if (d.status === "ocr_running" || d.status === "ocr_done") {
+            pct = total > 0 ? Math.round((d.pages_ocr_done / total) * 33) : 0;
+            label = `OCR ${d.pages_ocr_done}/${total}`;
+          } else if (d.status === "analyzing") {
+            pct =
+              33 +
+              (total > 0 ? Math.round((d.pages_analyzed / total) * 60) : 0);
+            label = `分析 ${d.pages_analyzed}/${total}`;
+          } else if (d.status === "review" || d.status === "partial_review") {
+            pct = 100;
+            label = "完成";
+          }
+
+          fill.style.width = pct + "%";
+          txt.textContent = label;
+          log("SSE progress", { status: d.status, pct, label });
+        } catch (err) {
+          log.warn("SSE parse error", err);
+        }
+      };
+
+      es.addEventListener("done", (e) => {
+        log("SSE done — closing stream, reloading page");
+        es.close();
+        // 终态：1.5s 后自动刷新页面，加载最终 findings
+        setTimeout(() => location.reload(), 1500);
+      });
+
+      es.onerror = () => {
+        log.warn("SSE connection error — will retry on next reload");
+        es.close();
+      };
+
+      // 页面卸载时清理 SSE 连接
+      window.addEventListener("beforeunload", () => es.close());
+    }
+
     const probes = {
       "critical-banner": document.querySelectorAll(".critical-banner").length,
       "findings-list-critical": document.querySelectorAll(
@@ -233,7 +311,10 @@
       if (ocrEl && pageData.raw_html) {
         // 去除 HTML 标签 — 用 DOMParser 避免设置 innerHTML 时
         // 触发 <img onerror=...> 等事件处理器（XSS 防御）
-        const doc = new DOMParser().parseFromString(pageData.raw_html, "text/html");
+        const doc = new DOMParser().parseFromString(
+          pageData.raw_html,
+          "text/html",
+        );
         ocrEl.textContent = (doc.body.textContent || "")
           .replace(/\s+/g, " ")
           .trim()

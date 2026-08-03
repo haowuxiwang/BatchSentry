@@ -199,21 +199,43 @@ app.include_router(settings_router)
 
 
 @app.get("/", response_class=HTMLResponse)
-async def index(request: Request):
+async def index(request: Request, page: int = 1):
     """Upload page with job list (excluding archived).
 
+    分页：每页 20 条，超过时显示翻页控件。
     首次运行检测：若无 provider 配置了 API key，显示引导横幅。
     """
+    page = max(1, page)
+    page_size = 20
+
     db = await get_db()
+    # 总数
+    count_cursor = await db.execute(
+        "SELECT COUNT(*) FROM jobs WHERE status != 'archived'"
+    )
+    total_jobs = (await count_cursor.fetchone())[0]
+    total_pages = (total_jobs + page_size - 1) // page_size  # 向上取整
+
+    offset = (page - 1) * page_size
     cursor = await db.execute(
-        "SELECT * FROM jobs WHERE status != 'archived' ORDER BY created_at DESC LIMIT 20"
+        "SELECT * FROM jobs WHERE status != 'archived' "
+        "ORDER BY created_at DESC LIMIT ? OFFSET ?",
+        (page_size, offset),
     )
     jobs = [dict(r) for r in await cursor.fetchall()]
     # 检查是否需要首次配置（无 provider 配置了 API key）
     providers = config["providers"]
     needs_setup = not any(p.api_key for p in providers.values())
     return templates.TemplateResponse(
-        request, "upload.html", {"jobs": jobs, "needs_setup": needs_setup}
+        request,
+        "upload.html",
+        {
+            "jobs": jobs,
+            "needs_setup": needs_setup,
+            "page": page,
+            "total_pages": total_pages,
+            "total_jobs": total_jobs,
+        },
     )
 
 

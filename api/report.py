@@ -1,4 +1,9 @@
-"""Report API — generate and download Markdown + JSON reports."""
+"""Report API — generate and download Markdown + JSON reports.
+
+缓存策略：报告内容缓存在内存中（FIFO，maxsize=32），key 为 (job_id, findings_count,
+last_finding_id)。findings 数量或最后一条 finding id 变化时自动失效。
+job 删除时缓存项自然淘汰。
+"""
 import json
 import logging
 from datetime import datetime
@@ -14,14 +19,22 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["report"])
 
 
-@router.get("/jobs/{job_id}/report.md", response_class=PlainTextResponse)
-async def download_report_md(job_id: str):
-    """Generate and return Markdown report."""
+# 缓存：key=(job_id, findings_count, last_finding_id) → markdown 文本
+# 用 dict 而非 lru_cache 装饰器，因为生成逻辑是 async 的
+_report_cache: dict[tuple[str, int, int], str] = {}
+_REPORT_CACHE_MAX = 32
+
+
+async def _generate_report_md_cached(job_id: str) -> str:
+    """生成 Markdown 报告（带缓存）。
+
+    缓存 key 为 (job_id, findings_count, last_finding_id)。
+    复核操作改变 findings 时，下次请求会因 key 变化而重新生成。
+    """
     db = await get_db()
     cursor = await db.execute("SELECT * FROM jobs WHERE id = ?", (job_id,))
     job = await cursor.fetchone()
     if not job:
-        logger.warning(f"Report.md requested for missing job: {job_id}")
         raise HTTPException(404, "Job not found")
 
     cursor = await db.execute(
@@ -36,8 +49,33 @@ async def download_report_md(job_id: str):
     )
     total_pages = (await cursor.fetchone())[0]
 
+    # 缓存 key：findings 数量 + 最后一条 finding 的 id
+    last_id = findings[-1]["id"] if findings else 0
+    cache_key = (job_id, len(findings), last_id)
+
+    if cache_key in _report_cache:
+        logger.info(f"[{job_id}] Report.md cache hit (findings={len(findings)})")
+        return _report_cache[cache_key]
+
     md = _generate_markdown(job, findings, total_pages)
-    logger.info(f"[{job_id}] Report.md generated: {len(findings)} findings, {len(md)} chars")
+
+    # 写入缓存，清理超出的项
+    _report_cache[cache_key] = md
+    if len(_report_cache) > _REPORT_CACHE_MAX:
+        # 简单 FIFO 淘汰：删除最早插入的 key
+        oldest = next(iter(_report_cache))
+        del _report_cache[oldest]
+
+    logger.info(
+        f"[{job_id}] Report.md generated and cached: {len(findings)} findings, {len(md)} chars"
+    )
+    return md
+
+
+@router.get("/jobs/{job_id}/report.md", response_class=PlainTextResponse)
+async def download_report_md(job_id: str):
+    """Generate and return Markdown report (cached)."""
+    md = await _generate_report_md_cached(job_id)
     return PlainTextResponse(md, media_type="text/markdown")
 
 

@@ -88,6 +88,16 @@
             <p class="text-[11px] text-muted-foreground">或点击选择文件</p>
           </label>
           <div id="status" class="mt-3 min-h-[1.5rem] text-[12px]"></div>
+          {# 上传进度条：XHR upload.progress 事件驱动 #}
+          <div id="upload-progress" class="hidden mt-2">
+            <div class="flex items-center justify-between text-[11px] text-muted-foreground mb-1">
+              <span id="upload-progress-text">上传中...</span>
+              <span id="upload-progress-pct" class="tabular-nums">0%</span>
+            </div>
+            <div class="w-full h-1 bg-muted rounded overflow-hidden">
+              <div id="upload-progress-fill" class="block h-full bg-foreground transition-all duration-300" style="width:0%"></div>
+            </div>
+          </div>
         </div>
       </section>
 
@@ -176,6 +186,20 @@
           </li>
           {% endfor %}
         </ul>
+        {# 分页控件 — 仅在 total_pages > 1 时显示 #}
+        {% if total_pages and total_pages > 1 %}
+        <div class="flex items-center justify-between px-1 py-3 border-t border-border text-[11px] text-muted-foreground">
+          <span class="tabular-nums">第 {{ page }} / {{ total_pages }} 页 · 共 {{ total_jobs }} 条</span>
+          <div class="flex items-center gap-3">
+            {% if page > 1 %}
+            <a href="/?page={{ page - 1 }}" class="btn-press hover:text-foreground">上一页</a>
+            {% endif %}
+            {% if page < total_pages %}
+            <a href="/?page={{ page + 1 }}" class="btn-press hover:text-foreground">下一页</a>
+            {% endif %}
+          </div>
+        </div>
+        {% endif %}
       </section>
       {% endif %}
 

@@ -11,11 +11,22 @@ router = APIRouter(prefix="/api", tags=["review"])
 
 
 @router.get("/jobs/{job_id}/findings")
-async def list_findings(job_id: str, status: Optional[str] = None, page: Optional[int] = None):
+async def list_findings(
+    job_id: str,
+    status: Optional[str] = None,
+    page: Optional[int] = None,
+    limit: int = 50,
+    offset: int = 0,
+):
     """List findings for a job, optionally filtered by status and/or page.
 
     统一端点：支持 status 和 page 过滤（AJAX 翻页用 page 参数）。
+    分页：limit（默认 50，max 200）+ offset，防止 100+ findings 一次返回卡顿。
     """
+    # 钳制 limit 防止滥用
+    limit = max(1, min(limit, 200))
+    offset = max(0, offset)
+
     db = await get_db()
     severity_order = (
         "CASE severity WHEN 'critical' THEN 0 "
@@ -32,23 +43,41 @@ async def list_findings(job_id: str, status: Optional[str] = None, page: Optiona
     if page:
         order_clause = f"ORDER BY {severity_order}, {source_order}, id"
         cursor = await db.execute(
-            f"SELECT * FROM findings WHERE job_id = ? AND page = ? {order_clause}",
-            (job_id, page),
+            f"SELECT * FROM findings WHERE job_id = ? AND page = ? {order_clause} "
+            f"LIMIT ? OFFSET ?",
+            (job_id, page, limit, offset),
         )
     elif status:
         order_clause = f"ORDER BY page, {severity_order}, {source_order}, id"
         cursor = await db.execute(
-            f"SELECT * FROM findings WHERE job_id = ? AND status = ? {order_clause}",
-            (job_id, status),
+            f"SELECT * FROM findings WHERE job_id = ? AND status = ? {order_clause} "
+            f"LIMIT ? OFFSET ?",
+            (job_id, status, limit, offset),
         )
     else:
         order_clause = f"ORDER BY page, {severity_order}, {source_order}, id"
         cursor = await db.execute(
-            f"SELECT * FROM findings WHERE job_id = ? {order_clause}", (job_id,)
+            f"SELECT * FROM findings WHERE job_id = ? {order_clause} LIMIT ? OFFSET ?",
+            (job_id, limit, offset),
         )
     rows = await cursor.fetchall()
     findings = [dict(r) for r in rows]
-    return {"findings": findings, "count": len(findings), "page": page}
+
+    # 总数（用于前端显示 "x/y"）
+    count_cursor = await db.execute(
+        "SELECT COUNT(*) FROM findings WHERE job_id = ?", (job_id,)
+    )
+    total = (await count_cursor.fetchone())[0]
+
+    return {
+        "findings": findings,
+        "count": len(findings),
+        "total": total,
+        "page": page,
+        "limit": limit,
+        "offset": offset,
+        "has_more": (offset + limit) < total,
+    }
 
 
 @router.get("/jobs/{job_id}/findings/{finding_id}")

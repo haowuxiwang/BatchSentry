@@ -265,36 +265,10 @@ async def run_pipeline(job_id: str, pdf_path: str):
             f"[{job_id}] Per-job lock released and removed from registry "
             f"(was_present={popped is not None})"
         )
-        # Cleanup uploaded PDF temp file (OCR done, raw_html in DB)
-        try:
-            pdf_file = Path(pdf_path)
-            if pdf_file.exists():
-                file_size = pdf_file.stat().st_size
-                pdf_file.unlink(missing_ok=True)
-                logger.info(
-                    f"[{job_id}] Cleaned up temp PDF: name={pdf_file.name} "
-                    f"size={file_size} bytes, path={pdf_file}"
-                )
-                # Also remove empty job dir if no other files remain
-                job_dir = pdf_file.parent
-                if job_dir.exists():
-                    remaining = list(job_dir.iterdir())
-                    if not remaining:
-                        job_dir.rmdir()
-                        logger.info(f"[{job_id}] Cleaned up empty job dir: {job_dir}")
-                    else:
-                        logger.info(
-                            f"[{job_id}] Job dir not empty, kept: {job_dir} "
-                            f"(remaining_files={[f.name for f in remaining]})"
-                        )
-            else:
-                logger.info(f"[{job_id}] Temp PDF already absent (likely cleaned by retry): {pdf_file.name}")
-        except Exception as e:
-            logger.warning(
-                f"[{job_id}] Failed to cleanup temp PDF: {type(e).__name__}: {e} "
-                f"(path={pdf_path})",
-                exc_info=True,
-            )
+        # NOTE: PDF 文件不在此处删除 — 复核页 /api/jobs/{id}/pdf 需要它。
+        # PDF 在 job 删除 (DELETE /api/jobs/{id}) 或归档时清理。
+        # OCR 完成后 raw_html 已存入数据库，但 PDF 仍需保留用于人工复核预览。
+        logger.info(f"[{job_id}] Pipeline exited, PDF retained for review: {Path(pdf_path).name}")
 
 
 async def _run_pipeline_impl(job_id: str, pdf_path: str):

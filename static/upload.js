@@ -117,7 +117,7 @@
     setStatus(`上传中 ${file.name} (${mb} MB)...`, "info");
     const fd = new FormData();
     fd.append("file", file);
-    log("uploadFile — fetch POST /api/jobs", {
+    log("uploadFile — XHR POST /api/jobs", {
       formDataEntries: [...fd.entries()].map(([k, v]) => [
         k,
         v instanceof File ? v.name : v,
@@ -128,38 +128,81 @@
     const dropZone = document.getElementById("drop-zone");
     if (dropZone) dropZone.style.pointerEvents = "none";
 
-    fetch("/api/jobs", { method: "POST", body: fd })
-      .then((r) => {
-        log("uploadFile — response", { status: r.status, ok: r.ok });
-        if (!r.ok) {
-          return r.text().then((txt) => {
-            log.err("uploadFile — HTTP error body", txt);
-            throw new Error("HTTP " + r.status);
-          });
+    // 使用 XHR 替代 fetch，以获取 upload progress 事件
+    const progressBar = document.getElementById("upload-progress");
+    const progressText = document.getElementById("upload-progress-text");
+    const progressPct = document.getElementById("upload-progress-pct");
+    const progressFill = document.getElementById("upload-progress-fill");
+    if (progressBar) {
+      progressBar.classList.remove("hidden");
+      if (progressFill) progressFill.style.width = "0%";
+      if (progressPct) progressPct.textContent = "0%";
+    }
+
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", "/api/jobs");
+
+    // 上传进度（大文件反馈关键）
+    xhr.upload.addEventListener("progress", (e) => {
+      if (e.lengthComputable && progressBar) {
+        const pct = Math.round((e.loaded / e.total) * 100);
+        if (progressFill) progressFill.style.width = pct + "%";
+        if (progressPct) progressPct.textContent = pct + "%";
+        if (progressText) {
+          const loadedMB = (e.loaded / 1024 / 1024).toFixed(1);
+          const totalMB = (e.total / 1024 / 1024).toFixed(1);
+          progressText.textContent = `上传中 ${loadedMB}/${totalMB} MB`;
         }
-        return r.json();
-      })
-      .then((data) => {
-        log("uploadFile — success response", data);
-        if (data.job_id) {
-          setStatus(`Job 已创建 ${data.job_id}，1.5s 后跳转复核页...`, "ok");
-          const target = `/jobs/${data.job_id}/review`;
-          log("uploadFile — scheduling redirect", { target, delayMs: 1500 });
-          setTimeout(() => {
-            log("uploadFile — redirecting now", target);
-            window.location.href = target;
-          }, 1500);
-        } else {
-          log.err("uploadFile — response missing job_id", data);
-          setStatus(`上传失败: ${JSON.stringify(data)}`, "err");
+        log("upload progress", { pct, loaded: e.loaded, total: e.total });
+      }
+    });
+
+    xhr.onload = () => {
+      log("uploadFile — response", {
+        status: xhr.status,
+        ok: xhr.status >= 200 && xhr.status < 300,
+      });
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try {
+          const data = JSON.parse(xhr.responseText);
+          log("uploadFile — success response", data);
+          if (data.job_id) {
+            if (progressBar) progressBar.classList.add("hidden");
+            setStatus(`Job 已创建 ${data.job_id}，1.5s 后跳转复核页...`, "ok");
+            const target = `/jobs/${data.job_id}/review`;
+            log("uploadFile — scheduling redirect", { target, delayMs: 1500 });
+            setTimeout(() => {
+              log("uploadFile — redirecting now", target);
+              window.location.href = target;
+            }, 1500);
+          } else {
+            log.err("uploadFile — response missing job_id", data);
+            setStatus(`上传失败: ${JSON.stringify(data)}`, "err");
+            if (progressBar) progressBar.classList.add("hidden");
+            if (dropZone) dropZone.style.pointerEvents = "";
+          }
+        } catch (err) {
+          log.err("uploadFile — JSON parse failed", err);
+          setStatus(`解析响应失败: ${err}`, "err");
+          if (progressBar) progressBar.classList.add("hidden");
           if (dropZone) dropZone.style.pointerEvents = "";
         }
-      })
-      .catch((err) => {
-        log.err("uploadFile — fetch failed", err);
-        setStatus(`错误: ${err}`, "err");
+      } else {
+        log.err("uploadFile — HTTP error", xhr.status, xhr.responseText);
+        setStatus(`上传失败: HTTP ${xhr.status}`, "err");
+        if (progressBar) progressBar.classList.add("hidden");
         if (dropZone) dropZone.style.pointerEvents = "";
-      });
+      }
+    };
+
+    xhr.onerror = () => {
+      log.err("uploadFile — XHR network error");
+      setStatus(`网络错误: 上传失败`, "err");
+      if (progressBar) progressBar.classList.add("hidden");
+      if (dropZone) dropZone.style.pointerEvents = "";
+    };
+
+    xhr.send(fd);
   }
 
   // === Job 归档/删除 ===
