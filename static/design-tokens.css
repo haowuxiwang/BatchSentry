@@ -1,0 +1,249 @@
+/* ============================================================
+ * BatchSentry — Design Tokens v2
+ * Linear / Vercel / Stripe 范式：border-first, 安静底色, 克制状态色
+ * 参考: linear.app, vercel.com/dashboard, stripe.com
+ * ============================================================ */
+
+/* === 1. 中性色 5 档表面 + 4 档文本（Linear 范式）=== */
+:root {
+  /* 表面分层 — 用极轻冷调灰，非纯灰 */
+  --background: 220 20% 99%; /* canvas — 极轻冷调白 */
+  --card: 0 0% 100%; /* surface-1 卡片底 */
+  --muted: 220 14% 96%; /* surface-2 表头/zebra/hover */
+  --accent: 220 14% 94%; /* surface-3 强调 hover */
+  --secondary: 220 14% 96%; /* alias muted */
+
+  /* 文本 4 档 */
+  --foreground: 222 47% 11%; /* ink 标题 */
+  --card-foreground: 222 47% 11%;
+  --popover: 0 0% 100%;
+  --popover-foreground: 222 47% 11%;
+  --muted-foreground: 220 9% 46%; /* ink-muted 辅助 */
+  --accent-foreground: 222 47% 11%;
+  --secondary-foreground: 222 47% 11%;
+
+  /* hairline 边框 2 档 */
+  --border: 220 13% 91%; /* 默认 1px hairline */
+  --input: 220 13% 91%;
+
+  /* === 品牌色 1 个（仅 CTA / focus / 链接）=== */
+  --primary: 222 47% 11%; /* 深墨蓝 — 严肃合规类首选 */
+  --primary-foreground: 0 0% 100%;
+  --ring: 222 47% 11%;
+
+  /* === 状态色：纯色 + 仅用于徽章/点，绝不铺底 === */
+  --destructive: 0 72% 51%;
+  --destructive-foreground: 0 0% 100%;
+  --warning: 38 92% 50%;
+  --warning-foreground: 48 96% 9%;
+  --info: 199 89% 48%;
+  --info-foreground: 0 0% 100%;
+  --success: 142 71% 45%;
+  --success-foreground: 0 0% 100%;
+
+  /* === 圆角：严肃类 6/8/12 === */
+  --radius: 8px; /* 默认 */
+  --radius-sm: 6px;
+  --radius-lg: 12px;
+}
+
+.dark {
+  --background: 222 47% 9%;
+  --foreground: 210 40% 98%;
+  --card: 222 40% 12%;
+  --card-foreground: 210 40% 98%;
+  --popover: 222 40% 12%;
+  --popover-foreground: 210 40% 98%;
+  --primary: 210 40% 98%;
+  --primary-foreground: 222 47% 11%;
+  --secondary: 217 33% 15%;
+  --secondary-foreground: 210 40% 98%;
+  --muted: 217 33% 15%;
+  --muted-foreground: 215 20% 60%;
+  --accent: 217 33% 18%;
+  --accent-foreground: 210 40% 98%;
+  --destructive: 0 63% 45%;
+  --destructive-foreground: 0 0% 100%;
+  --warning: 35 92% 50%;
+  --warning-foreground: 48 96% 9%;
+  --info: 198 89% 55%;
+  --info-foreground: 0 0% 100%;
+  --success: 142 71% 45%;
+  --success-foreground: 0 0% 100%;
+  --border: 217 33% 19%;
+  --input: 217 33% 19%;
+  --ring: 210 40% 98%;
+}
+
+/* === 2. 字体层级 4 档（Linear 范式）=== */
+:root {
+  --text-h1: 1.5rem; /* 24px 页面标题 */
+  --text-h2: 1rem; /* 16px 区块标题 */
+  --text-body: 0.8125rem; /* 13px 正文 */
+  --text-meta: 0.6875rem; /* 11px 元数据 */
+  --leading-tight: 1.3;
+  --leading-normal: 1.5;
+}
+
+/* === 3. 8px Grid 间距体系 === */
+:root {
+  --s-1: 4px;
+  --s-2: 8px;
+  --s-3: 12px;
+  --s-4: 16px;
+  --s-5: 20px;
+  --s-6: 24px;
+  --s-8: 32px;
+}
+
+/* === 4. Motion Primitives === */
+:root {
+  --ms-50: 50ms;
+  --ms-100: 100ms;
+  --ms-150: 150ms;
+  --ms-200: 200ms;
+  --ms-300: 300ms;
+  --ms-500: 500ms;
+
+  --ease-standard: cubic-bezier(0.4, 0, 0.2, 1);
+  --ease-entrance: cubic-bezier(0, 0, 0.2, 1);
+  --ease-exit: cubic-bezier(0.4, 0, 1, 1);
+  --ease-snap: cubic-bezier(0.2, 0.9, 0.1, 1);
+
+  --motion-hover: var(--ms-150) var(--ease-entrance);
+  --motion-pressed: var(--ms-100) var(--ease-snap);
+  --motion-fade-in: var(--ms-200) var(--ease-entrance);
+  --motion-slide-in: var(--ms-300) var(--ease-entrance);
+  --motion-page-enter: var(--ms-300) var(--ease-entrance);
+  --stagger-step: 40ms;
+}
+
+/* === 5. Elevation — border-first, 阴影仅 hover/modal === */
+:root {
+  --shadow-subtle: 0 1px 2px 0 hsl(222 47% 11% / 0.04);
+  --shadow-medium:
+    0 4px 12px -2px hsl(222 47% 11% / 0.08),
+    0 2px 4px -1px hsl(222 47% 11% / 0.04);
+  --shadow-strong:
+    0 12px 32px -8px hsl(222 47% 11% / 0.12),
+    0 4px 8px -2px hsl(222 47% 11% / 0.06);
+}
+
+/* === 6. Utility Classes === */
+
+/* Hover-lift — 仅卡片 hover 用，默认无阴影 */
+.hover-lift {
+  transition:
+    box-shadow var(--motion-hover),
+    border-color var(--motion-hover);
+}
+.hover-lift:hover {
+  box-shadow: var(--shadow-medium);
+  border-color: hsl(var(--border) / 1);
+}
+
+/* Button press — 极轻反馈 */
+.btn-press {
+  transition:
+    transform var(--motion-pressed),
+    background-color var(--motion-hover);
+}
+.btn-press:hover {
+  background-color: hsl(var(--muted));
+}
+.btn-press:active {
+  transform: scale(0.98);
+}
+
+/* Focus ring — 仅键盘 */
+.focus-ring:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px hsl(var(--ring) / 0.4);
+}
+
+/* Stagger entrance */
+@keyframes fade-in-up {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.stagger-in {
+  animation: fade-in-up var(--ms-200) var(--ease-entrance) both;
+  animation-delay: calc(var(--i, 0) * var(--stagger-step));
+}
+
+/* === 7. PDF spinner === */
+@keyframes pbc-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.pdf-spinner {
+  width: 1.5rem;
+  height: 1.5rem;
+  border-radius: 9999px;
+  border: 2px solid hsl(var(--border));
+  border-top-color: hsl(var(--primary));
+  animation: pbc-spin 0.7s linear infinite;
+}
+#pdf-loading {
+  z-index: 10;
+  transition: opacity var(--ms-300) var(--ease-entrance);
+}
+#pdf-loading.is-loaded {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* === 8. Page entrance === */
+@keyframes pbc-page-enter {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+body {
+  animation: pbc-page-enter var(--ms-300) var(--ease-entrance) both;
+}
+
+/* === 9. tabular-nums — 所有数字对齐 === */
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* === 10. Accessibility === */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* === 11. Matrix cells — 极轻底色，不用大色块 === */
+.cell-ok {
+  color: hsl(var(--success));
+}
+.cell-bad {
+  color: hsl(var(--destructive));
+  background-color: hsl(var(--destructive) / 0.06);
+  font-weight: 500;
+}
+.cell-unknown {
+  color: hsl(var(--muted-foreground));
+}
+
+/* === 12. Page nav active state === */
+.page-nav-item.active {
+  background-color: hsl(var(--primary));
+  color: hsl(var(--primary-foreground));
+}

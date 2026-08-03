@@ -1,0 +1,15 @@
+/* ============================================================
+   Review page — page-specific styles
+   共享样式（body / scrollbar）与 upload / settings 一致，
+   保留在此处以保证页面自包含、可独立缓存。
+   ============================================================ */
+html, body {
+    background: hsl(var(--background));
+    color: hsl(var(--foreground));
+}
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: hsl(var(--border)); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: hsl(var(--muted-foreground)); }
+
+.lucide { width: 14px; height: 14px; display: inline-block; vertical-align: -2px; }

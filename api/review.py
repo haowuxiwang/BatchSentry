@@ -1,28 +1,54 @@
-"""Review API — list/update findings."""
+"""Review API — list/update findings with audit logging."""
+import json
+import logging
 from typing import Optional
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Form
 
 from db.client import get_db
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["review"])
 
 
 @router.get("/jobs/{job_id}/findings")
-async def list_findings(job_id: str, status: Optional[str] = None):
-    """List findings for a job, optionally filtered by status."""
+async def list_findings(job_id: str, status: Optional[str] = None, page: Optional[int] = None):
+    """List findings for a job, optionally filtered by status and/or page.
+
+    统一端点：支持 status 和 page 过滤（AJAX 翻页用 page 参数）。
+    """
     db = await get_db()
-    if status:
+    severity_order = (
+        "CASE severity WHEN 'critical' THEN 0 "
+        "WHEN 'warning' THEN 1 "
+        "WHEN 'info' THEN 2 ELSE 3 END"
+    )
+    source_order = (
+        "CASE COALESCE(source, 'rule') WHEN 'rule' THEN 0 "
+        "WHEN 'llm_fallback' THEN 1 "
+        "WHEN 'llm_page' THEN 2 "
+        "WHEN 'llm_cross' THEN 3 ELSE 4 END"
+    )
+    # 按页过滤时，仅按 severity+source 排序（不需要 page）
+    if page:
+        order_clause = f"ORDER BY {severity_order}, {source_order}, id"
         cursor = await db.execute(
-            "SELECT * FROM findings WHERE job_id = ? AND status = ? ORDER BY page, id",
+            f"SELECT * FROM findings WHERE job_id = ? AND page = ? {order_clause}",
+            (job_id, page),
+        )
+    elif status:
+        order_clause = f"ORDER BY page, {severity_order}, {source_order}, id"
+        cursor = await db.execute(
+            f"SELECT * FROM findings WHERE job_id = ? AND status = ? {order_clause}",
             (job_id, status),
         )
     else:
+        order_clause = f"ORDER BY page, {severity_order}, {source_order}, id"
         cursor = await db.execute(
-            "SELECT * FROM findings WHERE job_id = ? ORDER BY page, id", (job_id,)
+            f"SELECT * FROM findings WHERE job_id = ? {order_clause}", (job_id,)
         )
     rows = await cursor.fetchall()
     findings = [dict(r) for r in rows]
-    return {"findings": findings, "count": len(findings)}
+    return {"findings": findings, "count": len(findings), "page": page}
 
 
 @router.get("/jobs/{job_id}/findings/{finding_id}")
@@ -42,17 +68,40 @@ async def get_finding(job_id: str, finding_id: int):
 async def update_finding(
     job_id: str,
     finding_id: int,
-    status: Optional[str] = None,
-    reviewer_note: Optional[str] = None,
-    corrected_text: Optional[str] = None,
+    status: Optional[str] = Form(default=None),
+    reviewer_note: Optional[str] = Form(default=None),
+    corrected_text: Optional[str] = Form(default=None),
 ):
-    """Update a finding (confirm/reject/correct)."""
+    """Update a finding (confirm/reject/correct).
+
+    Phase 3 fix: parameters use Form() because the review.html frontend posts
+    application/x-www-form-urlencoded. Without Form(), FastAPI treats them as
+    query params and returns 400 'No fields to update'.
+    """
     db = await get_db()
+
+    # Validate status value
+    valid_statuses = {"confirmed", "rejected", "corrected", "pending"}
+    if status and status not in valid_statuses:
+        logger.warning(f"[{job_id}] Invalid status update: finding={finding_id} status={status}")
+        raise HTTPException(400, f"Invalid status: {status}. Must be one of {valid_statuses}")
+
+    # Check finding exists
     cursor = await db.execute(
-        "SELECT id FROM findings WHERE id = ? AND job_id = ?", (finding_id, job_id)
+        "SELECT id, status FROM findings WHERE id = ? AND job_id = ?", (finding_id, job_id)
     )
-    if not await cursor.fetchone():
+    row = await cursor.fetchone()
+    if not row:
+        logger.warning(f"[{job_id}] Finding not found: {finding_id}")
         raise HTTPException(404, "Finding not found")
+
+    old_status = row["status"]
+    logger.info(
+        f"[{job_id}] Finding update: id={finding_id} "
+        f"{old_status}→{status or '(unchanged)'}"
+        + (f" note={reviewer_note[:30]!r}" if reviewer_note else "")
+        + (f" corrected={corrected_text[:30]!r}" if corrected_text else "")
+    )
 
     sets = []
     params = []
@@ -76,8 +125,52 @@ async def update_finding(
         f"UPDATE findings SET {', '.join(sets)} WHERE id = ? AND job_id = ?",
         params,
     )
+
+    # Audit log
+    action_parts = []
+    if status:
+        action_parts.append(f"status: {old_status} → {status}")
+    if reviewer_note is not None:
+        action_parts.append(f"note: '{reviewer_note[:50]}'")
+    if corrected_text is not None:
+        action_parts.append(f"corrected: '{corrected_text[:50]}'")
+
+    await db.execute(
+        "INSERT INTO audit_log (job_id, finding_id, action, detail) VALUES (?, ?, ?, ?)",
+        (job_id, finding_id, "finding_update", "; ".join(action_parts)),
+    )
     await db.commit()
+    logger.info(f"[{job_id}] Finding {finding_id} updated: {old_status} → {status or old_status}")
     return {"ok": True}
+
+
+@router.get("/jobs/{job_id}/audit")
+async def get_audit_log(job_id: str, limit: int = 50):
+    """Get audit log entries for a job."""
+    db = await get_db()
+    cursor = await db.execute(
+        "SELECT * FROM audit_log WHERE job_id = ? ORDER BY id DESC LIMIT ?",
+        (job_id, limit),
+    )
+    rows = await cursor.fetchall()
+    return {"entries": [dict(r) for r in rows], "count": len(rows)}
+
+
+@router.get("/jobs/{job_id}/llm_audit")
+async def get_llm_audit_log(job_id: str, limit: int = 100):
+    """Get LLM call audit log for a job (Phase 7 GMP traceability).
+
+    Returns every LLM call made during this job's pipeline run, including
+    provider / model / prompt_version / token usage / latency / success.
+    Used to answer "which model version produced this finding?".
+    """
+    db = await get_db()
+    cursor = await db.execute(
+        "SELECT * FROM llm_call_audit WHERE job_id = ? ORDER BY id ASC LIMIT ?",
+        (job_id, limit),
+    )
+    rows = await cursor.fetchall()
+    return {"entries": [dict(r) for r in rows], "count": len(rows)}
 
 
 @router.get("/jobs/{job_id}/pages/{page}")
@@ -91,10 +184,45 @@ async def get_page(job_id: str, page: int):
     row = await cursor.fetchone()
     if not row:
         raise HTTPException(404, "Page not found")
-    import json
     return {
         "job_id": job_id,
         "page": page,
         "raw_html": row["raw_html"],
         "structured": json.loads(row["structured_json"]) if row["structured_json"] else None,
+    }
+
+
+@router.get("/jobs/{job_id}/pages/{page}/measurements")
+async def get_page_measurements(job_id: str, page: int):
+    """Return measurement matrix for rendering on review page (Phase 3).
+
+    Extracts all step[].measurements[] from the page's structured_json so the
+    review template can render a time × column table with in_spec cell colors.
+    """
+    db = await get_db()
+    cursor = await db.execute(
+        "SELECT structured_json FROM page_cache WHERE job_id = ? AND page = ?",
+        (job_id, page),
+    )
+    row = await cursor.fetchone()
+    if not row:
+        raise HTTPException(404, "Page not found")
+    data = json.loads(row["structured_json"]) if row["structured_json"] else {}
+    measurements = []
+    column_set: dict[str, None] = {}  # ordered set of column names
+    for step in data.get("steps", []) or []:
+        for m in step.get("measurements", []) or []:
+            values = m.get("values") or {}
+            for col in values.keys():
+                column_set.setdefault(col, None)
+            measurements.append({
+                "step_no": step.get("step_no"),
+                "time": m.get("time"),
+                "values": values,
+            })
+    return {
+        "page": page,
+        "columns": list(column_set.keys()),
+        "measurements": measurements,
+        "count": len(measurements),
     }

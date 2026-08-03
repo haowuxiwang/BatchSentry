@@ -1,9 +1,8 @@
 @echo off
-REM Build Pharma Batch Checker into a single-directory exe
-REM Requires: pip install pyinstaller
+REM Build BatchSentry — Windows batch wrapper for build.ps1
+REM Requires: PowerShell (to execute build.ps1)
+REM Usage: build.bat            (full build)
+REM        build.bat -SkipElectron  (skip NSIS installer)
 cd /d "%~dp0"
-pyinstaller pharma.spec --clean --noconfirm
-echo.
-echo Build complete. Output: dist\pharma-batch-checker\
-echo Run: dist\pharma-batch-checker\pharma-batch-checker.exe
+powershell -ExecutionPolicy Bypass -File "%~dp0build.ps1" %*
 pause

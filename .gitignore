@@ -1,20 +1,84 @@
-# Env / secrets
-.env
-
-# Python
-__pycache__/
-*.py[cod]
-*.egg-info/
+# Build artifacts
 dist/
+dist-electron/
 build/
 *.spec.bak
 
-# Data
-data/
-output/
+# PyInstaller
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+.installed.cfg
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
 
 # IDE
 .vscode/
 .idea/
 *.swp
-OCR_BAIDU/
+*.swo
+.mimocode/
+.workbuddy/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# App data (dev)
+data/
+output/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Secrets
+.env
+.env.local
+.env.production
+
+# Logs
+*.log
+logs/
+server_err.log
+server_out.log
+
+# Test coverage artifacts
+.coverage
+coverage.xml
+htmlcov/
+.pytest_cache/
+
+# Spike test artifacts
+spike_phase*.log
+spike_*.png
+screenshot*.png
+
+# Sample documents (large binaries — keep out of git)
+samples/*.pdf
+samples/*.docx
+
+# Temporary spike scripts (one-shot, not part of app)
+spike_phase*.py
+_flip_status.py
+
+# Pytest temp output files
+pytest_out.txt
+pytest_full.txt
+pytest_subset.txt
+test_results.xml
+.coverage.*
+cache/
+
+# Spike exploration directories (design notes, not app code)
+spike/baseline/
+spike/phase2/
+

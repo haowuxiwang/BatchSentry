@@ -18,7 +18,7 @@ POLL_INTERVAL = 5  # seconds
 POLL_TIMEOUT = 600  # 10 minutes
 
 
-def submit_pdf(pdf_path: str) -> str:
+def submit_pdf(pdf_path: str, retries: int = 3) -> str:
     """Submit a PDF to PaddleOCR-VL async API, return job_id."""
     cfg = config["paddle_ocr"]
     headers = {"Authorization": f"bearer {cfg.token}"}
@@ -35,21 +35,30 @@ def submit_pdf(pdf_path: str) -> str:
     files = {"file": (Path(pdf_path).name, file_content, "application/pdf")}
     logger.info(f"Submitting {pdf_path} ({len(file_content)/1024/1024:.1f} MB) to PaddleOCR-VL...")
 
-    resp = requests.post(
-        cfg.api_url,
-        files=files,
-        data=data,
-        headers=headers,
-        timeout=120,
-    )
-    if resp.status_code != 200:
-        raise RuntimeError(f"Submit failed HTTP {resp.status_code}: {resp.text[:300]}")
-    result = resp.json()
-    job_id = result.get("data", {}).get("jobId") or result.get("jobId")
-    if not job_id:
-        raise RuntimeError(f"No jobId in response: {result}")
-    logger.info(f"Job submitted: {job_id}")
-    return job_id
+    last_error = None
+    for attempt in range(1, retries + 1):
+        try:
+            resp = requests.post(
+                cfg.api_url,
+                files=files,
+                data=data,
+                headers=headers,
+                timeout=120,
+            )
+            if resp.status_code != 200:
+                raise RuntimeError(f"Submit failed HTTP {resp.status_code}: {resp.text[:300]}")
+            result = resp.json()
+            job_id = result.get("data", {}).get("jobId") or result.get("jobId")
+            if not job_id:
+                raise RuntimeError(f"No jobId in response: {result}")
+            logger.info(f"Job submitted: {job_id}")
+            return job_id
+        except Exception as e:
+            last_error = e
+            logger.warning(f"Submit attempt {attempt}/{retries} failed: {e}")
+            if attempt < retries:
+                time.sleep(2 * attempt)
+    raise RuntimeError(f"Submit failed after {retries} attempts: {last_error}")
 
 
 def poll_job(job_id: str) -> dict:
@@ -98,7 +107,7 @@ def download_result(poll_response: dict) -> list[dict]:
         raise RuntimeError(f"No result URL in poll response: {poll_response}")
 
     logger.info(f"Downloading result from {json_url}...")
-    resp = requests.get(json_url, timeout=180, verify=cfg.api_url.startswith("https"))
+    resp = requests.get(json_url, timeout=180, verify=True)
     if resp.status_code != 200:
         raise RuntimeError(f"Download failed HTTP {resp.status_code}")
 

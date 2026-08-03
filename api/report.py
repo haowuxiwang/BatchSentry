@@ -1,5 +1,6 @@
 """Report API — generate and download Markdown + JSON reports."""
 import json
+import logging
 from datetime import datetime
 from pathlib import Path
 
@@ -9,6 +10,7 @@ from fastapi.responses import PlainTextResponse
 from db.client import get_db
 from models.schemas import FindingStatus
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["report"])
 
 
@@ -19,10 +21,12 @@ async def download_report_md(job_id: str):
     cursor = await db.execute("SELECT * FROM jobs WHERE id = ?", (job_id,))
     job = await cursor.fetchone()
     if not job:
+        logger.warning(f"Report.md requested for missing job: {job_id}")
         raise HTTPException(404, "Job not found")
 
     cursor = await db.execute(
-        "SELECT * FROM findings WHERE job_id = ? ORDER BY page, severity, id",
+        "SELECT * FROM findings WHERE job_id = ? ORDER BY page, "
+        "CASE severity WHEN 'critical' THEN 0 WHEN 'warning' THEN 1 WHEN 'info' THEN 2 END, id",
         (job_id,),
     )
     findings = [dict(r) for r in await cursor.fetchall()]
@@ -33,18 +37,49 @@ async def download_report_md(job_id: str):
     total_pages = (await cursor.fetchone())[0]
 
     md = _generate_markdown(job, findings, total_pages)
+    logger.info(f"[{job_id}] Report.md generated: {len(findings)} findings, {len(md)} chars")
     return PlainTextResponse(md, media_type="text/markdown")
 
 
 @router.get("/jobs/{job_id}/report.json")
 async def download_report_json(job_id: str):
-    """Return structured JSON findings."""
+    """Return structured JSON report with job metadata + findings.
+
+    Phase 3 fix: include job field (filename/status/total_pages/stages) so
+    downstream consumers (e.g. E2E test, external integrations) can identify
+    the job without a separate API call.
+    """
     db = await get_db()
+    cursor = await db.execute("SELECT * FROM jobs WHERE id = ?", (job_id,))
+    job = await cursor.fetchone()
+    if not job:
+        raise HTTPException(404, "Job not found")
+
     cursor = await db.execute(
-        "SELECT * FROM findings WHERE job_id = ? ORDER BY page, id", (job_id,)
+        "SELECT * FROM findings WHERE job_id = ? ORDER BY page, "
+        "CASE severity WHEN 'critical' THEN 0 WHEN 'warning' THEN 1 WHEN 'info' THEN 2 END, "
+        "CASE COALESCE(source, 'rule') WHEN 'rule' THEN 0 "
+        "WHEN 'llm_fallback' THEN 1 WHEN 'llm_page' THEN 2 "
+        "WHEN 'llm_cross' THEN 3 ELSE 4 END, id",
+        (job_id,),
     )
     findings = [dict(r) for r in await cursor.fetchall()]
-    return {"job_id": job_id, "findings": findings, "count": len(findings)}
+    logger.info(f"[{job_id}] Report.json generated: {len(findings)} findings")
+    return {
+        "job": {
+            "id": job["id"],
+            "filename": job["filename"],
+            "status": job["status"],
+            "total_pages": job["total_pages"],
+            "stage1_ms": job["stage1_ms"],
+            "stage2_ms": job["stage2_ms"],
+            "stage3_ms": job["stage3_ms"],
+            "created_at": job["created_at"],
+            "finished_at": job["finished_at"],
+        },
+        "findings": findings,
+        "count": len(findings),
+    }
 
 
 def _generate_markdown(job: dict, findings: list[dict], total_pages: int) -> str:

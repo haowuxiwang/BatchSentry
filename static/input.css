@@ -1,0 +1,49 @@
+/*
+ * BatchSentry — Tailwind input
+ *
+ * Tailwind directives + custom component classes that depend on Tailwind
+ * utilities (e.g. @apply). Design tokens (colors, motion, shadows) live in
+ * design-tokens.css and are imported here so a single `app.css` build ships
+ * everything the templates need.
+ */
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* === E2E-required class names — preserve verbatim === */
+.critical-banner {
+  animation: critical-pulse 3s ease-in-out infinite;
+}
+.findings-list-critical {
+  animation: critical-pulse 3s ease-in-out infinite;
+}
+@keyframes critical-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 hsl(var(--destructive) / 0.55); }
+  50%      { box-shadow: 0 0 0 8px hsl(var(--destructive) / 0); }
+}
+
+.page-link {
+  color: hsl(var(--info));
+  text-decoration: underline;
+  font-weight: 600;
+}
+.page-link:hover { text-decoration: none; opacity: 0.8; }
+
+/* Matrix cell states — pharma semantic palette */
+.cell-ok      { background: hsl(var(--success) / 0.14); color: hsl(var(--success)); font-weight: 600; }
+.cell-bad     { background: hsl(var(--destructive) / 0.14); color: hsl(var(--destructive)); font-weight: 700; }
+.cell-unknown { background: hsl(var(--warning) / 0.14); color: hsl(var(--warning)); }
+
+/* Lucide icon sizing */
+.lucide { width: 14px; height: 14px; display: inline-block; vertical-align: -2px; }
+
+/* Background grid for upload page */
+.bg-grid {
+  background-image:
+    linear-gradient(to right, hsl(var(--border) / 0.45) 1px, transparent 1px),
+    linear-gradient(to bottom, hsl(var(--border) / 0.45) 1px, transparent 1px);
+  background-size: 32px 32px;
+  mask-image: radial-gradient(ellipse 80% 60% at 50% 0%, #000 60%, transparent 100%);
+  -webkit-mask-image: radial-gradient(ellipse 80% 60% at 50% 0%, #000 60%, transparent 100%);
+}

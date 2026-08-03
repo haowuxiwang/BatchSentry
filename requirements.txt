@@ -8,3 +8,12 @@ openai>=1.30.0
 python-dotenv>=1.0.0
 requests>=2.31.0
 PyMuPDF>=1.24.0
+
+# Optional: required ONLY when a provider is configured with protocol=anthropic
+# (e.g. Claude). All OpenAI-protocol providers (DeepSeek, GLM, Kimi, Qwen, MiMo)
+# use the `openai` package above and do NOT need this.
+anthropic>=0.39.0
+
+# Build-time dependency for Windows installer bundling (Electron + PyInstaller).
+# Not required at runtime; install with: pip install pyinstaller
+pyinstaller>=6.10.0

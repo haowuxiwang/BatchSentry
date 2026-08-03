@@ -1,121 +1,331 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" class="h-full">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>复核 — {{ job_id }}</title>
-    <link rel="stylesheet" href="/static/style.css">
-    <style>
-        .review-container { display: flex; gap: 20px; max-width: 1400px; margin: 0 auto; padding: 20px; }
-        .pdf-panel { flex: 1; }
-        .info-panel { flex: 1; overflow-y: auto; max-height: 90vh; }
-        .finding-card { border: 1px solid #ddd; border-radius: 8px; padding: 12px; margin-bottom: 12px; background: #fff; }
-        .finding-card.critical { border-left: 4px solid #e74c3c; }
-        .finding-card.warning { border-left: 4px solid #f39c12; }
-        .finding-card.info { border-left: 4px solid #3498db; }
-        .finding-card.confirmed { opacity: 0.6; background: #f0fff0; }
-        .finding-card.rejected { opacity: 0.6; background: #fff0f0; }
-        .page-nav { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
-        .page-nav button { padding: 6px 16px; }
-        .severity-badge { font-size: 0.75rem; padding: 2px 8px; border-radius: 4px; color: #fff; }
-        .severity-badge.critical { background: #e74c3c; }
-        .severity-badge.warning { background: #f39c12; }
-        .severity-badge.info { background: #3498db; }
-        .action-btns { margin-top: 8px; display: flex; gap: 8px; }
-        .action-btns button { padding: 4px 12px; font-size: 0.85rem; cursor: pointer; border: 1px solid #ccc; border-radius: 4px; }
-        .btn-confirm { background: #27ae60; color: #fff; }
-        .btn-reject { background: #e74c3c; color: #fff; }
-        .btn-correct { background: #f39c12; color: #fff; }
-        .status-bar { background: #f5f7fa; padding: 12px; border-radius: 8px; margin-bottom: 16px; }
-    </style>
+    <link rel="stylesheet" href="/static/design-tokens.css">
+    <link rel="stylesheet" href="/static/app.css">
+    <link rel="stylesheet" href="/static/review.css">
+    {# 中英文映射：DB 中 severity/source/status/confidence 为英文枚举，前端统一渲染为中文 #}
+    {% set severity_zh = {'critical': '严重', 'warning': '警告', 'info': '信息'} %}
+    {% set source_zh = {'rule': '规则', 'llm_page': 'LLM单页', 'llm_fallback': 'LLM兜底', 'llm_cross': 'LLM跨页'} %}
+    {% set status_zh = {'pending': '待复核', 'confirmed': '已确认', 'rejected': '已拒绝', 'corrected': '已修正', 'queued': '排队中', 'processing': '处理中', 'review': '可复核', 'partial_review': '部分可复核', 'error': '出错', 'cancelled': '已取消', 'cancelling': '取消中', 'ocr_running': 'OCR识别中', 'ocr_done': 'OCR完成', 'analyzing': '分析中', 'done': '已完成'} %}
+    {% set confidence_zh = {'high': '高', 'medium': '中', 'low': '低'} %}
 </head>
-<body>
-    <div class="review-container">
-        <div class="pdf-panel">
-            <h3>PDF 原图 — 第 <span id="page-num">{{ page }}</span> / {{ total_pages }} 页</h3>
-            <div class="page-nav">
-                <button onclick="goPage({{ page - 1 }}" {% if page <= 1 %}disabled{% endif %}>← 上一页</button>
-                <span>第 {{ page }} 页</span>
-                <button onclick="goPage({{ page + 1 }}" {% if page >= total_pages %}disabled{% endif %}>下一页 →</button>
-            </div>
-            <div style="border: 1px solid #ddd; background: #fff;">
-                {% if pdf_url %}
-                <iframe src="{{ pdf_url }}#page={{ page }}" width="100%" height="800"></iframe>
-                {% else %}
-                <p>PDF 不可预览</p>
+<body class="h-full flex flex-col">
+    <!-- ============= Top App Bar — 48px, 无 logo, 纯文字 ============= -->
+    <header class="border-b border-border bg-background/80 backdrop-blur-sm sticky top-0 z-40">
+        <div class="max-w-[1700px] mx-auto px-6 h-12 flex items-center gap-3">
+            <a href="/" class="text-[13px] font-medium hover:text-muted-foreground transition-colors">
+                批记录检查
+            </a>
+            <span class="text-muted-foreground/40">/</span>
+            <span class="text-[13px] font-medium truncate max-w-[280px]">{{ filename }}</span>
+            <span class="inline-flex items-center gap-1 text-[11px] text-muted-foreground">
+                <span class="w-1.5 h-1.5 rounded-full bg-success"></span>
+                {{ status_zh.get(status, status) }}
+            </span>
+            <span class="text-[11px] text-muted-foreground font-mono">{{ job_id }}</span>
+            <div class="flex-1"></div>
+            <!-- 上下文按钮：取消/重试/报告 — 按状态显示 -->
+            <nav class="flex items-center gap-2">
+                {% if status in ['ocr_running', 'ocr_done', 'analyzing', 'pending'] %}
+                <button onclick="cancelJob()"
+                        class="btn-press text-[12px] text-muted-foreground hover:text-destructive">
+                    取消任务
+                </button>
                 {% endif %}
-            </div>
+                {% if status in ['error', 'cancelled'] %}
+                <button onclick="retryJob()"
+                        class="btn-press text-[12px] text-muted-foreground hover:text-foreground">
+                    重试
+                </button>
+                {% endif %}
+                {% if status in ['review', 'partial_review', 'done'] %}
+                <a href="/api/jobs/{{ job_id }}/report.md"
+                   class="btn-press text-[12px] text-muted-foreground hover:text-foreground">
+                    下载报告
+                </a>
+                {% endif %}
+                <a href="/settings"
+                   class="btn-press text-[12px] text-muted-foreground hover:text-foreground">
+                    设置
+                </a>
+                <a href="/"
+                   class="btn-press text-[12px] text-muted-foreground hover:text-foreground">
+                    首页
+                </a>
+            </nav>
         </div>
+    </header>
 
-        <div class="info-panel">
-            <div class="status-bar">
-                <strong>{{ filename }}</strong><br>
-                Job: {{ job_id }} | 状态: {{ status }}
-                <span style="float: right;">
-                    <a href="/api/jobs/{{ job_id }}/report.md">导出 Markdown</a> |
-                    <a href="/api/jobs/{{ job_id }}/report.json">导出 JSON</a>
-                </span>
+    <!-- ============= Main 3-column layout ============= -->
+    <div class="flex-1 max-w-[1700px] w-full mx-auto px-4 py-4 grid gap-4"
+         style="grid-template-columns: 180px 1fr 440px; min-height: calc(100vh - 48px);">
+
+        <!-- LEFT: Page navigation sidebar — 扁平列表，无卡片包裹 -->
+        <aside class="flex flex-col min-w-0">
+            <div class="flex items-center justify-between px-1 py-1.5">
+                <h3 class="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">页码</h3>
+                <span class="text-[11px] text-muted-foreground tabular-nums">{{ total_pages }}</span>
             </div>
-
-            <h3>第 {{ page }} 页 OCR 文本</h3>
-            <div style="background: #fff; border: 1px solid #ddd; padding: 12px; max-height: 400px; overflow: auto; white-space: pre-wrap; font-size: 0.85rem;">
-                {{ ocr_text or '无 OCR 数据' }}
-            </div>
-
-            <h3>Findings</h3>
-            <div id="findings-list">
-                {% if findings %}
-                    {% for f in findings %}
-                    <div class="finding-card {{ f.severity }} {{ f.status }}" id="finding-{{ f.id }}">
-                        <span class="severity-badge {{ f.severity }}">{{ f.severity }}</span>
-                        <strong>{{ f.type }}</strong>
-                        {% if f.status != 'pending' %} <small>({{ f.status }})</small>{% endif %}
-                        <p>{{ f.description }}</p>
-                        {% if f.ocr_text %}<small style="color:#666">OCR: {{ f.ocr_text[:100] }}</small>{% endif %}
-                        {% if f.status == 'pending' %}
-                        <div class="action-btns">
-                            <button class="btn-confirm" onclick="updateFinding({{ f.id }}, 'confirmed')">✓ 确认</button>
-                            <button class="btn-reject" onclick="updateFinding({{ f.id }}, 'rejected')">✗ 拒绝</button>
-                            <button class="btn-correct" onclick="correctFinding({{ f.id }})">✎ 修正</button>
-                        </div>
+            <div class="flex-1 overflow-y-auto border-t border-border" id="page-nav">
+                {% for p in range(1, total_pages + 1) %}
+                {% set pfc = page_finding_counts.get(p, {"critical":0,"warning":0,"info":0,"total":0}) %}
+                {% set is_current = p == page %}
+                <a href="/jobs/{{ job_id }}/review?page={{ p }}"
+                   data-page="{{ p }}"
+                   onclick="event.preventDefault(); goPage({{ p }});"
+                   class="page-nav-item group relative flex items-center justify-between px-3 py-1.5 text-[12px] transition-colors duration-150
+                   {% if is_current %}text-foreground font-medium{% else %}text-muted-foreground hover:text-foreground{% endif %}">
+                    <!-- 左侧指示条（选中时显示）-->
+                    {% if is_current %}
+                    <span class="absolute left-0 top-1 bottom-1 w-0.5 bg-foreground"></span>
+                    {% endif %}
+                    <span class="font-mono tabular-nums">P{{ p }}</span>
+                    {% if pfc.total > 0 %}
+                    <span class="flex items-center gap-1">
+                        {% if pfc.critical > 0 %}
+                        <span data-dot="critical" class="w-1 h-1 rounded-full bg-destructive" title="{{ pfc.critical }} 严重"></span>
                         {% endif %}
-                        {% if f.corrected_text %}<p style="color:green">修正: {{ f.corrected_text }}</p>{% endif %}
-                        {% if f.reviewer_note %}<p style="color:blue">备注: {{ f.reviewer_note }}</p>{% endif %}
-                    </div>
-                    {% endfor %}
+                        {% if pfc.warning > 0 %}
+                        <span data-dot="warning" class="w-1 h-1 rounded-full bg-warning" title="{{ pfc.warning }} 警告"></span>
+                        {% endif %}
+                        {% if pfc.info > 0 and pfc.critical == 0 and pfc.warning == 0 %}
+                        <span class="text-[10px] tabular-nums text-muted-foreground">{{ pfc.total }}</span>
+                        {% endif %}
+                    </span>
+                    {% endif %}
+                </a>
+                {% endfor %}
+            </div>
+        </aside>
+
+        <!-- CENTER: PDF preview -->
+        <section class="flex flex-col gap-3 min-w-0">
+            <div class="flex items-center justify-between">
+                <h2 class="text-sm font-semibold text-muted-foreground tracking-wide">
+                    PDF 原图 · 第 <span id="page-num" class="text-foreground font-mono">{{ page }}</span> / {{ total_pages }} 页
+                </h2>
+                <div class="flex items-center gap-2">
+                    <button onclick="goPage({{ page - 1 }})" {% if page <= 1 %}disabled{% endif %}
+                            class="btn-press focus-ring inline-flex items-center justify-center h-8 w-8 rounded-md border border-border bg-card hover:bg-accent disabled:opacity-40 disabled:pointer-events-none">
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor" class="w-4 h-4"><path stroke-linecap="round" stroke-linejoin="round" d="M15.75 19.5L8.25 12l7.5-7.5"/></svg>
+                    </button>
+                    <span class="text-sm text-muted-foreground font-mono tabular-nums w-16 text-center">{{ page }} / {{ total_pages }}</span>
+                    <button onclick="goPage({{ page + 1 }})" {% if page >= total_pages %}disabled{% endif %}
+                            class="btn-press focus-ring inline-flex items-center justify-center h-8 w-8 rounded-md border border-border bg-card hover:bg-accent disabled:opacity-40 disabled:pointer-events-none">
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor" class="w-4 h-4"><path stroke-linecap="round" stroke-linejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5"/></svg>
+                    </button>
+                </div>
+            </div>
+
+            <div class="flex-1 border-t border-border overflow-hidden relative bg-card">
+                {% if pdf_url %}
+                <div id="pdf-loading" class="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-background z-10">
+                    <div class="pdf-spinner"></div>
+                    <p class="text-xs text-muted-foreground">正在加载 PDF ...</p>
+                </div>
+                <iframe id="pdf-frame" src="{{ pdf_url }}#page={{ page }}" class="w-full h-full" style="min-height:calc(100vh - 140px)" title="PDF 预览"></iframe>
                 {% else %}
-                    <p>本页无 findings</p>
+                <div class="flex items-center justify-center h-full text-muted-foreground text-sm p-12">PDF 不可预览</div>
                 {% endif %}
             </div>
-        </div>
+        </section>
+
+        <!-- RIGHT: Findings + Measurements -->
+        <section class="flex flex-col gap-4 min-w-0 overflow-y-auto" style="max-height: calc(100vh - 88px);">
+
+            <!-- Severity summary — 扁平行内，不用卡片包裹 -->
+            <div class="severity-summary flex items-center gap-4 px-1">
+                <div class="flex items-center gap-1.5">
+                    <span class="w-1.5 h-1.5 rounded-full {% if severity_counts.critical > 0 %}bg-destructive{% else %}bg-muted-foreground/30{% endif %}"></span>
+                    <span class="text-[11px] text-muted-foreground">严重</span>
+                    <span class="text-sm font-semibold tabular-nums">{{ severity_counts.critical }}</span>
+                </div>
+                <div class="flex items-center gap-1.5">
+                    <span class="w-1.5 h-1.5 rounded-full {% if severity_counts.warning > 0 %}bg-warning{% else %}bg-muted-foreground/30{% endif %}"></span>
+                    <span class="text-[11px] text-muted-foreground">警告</span>
+                    <span class="text-sm font-semibold tabular-nums">{{ severity_counts.warning }}</span>
+                </div>
+                <div class="flex items-center gap-1.5">
+                    <span class="w-1.5 h-1.5 rounded-full {% if severity_counts.info > 0 %}bg-info{% else %}bg-muted-foreground/30{% endif %}"></span>
+                    <span class="text-[11px] text-muted-foreground">信息</span>
+                    <span class="text-sm font-semibold tabular-nums">{{ severity_counts.info }}</span>
+                </div>
+                <div class="flex-1"></div>
+                {% if page_confidence and not page_parse_error %}
+                <span class="text-[11px] text-muted-foreground">置信度 {{ confidence_zh.get(page_confidence, page_confidence) }}</span>
+                {% endif %}
+            </div>
+
+            <!-- Critical banner — 仅 critical>0 时显示，红色左边框，不铺底 -->
+            {% set critical_count = findings | selectattr('severity', 'equalto', 'critical') | list | length %}
+            {% if critical_count > 0 %}
+            <div class="critical-banner rounded-md border-l-2 border-destructive bg-card px-3 py-2 flex items-center gap-2">
+                <span class="w-1.5 h-1.5 rounded-full bg-destructive shrink-0"></span>
+                <span class="text-xs text-foreground">本页 <strong class="font-semibold">{{ critical_count }}</strong> 条严重问题，请优先复核</span>
+            </div>
+            {% endif %}
+
+            <!-- LLM parse error — 同样左边框样式，不铺底 -->
+            {% if page_parse_error %}
+            <div class="parse-error-banner rounded-md border-l-2 border-warning bg-card px-3 py-2 flex items-center gap-2">
+                <span class="w-1.5 h-1.5 rounded-full bg-warning shrink-0"></span>
+                <span class="text-xs text-foreground">此页 LLM 解析失败，findings 仅供参考，请以 OCR 原文为准</span>
+            </div>
+            {% endif %}
+
+            <!-- Findings list — Linear 风格扁平列表，无外层卡片包裹 -->
+            <div class="flex flex-col">
+                <!-- 列表 header — 仅标题 + 计数，无卡片背景 -->
+                <div class="flex items-center justify-between px-1 py-1.5">
+                    <h3 class="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">问题清单</h3>
+                    <span class="text-[11px] text-muted-foreground tabular-nums">{{ findings|length }}</span>
+                </div>
+                <div id="findings-list" class="border-t border-border">
+                    {% if findings %}
+                        {% for f in findings %}
+                        {% set sev_dot = 'bg-destructive' if f.severity == 'critical' else ('bg-warning' if f.severity == 'warning' else 'bg-info') %}
+                        <div id="finding-{{ f.id }}"
+                             class="finding-card stagger-in hover-lift border-b border-border last:border-b-0 {% if f.status == 'confirmed' %}opacity-50{% elif f.status == 'rejected' %}opacity-40{% endif %} py-2.5 px-1"
+                             style="--i: {{ loop.index0 }}">
+                            <div class="flex items-start gap-2">
+                                <span class="w-1.5 h-1.5 rounded-full {{ sev_dot }} mt-[7px] shrink-0"></span>
+                                <div class="flex-1 min-w-0">
+                                    <!-- 第一行: type + 状态点（类似 Linear issue row）-->
+                                    <div class="flex items-center gap-2 mb-0.5">
+                                        <span class="text-[13px] font-medium text-foreground">{{ f.type }}</span>
+                                        {% if f.status != 'pending' %}
+                                        <span class="text-[10px] text-muted-foreground">· {{ status_zh.get(f.status, f.status) }}</span>
+                                        {% endif %}
+                                        {% if f.source and f.source != 'rule' %}
+                                        <span class="text-[10px] text-muted-foreground">· {{ source_zh.get(f.source, f.source) }}</span>
+                                        {% endif %}
+                                        <span class="text-[10px] text-muted-foreground uppercase tracking-wider ml-auto">{{ severity_zh.get(f.severity, f.severity) }}</span>
+                                    </div>
+                                    <!-- 第二行: 描述 -->
+                                    <p class="text-[13px] text-muted-foreground leading-relaxed">{{ f.description | render_page_links(job_id) }}</p>
+                                    {% if f.ocr_text %}
+                                    <p class="text-[11px] text-muted-foreground/70 font-mono mt-1 truncate">OCR：{{ f.ocr_text[:100] }}</p>
+                                    {% endif %}
+                                    {% if f.corrected_text %}
+                                    <p class="text-[11px] text-foreground mt-1">修正：{{ f.corrected_text }}</p>
+                                    {% endif %}
+                                    {% if f.reviewer_note %}
+                                    <p class="text-[11px] text-muted-foreground mt-1">备注：{{ f.reviewer_note }}</p>
+                                    {% endif %}
+                                    {% if f.status == 'pending' %}
+                                    <div class="action-btns mt-1.5 flex items-center gap-2">
+                                        <button onclick="updateFinding({{ f.id }}, 'confirmed')"
+                                                class="btn-press focus-ring text-[11px] font-medium text-foreground hover:text-muted-foreground">
+                                            确认
+                                        </button>
+                                        <span class="text-muted-foreground/30">·</span>
+                                        <button onclick="updateFinding({{ f.id }}, 'rejected')"
+                                                class="btn-press focus-ring text-[11px] font-medium text-muted-foreground hover:text-foreground">
+                                            拒绝
+                                        </button>
+                                        <span class="text-muted-foreground/30">·</span>
+                                        <button onclick="correctFinding({{ f.id }})"
+                                                class="btn-press focus-ring text-[11px] font-medium text-muted-foreground hover:text-foreground">
+                                            修正
+                                        </button>
+                                    </div>
+                                    {% endif %}
+                                </div>
+                            </div>
+                        </div>
+                        {% endfor %}
+                    {% else %}
+                        <div class="py-8 text-center text-[13px] text-muted-foreground">本页无问题</div>
+                    {% endif %}
+                </div>
+            </div>
+
+            <!-- OCR text — HashiCorp 范式: header + 折叠 + 浮层按钮 -->
+            <div class="flex flex-col">
+                <div class="flex items-center justify-between px-1 py-1.5">
+                    <h3 class="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">OCR 文本</h3>
+                    <span class="text-[11px] text-muted-foreground">第 {{ page }} 页</span>
+                </div>
+                <div class="relative border-t border-border">
+                    <div id="ocr-text" class="px-3 py-3 overflow-hidden text-[12px] leading-[1.6] text-muted-foreground whitespace-pre-wrap font-mono" style="max-height: 200px;">
+                        {{ ocr_text or '无 OCR 数据' }}
+                    </div>
+                    <!-- 浮层展开按钮 — 仅在内容溢出时显示 -->
+                    <div id="ocr-gradient" class="absolute bottom-0 left-0 right-0 h-8 bg-gradient-to-t from-background to-transparent pointer-events-none flex items-end justify-center pb-1">
+                        <button onclick="toggleOcr()" id="ocr-toggle-btn" class="btn-press text-[11px] font-medium text-foreground hover:text-muted-foreground bg-background px-2 py-0.5 rounded">
+                            展开更多
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Measurements matrix — 仅在有数据时显示 -->
+            {% if measurements %}
+            <div class="flex flex-col">
+                <div class="flex items-center justify-between px-1 py-1.5">
+                    <h3 class="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">参数矩阵</h3>
+                    <span class="text-[11px] text-muted-foreground tabular-nums">{{ measurements|length }} × {{ matrix_columns|length }}</span>
+                </div>
+                <div class="matrix-container overflow-x-auto border-t border-border">
+                    <table class="measurement-matrix w-full text-[12px] border-collapse">
+                        <thead>
+                            <tr class="border-b border-border">
+                                <th class="text-left px-3 py-1.5 font-medium text-muted-foreground">时间</th>
+                                {% for col in matrix_columns %}
+                                <th class="px-3 py-1.5 font-medium text-muted-foreground text-center whitespace-nowrap">{{ col }}</th>
+                                {% endfor %}
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for m in measurements %}
+                            <tr class="stagger-in border-b border-border/50 hover:bg-muted/50" style="--i: {{ loop.index0 }}">
+                                <td class="px-3 py-1.5 font-mono text-foreground">{{ m.time or '-' }}</td>
+                                {% for col in matrix_columns %}
+                                {% set cell = m['values'].get(col, {}) %}
+                                {% set cell_class = 'cell-ok' if cell.in_spec == true else ('cell-bad' if cell.in_spec == false else 'cell-unknown') %}
+                                <td class="px-3 py-1.5 text-center tabular-nums {{ cell_class }}"
+                                    title="规格: {{ cell.spec }} | 实测: {{ cell.actual }} | 单位: {{ cell.unit }}">
+                                    {{ cell.actual or '-' }}
+                                </td>
+                                {% endfor %}
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            {% endif %}
+
+        </section>
     </div>
 
+    {# 服务端上下文注入：Jinja2 变量 → window.__PBC__，供 review.js 使用。
+       仅此一处内联脚本用于桥接 SSR 数据与外部 JS，无业务逻辑。 #}
     <script>
-        function goPage(p) {
-            if (p < 1 || p > {{ total_pages }}) return;
-            window.location.href = '/jobs/{{ job_id }}/review?page=' + p;
-        }
-
-        function updateFinding(findingId, status) {
-            fetch('/api/jobs/{{ job_id }}/findings/' + findingId, {
-                method: 'POST',
-                headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-                body: 'status=' + status
-            }).then(r => r.json()).then(() => {
-                document.getElementById('finding-' + findingId).classList.add(status);
-                location.reload();
-            });
-        }
-
-        function correctFinding(findingId) {
-            const text = prompt('输入修正后的文本:');
-            if (!text) return;
-            fetch('/api/jobs/{{ job_id }}/findings/' + findingId, {
-                method: 'POST',
-                headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-                body: 'status=corrected&corrected_text=' + encodeURIComponent(text)
-            }).then(r => r.json()).then(() => location.reload());
-        }
+      window.__PBC__ = {
+        job_id: {{ job_id | tojson }},
+        filename: {{ filename | tojson }},
+        status: {{ status | tojson }},
+        page: {{ page }},
+        total_pages: {{ total_pages }},
+        findings_count: {{ findings | length }},
+        severity_counts: {{ severity_counts | tojson }},
+        has_measurements: {{ ((measurements | length) > 0) | tojson }},
+        matrix_shape: [{{ measurements | length }}, {{ matrix_columns | length }}],
+        pdf_url: {{ pdf_url | tojson }},
+        page_parse_error: {{ page_parse_error | tojson if page_parse_error is boolean else 'false' }},
+        page_confidence: {{ page_confidence | tojson }},
+        page_finding_counts: {
+          {% for p, c in page_finding_counts.items() %}
+          {{ p }}: { critical: {{ c.critical }}, warning: {{ c.warning }}, info: {{ c.info }}, total: {{ c.total }} },
+          {% endfor %}
+        },
+      };
     </script>
+    <script src="/static/review.js" defer></script>
 </body>
 </html>

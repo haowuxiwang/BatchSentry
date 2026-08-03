@@ -1,25 +1,193 @@
-<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Pharma Batch Checker</title>
-    <link rel="stylesheet" href="/static/style.css">
-</head>
-<body>
-    <div class="container">
-        <h1>🏭 Pharma Batch Checker</h1>
-        <p class="subtitle">GMP 批生产记录半自动合规检查系统</p>
-        <div class="upload-area" id="upload-area">
-            <p>拖拽 PDF 文件到此处，或点击选择文件</p>
-            <input type="file" id="file-input" accept=".pdf" hidden>
-            <button onclick="document.getElementById('file-input').click()">选择 PDF</button>
+<!doctype html>
+<html lang="zh-CN" class="h-full">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>BatchSentry — 批记录检查</title>
+    <link rel="stylesheet" href="/static/design-tokens.css" />
+    <link rel="stylesheet" href="/static/app.css" />
+    <link rel="stylesheet" href="/static/upload.css" />
+  </head>
+  <body class="h-full min-h-screen">
+    <div class="relative max-w-3xl mx-auto px-6 py-16">
+      <!-- Header — 极简，无 logo -->
+      <header class="stagger-in flex items-center gap-3 mb-10" style="--i: 0">
+        <div class="flex-1">
+          <h1 class="text-xl font-semibold tracking-tight">BatchSentry</h1>
+          <p class="text-[13px] text-muted-foreground mt-0.5">
+            GMP 批生产记录半自动合规检查
+          </p>
         </div>
-        <div id="status"></div>
-        <footer>
-            <p>v0.1.0 — Phase 0 MVP</p>
-        </footer>
+        <a
+          href="/settings"
+          class="btn-press text-[12px] font-medium text-muted-foreground hover:text-foreground"
+        >
+          设置
+        </a>
+      </header>
+
+      {% if needs_setup %}
+      <!-- 首次运行引导：未配置任何 LLM provider 的 API key -->
+      <div
+        class="stagger-in rounded-md border border-border bg-card px-5 py-4 mb-8"
+        style="--i: 0"
+      >
+        <div class="flex items-start justify-between gap-4">
+          <div class="flex-1">
+            <h2 class="text-sm font-semibold text-foreground">欢迎使用 BatchSentry</h2>
+            <p class="text-[12px] text-muted-foreground mt-1 leading-relaxed">
+              检测到尚未配置 LLM 服务商。请先在设置页面填入至少一个
+              API Key（如 DeepSeek、SiliconFlow、GLM、Kimi 等），否则上传后无法进行结构化分析。
+            </p>
+          </div>
+          <a
+            href="/settings"
+            class="btn-press shrink-0 rounded-md border border-foreground px-3 py-1.5 text-[12px] font-medium text-foreground hover:bg-foreground hover:text-background"
+          >
+            前往设置
+          </a>
+        </div>
+      </div>
+      {% endif %}
+
+      <!-- Upload card -->
+      <section
+        class="stagger-in rounded-md border border-border bg-card overflow-hidden mb-8"
+        style="--i: 1"
+      >
+        <div class="px-5 py-3 border-b border-border">
+          <h2 class="text-sm font-semibold">上传批生产记录</h2>
+          <p class="text-[11px] text-muted-foreground mt-0.5">
+            仅支持 PDF，最大 200MB。OCR + LLM 自动审查时间逻辑与参数合规。
+          </p>
+        </div>
+        <div class="p-5">
+          <input type="file" id="file-input" accept=".pdf" class="hidden" />
+          <label
+            for="file-input"
+            id="upload-area"
+            class="block cursor-pointer rounded-md border border-dashed border-border p-8 text-center hover:border-foreground/30 hover:bg-muted/50"
+          >
+            <div class="flex justify-center mb-3">
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke-width="1.5"
+                stroke="currentColor"
+                class="w-5 h-5 text-muted-foreground"
+              >
+                <path
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5"
+                />
+              </svg>
+            </div>
+            <p class="text-[13px] font-medium mb-0.5">拖拽 PDF 文件到此处</p>
+            <p class="text-[11px] text-muted-foreground">或点击选择文件</p>
+          </label>
+          <div id="status" class="mt-3 min-h-[1.5rem] text-[12px]"></div>
+        </div>
+      </section>
+
+      <!-- History — 扁平列表，无外层卡片包裹 -->
+      {% if jobs %}
+      <section class="stagger-in" style="--i: 2">
+        <div class="flex items-center justify-between px-1 py-1.5">
+          <h2
+            class="text-[11px] font-medium uppercase tracking-wider text-muted-foreground"
+          >
+            历史记录
+          </h2>
+          <span class="text-[11px] text-muted-foreground tabular-nums"
+            >{{ jobs|length }}</span
+          >
+        </div>
+        <ul class="border-t border-border">
+          {% for job in jobs %}
+          <li
+            class="stagger-in hover-lift flex items-center gap-3 py-3 px-1 border-b border-border last:border-b-0 hover:bg-muted/40 group"
+            style="--i: {{ loop.index0 + 3 }}"
+          >
+            <a
+              href="/jobs/{{ job.id }}/review"
+              class="flex-1 min-w-0 flex items-center gap-3"
+            >
+              <div class="flex-1 min-w-0">
+                <div class="text-[13px] font-medium truncate">
+                  {{ job.filename }}
+                </div>
+                <div class="text-[11px] text-muted-foreground font-mono mt-0.5">
+                  {{ job.id }} · {{ job.created_at }}
+                </div>
+              </div>
+              <div class="flex items-center gap-3 shrink-0">
+                {% set st = job.status %} {% set status_zh = {'pending':
+                '待复核', 'confirmed': '已确认', 'rejected': '已拒绝',
+                'corrected': '已修正', 'queued': '排队中', 'processing':
+                '处理中', 'review': '可复核', 'partial_review': '部分可复核',
+                'error': '出错', 'cancelled': '已取消', 'cancelling': '取消中',
+                'ocr_running': 'OCR识别中', 'ocr_done': 'OCR完成', 'analyzing':
+                '分析中', 'done': '已完成'} %} {% set st_dot = 'bg-success' if
+                (st == 'review' or st == 'partial_review' or st == 'done') else
+                ('bg-destructive' if st == 'error' else
+                ('bg-muted-foreground/40' if (st == 'cancelled' or st ==
+                'cancelling') else 'bg-info')) %}
+                <span
+                  class="inline-flex items-center gap-1.5 text-[11px] text-muted-foreground"
+                >
+                  <span class="w-1.5 h-1.5 rounded-full {{ st_dot }}"></span>
+                  {{ status_zh.get(st, st) }}
+                </span>
+                <span class="text-[11px] text-muted-foreground tabular-nums"
+                  >{{ job.total_pages or '?' }} 页</span
+                >
+              </div>
+            </a>
+            <!-- 操作按钮：归档 / 删除（处理中状态禁用归档）-->
+            <div
+              class="flex items-center gap-1 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity"
+            >
+              {% set can_archive = job.status in ['review', 'partial_review',
+              'error', 'cancelled', 'done'] %}
+              <button
+                onclick="archiveJob('{{ job.id }}', '{{ job.filename | escape }}')"
+                {%
+                if
+                not
+                can_archive
+                %}disabled{%
+                endif
+                %}
+                class="btn-press text-[11px] px-1.5 py-0.5 {% if can_archive %}text-muted-foreground hover:text-foreground{% else %}text-muted-foreground/30 cursor-not-allowed{% endif %}"
+                title="{% if can_archive %}归档（保留数据，从列表移除）{% else %}任务处理中，无法归档{% endif %}"
+              >
+                归档
+              </button>
+              <button
+                onclick="deleteJob('{{ job.id }}', '{{ job.filename | escape }}')"
+                class="btn-press text-[11px] text-muted-foreground hover:text-destructive px-1.5 py-0.5"
+                title="彻底删除（含 PDF 文件）"
+              >
+                删除
+              </button>
+            </div>
+          </li>
+          {% endfor %}
+        </ul>
+      </section>
+      {% endif %}
+
+      <footer class="mt-12 text-center text-[11px] text-muted-foreground">
+        v0.1.0
+      </footer>
     </div>
-    <script src="/static/app.js"></script>
-</body>
+
+    {# 服务端上下文注入：仅用于日志统计，无敏感数据 #}
+    <script>
+      window.__PBC__ = { jobs_count: {{ jobs | length }} };
+    </script>
+    <script src="/static/upload.js" defer></script>
+  </body>
 </html>

@@ -1,0 +1,142 @@
+/* ============================================================
+   Settings page — page-specific styles (form controls, segments)
+   ============================================================ */
+html, body {
+    background: hsl(var(--background));
+    color: hsl(var(--foreground));
+}
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb { background: hsl(var(--border)); border-radius: 4px; }
+
+/* 极简表单 */
+.field-label {
+    display: block;
+    font-size: 12px;
+    font-weight: 500;
+    color: hsl(var(--foreground));
+    margin-bottom: 6px;
+}
+.field-hint {
+    font-size: 11px;
+    color: hsl(var(--muted-foreground));
+    margin-top: 4px;
+}
+.input {
+    width: 100%;
+    padding: 8px 10px;
+    border: 1px solid hsl(var(--border));
+    border-radius: 6px;
+    background: hsl(var(--card));
+    color: hsl(var(--foreground));
+    font-size: 13px;
+    font-family: ui-monospace, monospace;
+    outline: none;
+    transition:
+        border-color 0.15s,
+        box-shadow 0.15s;
+}
+.input:focus {
+    border-color: hsl(var(--foreground));
+    box-shadow: 0 0 0 2px hsl(var(--foreground) / 0.08);
+}
+.input::placeholder {
+    color: hsl(var(--muted-foreground) / 0.6);
+}
+
+/* Segmented control — 黑白主题 */
+.seg {
+    display: inline-flex;
+    border: 1px solid hsl(var(--border));
+    border-radius: 6px;
+    overflow: hidden;
+}
+.seg button {
+    padding: 7px 16px;
+    font-size: 12px;
+    font-weight: 500;
+    background: transparent;
+    color: hsl(var(--muted-foreground));
+    border: none;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+.seg button:hover {
+    color: hsl(var(--foreground));
+}
+.seg button.active {
+    background: hsl(var(--foreground));
+    color: hsl(var(--background));
+}
+
+/* 状态徽章 — 克制 */
+.badge-ok {
+    color: hsl(142 71% 35%);
+}
+.badge-no {
+    color: hsl(0 84% 50%);
+}
+
+/* ============================================================
+   Dynamic provider rows (LLM section)
+   - flat list with border separators, no card containers
+   - pure text action buttons, no decorative chrome
+   ============================================================ */
+.provider-row {
+    padding: 12px 0;
+    border-bottom: 1px solid hsl(var(--border));
+}
+.provider-row:last-child {
+    border-bottom: none;
+}
+.provider-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 10px;
+}
+.provider-name-row {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+}
+.provider-name {
+    font-size: 13px;
+    font-weight: 500;
+    color: hsl(var(--foreground));
+}
+.provider-key {
+    font-size: 11px;
+    color: hsl(var(--muted-foreground));
+    font-family: ui-monospace, monospace;
+}
+.provider-actions {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+.provider-use-btn,
+.provider-remove-btn {
+    font-size: 12px;
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    color: hsl(var(--muted-foreground));
+    padding: 2px 0;
+    transition: color 0.15s;
+}
+.provider-use-btn:hover,
+.provider-remove-btn:hover {
+    color: hsl(var(--foreground));
+}
+.provider-use-btn.active {
+    color: hsl(var(--foreground));
+    font-weight: 500;
+}
+.provider-remove-btn:hover {
+    color: hsl(0 84% 50%);
+}
+.provider-body {
+    /* slight left padding to visually nest under the provider name */
+    padding-left: 0;
+}
+

@@ -1,0 +1,67 @@
+{
+  "name": "batchsentry",
+  "version": "1.0.0",
+  "description": "BatchSentry — GMP 批生产记录半自动合规检查系统",
+  "main": "electron/main.js",
+  "author": "BatchSentry",
+  "license": "ISC",
+  "scripts": {
+    "start": "electron .",
+    "start:dev": "cross-env PORT=8000 electron .",
+    "build:css": "tailwindcss build -i static/input.css -o static/app.css --minify",
+    "build:py": "pyinstaller pbc-server.spec --noconfirm --clean",
+    "build:win": "electron-builder --win --x64",
+    "build": "npm run build:css && npm run build:py && npm run build:win",
+    "pack:dir": "electron-builder --dir"
+  },
+  "dependencies": {
+    "docx": "^9.7.1"
+  },
+  "devDependencies": {
+    "autoprefixer": "^10.5.4",
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.8",
+    "postcss": "^8.5.24",
+    "tailwindcss": "^3.4.17"
+  },
+  "build": {
+    "appId": "com.batchsentry.app",
+    "productName": "BatchSentry",
+    "copyright": "Copyright © 2026 BatchSentry",
+    "directories": {
+      "output": "dist-electron"
+    },
+    "files": [
+      "electron/main.js"
+    ],
+    "extraResources": [
+      {
+        "from": "dist/pbc-server",
+        "to": "pbc-server",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "BatchSentry-Setup-${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "BatchSentry",
+      "deleteAppDataOnUninstall": false
+    }
+  }
+}

@@ -1,0 +1,251 @@
+<!doctype html>
+<html lang="zh-CN" class="h-full">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>设置 — BatchSentry</title>
+    <link rel="stylesheet" href="/static/design-tokens.css" />
+    <link rel="stylesheet" href="/static/app.css" />
+    <link rel="stylesheet" href="/static/settings.css" />
+  </head>
+  <body class="h-full min-h-screen">
+    <div class="relative max-w-2xl mx-auto px-6 py-10">
+      <!-- 顶部导航 — 无 logo，极简 -->
+      <header class="stagger-in flex items-center gap-3 mb-10" style="--i: 0">
+        <a
+          href="/"
+          class="text-[12px] text-muted-foreground hover:text-foreground"
+          >← 返回</a
+        >
+        <div class="flex-1"></div>
+      </header>
+
+      <h1
+        class="stagger-in text-xl font-semibold tracking-tight mb-1"
+        style="--i: 1"
+      >
+        设置
+      </h1>
+      <p
+        class="stagger-in text-[13px] text-muted-foreground mb-8"
+        style="--i: 2"
+      >
+        配置 LLM 与 OCR 服务凭据，保存后立即生效。
+      </p>
+
+      <form id="settings-form" class="flex flex-col gap-8">
+        <!-- LLM 配置 — 动态 provider 列表 -->
+        <section class="stagger-in" style="--i: 3">
+          <div class="flex items-center justify-between px-1 mb-3">
+            <h2
+              class="text-[11px] font-medium uppercase tracking-wider text-muted-foreground"
+            >
+              LLM 大模型
+            </h2>
+            <span
+              id="llm-provider-badge"
+              class="text-[11px] text-muted-foreground"
+            ></span>
+          </div>
+          <div class="border-t border-border pt-4 flex flex-col gap-4">
+            <!-- 当前激活 provider 提示 -->
+            <div>
+              <span class="field-label">当前服务提供商</span>
+              <p
+                id="llm-active-name"
+                class="text-[13px] text-muted-foreground"
+              ></p>
+            </div>
+
+            <!-- 动态 provider 列表（由 JS 渲染） -->
+            <div id="llm-providers-list" class="flex flex-col gap-6"></div>
+
+            <!-- 添加新 provider -->
+            <div class="flex items-center gap-2 pt-2 border-t border-border">
+              <span class="field-label">添加提供商</span>
+              <select
+                id="llm-add-select"
+                class="input"
+                style="width: auto; padding: 6px 10px; font-size: 12px"
+              >
+                <option value="">— 选择 —</option>
+                <option value="glm">GLM · 智谱 (openai)</option>
+                <option value="kimi">Kimi · 月之暗面 (openai)</option>
+                <option value="qwen">Qwen · 通义千问 (openai)</option>
+                <option value="mimo">MiMo · 小米 (openai)</option>
+                <option value="anthropic">
+                  Anthropic · Claude (anthropic)
+                </option>
+                <option value="openai">OpenAI (openai)</option>
+                <option value="__custom">自定义…</option>
+              </select>
+              <input
+                id="llm-add-custom"
+                class="input hidden"
+                style="width: 140px; padding: 6px 10px; font-size: 12px"
+                placeholder="provider 名"
+              />
+              <button
+                type="button"
+                id="llm-add-btn"
+                class="text-[12px] text-foreground hover:text-muted-foreground transition-colors"
+              >
+                + 添加
+              </button>
+            </div>
+          </div>
+        </section>
+
+        <!-- OCR 配置 — 保持原有结构 -->
+        <section class="stagger-in" style="--i: 4">
+          <div class="flex items-center justify-between px-1 mb-3">
+            <h2
+              class="text-[11px] font-medium uppercase tracking-wider text-muted-foreground"
+            >
+              OCR 文档解析
+            </h2>
+            <span
+              id="ocr-backend-badge"
+              class="text-[11px] text-muted-foreground"
+            ></span>
+          </div>
+          <div class="border-t border-border pt-4 flex flex-col gap-4">
+            <div>
+              <span class="field-label">OCR 后端</span>
+              <div class="seg" id="ocr-backend-seg">
+                <button type="button" data-value="paddle">PaddleOCR</button>
+                <button type="button" data-value="mineru">MinerU</button>
+              </div>
+            </div>
+
+            <!-- PaddleOCR 表单 -->
+            <div data-backend-form="paddle" class="flex flex-col gap-3">
+              <div>
+                <label class="field-label">Token</label>
+                <input
+                  class="input"
+                  name="paddle_ocr_token"
+                  id="paddle_ocr_token"
+                  placeholder="token"
+                  autocomplete="off"
+                />
+                <p class="field-hint" id="paddle-status"></p>
+              </div>
+              <div class="grid grid-cols-2 gap-3">
+                <div>
+                  <label class="field-label">API URL</label>
+                  <input
+                    class="input"
+                    name="paddle_ocr_api_url"
+                    id="paddle_ocr_api_url"
+                  />
+                </div>
+                <div>
+                  <label class="field-label">模型</label>
+                  <input
+                    class="input"
+                    name="paddle_ocr_model"
+                    id="paddle_ocr_model"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <!-- MinerU 表单 -->
+            <div data-backend-form="mineru" class="flex flex-col gap-3 hidden">
+              <div>
+                <label class="field-label">Token</label>
+                <input
+                  class="input"
+                  name="mineru_token"
+                  id="mineru_token"
+                  placeholder="sk-..."
+                  autocomplete="off"
+                />
+                <p class="field-hint" id="mineru-status"></p>
+              </div>
+              <div class="grid grid-cols-2 gap-3">
+                <div>
+                  <label class="field-label">模型版本</label>
+                  <select
+                    class="input"
+                    name="mineru_model_version"
+                    id="mineru_model_version"
+                  >
+                    <option value="vlm">vlm（推荐）</option>
+                    <option value="pipeline">pipeline（默认）</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="field-label">语言</label>
+                  <select
+                    class="input"
+                    name="mineru_language"
+                    id="mineru_language"
+                  >
+                    <option value="ch">中文</option>
+                    <option value="en">英文</option>
+                  </select>
+                </div>
+              </div>
+              <div class="flex items-center gap-4 mt-1">
+                <label
+                  class="flex items-center gap-2 text-[12px] cursor-pointer"
+                >
+                  <input
+                    type="checkbox"
+                    name="mineru_enable_formula"
+                    id="mineru_enable_formula"
+                    class="cursor-pointer"
+                  />
+                  公式识别
+                </label>
+                <label
+                  class="flex items-center gap-2 text-[12px] cursor-pointer"
+                >
+                  <input
+                    type="checkbox"
+                    name="mineru_enable_table"
+                    id="mineru_enable_table"
+                    class="cursor-pointer"
+                  />
+                  表格识别
+                </label>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- 保存按钮 -->
+        <div class="stagger-in flex items-center gap-3" style="--i: 5">
+          <button
+            type="submit"
+            id="save-btn"
+            class="btn-press focus-ring inline-flex items-center px-5 py-2 text-[13px] font-medium bg-foreground text-background rounded-md hover:opacity-90 transition-opacity"
+          >
+            保存配置
+          </button>
+          <button
+            type="button"
+            id="test-conn-btn"
+            class="btn-press focus-ring inline-flex items-center px-5 py-2 text-[13px] font-medium text-foreground hover:text-muted-foreground transition-colors"
+          >
+            测试连接
+          </button>
+          <span id="save-msg" class="text-[12px]"></span>
+        </div>
+      </form>
+
+      <div class="mt-8 text-[11px] text-muted-foreground">
+        <p>配置文件：<code id="env-path" class="font-mono"></code></p>
+        <p class="mt-1">留空表示不修改原值。保存后立即生效（无需重启）。</p>
+        <p class="mt-1">
+          支持的协议：openai（DeepSeek/GLM/Kimi/Qwen/MiMo
+          等）、anthropic（Claude）。
+        </p>
+      </div>
+    </div>
+
+    <script src="/static/settings.js" defer></script>
+  </body>
+</html>
