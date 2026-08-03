@@ -148,16 +148,28 @@ async def recover_stuck_jobs() -> int:
     db = await get_db()
     placeholders = ",".join("?" * len(_STUCK_STATUSES))
     cursor = await db.execute(
-        f"SELECT id, status FROM jobs WHERE status IN ({placeholders})",
+        f"SELECT id, status, filename, created_at FROM jobs WHERE status IN ({placeholders})",
         _STUCK_STATUSES,
     )
     stuck = await cursor.fetchall()
     if not stuck:
+        logger.info("[Startup] No stuck jobs found (all jobs in terminal state)")
         return 0
+
+    logger.warning(
+        f"[Startup] Found {len(stuck)} stuck job(s) to recover: "
+        f"{[(r['id'][:8], r['status']) for r in stuck]}"
+    )
 
     for row in stuck:
         job_id = row["id"]
         old_status = row["status"]
+        filename = row["filename"] if "filename" in row.keys() else "?"
+        created_at = row["created_at"] if "created_at" in row.keys() else "?"
+        logger.warning(
+            f"[{job_id}] Recovering stuck job: status={old_status} "
+            f"filename={filename} created_at={created_at}"
+        )
         # 直接 UPDATE 而非 transition_status：状态机不允许 ocr_running→error
         # 之外的路径（如 pending→error 是允许的），但 ocr_done→error 不在
         # VALID_TRANSITIONS 中。这里属于"崩溃恢复"场景，绕过状态机校验，
@@ -171,10 +183,11 @@ async def recover_stuck_jobs() -> int:
             db, job_id, "stuck_recovery",
             f"recovered on startup: {old_status} → error",
         )
+        logger.info(f"[{job_id}] Stuck job recovered: {old_status} → error")
 
     await db.commit()
     logger.warning(
-        f"Startup recovery: {len(stuck)} stuck jobs marked as error "
+        f"[Startup] Recovery complete: {len(stuck)} stuck jobs marked as error "
         f"(ids: {[r['id'] for r in stuck]})"
     )
     return len(stuck)
@@ -193,18 +206,31 @@ def launch_pipeline(job_id: str, pdf_path: str) -> asyncio.Task:
     """
     def _on_done(task: asyncio.Task, jid: str = job_id):
         # task 完成后从注册表移除（无论成功/失败/取消）
-        _pipeline_tasks.pop(jid, None)
+        removed = _pipeline_tasks.pop(jid, None)
+        active_after = len(_pipeline_tasks)
         if task.cancelled():
-            logger.info(f"[{jid}] Pipeline task cancelled and unregistered")
+            logger.info(
+                f"[{jid}] Pipeline task cancelled and unregistered "
+                f"(was_registered={removed is not None}, active_after={active_after})"
+            )
         elif task.exception():
-            logger.error(f"[{jid}] Pipeline task crashed: {task.exception()}")
+            logger.error(
+                f"[{jid}] Pipeline task crashed: {task.exception()!r} "
+                f"(was_registered={removed is not None}, active_after={active_after})"
+            )
         else:
-            logger.info(f"[{jid}] Pipeline task completed and unregistered")
+            logger.info(
+                f"[{jid}] Pipeline task completed and unregistered "
+                f"(was_registered={removed is not None}, active_after={active_after})"
+            )
 
     task = asyncio.create_task(run_pipeline(job_id, pdf_path))
     _pipeline_tasks[job_id] = task
     task.add_done_callback(_on_done)
-    logger.info(f"[{job_id}] Pipeline task launched and registered (active: {len(_pipeline_tasks)})")
+    logger.info(
+        f"[{job_id}] Pipeline task launched and registered "
+        f"(pdf={Path(pdf_path).name}, active={len(_pipeline_tasks)})"
+    )
     return task
 
 
@@ -221,26 +247,54 @@ async def run_pipeline(job_id: str, pdf_path: str):
     """
     # Acquire per-job lock — prevents two pipelines on the same job_id
     async with _locks_guard:
+        lock_existed = job_id in _pipeline_locks
         lock = _pipeline_locks.setdefault(job_id, asyncio.Lock())
+    if lock_existed:
+        logger.info(f"[{job_id}] Lock contention: another pipeline still draining, waiting...")
     try:
+        if lock.locked():
+            logger.info(f"[{job_id}] Per-job lock held by another coroutine, waiting to acquire")
         async with lock:
+            logger.info(f"[{job_id}] Per-job lock acquired")
             await _run_pipeline_impl(job_id, pdf_path)
     finally:
         # Cleanup lock entry after pipeline exits
         async with _locks_guard:
-            _pipeline_locks.pop(job_id, None)
+            popped = _pipeline_locks.pop(job_id, None)
+        logger.info(
+            f"[{job_id}] Per-job lock released and removed from registry "
+            f"(was_present={popped is not None})"
+        )
         # Cleanup uploaded PDF temp file (OCR done, raw_html in DB)
         try:
             pdf_file = Path(pdf_path)
             if pdf_file.exists():
+                file_size = pdf_file.stat().st_size
                 pdf_file.unlink(missing_ok=True)
+                logger.info(
+                    f"[{job_id}] Cleaned up temp PDF: name={pdf_file.name} "
+                    f"size={file_size} bytes, path={pdf_file}"
+                )
                 # Also remove empty job dir if no other files remain
                 job_dir = pdf_file.parent
-                if job_dir.exists() and not any(job_dir.iterdir()):
-                    job_dir.rmdir()
-                logger.info(f"[{job_id}] Cleaned up temp PDF: {pdf_file.name}")
+                if job_dir.exists():
+                    remaining = list(job_dir.iterdir())
+                    if not remaining:
+                        job_dir.rmdir()
+                        logger.info(f"[{job_id}] Cleaned up empty job dir: {job_dir}")
+                    else:
+                        logger.info(
+                            f"[{job_id}] Job dir not empty, kept: {job_dir} "
+                            f"(remaining_files={[f.name for f in remaining]})"
+                        )
+            else:
+                logger.info(f"[{job_id}] Temp PDF already absent (likely cleaned by retry): {pdf_file.name}")
         except Exception as e:
-            logger.warning(f"[{job_id}] Failed to cleanup temp PDF: {e}")
+            logger.warning(
+                f"[{job_id}] Failed to cleanup temp PDF: {type(e).__name__}: {e} "
+                f"(path={pdf_path})",
+                exc_info=True,
+            )
 
 
 async def _run_pipeline_impl(job_id: str, pdf_path: str):
