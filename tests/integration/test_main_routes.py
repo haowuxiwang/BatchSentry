@@ -45,7 +45,7 @@ class TestHealth:
     async def test_health_returns_ok(self, test_client):
         r = await test_client.get("/health")
         assert r.status_code == 200
-        assert r.json() == {"status": "ok", "version": "0.1.0"}
+        assert r.json() == {"status": "ok", "version": "1.0.0"}
 
 
 class TestIndex:

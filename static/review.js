@@ -231,10 +231,10 @@
       // 更新 OCR 文本
       const ocrEl = document.getElementById("ocr-text");
       if (ocrEl && pageData.raw_html) {
-        // 去除 HTML 标签
-        const tmp = document.createElement("div");
-        tmp.innerHTML = pageData.raw_html;
-        ocrEl.textContent = (tmp.textContent || "")
+        // 去除 HTML 标签 — 用 DOMParser 避免设置 innerHTML 时
+        // 触发 <img onerror=...> 等事件处理器（XSS 防御）
+        const doc = new DOMParser().parseFromString(pageData.raw_html, "text/html");
+        ocrEl.textContent = (doc.body.textContent || "")
           .replace(/\s+/g, " ")
           .trim()
           .slice(0, 5000);

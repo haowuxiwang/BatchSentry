@@ -7,6 +7,7 @@ import re
 from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi.responses import HTMLResponse, FileResponse
@@ -68,7 +69,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="BatchSentry",
     description="GMP 批生产记录半自动合规检查系统",
-    version="0.1.0",
+    version="1.0.0",
     lifespan=lifespan,
 )
 
@@ -89,6 +90,35 @@ app.add_middleware(
     allow_headers=["Content-Type", "X-Request-ID"],
     allow_credentials=False,
 )
+
+# Gzip 压缩 — 生产环境减少传输体积（CSS/JS/JSON 等文本响应）
+app.add_middleware(GZipMiddleware, minimum_size=1024)
+
+# 安全响应头中间件 — CSP / X-Content-Type-Options / X-Frame-Options / Referrer-Policy
+# 防御 clickjacking、MIME sniffing、XSS（CSP 禁止内联脚本和外部资源）
+@app.middleware("http")
+async def security_headers_middleware(request: Request, call_next):
+    response = await call_next(request)
+    # CSP: 只允许同源资源。
+    # script-src 'unsafe-inline': 模板用内联 <script> 注入 window.__PBC__
+    #   SSR 桥接数据（Jinja2 → JS），onclick 调用外部 JS 函数。
+    #   后续可用 CSP nonce 重构移除 'unsafe-inline'。
+    # style-src 'unsafe-inline': Tailwind 工具类需要内联样式。
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline'; "
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data:; "
+        "font-src 'self'; "
+        "connect-src 'self'; "
+        "frame-ancestors 'none'; "  # 禁止被 iframe 嵌入（clickjacking 防御）
+        "base-uri 'self'"
+    )
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["X-XSS-Protection"] = "0"  # 现代浏览器用 CSP，关闭旧的 XSS Auditor
+    return response
 
 # Mount static files
 app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
@@ -190,7 +220,7 @@ async def settings_page(request: Request):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "version": "0.1.0"}
+    return {"status": "ok", "version": "1.0.0"}
 
 
 @app.post("/api/shutdown")
