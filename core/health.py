@@ -67,10 +67,22 @@ async def probe_llm() -> dict:
     provider has no API key (adapter construction may still succeed but
     the actual request will fail with an auth error, which is what we want
     to surface to the user).
+
+    短路逻辑：如果 provider 未配置 API key，直接返回 not configured，
+    避免用空 key 实际调用 API（浪费 8 秒超时 + 触发 SDK 重试）。
     """
     try:
         client = get_llm_client()
         info = client.adapter.client_info()
+        # 短路：未配置 API key 时直接返回，不发起真实请求
+        if not client.adapter.is_configured:
+            return {
+                "ok": False,
+                "model": client.model,
+                "provider": client.provider,
+                "protocol": info.get("protocol", "?"),
+                "reason": "API key not configured",
+            }
         start = time.time()
         # Tiny prompt to verify auth + connectivity. Goes through adapter.chat
         # which routes to OpenAI chat.completions.create or Anthropic
