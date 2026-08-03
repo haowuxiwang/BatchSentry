@@ -152,13 +152,23 @@ class TestPaddleOCRSubmit:
 
     @patch('core.ocr_client.requests.post')
     def test_submit_pdf_reads_file_via_mock_open(self, mock_post, paddle_cfg):
-        """submit_pdf 读取文件内容作为上传数据（使用 mock_open 避免真实文件）。"""
+        """submit_pdf 流式读取文件作为上传数据（使用 mock_open 避免真实文件）。
+
+        更新：submit_pdf 现在用 open() 返回的文件对象直接传给 requests，
+        通过 seek(0, 2) 获取文件大小，再 seek(0) 重置指针。
+        """
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.json.return_value = {"data": {"jobId": "job-read-file"}}
         mock_post.return_value = mock_resp
 
-        with patch('builtins.open', mock_open(read_data=b"fake-pdf-bytes")) as m:
+        # mock_open 的返回值需要支持 seek() 调用
+        m = mock_open(read_data=b"fake-pdf-bytes")
+        mock_file = m.return_value
+        # seek(0, 2) 返回文件大小（流式上传时用于计算 timeout）
+        mock_file.seek.return_value = 14  # len("fake-pdf-bytes")
+
+        with patch('builtins.open', m):
             job_id = ocr_client.submit_pdf("/fake/nonexistent.pdf")
 
         assert job_id == "job-read-file"

@@ -29,11 +29,12 @@ def submit_pdf(pdf_path: str, retries: int = 3) -> str:
     })
     data = {"model": cfg.model, "optionalPayload": optional_payload}
 
-    with open(pdf_path, "rb") as f:
-        file_content = f.read()
-
-    file_size_mb = len(file_content) / 1024 / 1024
-    files = {"file": (Path(pdf_path).name, file_content, "application/pdf")}
+    # 流式读取：避免一次性将大文件（131MB+）全部读入内存
+    # 使用文件对象让 requests 自动分块上传
+    pdf_file = open(pdf_path, "rb")
+    file_size_mb = pdf_file.seek(0, 2) / 1024 / 1024
+    pdf_file.seek(0)
+    files = {"file": (Path(pdf_path).name, pdf_file, "application/pdf")}
     # 动态超时：大文件需要更长的上传时间
     # 基准 120s + 每 10MB 额外 30s（约 3MB/s 上传速度假设）
     upload_timeout = max(120, int(120 + file_size_mb * 3))
@@ -44,33 +45,38 @@ def submit_pdf(pdf_path: str, retries: int = 3) -> str:
     )
 
     last_error = None
-    for attempt in range(1, retries + 1):
-        try:
-            resp = requests.post(
-                cfg.api_url,
-                files=files,
-                data=data,
-                headers=headers,
-                timeout=upload_timeout,
-            )
-            if resp.status_code != 200:
-                raise RuntimeError(f"Submit failed HTTP {resp.status_code}: {resp.text[:300]}")
-            result = resp.json()
-            job_id = result.get("data", {}).get("jobId") or result.get("jobId")
-            if not job_id:
-                raise RuntimeError(f"No jobId in response: {result}")
-            logger.info(f"OCR job submitted: jobId={job_id}")
-            return job_id
-        except Exception as e:
-            last_error = e
-            logger.warning(
-                f"Submit attempt {attempt}/{retries} failed: {type(e).__name__}: {e}"
-            )
-            if attempt < retries:
-                backoff = 2 * attempt
-                logger.info(f"Submit retry: backing off {backoff}s before attempt {attempt + 1}")
-                time.sleep(backoff)
-    raise RuntimeError(f"Submit failed after {retries} attempts: {last_error}")
+    try:
+        for attempt in range(1, retries + 1):
+            try:
+                # 重试时重置文件指针到开头（上次失败可能已部分读取）
+                pdf_file.seek(0)
+                resp = requests.post(
+                    cfg.api_url,
+                    files=files,
+                    data=data,
+                    headers=headers,
+                    timeout=upload_timeout,
+                )
+                if resp.status_code != 200:
+                    raise RuntimeError(f"Submit failed HTTP {resp.status_code}: {resp.text[:300]}")
+                result = resp.json()
+                job_id = result.get("data", {}).get("jobId") or result.get("jobId")
+                if not job_id:
+                    raise RuntimeError(f"No jobId in response: {result}")
+                logger.info(f"OCR job submitted: jobId={job_id}")
+                return job_id
+            except Exception as e:
+                last_error = e
+                logger.warning(
+                    f"Submit attempt {attempt}/{retries} failed: {type(e).__name__}: {e}"
+                )
+                if attempt < retries:
+                    backoff = 2 * attempt
+                    logger.info(f"Submit retry: backing off {backoff}s before attempt {attempt + 1}")
+                    time.sleep(backoff)
+        raise RuntimeError(f"Submit failed after {retries} attempts: {last_error}")
+    finally:
+        pdf_file.close()
 
 
 def poll_job(job_id: str) -> dict:

@@ -57,7 +57,7 @@
     }
 
     // === SSE 实时进度订阅 ===
-    // 非终态时订阅 /api/jobs/{id}/stream，每 2s 收到进度更新
+    // 非终态时订阅 /api/jobs/{id}/stream，每 3s 收到进度更新
     // 终态时服务端推送 done 事件并关闭流
     const initialStatus = ctx.status;
     const terminalStatuses = [

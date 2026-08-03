@@ -3,7 +3,11 @@
 缓存策略：报告内容缓存在内存中（FIFO，maxsize=32），key 为 (job_id, findings_count,
 last_finding_id)。findings 数量或最后一条 finding id 变化时自动失效。
 job 删除时缓存项自然淘汰。
+
+并发安全：_report_cache 用 asyncio.Lock 保护，防止 SSE 请求 + 报告请求并发读写导致
+字典迭代器失效或 key 覆盖。
 """
+import asyncio
 import json
 import logging
 from datetime import datetime
@@ -20,13 +24,13 @@ router = APIRouter(prefix="/api", tags=["report"])
 
 
 # 缓存：key=(job_id, findings_count, last_finding_id) → markdown 文本
-# 用 dict 而非 lru_cache 装饰器，因为生成逻辑是 async 的
 _report_cache: dict[tuple[str, int, int], str] = {}
+_report_cache_lock = asyncio.Lock()
 _REPORT_CACHE_MAX = 32
 
 
 async def _generate_report_md_cached(job_id: str) -> str:
-    """生成 Markdown 报告（带缓存）。
+    """生成 Markdown 报告（带缓存，并发安全）。
 
     缓存 key 为 (job_id, findings_count, last_finding_id)。
     复核操作改变 findings 时，下次请求会因 key 变化而重新生成。
@@ -53,18 +57,22 @@ async def _generate_report_md_cached(job_id: str) -> str:
     last_id = findings[-1]["id"] if findings else 0
     cache_key = (job_id, len(findings), last_id)
 
-    if cache_key in _report_cache:
-        logger.info(f"[{job_id}] Report.md cache hit (findings={len(findings)})")
-        return _report_cache[cache_key]
+    # 并发安全：用锁保护字典读写
+    async with _report_cache_lock:
+        if cache_key in _report_cache:
+            logger.info(f"[{job_id}] Report.md cache hit (findings={len(findings)})")
+            return _report_cache[cache_key]
 
+    # 生成报告（在锁外执行，避免长时间持锁）
     md = _generate_markdown(job, findings, total_pages)
 
     # 写入缓存，清理超出的项
-    _report_cache[cache_key] = md
-    if len(_report_cache) > _REPORT_CACHE_MAX:
-        # 简单 FIFO 淘汰：删除最早插入的 key
-        oldest = next(iter(_report_cache))
-        del _report_cache[oldest]
+    async with _report_cache_lock:
+        _report_cache[cache_key] = md
+        if len(_report_cache) > _REPORT_CACHE_MAX:
+            # 简单 FIFO 淘汰：删除最早插入的 key
+            oldest = next(iter(_report_cache))
+            del _report_cache[oldest]
 
     logger.info(
         f"[{job_id}] Report.md generated and cached: {len(findings)} findings, {len(md)} chars"

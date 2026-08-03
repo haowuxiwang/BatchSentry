@@ -243,7 +243,7 @@ async def stream_job_progress(job_id: str):
                 yield f"event: done\ndata: {payload}\n\n"
                 return
 
-            await asyncio.sleep(2)
+            await asyncio.sleep(3)
 
     return StreamingResponse(
         event_generator(),
@@ -365,15 +365,38 @@ async def retry_job(job_id: str):
 # 生产环境必需：PDF 和数据库会无限累积，需要归档/删除机制
 
 @router.post("/{job_id}/archive")
-async def archive_job(job_id: str):
-    """归档 job — 标记为已归档，从前端列表隐藏，但保留数据用于审计。"""
+async def archive_job(job_id: str, keep_pdf: bool = True):
+    """归档 job — 标记为已归档，从前端列表隐藏，但保留数据用于审计。
+
+    Args:
+        keep_pdf: True（默认）保留 PDF 用于审计追溯；False 删除 PDF 释放磁盘。
+                  数据库记录始终保留。
+    """
     db = await get_db()
     try:
         await transition_status(db, job_id, "archived", "User archived")
-        logger.info(f"[{job_id}] Archived by user")
+        logger.info(f"[{job_id}] Archived by user (keep_pdf={keep_pdf})")
     except InvalidTransitionError as e:
         logger.warning(f"[{job_id}] Archive blocked: {e}")
         raise HTTPException(400, str(e))
+
+    # 可选：归档时删除 PDF 释放磁盘（数据库记录保留）
+    if not keep_pdf:
+        cursor = await db.execute("SELECT pdf_path FROM jobs WHERE id = ?", (job_id,))
+        row = await cursor.fetchone()
+        if row and row["pdf_path"]:
+            pdf = Path(row["pdf_path"])
+            output_root = Path(config["app"].output_dir).resolve()
+            try:
+                job_dir = pdf.parent.resolve()
+                job_dir.relative_to(output_root)
+                if pdf.exists():
+                    import shutil
+                    shutil.rmtree(job_dir, ignore_errors=True)
+                    logger.info(f"[{job_id}] Archived + PDF removed: {job_dir}")
+            except (ValueError, RuntimeError) as e:
+                logger.warning(f"[{job_id}] Archive PDF cleanup skipped (path check): {e}")
+
     return {"ok": True, "status": "archived"}
 
 
@@ -411,10 +434,11 @@ async def delete_job(job_id: str, keep_pdf: bool = False):
     pdf_path = row["pdf_path"]
     logger.info(f"[{job_id}] Delete requested: filename={row['filename']} keep_pdf={keep_pdf}")
 
-    # 删除数据库记录（级联删除 page_cache, findings, audit_log）
+    # 删除数据库记录（级联删除 page_cache, findings, audit_log, llm_call_audit）
     await db.execute("DELETE FROM page_cache WHERE job_id = ?", (job_id,))
     await db.execute("DELETE FROM findings WHERE job_id = ?", (job_id,))
     await db.execute("DELETE FROM audit_log WHERE job_id = ?", (job_id,))
+    await db.execute("DELETE FROM llm_call_audit WHERE job_id = ?", (job_id,))
     await db.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
     await db.commit()
 
