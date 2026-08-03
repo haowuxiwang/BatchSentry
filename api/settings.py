@@ -368,9 +368,9 @@ async def update_settings(req: SettingsUpdate, request: Request):
 
     # 写入 .env（原子性：先写临时文件再 rename，避免并发读到半写状态）
     # 临时文件名带 PID + 随机后缀，防止两个并发 POST 请求互相覆盖 tmp 文件
-    tmp_path = env_path.with_suffix(
-        f".env.tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}"
-    )
+    # 注意：不能用 Path.with_suffix()，因为 .env 的 stem=".env" suffix=""
+    # 会导致 with_suffix(".env.tmp.xxx") 生成 ".env.env.tmp.xxx"
+    tmp_path = env_path.parent / f".env.tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}"
     with open(tmp_path, "w", encoding="utf-8") as f:
         f.write("\n".join(new_lines))
         if new_lines and not new_lines[-1].endswith("\n"):

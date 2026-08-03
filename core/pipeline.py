@@ -477,13 +477,20 @@ async def _run_pipeline_impl(job_id: str, pdf_path: str):
     except Exception as e:
         logger.error(f"[{job_id}] Pipeline failed: {e}", exc_info=True)
         await _audit_log(db, job_id, "pipeline_error", str(e)[:200])
+        error_msg = str(e)[:500]
         try:
             await transition_status(db, job_id, "error", f"Pipeline failed: {str(e)[:100]}")
+            # transition_status 只更新 status 字段，还需显式写入 error_message + finished_at
+            await db.execute(
+                "UPDATE jobs SET error_message = ?, finished_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (error_msg, job_id),
+            )
+            await db.commit()
         except InvalidTransitionError:
             # 已是终态，直接更新 error_message
             await db.execute(
                 "UPDATE jobs SET error_message = ?, finished_at = CURRENT_TIMESTAMP WHERE id = ?",
-                (str(e)[:500], job_id),
+                (error_msg, job_id),
             )
             await db.commit()
 

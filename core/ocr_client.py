@@ -34,9 +34,13 @@ def submit_pdf(pdf_path: str, retries: int = 3) -> str:
 
     file_size_mb = len(file_content) / 1024 / 1024
     files = {"file": (Path(pdf_path).name, file_content, "application/pdf")}
+    # 动态超时：大文件需要更长的上传时间
+    # 基准 120s + 每 10MB 额外 30s（约 3MB/s 上传速度假设）
+    upload_timeout = max(120, int(120 + file_size_mb * 3))
     logger.info(
         f"Submitting to PaddleOCR-VL: file={Path(pdf_path).name} "
-        f"size={file_size_mb:.1f}MB model={cfg.model} url={cfg.api_url}"
+        f"size={file_size_mb:.1f}MB model={cfg.model} url={cfg.api_url} "
+        f"timeout={upload_timeout}s"
     )
 
     last_error = None
@@ -47,7 +51,7 @@ def submit_pdf(pdf_path: str, retries: int = 3) -> str:
                 files=files,
                 data=data,
                 headers=headers,
-                timeout=120,
+                timeout=upload_timeout,
             )
             if resp.status_code != 200:
                 raise RuntimeError(f"Submit failed HTTP {resp.status_code}: {resp.text[:300]}")
