@@ -147,9 +147,10 @@ class TestSettingsMask:
     def test_mask_long_value_shows_first_and_last_4(self):
         """长值应显示前4位 + **** + 后4位。"""
         from api.settings import _mask
-        result = _mask("sk-TuK3I6wds42o0L0mCFYXYWglECnMWWfMXpMGCXJ0Oh9EuL8I")
-        assert result.startswith("sk-T")
-        assert result.endswith("uL8I")
+        # 使用明显的假值，避免误用真实 key 格式
+        result = _mask("sk-test-fake-key-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+        assert result.startswith("sk-t")
+        assert result.endswith("xxxx")
         assert "****" in result
 
     def test_mask_empty_value(self):

@@ -154,15 +154,15 @@ if (-not $SkipElectron) {
         Write-Fail "electron-builder failed"
     }
 
-    # Find the installer
-    $installer = Get-ChildItem "dist-electron" -Filter "BatchSentry-Setup-*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+    # Find the portable build (BatchSentry-Portable-*.exe)
+    $installer = Get-ChildItem "dist-electron" -Filter "BatchSentry-Portable-*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($installer) {
         $size = $installer.Length / 1MB
-        Write-OK ("Installer: {0} ({1:N1} MB)" -f $installer.Name, $size)
+        Write-OK ("Portable build: {0} ({1:N1} MB)" -f $installer.Name, $size)
         Write-Host ""
         Write-Host "  Output: $($installer.FullName)" -ForegroundColor Yellow
     } else {
-        Write-Fail "Installer not found in dist-electron/"
+        Write-Fail "Portable build not found in dist-electron/"
     }
 } else {
     Write-Step "Step 3/3: Skipping Electron build"

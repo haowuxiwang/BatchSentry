@@ -46,13 +46,16 @@
     "win": {
       "target": [
         {
-          "target": "nsis",
+          "target": "portable",
           "arch": [
             "x64"
           ]
         }
       ],
-      "artifactName": "BatchSentry-Setup-${version}.${ext}"
+      "artifactName": "BatchSentry-Portable-${version}.${ext}"
+    },
+    "portable": {
+      "artifactName": "BatchSentry-Portable-${version}.${ext}"
     },
     "nsis": {
       "oneClick": false,

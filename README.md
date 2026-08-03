@@ -16,7 +16,7 @@ BatchSentry 是面向制药企业的批生产记录（BPR）审核工具，通�
   - R5 完整性检查（completeness）
 - **多 LLM 服务商**：DeepSeek / SiliconFlow / GLM / Kimi / Qwen / Anthropic，动态注册，无硬编码
 - **GMP 审计追踪**：所有状态转换、LLM 调用、人工复核操作均写入审计日志
-- **Electron 桌面应用**：Windows 一键安装，splash 启动、优雅关闭、卡死任务恢复
+- **Electron 桌面应用**：Windows 便携版（解压即用），splash 启动、优雅关闭、卡死任务恢复
 
 ## 技术架构
 
@@ -76,11 +76,11 @@ npm install
 npm run dev
 ```
 
-### 生产打包
+### 生产打包（便携版）
 
 ```powershell
 # 必须在真实 PowerShell 终端执行（非 IDE Sandbox）
-.\build.ps1              # 完整构建：CSS + PyInstaller + Electron
+.\build.ps1              # 完整构建：CSS + PyInstaller + Electron portable
 .\build.ps1 -SkipCss    # 跳过 CSS 重建
 .\build.ps1 -Clean      # 清理后重建
 ```
@@ -88,7 +88,9 @@ npm run dev
 构建产物：
 - `static/app.css` — 压缩后的 Tailwind CSS（~15KB）
 - `dist/pbc-server/pbc-server.exe` — PyInstaller 打包的后端
-- `dist-electron/BatchSentry-Setup-1.0.0.exe` — Electron 安装包
+- `dist-electron/BatchSentry-Portable-1.0.0.exe` — Electron 便携版（单文件，解压即用）
+
+详细部署与运维见 [DEPLOYMENT.md](./DEPLOYMENT.md)，开发规范见 [CONTRIBUTING.md](./CONTRIBUTING.md)。
 
 ## 配置说明
 

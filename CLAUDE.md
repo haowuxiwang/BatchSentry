@@ -188,7 +188,7 @@ The probe does NOT submit real OCR/LLM work — it just verifies auth + connecti
 ### Packaging
 
 - **Backend**: PyInstaller via `pbc-server.spec` → `dist/pbc-server/pbc-server.exe`. Hidden imports include `core.mineru_client`, `api.settings`. Resource paths resolve via `sys._MEIPASS` in frozen mode.
-- **Frontend installer**: electron-builder via `build.ps1` → `dist-electron/PBC-Setup-1.0.0.exe`. Electron main (`electron/main.js`) spawns `pbc-server.exe`, health-checks, creates `BrowserWindow`, cleans up child processes on exit. Icon `icon.ico` loaded conditionally.
+- **Frontend portable**: electron-builder via `build.ps1` → `dist-electron/BatchSentry-Portable-1.0.0.exe` (single-file portable, no installer). Electron main (`electron/main.js`) spawns `pbc-server.exe`, health-checks, creates `BrowserWindow`, cleans up child processes on exit. Icon `icon.ico` loaded conditionally.
 - **Run build in real PowerShell** (not IDE Sandbox) — AppData write restrictions in sandbox break packaging.
 
 ### Key Design Decisions

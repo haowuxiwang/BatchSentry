@@ -215,15 +215,32 @@ async def run_pipeline(job_id: str, pdf_path: str):
     If a retry is requested while a previous pipeline is still draining,
     the retry waits for the lock, then sees status=cancelled and exits
     cleanly without spawning duplicate LLM calls.
+
+    资源清理：pipeline 结束后（无论成功/失败/取消）删除上传的 PDF 临时文件。
+    OCR 完成后 raw_html 已存入数据库，PDF 文件不再需要。
     """
     # Acquire per-job lock — prevents two pipelines on the same job_id
     async with _locks_guard:
         lock = _pipeline_locks.setdefault(job_id, asyncio.Lock())
-    async with lock:
-        await _run_pipeline_impl(job_id, pdf_path)
-    # Cleanup lock entry after pipeline exits
-    async with _locks_guard:
-        _pipeline_locks.pop(job_id, None)
+    try:
+        async with lock:
+            await _run_pipeline_impl(job_id, pdf_path)
+    finally:
+        # Cleanup lock entry after pipeline exits
+        async with _locks_guard:
+            _pipeline_locks.pop(job_id, None)
+        # Cleanup uploaded PDF temp file (OCR done, raw_html in DB)
+        try:
+            pdf_file = Path(pdf_path)
+            if pdf_file.exists():
+                pdf_file.unlink(missing_ok=True)
+                # Also remove empty job dir if no other files remain
+                job_dir = pdf_file.parent
+                if job_dir.exists() and not any(job_dir.iterdir()):
+                    job_dir.rmdir()
+                logger.info(f"[{job_id}] Cleaned up temp PDF: {pdf_file.name}")
+        except Exception as e:
+            logger.warning(f"[{job_id}] Failed to cleanup temp PDF: {e}")
 
 
 async def _run_pipeline_impl(job_id: str, pdf_path: str):
