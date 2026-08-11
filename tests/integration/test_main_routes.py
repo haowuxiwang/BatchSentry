@@ -22,12 +22,19 @@ async def client_with_job(test_db):
     """预置一条 job 后再构建 ASGITransport 客户端。
 
     用于需要 DB 数据的路由测试（review 页 / PDF 服务）。
-    插入的 job pdf_path 指向不存在的文件，便于测试 404 路径。
+    插入的 job pdf_path 指向 output_dir 内不存在的文件，便于测试 404 路径。
+    （serve_pdf 有路径遍历防护，pdf_path 必须在 output_dir 内）
     """
+    from config import config as _cfg
+    from pathlib import Path
+    output_dir = Path(_cfg["app"].output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    # 路径在 output_dir 内但文件不存在 → 应返回 404 PDF file missing
+    pdf_path = output_dir / "nonexistent_test.pdf"
     await test_db.execute(
         "INSERT INTO jobs (id, filename, pdf_path, status, total_pages) "
         "VALUES (?, ?, ?, ?, ?)",
-        ("route-job", "test.pdf", "/nonexistent/test.pdf", "review", 3),
+        ("route-job", "test.pdf", str(pdf_path), "review", 3),
     )
     await test_db.commit()
 
@@ -117,3 +124,19 @@ class TestServePdf:
         """job 存在但 pdf_path 指向不存在的文件 → 404 PDF file missing。"""
         r = await client_with_job.get("/api/jobs/route-job/pdf")
         assert r.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_pdf_path_traversal_blocked(self, test_db, test_client):
+        """serve_pdf 路径遍历防护：pdf_path 在 output_dir 外 → 403。
+
+        攻击场景：DB 被篡改（SQL 注入或直接改库），pdf_path 指向
+        任意系统文件（如 C:\\Windows\\win.ini），可读取敏感文件。
+        """
+        await test_db.execute(
+            "INSERT INTO jobs (id, filename, pdf_path, status, total_pages) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("traversal-job", "evil.pdf", "C:/Windows/win.ini", "review", 1),
+        )
+        await test_db.commit()
+        r = await test_client.get("/api/jobs/traversal-job/pdf")
+        assert r.status_code == 403

@@ -2,7 +2,7 @@
 
 ## 便携版分发（推荐）
 
-BatchSentry 以**便携版（Portable）**形式分发，用户无需安装，解压即用。
+BatchSentry 以**文件夹便携版**形式分发，用户无需安装，解压即用。
 
 ### 构建便携版
 
@@ -10,7 +10,7 @@ BatchSentry 以**便携版（Portable）**形式分发，用户无需安装，�
 # 在真实 PowerShell 终端执行（非 IDE Sandbox）
 cd d:\learn\claudecode\pharma-batch-checker
 
-# 方式 1：完整构建（CSS + PyInstaller + Electron portable）
+# 方式 1：完整构建（CSS + PyInstaller + Electron 文件夹便携版）
 .\build.ps1
 
 # 方式 2：跳过 CSS（app.css 已最新）
@@ -24,20 +24,19 @@ cd d:\learn\claudecode\pharma-batch-checker
 
 | 产物 | 路径 | 说明 |
 |------|------|------|
-| 便携版可执行文件 | `dist-electron/BatchSentry-Portable-1.0.0.exe` | 单文件，解压即用 |
-| Python 后端 | `dist/pbc-server/pbc-server.exe` | PyInstaller 打包的后端 |
-| Tailwind CSS | `static/app.css` | 压缩后的样式（~15KB） |
+| Electron 应用文件夹 | `dist-electron/win-unpacked/` | 双击 `BatchSentry.exe` 运行，无需安装 |
+| Python 后端 | `dist/pbc-server/pbc-server.exe` | PyInstaller 打包的后端，嵌入 win-unpacked/resources/ |
+| Tailwind CSS | `static/app.css` | 压缩后的样式（~14KB） |
 
 ### 分发方式
 
-1. 将 `BatchSentry-Portable-1.0.0.exe` 重命名为 `.zip`（portable 实际是自解压格式）
-2. 或直接将 `dist/pbc-server/` 目录 + `electron/main.js` + `templates/` + `static/` 打包成 zip
-3. 用户解压后双击 `BatchSentry.exe` 即可运行
+1. 将 `dist-electron/win-unpacked/` 整个文件夹压缩成 zip
+2. 用户解压后双击 `BatchSentry.exe` 即可运行
 
 ### 用户首次使用
 
 1. 解压便携版到任意目录（如 `D:\BatchSentry\`）
-2. 双击 `BatchSentry.exe` 启动
+2. 双击 `win-unpacked\BatchSentry.exe` 启动
 3. 首次运行会显示 splash 窗口（"正在启动后端服务…"）
 4. 主窗口打开后，进入**设置页面**配置 LLM API key
 5. 配置完成后即可上传 PDF 开始审核
@@ -56,7 +55,7 @@ cd d:\learn\claudecode\pharma-batch-checker
 
 | 数据 | 位置 |
 |------|------|
-| 配置 | `%APPDATA%/PBC/.env` |
+| 配置 | `%APPDATA%/PBC/config.json` |
 | 数据库 | `%APPDATA%/PBC/data/pharma.db` |
 | 日志 | `%APPDATA%/PBC/logs/` |
 | 上传文件 | `%APPDATA%/PBC/output/{job_id}/` |
@@ -84,7 +83,7 @@ BatchSentry 有 4 个日志文件（位于 `logs/` 目录）：
 ### 健康检查
 
 ```bash
-# 基础健康检查
+# 基础健康检查（开发模式端口 8000，frozen 模式端口 58765）
 curl http://127.0.0.1:58765/health
 # → {"status":"ok","version":"1.0.0"}
 
@@ -124,7 +123,7 @@ sqlite3 data/pharma.db "PRAGMA wal_checkpoint(TRUNCATE)"
 
 ### LLM Provider 配置
 
-支持运行时切换，无需重启：
+配置通过设置页面管理，持久化到 `config.json`（开发模式在项目根，frozen 模式在 `%APPDATA%/PBC/config.json`）。支持运行时切换，无需重启：
 
 ```bash
 # 切换 LLM provider
@@ -141,10 +140,10 @@ curl -X POST http://127.0.0.1:58765/api/settings \
 ### Secret 轮换流程
 
 1. 在 LLM 服务商平台生成新 API key
-2. 更新 `.env` 文件中对应的 `<PROVIDER>_API_KEY`
-3. 通过设置页面或 API 热加载配置
-4. 调用 `/api/health/downstream` 验证新 key 连通性
-5. 检查 git 历史确保旧 key 未提交：`git log -p -- .env`（应无记录）
+2. 在设置页面更新对应的 API key 字段并保存（写入 `config.json`）
+3. 调用 `/api/health/downstream` 验证新 key 连通性
+4. 检查 git 历史确保旧 key 未提交：`git log -p -- config.json`（应无记录）
+5. 旧版 `.env` 已弃用，若仍有残留可直接删除
 
 ## 故障排查
 
@@ -185,9 +184,9 @@ sqlite3 data/pharma.db "PRAGMA wal_checkpoint(TRUNCATE)"
 
 ## 安全注意事项
 
-1. **`.env` 文件包含 API key**，切勿提交到 git（已在 `.gitignore` 中）
+1. **`config.json` 文件包含 API key**，切勿提交到 git（已在 `.gitignore` 中）
 2. **CSP 头**：`default-src 'self'`，禁止加载外部资源
-3. **CORS**：仅允许 `127.0.0.1`，禁止远程访问
+3. **CORS**：仅允许 `127.0.0.1:8000/58765`，禁止远程访问
 4. **PDF 上传**：magic bytes 校验 + 200MB 大小限制 + 路径遍历防护
 5. **本地访问限制**：`/api/shutdown` 等敏感端点仅允许本地访问
 6. **审计日志**：所有状态转换和人工操作均记录，不可篡改

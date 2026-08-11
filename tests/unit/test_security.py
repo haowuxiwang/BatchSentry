@@ -59,6 +59,27 @@ class TestIsBlockedHost:
         """IPv6 in bracket form [::1] should be normalized and blocked."""
         assert _is_blocked_host("[::1]") is True
 
+    def test_non_dotted_ip_literals_blocked(self):
+        """对抗审查(cr-2): 非点分 IP 字面量（十进制/十六进制/八进制）必须
+        被识别为内网地址 — 底层 getaddrinfo 会把它们解析到 loopback/内网。"""
+        assert _is_blocked_host("2130706433") is True   # 127.0.0.1
+        assert _is_blocked_host("0x7f000001") is True   # 127.0.0.1 hex
+        assert _is_blocked_host("017700000001") is True  # 127.0.0.1 octal
+        assert _is_blocked_host("167772161") is True    # 10.0.0.1
+        assert _is_blocked_host("0x0a000001") is True   # 10.0.0.1 hex
+        assert _is_blocked_host("2851995649") is True   # 169.254.169.254
+        assert _is_blocked_host("0") is True            # 0.0.0.0
+
+    def test_non_dotted_public_ip_allowed(self):
+        """非点分但指向公网的字面量应放行（如 8.8.8.8 = 134744072）。"""
+        assert _is_blocked_host("134744072") is False   # 8.8.8.8
+        assert _is_blocked_host("0x08080808") is False
+
+    def test_numeric_hostname_not_parsed_as_ip(self):
+        """纯数字字符串超出 IPv4 范围（> 2^32-1）→ 当 hostname 处理不阻断。"""
+        assert _is_blocked_host("99999999999") is False
+        assert _is_blocked_host("12345678901234567890") is False
+
 
 class TestValidateExternalUrl:
     """validate_external_url — scheme + host validation."""
@@ -119,7 +140,11 @@ class TestValidateExternalUrl:
 
 
 class TestIsLocalRequest:
-    """is_local_request — Host + Origin check for Settings CSRF guard."""
+    """is_local_request — Host + Origin check for Settings CSRF guard.
+
+    Phase 8: Origin header is now REQUIRED (blocks curl/non-browser CSRF).
+    Previously empty Origin would pass; now it's rejected.
+    """
 
     def _make_request(self, host="", origin=""):
         req = MagicMock()
@@ -133,24 +158,35 @@ class TestIsLocalRequest:
         req.headers.get = lambda key, default="": headers.get(key.lower(), default)
         return req
 
-    def test_localhost_host_accepted(self):
-        req = self._make_request(host="localhost:8000")
+    def test_localhost_host_with_origin_accepted(self):
+        """Local host + local Origin → accepted."""
+        req = self._make_request(
+            host="localhost:8000", origin="http://localhost:8000"
+        )
         assert is_local_request(req) is True
 
-    def test_127_host_accepted(self):
-        req = self._make_request(host="127.0.0.1:8000")
+    def test_127_host_with_origin_accepted(self):
+        """127.0.0.1 host + 127.0.0.1 Origin → accepted."""
+        req = self._make_request(
+            host="127.0.0.1:8000", origin="http://127.0.0.1:8000"
+        )
         assert is_local_request(req) is True
 
-    def test_ipv6_localhost_accepted(self):
-        req = self._make_request(host="[::1]:8000")
+    def test_ipv6_localhost_with_origin_accepted(self):
+        """IPv6 loopback host + Origin → accepted."""
+        req = self._make_request(
+            host="[::1]:8000", origin="http://127.0.0.1:8000"
+        )
         assert is_local_request(req) is True
 
     def test_non_local_host_rejected(self):
-        req = self._make_request(host="evil.com:8000")
+        req = self._make_request(
+            host="evil.com:8000", origin="http://evil.com:8000"
+        )
         assert is_local_request(req) is False
 
     def test_empty_host_rejected(self):
-        req = self._make_request(host="")
+        req = self._make_request(host="", origin="http://127.0.0.1:8000")
         assert is_local_request(req) is False
 
     def test_allowed_origin_accepted(self):
@@ -173,7 +209,16 @@ class TestIsLocalRequest:
         )
         assert is_local_request(req) is True
 
-    def test_no_origin_header_passes_when_host_is_local(self):
-        """Non-browser clients (curl) don't send Origin — allowed if Host is local."""
+    def test_no_origin_header_allowed_for_localhost(self):
+        """无 Origin header（Electron 内部请求/curl）+ Host=localhost 应允许。
+
+        新逻辑：Host=localhost 已验证本机，Origin 为空时不阻断。
+        本地单用户应用，无需 Origin 白名单防 CSRF。
+        """
         req = self._make_request(host="localhost:8000", origin="")
+        assert is_local_request(req) is True
+
+    def test_no_origin_header_allowed_for_127(self):
+        """无 Origin header + Host=127.0.0.1 应允许。"""
+        req = self._make_request(host="127.0.0.1:8000", origin="")
         assert is_local_request(req) is True

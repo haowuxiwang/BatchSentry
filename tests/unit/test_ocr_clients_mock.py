@@ -11,6 +11,7 @@
 import io
 import json
 import zipfile
+from pathlib import Path
 from unittest.mock import patch, MagicMock, mock_open
 
 import pytest
@@ -355,8 +356,72 @@ class TestPaddleOCRRunOCR:
         assert pages[1]["markdown"]["text"] == "第2页"
 
         mock_submit.assert_called_once_with(fake_pdf)
-        mock_poll.assert_called_once_with("job-e2e")
+        mock_poll.assert_called_once_with("job-e2e", progress_callback=None)
         mock_download.assert_called_once_with({"data": {"state": "done"}})
+
+    @patch('core.ocr_client.download_result')
+    @patch('core.ocr_client.poll_job')
+    @patch('core.ocr_client.submit_pdf')
+    def test_run_ocr_propagates_progress_callback(self, mock_submit, mock_poll, mock_download, fake_pdf, paddle_cfg):
+        """progress_callback 透传给 poll_job（Stage 1 流式反馈）。"""
+        mock_submit.return_value = "job-e2e"
+        mock_poll.return_value = {"data": {"state": "done"}}
+        mock_download.return_value = [{"markdown": {"text": "x"}}]
+
+        calls = []
+        ocr_client.run_ocr(fake_pdf, progress_callback=lambda d, t: calls.append((d, t)))
+
+        assert mock_poll.call_args[0] == ("job-e2e",)
+        assert callable(mock_poll.call_args[1]["progress_callback"])
+
+    @patch('core.ocr_client.download_result')
+    @patch('core.ocr_client.poll_job')
+    @patch('core.ocr_client.submit_pdf')
+    def test_run_ocr_logs_job_id_prefix(self, mock_submit, mock_poll, mock_download,
+                                        fake_pdf, paddle_cfg, caplog):
+        """robustness-F1: 传 job_id 时模块日志自动带 [job_id] 前缀。"""
+        mock_submit.return_value = "job-e2e"
+        mock_poll.return_value = {"data": {"state": "done"}}
+        mock_download.return_value = []
+
+        import logging
+        with caplog.at_level(logging.INFO, logger="core.ocr_client"):
+            ocr_client.run_ocr(fake_pdf, job_id="job-123")
+
+        # 空结果触发 defensive warning，filter 应已加 [job-123] 前缀
+        assert any("[job-123]" in r.message for r in caplog.records)
+
+    def test_run_ocr_without_job_id_has_no_prefix(self, fake_pdf, paddle_cfg, caplog):
+        """robustness-F1: 不传 job_id 时日志无前缀（默认行为不变）。"""
+        import logging
+        with caplog.at_level(logging.INFO, logger="core.ocr_client"):
+            with patch('core.ocr_client.requests.post',
+                       side_effect=RuntimeError("conn refused")):
+                with pytest.raises(RuntimeError):
+                    ocr_client.submit_pdf(fake_pdf)
+
+        assert all(not r.message.startswith("[") for r in caplog.records)
+
+    def test_poll_job_invokes_progress_callback(self, paddle_cfg):
+        """poll_job 轮询到 extractProgress 时回调 (done, total)。"""
+        from unittest.mock import patch as _patch
+        progress_responses = iter([
+            # 第一次轮询：running + 进度 12/51
+            type("R", (), {"status_code": 200, "json": lambda self: {
+                "data": {"state": "running",
+                         "extractProgress": {"extractedPages": 12, "totalPages": 51}}
+            }})(),
+            # 第二次轮询：done
+            type("R", (), {"status_code": 200, "json": lambda self: {
+                "data": {"state": "done",
+                         "extractProgress": {"extractedPages": 51, "totalPages": 51}}
+            }})(),
+        ])
+        with _patch('core.ocr_client.requests.get', side_effect=lambda *a, **k: next(progress_responses)):
+            progress_calls = []
+            ocr_client.poll_job("job-prog", progress_callback=lambda d, t: progress_calls.append((d, t)))
+
+        assert progress_calls == [(12, 51), (51, 51)]
 
     @patch('core.ocr_client.download_result')
     @patch('core.ocr_client.poll_job')
@@ -593,7 +658,7 @@ class TestMinerUDownload:
 
     @patch('core.mineru_client.requests.get')
     def test_download_result_with_content_list(self, mock_get, mineru_cfg):
-        """解析 content_list.json 按 page_idx 分组。"""
+        """解析 content_list.json 按 page_idx 分组，保留整页段落结构。"""
         content_list = [
             {"page_idx": 0, "type": "text", "text": "第1页文本"},
             {"page_idx": 0, "type": "text", "text": "继续"},
@@ -612,12 +677,104 @@ class TestMinerUDownload:
         pages = mineru_client.download_result({"full_zip_url": "https://zip.test/1"})
 
         assert len(pages) == 2
-        assert pages[0]["markdown"]["text"] == "第1页文本\n\n继续"
+        # 第1页：标题 + 段落合并（"第1页文本" 和 "继续" 无句末标点，合并为一行）
+        assert pages[0]["markdown"]["text"] == "## 第 1 页\n第1页文本 继续"
         assert pages[0]["page_count"] == 1
         assert pages[0]["_source"] == "mineru"
-        assert pages[1]["markdown"]["text"] == "第2页文本\n\n| 列1 | 列2 |"
+        # 第2页：标题 + 文本 + 表格（前后空行分隔）
+        assert pages[1]["markdown"]["text"] == "## 第 2 页\n第2页文本\n\n| 列1 | 列2 |"
         assert pages[1]["page_count"] == 2
         assert pages[1]["_source"] == "mineru"
+
+    @patch('core.mineru_client.requests.get')
+    def test_download_result_content_list_v2(self, mock_get, mineru_cfg):
+        """v2 格式（content_list_v2.json 按页二维数组）正确拆分 + 表格保留 HTML + 噪音过滤。"""
+        content_list_v2 = [
+            # 第 1 页：页眉 + 页脚/页码噪音 + 正文段落 + 表格（HTML）
+            [
+                {"type": "page_header", "content": {"header_content": [{"type": "text", "content": "批记录表头"}]}},
+                {"type": "paragraph", "content": {"paragraph_content": [{"type": "text", "content": "工序开始"}]}},
+                {"type": "table", "content": {"html": "<table><tr><td>浓度</td></tr></table>", "table_content": []}},
+                {"type": "page_footer", "content": {"footer_content": [{"type": "text", "content": "15.60%"}]}},
+                {"type": "page_number", "content": {"page_number_content": [{"type": "text", "content": "1/24"}]}},
+            ],
+            # 第 2 页：标题 + 图片占位 + 公式占位
+            [
+                {"type": "title", "content": {"title_content": [{"type": "text", "content": "工序二"}]}},
+                {"type": "image", "content": {"image_content": [{"type": "text", "content": "图A"}]}},
+                {"type": "equation_interline", "content": {"equation_content": [{"type": "text", "content": "E=mc2"}]}},
+            ],
+        ]
+        zip_bytes = _make_zip_bytes({
+            "full.md": "# 全文",
+            "abc_content_list_v2.json": json.dumps(content_list_v2),
+        })
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.content = zip_bytes
+        mock_get.return_value = mock_resp
+
+        pages = mineru_client.download_result({"full_zip_url": "https://zip.test/v2"})
+
+        assert len(pages) == 2
+        # 第1页：页眉(###) + 段落 + HTML 表格；页脚"15.60%"和页码"1/24"被过滤
+        t1 = pages[0]["markdown"]["text"]
+        assert "### 批记录表头" in t1
+        assert "工序开始" in t1
+        assert "<table><tr><td>浓度</td></tr></table>" in t1
+        assert "15.60%" not in t1
+        assert "1/24" not in t1
+        # 第2页：标题(##) + 图片/公式占位
+        t2 = pages[1]["markdown"]["text"]
+        assert "## 工序二" in t2
+        assert "[image: 图A]" in t2
+        assert "[equation_interline: E=mc2]" in t2
+
+    def test_content_text_recursive_nested(self):
+        """_content_text 递归提取 v2 嵌套结构（列表套列表 + str 叶子节点）。"""
+        block = {
+            "type": "paragraph",
+            "content": {
+                "paragraph_content": [
+                    {"type": "text", "content": "第一段"},
+                    {"type": "superscript", "content": [
+                        {"type": "text", "content": "上标"}
+                    ]},
+                ]
+            },
+        }
+        assert mineru_client._content_text(block) == "第一段 上标"
+
+    def test_content_text_string_content(self):
+        """content 为 str 时直接返回（叶子节点）。"""
+        assert mineru_client._content_text({"content": "直接文本"}) == "直接文本"
+
+    def test_content_text_empty(self):
+        """无 content 或 content 非 dict/str 时返回空。"""
+        assert mineru_client._content_text({"type": "text"}) == ""
+        assert mineru_client._content_text({"content": 42}) == ""
+
+    def test_block_noise_filters(self):
+        """page_footer / page_number / footer 噪音块返回空（LLM 无需看到页码页脚）。"""
+        for btype in ("footer", "page_footer", "page_number"):
+            assert mineru_client._block_to_markdown(
+                {"type": btype, "text": "15.60%"}
+            ) == "", f"{btype} 应被过滤"
+
+    def test_block_header_page_header_title(self):
+        """页眉和标题块输出为 markdown 标题（含起草/审核日期信息）。"""
+        assert mineru_client._block_to_markdown(
+            {"type": "page_header", "text": "起草日期 2024-01-01"}
+        ) == "### 起草日期 2024-01-01"
+        assert mineru_client._block_to_markdown(
+            {"type": "title", "text": "工序二"}
+        ) == "## 工序二"
+
+    def test_block_aside_text(self):
+        """页侧注释块保留为普通文本。"""
+        assert mineru_client._block_to_markdown(
+            {"type": "page_aside_text", "text": "旁注"}
+        ) == "旁注"
 
     @patch('core.mineru_client.requests.get')
     def test_download_result_full_md_fallback(self, mock_get, mineru_cfg):
@@ -691,6 +848,70 @@ class TestMinerUDownload:
         with pytest.raises(RuntimeError, match="content_list.json 解析失败"):
             mineru_client.download_result({"full_zip_url": "https://zip.test/1"})
 
+    @patch('core.mineru_client.requests.get')
+    def test_download_result_v1_discarded_counted(self, mock_get, mineru_cfg):
+        """v1 格式：discarded 块不进入正文，但页 dict 暴露 _discarded_count。"""
+        content_list = [
+            {"page_idx": 0, "type": "text", "text": "正常文本"},
+            {"page_idx": 0, "type": "discarded", "text": "被丢弃的残缺片段"},
+            {"page_idx": 0, "type": "discarded", "text": "另一块被丢弃内容"},
+        ]
+        zip_bytes = _make_zip_bytes({
+            "full.md": "# 全文",
+            "abc_content_list.json": json.dumps(content_list),
+        })
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.content = zip_bytes
+        mock_get.return_value = mock_resp
+
+        pages = mineru_client.download_result({"full_zip_url": "https://zip.test/disc1"})
+
+        assert len(pages) == 1
+        text = pages[0]["markdown"]["text"]
+        assert "正常文本" in text
+        assert "被丢弃" not in text
+        assert pages[0]["_discarded_count"] == 2
+
+    @patch('core.mineru_client.requests.get')
+    def test_download_result_v2_discarded_counted(self, mock_get, mineru_cfg):
+        """v2 格式：discard 标记块计数，无丢弃时不含 _discarded_count 字段。"""
+        content_list_v2 = [
+            [
+                {"type": "paragraph", "content": {"paragraph_content": [{"type": "text", "content": "保留内容"}]}},
+                {"type": "paragraph", "content": {"paragraph_content": [{"type": "text", "content": "低置信度"}]}, "discard": True},
+            ],
+        ]
+        zip_bytes = _make_zip_bytes({
+            "full.md": "# 全文",
+            "abc_content_list_v2.json": json.dumps(content_list_v2),
+        })
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.content = zip_bytes
+        mock_get.return_value = mock_resp
+
+        pages = mineru_client.download_result({"full_zip_url": "https://zip.test/disc2"})
+
+        assert len(pages) == 1
+        text = pages[0]["markdown"]["text"]
+        assert "保留内容" in text
+        assert "低置信度" not in text
+        assert pages[0]["_discarded_count"] == 1
+
+        # 无丢弃块时不应出现 _discarded_count（避免下游误判不完整）
+        zip_bytes2 = _make_zip_bytes({
+            "full.md": "# 全文",
+            "abc_content_list_v2.json": json.dumps([[{"type": "paragraph", "content": {"paragraph_content": [{"type": "text", "content": "干净页"}]}}]]),
+        })
+        mock_resp2 = MagicMock()
+        mock_resp2.status_code = 200
+        mock_resp2.content = zip_bytes2
+        mock_get.return_value = mock_resp2
+
+        pages2 = mineru_client.download_result({"full_zip_url": "https://zip.test/disc3"})
+        assert "_discarded_count" not in pages2[0]
+
 
 class TestMinerUBlockToMarkdown:
     """MinerU _block_to_markdown — 块类型转 Markdown。"""
@@ -713,10 +934,22 @@ class TestMinerUBlockToMarkdown:
         assert result == "| a | b |"
 
     def test_table_block_fallback_to_text(self):
-        """table 块无 markdown 时回退到 text 字段。"""
+        """table 块无 HTML/markdown 时返回空（宁缺毋滥，避免纯文本表格丢失结构）。"""
         assert mineru_client._block_to_markdown(
             {"type": "table", "text": "fallback"}
-        ) == "fallback"
+        ) == ""
+
+    def test_table_block_v1_table_body_html(self):
+        """v1 table 块从 table_body 取 HTML（page_analyzer 的 prompt 按 HTML 表格设计）。"""
+        assert mineru_client._block_to_markdown(
+            {"type": "table", "table_body": "<table><tr><td>浓度</td></tr></table>"}
+        ) == "<table><tr><td>浓度</td></tr></table>"
+
+    def test_table_block_v2_content_html(self):
+        """v2 table 块从 content.html 取 HTML。"""
+        assert mineru_client._block_to_markdown(
+            {"type": "table", "content": {"html": "<table><tr><td>a</td></tr></table>"}}
+        ) == "<table><tr><td>a</td></tr></table>"
 
     def test_table_block_both_empty(self):
         """table 块无 markdown 和 text 时返回空字符串。"""
@@ -729,8 +962,8 @@ class TestMinerUBlockToMarkdown:
         ) == "[image: 图1]"
 
     def test_image_block_no_caption(self):
-        """image 块无 caption 时返回空字符串。"""
-        assert mineru_client._block_to_markdown({"type": "image"}) == ""
+        """image 块无 caption 时返回 [image] 占位符（让 LLM 知道此处有图）。"""
+        assert mineru_client._block_to_markdown({"type": "image"}) == "[image]"
 
     def test_equation_block_with_caption(self):
         """equation 块有 caption 时返回占位符。"""
@@ -783,7 +1016,7 @@ class TestMinerURunOCR:
         assert pages[1]["markdown"]["text"] == "第2页"
 
         mock_submit.assert_called_once_with(fake_pdf)
-        mock_poll.assert_called_once_with("batch-e2e")
+        mock_poll.assert_called_once_with("batch-e2e", progress_callback=None)
         mock_download.assert_called_once_with({
             "task_id": "t1",
             "state": "done",
@@ -811,3 +1044,138 @@ class TestMinerURunOCR:
         with pytest.raises(RuntimeError, match="解析失败"):
             mineru_client.run_ocr(fake_pdf)
         mock_download.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# MinerU 分片 OCR（core/mineru_client.py: split_pdf / cleanup_slices / run_ocr_sliced）
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def real_pdf(tmp_path):
+    """用 PyMuPDF 生成真实 3 页 PDF（split_pdf 需要 fitz 可解析）。"""
+    import fitz
+
+    doc = fitz.open()
+    for i in range(3):
+        page = doc.new_page()
+        page.insert_text((72, 72), f"page {i + 1}")
+    out = tmp_path / "real.pdf"
+    doc.save(out)
+    doc.close()
+    return str(out)
+
+
+class TestMinerUSplitPdf:
+    """split_pdf 按 slice_pages 拆片，返回 (total, [(start_1based, path), ...])。"""
+
+    def test_split_2_slices(self, real_pdf, tmp_path):
+        total, slices = mineru_client.split_pdf(real_pdf, 2)
+        assert total == 3
+        assert [s for s, _ in slices] == [1, 3]
+        for _, p in slices:
+            assert Path(p).exists()
+            assert Path(p).parent.name.startswith("pbc_slice_")  # 系统临时目录下
+        mineru_client.cleanup_slices(slices)
+        for _, p in slices:
+            assert not Path(p).exists()
+
+    def test_split_single_slice_when_slice_pages_ge_total(self, real_pdf):
+        total, slices = mineru_client.split_pdf(real_pdf, 99)
+        assert total == 3
+        assert len(slices) == 1
+        assert slices[0][0] == 1
+        mineru_client.cleanup_slices(slices)
+
+    def test_cleanup_slices_ignores_missing(self, real_pdf):
+        _, slices = mineru_client.split_pdf(real_pdf, 2)
+        mineru_client.cleanup_slices([(1, str(real_pdf))])
+        assert Path(slices[0][1]).exists()  # 只清理传入的路径
+        mineru_client.cleanup_slices(slices)
+
+
+class TestMinerURunOcrSliced:
+    """run_ocr_sliced 并行提交/轮询/下载，一片完成即回调 on_batch。"""
+
+    def _mock_chain(self, mock_submit, mock_poll, mock_download):
+        mock_submit.side_effect = [("batch-1", "a.pdf"), ("batch-2", "b.pdf")]
+
+        def fake_poll(batch_id, progress_callback=None, **kwargs):
+            if progress_callback:
+                progress_callback(2, 2)
+            return {"full_zip_url": f"https://zip.test/{batch_id}"}
+
+        mock_poll.side_effect = fake_poll
+        mock_download.side_effect = [
+            [
+                {"markdown": {"text": "s1p1"}, "page_count": 1},
+                {"markdown": {"text": "s1p2"}, "page_count": 2},
+            ],
+            [{"markdown": {"text": "s2p1"}, "page_count": 1}],
+        ]
+
+    @patch('core.mineru_client.cleanup_slices')
+    @patch('core.mineru_client.download_result')
+    @patch('core.mineru_client.poll_job')
+    @patch('core.mineru_client.submit_pdf')
+    def test_on_batch_remaps_global_page_numbers(
+        self, mock_submit, mock_poll, mock_download, mock_cleanup, real_pdf, mineru_cfg
+    ):
+        """page_count 重映射为全局页号；on_batch 每片回调一次；进度合并为全局。"""
+        self._mock_chain(mock_submit, mock_poll, mock_download)
+        batches, progress = [], []
+
+        results = mineru_client.run_ocr_sliced(
+            real_pdf,
+            2,
+            on_batch=lambda start, pages: batches.append((start, pages)),
+            progress_callback=lambda done, total: progress.append((done, total)),
+        )
+
+        assert results[0][0] == 1 and results[1][0] == 3
+        assert [b[0] for b in batches] == [1, 3]
+        pages1 = batches[0][1]
+        assert pages1[0]["page_count"] == 1 and pages1[1]["page_count"] == 2
+        pages2 = batches[1][1]
+        assert pages2[0]["page_count"] == 3
+        # 进度回调合并为全局：total 恒为文档总页数，done 单调递增
+        assert all(t == 3 for _, t in progress)
+        dones = [d for d, _ in progress]
+        assert dones == sorted(dones)
+        mock_cleanup.assert_called_once()
+
+    @patch('core.mineru_client.cleanup_slices')
+    @patch('core.mineru_client.download_result')
+    @patch('core.mineru_client.poll_job')
+    @patch('core.mineru_client.submit_pdf')
+    def test_slice_error_propagates_and_cleans_up(
+        self, mock_submit, mock_poll, mock_download, mock_cleanup, real_pdf, mineru_cfg
+    ):
+        """单片失败向上抛异常，且 finally 清理切片。"""
+        self._mock_chain(mock_submit, mock_poll, mock_download)
+        mock_download.side_effect = [
+            RuntimeError("download boom"),
+            [{"markdown": {"text": "s2p1"}, "page_count": 1}],
+        ]
+
+        with pytest.raises(RuntimeError, match="download boom"):
+            mineru_client.run_ocr_sliced(real_pdf, 2)
+
+        mock_cleanup.assert_called_once()
+        mock_poll.assert_called()
+        mock_submit.assert_called()
+
+    @patch('core.mineru_client.cleanup_slices')
+    @patch('core.mineru_client.download_result')
+    @patch('core.mineru_client.poll_job')
+    @patch('core.mineru_client.submit_pdf')
+    def test_sliced_calls_submit_poll_download_per_slice(
+        self, mock_submit, mock_poll, mock_download, mock_cleanup, real_pdf, mineru_cfg
+    ):
+        """每片走 submit → poll → download 完整链路。"""
+        self._mock_chain(mock_submit, mock_poll, mock_download)
+
+        mineru_client.run_ocr_sliced(real_pdf, 2)
+
+        assert mock_submit.call_count == 2
+        assert mock_poll.call_count == 2
+        assert mock_download.call_count == 2

@@ -9,25 +9,79 @@
  *
  * Lifecycle:
  *   1. app.whenReady() → show splash window (instant feedback)
- *   2. spawn pbc-server.exe + poll /health until ready (up to 30s)
- *   3. splash → main window, load the app URL
- *   4. on quit: POST /api/shutdown → wait 2s → SIGTERM → taskkill /T /F fallback
+ *   2. pre-flight port check (58765 must be free or owned by us)
+ *   3. spawn pbc-server.exe + poll /health until ready (up to 30s)
+ *   4. splash → main window, load the app URL
+ *   5. on quit: POST /api/shutdown → wait 2s → SIGTERM → taskkill /T /F fallback
  */
 
-const { app, BrowserWindow, shell } = require("electron");
+const { app, BrowserWindow, shell, dialog, Menu } = require("electron");
 const { spawn, execSync } = require("child_process");
 const path = require("path");
 const http = require("http");
+const net = require("net");
+
+// Phase 8: remove the default Electron menu bar (File/Edit/View/Window/Help).
+// BatchSentry is a single-window app — the menu bar adds visual clutter with
+// no useful functionality. Must be set before app.whenReady() for it to take
+// effect on the first window.
+Menu.setApplicationMenu(null);
 
 const SERVER_PORT = 58765;
 const SERVER_HOST = "127.0.0.1";
 const MAX_READY_CHECKS = 60; // 60 × 500ms = 30s timeout
 const SHUTDOWN_GRACE_MS = 2500; // wait for /api/shutdown to complete
 
+// robustness-G1: 看门狗 — 后端运行中自崩/僵死时自动重启。
+// 探测间隔 15s，连续失败 3 次（约 45s 无响应）判定崩溃。
+// 端口误占（其他程序抢端口）时 waitForServer 会失败并保持原样退出，
+// 不做无限重启（避免与其他程序端口打架）。
+const WATCHDOG_INTERVAL_MS = 15000;
+const WATCHDOG_MAX_FAILURES = 3;
+const WATCHDOG_RETRY_DELAY_MS = 2000;
+
 let pythonProcess = null;
 let mainWindow = null;
 let splashWindow = null;
 let isShuttingDown = false;
+let watchdogTimer = null;
+let watchdogFailures = 0;
+let watchdogRestarting = false;
+
+// robustness-F2: 单实例锁 — 双击工具最常见的误用是重复启动。第二次启动
+// 时聚焦已有实例窗口而非弹"端口冲突"框；强杀 Electron 残留的孤儿
+// pbc-server.exe 仍由 isPortFree 预检兜底提示（main.js:332）。
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+if (!gotSingleInstanceLock) {
+  // 已有实例在运行：退出本进程，主实例会收到 second-instance 事件
+  app.quit();
+} else {
+  app.on("second-instance", () => {
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.focus();
+    }
+  });
+}
+
+/**
+ * Check if a TCP port is free (nothing listening on it).
+ * Used to detect port conflicts before spawning the server.
+ *
+ * Phase 8: prevents confusing "Backend startup timed out" errors when
+ * another BatchSentry instance (or another app) is already on 58765.
+ */
+function isPortFree(port) {
+  return new Promise((resolve) => {
+    const tester = net
+      .createServer()
+      .once("error", () => resolve(false))
+      .once("listening", () => {
+        tester.once("close", () => resolve(true)).close();
+      })
+      .listen(port, SERVER_HOST);
+  });
+}
 
 /**
  * Resolve the Python server executable path.
@@ -132,10 +186,98 @@ function waitForServer() {
 }
 
 /**
+ * robustness-G1: 后端看门狗 — 主窗口打开后定期探测 /health。
+ * 连续 WATCHDOG_MAX_FAILURES 次失败 → 认为后端崩溃/僵死：
+ *   1. 强杀残留进程树（若句柄仍存活）
+ *   2. 重新 spawn + waitForServer（复用启动期逻辑）
+ *   3. 成功后重置计数，并 reload 主窗口（数据在 SQLite，重载无损失）
+ * 关闭流程（isShuttingDown）期间停止探测，避免与优雅关闭竞争。
+ */
+function startWatchdog() {
+  if (watchdogTimer) return;
+  watchdogTimer = setInterval(async () => {
+    if (isShuttingDown || watchdogRestarting) return;
+    const healthy = await probeHealth(SERVER_PORT);
+    if (healthy) {
+      watchdogFailures = 0;
+      return;
+    }
+    watchdogFailures += 1;
+    console.warn(
+      `[BatchSentry] Watchdog: health probe failed (${watchdogFailures}/${WATCHDOG_MAX_FAILURES})`
+    );
+    if (watchdogFailures < WATCHDOG_MAX_FAILURES) return;
+
+    // 判定崩溃 → 重启
+    watchdogRestarting = true;
+    console.error("[BatchSentry] Watchdog: backend unhealthy, restarting...");
+    try {
+      if (pythonProcess && !pythonProcess.killed) {
+        try {
+          if (process.platform === "win32") {
+            execSync(`taskkill /pid ${pythonProcess.pid} /T /F`, { stdio: "ignore" });
+          } else {
+            pythonProcess.kill("SIGKILL");
+          }
+        } catch {
+          // 进程可能已自行退出
+        }
+      }
+      pythonProcess = null;
+      await new Promise((r) => setTimeout(r, WATCHDOG_RETRY_DELAY_MS));
+      startPythonServer();
+      try {
+        await waitForServer();
+        console.log("[BatchSentry] Watchdog: backend restarted successfully");
+        watchdogFailures = 0;
+        if (mainWindow) {
+          mainWindow.webContents.reload();
+        }
+      } catch (err) {
+        // 端口仍被占/重启失败 — 停止看门狗，让用户通过窗口错误提示得知
+        console.error("[BatchSentry] Watchdog: restart failed:", err.message);
+        clearInterval(watchdogTimer);
+        watchdogTimer = null;
+        dialog.showErrorBox(
+          "BatchSentry — 后端恢复失败",
+          `后端服务已停止且无法自动重启：\n\n${err.message}\n\n请关闭 BatchSentry 后重新打开。`,
+        );
+      }
+    } finally {
+      watchdogRestarting = false;
+    }
+  }, WATCHDOG_INTERVAL_MS);
+}
+
+/**
+ * Single-shot health probe — returns true if a BatchSentry backend is
+ * already listening and healthy on the port. Used for orphan recovery:
+ * when the port is occupied but /health answers, we reuse the existing
+ * server instead of failing with a conflict dialog.
+ */
+function probeHealth(port) {
+  return new Promise((resolve) => {
+    const req = http.get(
+      `http://${SERVER_HOST}:${port}/health`,
+      (res) => {
+        res.resume();
+        resolve(res.statusCode === 200);
+      },
+    );
+    req.on("error", () => resolve(false));
+    req.setTimeout(2000, () => {
+      req.destroy();
+      resolve(false);
+    });
+  });
+}
+
+/**
  * Create the splash window shown while the Python server boots.
  *
  * Uses a data: URL so it works in both dev and packaged mode without
  * needing a separate splash.html file. Minimal HTML, no external deps.
+ * Phase 8: progress callback updates the status text in real time.
  */
 function createSplashWindow() {
   splashWindow = new BrowserWindow({
@@ -154,7 +296,7 @@ function createSplashWindow() {
     },
   });
 
-  // Inline splash HTML — minimalist BatchSentry branding + spinner
+  // Inline splash HTML — minimalist BatchSentry branding + spinner + status
   splashWindow.loadURL(
     "data:text/html;charset=utf-8," +
       encodeURIComponent(`<!doctype html>
@@ -181,11 +323,6 @@ function createSplashWindow() {
     font-weight: 600;
     letter-spacing: -0.02em;
   }
-  p {
-    font-size: 13px;
-    color: #71717a;
-    font-weight: 400;
-  }
   .spinner {
     width: 28px;
     height: 28px;
@@ -195,12 +332,19 @@ function createSplashWindow() {
     animation: spin 0.8s linear infinite;
   }
   @keyframes spin { to { transform: rotate(360deg); } }
+  #status {
+    font-size: 13px;
+    color: #71717a;
+    font-weight: 400;
+    text-align: center;
+    min-height: 18px;
+  }
 </style>
 </head>
 <body>
   <h1>BatchSentry</h1>
   <div class="spinner"></div>
-  <p>正在启动后端服务…</p>
+  <p id="status">正在初始化…</p>
 </body>
 </html>`),
   );
@@ -208,6 +352,22 @@ function createSplashWindow() {
   splashWindow.on("closed", () => {
     splashWindow = null;
   });
+}
+
+/**
+ * Update splash status text (Phase 8).
+ * Safe to call before splashWindow exists or after it's destroyed.
+ */
+function setSplashStatus(text) {
+  if (!splashWindow || splashWindow.isDestroyed()) return;
+  try {
+    splashWindow.webContents.executeJavaScript(
+      `document.getElementById('status').textContent = ${JSON.stringify(text)};`,
+      true,
+    );
+  } catch {
+    // splash may be mid-load; ignore
+  }
 }
 
 /**
@@ -276,17 +436,57 @@ function createWindow() {
 app.whenReady().then(async () => {
   // 1. 立即显示 splash（用户点击图标后 <100ms 内有反馈）
   createSplashWindow();
+  setSplashStatus("正在检查端口…");
 
   try {
-    // 2. 启动后端 + 轮询健康检查
-    startPythonServer();
+    // Phase 8: pre-flight port conflict detection.
+    // If 58765 is already taken, either (a) an orphaned pbc-server.exe from a
+    // force-killed Electron is still alive, (b) another BatchSentry instance
+    // is running (normally blocked by the single-instance lock), or (c) an
+    // unrelated app grabbed the port.
+    // Robustness-E3: probe /health before giving up — if it responds, reuse
+    // the running server instead of failing (orphan recovery). Only when the
+    // port answers AND is not our backend do we show the error dialog.
+    const portOk = await isPortFree(SERVER_PORT);
+    let reused = false;
+    if (!portOk) {
+      reused = await probeHealth(SERVER_PORT);
+      if (reused) {
+        setSplashStatus("检测到正在运行的 BatchSentry 服务，直接连接…");
+        log.warn("SERVER", `Port ${SERVER_PORT} occupied by a healthy backend, reusing it (orphan recovery)`);
+      } else {
+        const choice = dialog.showMessageBoxSync({
+          type: "error",
+          title: "BatchSentry — 端口冲突",
+          message: `端口 ${SERVER_PORT} 已被占用`,
+          detail:
+            `另一个 BatchSentry 实例可能正在运行，或端口被其他应用占用。\n\n` +
+            `请先关闭其他 BatchSentry 进程（任务管理器查找 pbc-server.exe / BatchSentry），\n` +
+            `或修改 electron/main.js 中的 SERVER_PORT 后重新打包。\n\n` +
+            `点击“确定”退出 BatchSentry。`,
+          buttons: ["确定"],
+          noLink: true,
+        });
+        app.quit();
+        return;
+      }
+    }
+
+    // 2. 启动后端（reused 时跳过，直接复用已有实例）+ 轮询健康检查
+    setSplashStatus("正在启动后端服务…");
+    if (portOk) {
+      startPythonServer();
+    }
     console.log("[BatchSentry] Waiting for server to be ready...");
+    setSplashStatus("正在加载数据库与配置…");
     await waitForServer();
+    setSplashStatus("正在打开主窗口…");
     // 3. 创建主窗口（splash 会在主窗口加载完成后销毁）
     createWindow();
+    // robustness-G1: 主窗口就绪后启动后端看门狗
+    startWatchdog();
   } catch (err) {
     console.error("[BatchSentry] Startup failed:", err.message);
-    const { dialog } = require("electron");
     dialog.showErrorBox(
       "BatchSentry — 启动失败",
       `无法启动后端服务：\n\n${err.message}\n\n请检查日志或重新安装。`,
@@ -393,6 +593,10 @@ app.on("before-quit", async (e) => {
   // 阻止立即退出，等优雅关闭完成后再 quit
   if (!isShuttingDown) {
     e.preventDefault();
+    if (watchdogTimer) {
+      clearInterval(watchdogTimer);
+      watchdogTimer = null;
+    }
     await gracefulShutdown();
     app.quit();
   }

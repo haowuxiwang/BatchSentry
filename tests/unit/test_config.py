@@ -4,7 +4,7 @@
 - load_config 默认值
 - update_config 运行时更新（供应商切换 bug 的核心修复）
 - _mask 脱敏函数
-- _env_path 路径解析（dev/frozen 模式）
+- _settings_config_path 路径解析（dev/frozen 模式，JSON 配置文件）
 """
 import os
 import sys
@@ -36,8 +36,14 @@ class TestLoadConfig:
         assert "mineru" in cfg
         assert "app" in cfg
 
-    def test_load_config_default_llm_provider_is_deepseek(self):
-        """默认 LLM 供应商为 deepseek。"""
+    def test_load_config_default_llm_provider_is_deepseek(self, monkeypatch):
+        """默认 LLM 供应商为 deepseek（当无任何 provider 配置 Key 时）。"""
+        # 清除环境变量 + 所有 API key，确保无 provider 被自动激活
+        monkeypatch.delenv("LLM_PROVIDER", raising=False)
+        for prov in ("DEEPSEEK", "SILICONFLOW", "GLM", "KIMI", "QWEN", "MIMO", "ANTHROPIC"):
+            monkeypatch.delenv(f"{prov}_API_KEY", raising=False)
+        # 也清除 LLM_PROVIDERS 避免加载自定义 provider
+        monkeypatch.delenv("LLM_PROVIDERS", raising=False)
         cfg = load_config()
         assert cfg["app"].llm_provider == "deepseek"
 
@@ -164,22 +170,26 @@ class TestSettingsMask:
         assert _mask(None) == ""
 
 
-class TestEnvPath:
-    """_env_path 路径解析（dev/frozen 模式）。"""
+class TestSettingsConfigPath:
+    """_settings_config_path 路径解析（dev/frozen 模式）。
 
-    def test_env_path_dev_mode(self):
-        """开发模式应返回项目根 .env。"""
-        from api.settings import _env_path
+    Phase 9: 配置系统从 .env 迁移到 JSON 后，设置 API 写入 config.json。
+    这些测试验证路径解析在 dev/frozen 模式下都指向正确的 JSON 文件。
+    """
+
+    def test_settings_config_path_dev_mode(self):
+        """开发模式应返回项目根 config.json。"""
+        from api.settings import _settings_config_path
         with patch("sys.frozen", False, create=True):
-            path = _env_path()
-            assert path.name == ".env"
+            path = _settings_config_path()
+            assert path.name == "config.json"
 
-    def test_env_path_frozen_mode_windows(self, monkeypatch):
-        """Frozen 模式应返回 %APPDATA%/PBC/.env。"""
-        from api.settings import _env_path
+    def test_settings_config_path_frozen_mode_windows(self, monkeypatch):
+        """Frozen 模式应返回 %APPDATA%/PBC/config.json。"""
+        from api.settings import _settings_config_path
         monkeypatch.setattr(sys, "frozen", True, raising=False)
         monkeypatch.setattr(sys, "platform", "win32")
         monkeypatch.setenv("APPDATA", str(Path.cwd() / "tmp_test_appdata"))
-        path = _env_path()
+        path = _settings_config_path()
         assert "PBC" in str(path)
-        assert path.name == ".env"
+        assert path.name == "config.json"

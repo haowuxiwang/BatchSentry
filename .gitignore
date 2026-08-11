@@ -26,6 +26,8 @@ yarn-error.log*
 *.swo
 .mimocode/
 .workbuddy/
+.trae/
+.npm-cache/
 
 # OS
 .DS_Store
@@ -44,6 +46,7 @@ output/
 .env
 .env.local
 .env.production
+config.json
 
 # Logs
 *.log

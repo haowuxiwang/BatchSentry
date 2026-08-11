@@ -91,8 +91,9 @@ class TestValidTransitions:
     def test_analyzing_can_transition_to_partial_review(self):
         assert "partial_review" in VALID_TRANSITIONS["analyzing"]
 
-    def test_cancelling_can_only_transition_to_cancelled(self):
-        assert VALID_TRANSITIONS["cancelling"] == {"cancelled"}
+    def test_cancelling_can_transition_to_cancelled_or_error(self):
+        """cancelling 应能转向 cancelled（正常取消）或 error（LLM 卡死时自救）。"""
+        assert VALID_TRANSITIONS["cancelling"] == {"cancelled", "error"}
 
     def test_review_can_transition_to_archived(self):
         assert "archived" in VALID_TRANSITIONS["review"]

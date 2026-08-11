@@ -37,6 +37,9 @@ datas = [
 
 # Hidden imports — modules PyInstaller can't detect via static analysis
 # (dynamic imports, entry points, etc.)
+# Phase 8 adversarial review: added python-multipart, openai, anthropic,
+# jinja2, httpx, email.mime — these are frequently missed by PyInstaller's
+# static analysis but required at runtime (file upload, LLM SDK, templating).
 hiddenimports = [
     # uvicorn internals — not auto-detected
     "uvicorn",
@@ -61,6 +64,27 @@ hiddenimports = [
     "starlette.templating",
     "starlette.staticfiles",
     "pydantic",
+    "pydantic._internal._core_utils",
+    "pydantic._internal._validators",
+    "pydantic._internal._fields",
+    "pydantic._internal._config",
+    "pydantic._internal._generate_schema",
+    "pydantic._internal._generics",
+    "pydantic._internal._signature",
+    "pydantic._internal._typing_extra",
+    # Phase 8: python-multipart — required by FastAPI for multipart/form-data
+    # file uploads (POST /api/jobs). PyInstaller misses this because it's
+    # imported dynamically by Starlette on first file upload request.
+    "multipart",
+    "multipart.multipart",
+    "multipart.exceptions",
+    # Phase 8: Jinja2 templating engine (templates/*.html)
+    "jinja2",
+    "jinja2.ext",
+    "jinja2.parsers",
+    "jinja2.runtime",
+    "jinja2.utils",
+    "jinja2.compiler",
     # Our app modules
     "main",
     "server",
@@ -75,6 +99,8 @@ hiddenimports = [
     "core.cross_page_analyzer",
     "core.ocr_client",
     "core.mineru_client",  # pipeline.py 动态导入（_get_ocr_backend）
+    "core.security",
+    "core.health",
     "llm.client",
     # Phase 7: LLM adapter layer (dynamic import via get_adapter)
     "llm.adapters",
@@ -83,8 +109,30 @@ hiddenimports = [
     "llm.adapters.anthropic_adapter",
     "models.schemas",
     "logging_config",
+    # Phase 8: LLM SDKs — imported by adapters but PyInstaller misses them
+    # because adapter selection is dynamic (config-driven).
+    "openai",
+    "openai.types",
+    "openai.types.chat",
+    "openai.resources",
+    "openai.resources.chat",
+    "openai.resources.chat.completions",
+    "anthropic",
+    "anthropic.types",
+    "anthropic.resources",
+    "anthropic.resources.messages",
+    # Phase 8: httpx — used by openai/anthropic SDKs for HTTP
+    "httpx",
+    "httpx._transports",
+    "httpx._transports.default",
+    "httpcore",
+    "h11",
+    "h2",
+    "hpack",
+    "hyperframe",
     # SQLite (used by aiosqlite)
     "sqlite3",
+    "aiosqlite",
     # dotenv (config.py loads .env)
     "dotenv",
     # markupsafe (Jinja2 dep, sometimes missed)
@@ -94,6 +142,28 @@ hiddenimports = [
     # logging config file support
     "logging.config",
     "logging.handlers",
+    # Phase 8: email.mime — used by report.py for DOCX generation if needed
+    "email.mime",
+    "email.mime.text",
+    "email.mime.multipart",
+    "email.mime.base",
+    # Phase 8: requests + urllib3 (ocr_client.py, mineru_client.py)
+    "requests",
+    "urllib3",
+    "urllib3.util",
+    "urllib3.util.retry",
+    "urllib3.connection",
+    "urllib3.connectionpool",
+    # Phase 8: certifi — SSL certificates for HTTPS requests to LLM/OCR APIs
+    "certifi",
+    "ssl",
+    # Phase 8: anyio — used by Starlette/httpx for async I/O
+    "anyio",
+    "anyio._backends",
+    "anyio._backends._asyncio",
+    "sniffio",
+    # Phase 8: PyMuPDF (optional, used by report.py if installed)
+    "fitz",
 ]
 
 # Filters to exclude unnecessary files
@@ -116,7 +186,7 @@ excludes = [
 
 a = Analysis(
     ["server.py"],
-    pathex=["."],
+    pathex=[str(_PROJECT_ROOT)],
     binaries=[],
     datas=datas,
     hiddenimports=hiddenimports,

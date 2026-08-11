@@ -91,6 +91,23 @@ class TestReportMarkdown:
         r = await report_client.get("/api/jobs/nonexistent-id/report.md")
         assert r.status_code == 404
 
+    @pytest.mark.asyncio
+    async def test_report_md_escapes_html_in_findings(self, report_client, test_db):
+        """对抗审查(cr-7): LLM/OCR 生成的 description 可能含 HTML/脚本，
+        Markdown 文件中必须 HTML-escape，防止 Typora/Obsidian 渲染 XSS。"""
+        await test_db.execute(
+            "INSERT INTO findings (job_id, page, type, severity, source, description, status) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("report-job", 1, "xss", "warning", "llm_page",
+             "<script>alert(1)</script> & <b>bold</b>", "pending"),
+        )
+        await test_db.commit()
+        r = await report_client.get("/api/jobs/report-job/report.md")
+        assert r.status_code == 200
+        assert "<script>alert(1)</script>" not in r.text
+        assert "&lt;script&gt;alert(1)&lt;/script&gt;" in r.text
+        assert "&lt;b&gt;bold&lt;/b&gt;" in r.text
+
 
 class TestReportJson:
     """GET /api/jobs/{id}/report.json。"""

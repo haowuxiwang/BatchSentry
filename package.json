@@ -19,6 +19,7 @@
   },
   "devDependencies": {
     "autoprefixer": "^10.5.4",
+    "cross-env": "^7.0.3",
     "electron": "^33.0.0",
     "electron-builder": "^25.1.8",
     "postcss": "^8.5.24",
@@ -46,16 +47,12 @@
     "win": {
       "target": [
         {
-          "target": "portable",
+          "target": "dir",
           "arch": [
             "x64"
           ]
         }
-      ],
-      "artifactName": "BatchSentry-Portable-${version}.${ext}"
-    },
-    "portable": {
-      "artifactName": "BatchSentry-Portable-${version}.${ext}"
+      ]
     },
     "nsis": {
       "oneClick": false,

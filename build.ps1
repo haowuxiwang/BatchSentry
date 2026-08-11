@@ -2,9 +2,10 @@
 # Pharma Batch Checker — Windows build script
 # ============================================================
 # Produces:
-#   1. static/app.css       (Tailwind CLI build)
-#   2. dist/pbc-server/     (PyInstaller bundle, ~50MB)
-#   3. dist-electron/BatchSentry-Setup-1.0.0.exe (NSIS installer, ~250MB)
+#   1. static/app.css       (Tailwind CLI build, ~14KB)
+#   2. dist/pbc-server/     (PyInstaller bundle, ~100MB)
+#   3. dist-electron/win-unpacked/  (Electron 文件夹便携版, ~640MB)
+#      └─ BatchSentry.exe   (双击运行，无需安装)
 #
 # Prerequisites:
 #   - Python 3.11+ with pyinstaller installed (pip install pyinstaller)
@@ -16,7 +17,7 @@
 #   .\build.ps1 -Clean       # clean then full build
 #   .\build.ps1 -SkipCSS     # skip Tailwind (if app.css is current)
 #   .\build.ps1 -SkipPyInstaller  # skip Python bundle
-#   .\build.ps1 -SkipElectron     # skip NSIS installer
+#   .\build.ps1 -SkipElectron     # skip Electron packaging
 # ============================================================
 
 param(
@@ -88,19 +89,20 @@ if (-not $SkipCSS) {
     if (-not (Test-Path "node_modules")) {
         Write-Host "  Installing npm dependencies..."
         & npm install 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Fail "npm install failed (exit code $LASTEXITCODE)"
+        }
     }
 
+    # Resolve npx via PATH; fall back to npm-cli.js inside node_modules
+    # (works on any machine without hardcoded paths).
     $npx = Get-Command npx -ErrorAction SilentlyContinue
-    if (-not $npx) {
-        # Fallback: use full path to npx
-        $npxPath = "D:\nodejs\node-v22.16.0-win-x64\npx.cmd"
-        if (Test-Path $npxPath) {
-            & $npxPath tailwindcss build -i static/input.css -o static/app.css --minify
-        } else {
-            Write-Fail "npx not found. Install Node.js and npm."
-        }
-    } else {
+    if ($npx) {
         & npx tailwindcss build -i static/input.css -o static/app.css --minify
+    } elseif (Test-Path "node_modules\npm\bin\npx-cli.js") {
+        & node node_modules\npm\bin\npx-cli.js tailwindcss build -i static/input.css -o static/app.css --minify
+    } else {
+        Write-Fail "npx not found on PATH and node_modules\\npm\\bin\\npx-cli.js missing. Run 'npm install' first."
     }
 
     if (Test-Path "static/app.css") {
@@ -135,6 +137,46 @@ if (-not $SkipPyInstaller) {
     } else {
         Write-Fail "dist/pbc-server/pbc-server.exe not found"
     }
+
+    # ── 2.5 冒烟测试（robustness-F1）───────────────────────────
+    # 启动刚构建的 exe，轮询 /health，通过后再继续打包。exe 启动即崩
+    # 时在此暴露（此前会产出无法运行的 Electron 包）。
+    Write-Step "Smoke test: 启动 pbc-server.exe 验证 /health"
+    $proc = $null
+    $smokeOk = $false
+    try {
+        # 端口可能已被开发中运行的实例占用：若 /health 已响应则视为通过
+        try {
+            $resp = Invoke-WebRequest -Uri "http://127.0.0.1:58765/health" -TimeoutSec 2 -UseBasicParsing
+            if ($resp.StatusCode -eq 200) {
+                Write-OK "  /health already responds (existing instance) — skip spawn"
+                $smokeOk = $true
+            }
+        } catch { }
+
+        if (-not $smokeOk) {
+            $proc = Start-Process -FilePath "dist/pbc-server/pbc-server.exe" -PassThru -WindowStyle Hidden
+            for ($i = 0; $i -lt 30; $i++) {
+                Start-Sleep -Milliseconds 1000
+                if ($proc.HasExited) { break }
+                try {
+                    $resp = Invoke-WebRequest -Uri "http://127.0.0.1:58765/health" -TimeoutSec 2 -UseBasicParsing
+                    if ($resp.StatusCode -eq 200) { $smokeOk = $true; break }
+                } catch { }
+            }
+            if ($smokeOk) {
+                Write-OK "  /health OK (startup ~$($i + 1)s)"
+            }
+        }
+    } finally {
+        if ($proc -and -not $proc.HasExited) {
+            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+            & taskkill /PID $proc.Id /T /F 2>&1 | Out-Null
+        }
+    }
+    if (-not $smokeOk) {
+        Write-Fail "Smoke test failed: pbc-server.exe 未能在 30s 内响应 /health"
+    }
 } else {
     Write-Step "Step 2/3: Skipping PyInstaller build"
 }
@@ -147,6 +189,9 @@ if (-not $SkipElectron) {
     if (-not (Test-Path "node_modules/electron") -or -not (Test-Path "node_modules/electron-builder")) {
         Write-Host "  Installing electron + electron-builder..."
         & npm install 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Fail "npm install failed (exit code $LASTEXITCODE)"
+        }
     }
 
     & npx electron-builder --win --x64
@@ -154,15 +199,19 @@ if (-not $SkipElectron) {
         Write-Fail "electron-builder failed"
     }
 
-    # Find the portable build (BatchSentry-Portable-*.exe)
-    $installer = Get-ChildItem "dist-electron" -Filter "BatchSentry-Portable-*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($installer) {
-        $size = $installer.Length / 1MB
-        Write-OK ("Portable build: {0} ({1:N1} MB)" -f $installer.Name, $size)
+    # dir target produces win-unpacked/ folder (not a single exe)
+    $exePath = "dist-electron\win-unpacked\BatchSentry.exe"
+    if (Test-Path $exePath) {
+        $size = (Get-Item $exePath).Length / 1MB
+        Write-OK ("win-unpacked\BatchSentry.exe built ({0:N1} MB)" -f $size)
+        $totalSize = (Get-ChildItem "dist-electron\win-unpacked" -Recurse | Measure-Object -Property Length -Sum).Sum / 1MB
         Write-Host ""
-        Write-Host "  Output: $($installer.FullName)" -ForegroundColor Yellow
+        # 注意：必须用括号包住 -f 格式化表达式，否则 PowerShell 会把 -f 当成
+        # Write-Host 的参数（导致 "Cannot bind parameter 'ForegroundColor'" 错误）
+        Write-Host ("  Output: dist-electron\win-unpacked\ (total {0:N1} MB)" -f $totalSize) -ForegroundColor Yellow
+        Write-Host "  Run:    dist-electron\win-unpacked\BatchSentry.exe" -ForegroundColor Yellow
     } else {
-        Write-Fail "Portable build not found in dist-electron/"
+        Write-Fail "win-unpacked\BatchSentry.exe not found"
     }
 } else {
     Write-Step "Step 3/3: Skipping Electron build"
@@ -177,8 +226,6 @@ Write-Host ""
 Write-Host "Artifacts:"
 if (Test-Path "static/app.css") { Write-Host "  - static/app.css" }
 if (Test-Path "dist/pbc-server/pbc-server.exe") { Write-Host "  - dist/pbc-server/pbc-server.exe" }
-if (Test-Path "dist-electron") {
-    Get-ChildItem "dist-electron" -Filter "*.exe" | ForEach-Object {
-        Write-Host ("  - dist-electron/{0}" -f $_.Name)
-    }
+if (Test-Path "dist-electron\win-unpacked\BatchSentry.exe") {
+    Write-Host "  - dist-electron\win-unpacked\ (folder, run BatchSentry.exe)"
 }

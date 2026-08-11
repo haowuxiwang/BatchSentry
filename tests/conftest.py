@@ -61,6 +61,9 @@ async def test_db(tmp_path):
     每个测试函数获得独立的数据库文件，自动初始化 schema，测试后清理。
     通过 patch config["app"].database_path 指向临时文件，并重置 db.client._db
     全局连接，确保测试间完全隔离。
+
+    同时注入 mock LLM provider 配置（api_key="test-key"），让上传拦截
+    （create_job 中的 needs_setup 检查）在测试中不生效。
     """
     db_path = tmp_path / "test.db"
     import db.client as db_mod
@@ -70,11 +73,22 @@ async def test_db(tmp_path):
     orig_db_path = _cfg["app"].database_path
     orig_output_dir = _cfg["app"].output_dir
     orig_db_global = db_mod._db
+    # _cfg["providers"] 在 load_config() 时已注入 deepseek / siliconflow
+    # （_load_all_providers 总是注册这两个内置 provider），保存其 api_key
+    # 原值即可恢复。
+    orig_deepseek_key = _cfg["providers"]["deepseek"].api_key
 
     # 指向临时数据库 + 临时输出目录
     _cfg["app"].database_path = str(db_path)
     _cfg["app"].output_dir = str(tmp_path / "output")
     db_mod._db = None  # 强制 get_db() 重新连接
+
+    # 注入 mock LLM api_key（绕过 create_job 的"未配置 LLM 服务商"拦截）。
+    # 直接修改 _cfg["providers"]["deepseek"].api_key —— 与 production 读取
+    # 路径完全一致（api/jobs.py 用 config["providers"]）。早期 fixture 误注入
+    # 到不存在的 "llm_providers" 键，与 production 路径脱节，掩盖了上传守卫
+    # 的真实 bug（见对抗性审查 B-C1）。
+    _cfg["providers"]["deepseek"].api_key = "sk-test-key-for-unit-test-only"
 
     try:
         db = await db_mod.get_db()  # 连接 + 自动 init_schema + migrate
@@ -86,6 +100,7 @@ async def test_db(tmp_path):
         db_mod._db = orig_db_global
         _cfg["app"].database_path = orig_db_path
         _cfg["app"].output_dir = orig_output_dir
+        _cfg["providers"]["deepseek"].api_key = orig_deepseek_key
         if db_path.exists():
             db_path.unlink()
 

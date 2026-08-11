@@ -23,28 +23,26 @@ pip install -r requirements-dev.txt   # pytest, pytest-cov, httpx, pytest-timeou
 # 2. Node 依赖（仅前端构建需要）
 npm install
 
-# 3. 环境变量
-Copy-Item .env.example .env
-# 编辑 .env，至少填入一个 LLM API key 和 OCR token
-
-# 4. 构建前端 CSS（首次必须）
+# 3. 构建前端 CSS（首次必须）
 npx tailwindcss -i ./static/input.css -o ./static/app.css --minify
 ```
+
+启动后通过设置页面配置 LLM + OCR，配置持久化到 `config.json`（项目根目录）。`.env` 已弃用，仅作为旧版本迁移源。
 
 ### 启动开发服务器
 
 ```powershell
-# 方式 1：直接 uvicorn（带热重载）
+# 方式 1：直接 uvicorn（带热重载，端口 8000）
 uvicorn main:app --reload --host 127.0.0.1 --port 8000
 
-# 方式 2：通过 server.py（与打包入口一致，端口 58765）
+# 方式 2：通过 server.py（与打包入口一致，端口 8000）
 python server.py
 
 # 方式 3：Electron 桌面壳（需先启动后端或让 Electron 自动拉起）
 npm run start:dev
 ```
 
-访问 http://127.0.0.1:58765 （或 8000）查看应用，http://127.0.0.1:58765/docs 查看 Swagger 文档。
+访问 http://127.0.0.1:8000 查看应用，http://127.0.0.1:8000/docs 查看 Swagger 文档。
 
 ## 代码约定
 
@@ -153,9 +151,9 @@ python -m pytest tests/ --cov=. --cov-report=term --timeout=30
 
 | 产物 | 路径 | 说明 |
 |------|------|------|
-| 便携版可执行文件 | `dist-electron/BatchSentry-Portable-1.0.0.exe` | 单文件，解压即用 |
-| Python 后端 | `dist/pbc-server/pbc-server.exe` | PyInstaller 打包，被 Electron 拉起 |
-| Tailwind CSS | `static/app.css` | 压缩后约 15KB |
+| Electron 应用文件夹 | `dist-electron/win-unpacked/` | 双击 `BatchSentry.exe` 运行，无需安装 |
+| Python 后端 | `dist/pbc-server/pbc-server.exe` | PyInstaller 打包，嵌入 win-unpacked/resources/ |
+| Tailwind CSS | `static/app.css` | 压缩后约 14KB |
 
 ### 分发流程
 

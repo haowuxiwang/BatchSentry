@@ -149,26 +149,45 @@ class TestLLMFallbackCheck:
         assert findings == []
 
     @pytest.mark.asyncio
-    async def test_exception_returns_empty(self, mock_llm):
-        """LLM 调用异常时应返回空列表（不抛异常）。"""
+    async def test_exception_returns_review_findings(self, mock_llm):
+        """LLM 调用异常时应 fail-closed：返回人工复核 findings 而非空列表。"""
         llm_queue = [
             {"page": 1, "step_no": 1, "name": "外观", "spec": "应澄清",
              "actual": "澄清", "unit": "", "kind": "param"},
         ]
         mock_llm.chat_json.side_effect = RuntimeError("LLM unavailable")
         findings = await _llm_fallback_check(llm_queue)
-        assert findings == []
+        assert len(findings) == 1
+        f = findings[0]
+        assert f["type"] == "completeness"
+        assert f["severity"] == "warning"
+        assert f["source"] == "rule"
+        assert f["page"] == 1
+        assert "外观" in f["description"]
+        assert "应澄清" in f["description"]
+        assert "人工确认" in f["description"]
+        assert "LLM 调用失败" in f["description"]
+        assert "RuntimeError" in f["description"]
 
     @pytest.mark.asyncio
-    async def test_parse_error_returns_empty(self, mock_llm):
-        """LLM 返回 _parse_error 时应返回空列表。"""
+    async def test_parse_error_returns_review_findings(self, mock_llm):
+        """LLM 返回 _parse_error 时应 fail-closed：返回人工复核 findings。"""
         llm_queue = [
             {"page": 1, "step_no": 1, "name": "外观", "spec": "应澄清",
              "actual": "澄清", "unit": "", "kind": "param"},
         ]
         mock_llm.chat_json.return_value = {"_parse_error": True, "_raw": "garbage"}
         findings = await _llm_fallback_check(llm_queue)
-        assert findings == []
+        assert len(findings) == 1
+        f = findings[0]
+        assert f["type"] == "completeness"
+        assert f["severity"] == "warning"
+        assert f["source"] == "rule"
+        assert f["page"] == 1
+        assert "外观" in f["description"]
+        assert "应澄清" in f["description"]
+        assert "人工确认" in f["description"]
+        assert "JSON 解析失败" in f["description"]
 
     @pytest.mark.asyncio
     async def test_dict_result_with_items_key(self, mock_llm):
@@ -338,18 +357,32 @@ class TestLLMBasedCheck:
         assert len(findings) == 1
 
     @pytest.mark.asyncio
-    async def test_exception_returns_empty(self, mock_llm):
-        """LLM 调用异常时应返回空列表。"""
+    async def test_exception_returns_review_finding(self, mock_llm):
+        """LLM 调用异常时应 fail-closed：返回人工复核 finding 而非空列表。"""
         mock_llm.chat_json.side_effect = RuntimeError("LLM unavailable")
         findings = await _llm_based_check("第1页 ...")
-        assert findings == []
+        assert len(findings) == 1
+        f = findings[0]
+        assert f["type"] == "completeness"
+        assert f["severity"] == "info"
+        assert f["source"] == "rule"
+        assert f["page"] == 0
+        assert "人工复核" in f["description"]
+        assert "RuntimeError" in f["description"]
 
     @pytest.mark.asyncio
-    async def test_parse_error_returns_empty(self, mock_llm):
-        """LLM 返回 _parse_error 时应返回空列表。"""
+    async def test_parse_error_returns_review_finding(self, mock_llm):
+        """LLM 返回 _parse_error 时应 fail-closed：返回人工复核 finding。"""
         mock_llm.chat_json.return_value = {"_parse_error": True, "_raw": "garbage"}
         findings = await _llm_based_check("第1页 ...")
-        assert findings == []
+        assert len(findings) == 1
+        f = findings[0]
+        assert f["type"] == "completeness"
+        assert f["severity"] == "info"
+        assert f["source"] == "rule"
+        assert f["page"] == 0
+        assert "人工复核" in f["description"]
+        assert "JSON 解析失败" in f["description"]
 
 
 # ===========================================================================
@@ -801,3 +834,91 @@ class TestAnalyzeCrossPageLLMPaths:
         assert llm_findings[0]["type"] == "completeness"
         # 两个路径都调用了 chat_json
         assert mock_llm.chat_json.call_count == 2
+
+
+# ===========================================================================
+# Fail-closed 行为测试（GMP 安全原则：LLM 不可用时不得静默放行）
+# ===========================================================================
+
+
+class TestLlmFallbackFailClosed:
+    """LLM 兜底/语义检查失败时应 fail-closed，标记人工复核而非返回空列表。"""
+
+    @pytest.mark.asyncio
+    async def test_llm_exception_returns_review_findings(self):
+        """LLM 调用失败时应返回人工复核 findings 而非空列表。"""
+        from core.cross_page_analyzer import _llm_fallback_check
+        llm_queue = [
+            {"page": 1, "step_no": 1, "name": "温度", "spec": "≤25°C", "actual": "30", "unit": "°C"},
+        ]
+        with patch("core.cross_page_analyzer.get_llm_client") as mock:
+            mock.return_value.chat_json.side_effect = RuntimeError("API down")
+            findings = await _llm_fallback_check(llm_queue, job_id="test")
+        assert len(findings) == 1
+        assert findings[0]["type"] == "completeness"
+        assert "人工确认" in findings[0]["description"]
+        assert findings[0]["source"] == "rule"
+
+    @pytest.mark.asyncio
+    async def test_llm_exception_flags_all_queued_params(self):
+        """LLM 调用失败时队列中所有参数都应被标记（不可只标记第一个）。"""
+        from core.cross_page_analyzer import _llm_fallback_check
+        llm_queue = [
+            {"page": 1, "step_no": 1, "name": "温度", "spec": "≤25°C", "actual": "30", "unit": "°C"},
+            {"page": 2, "step_no": 3, "name": "外观", "spec": "应澄清", "actual": "浑浊", "unit": ""},
+            {"page": 3, "step_no": 5, "name": "pH", "spec": "6.0-7.0", "actual": "5.5", "unit": ""},
+        ]
+        with patch("core.cross_page_analyzer.get_llm_client") as mock:
+            mock.return_value.chat_json.side_effect = TimeoutError("timeout")
+            findings = await _llm_fallback_check(llm_queue, job_id="test")
+        assert len(findings) == 3
+        pages = {f["page"] for f in findings}
+        assert pages == {1, 2, 3}
+        assert all(f["type"] == "completeness" for f in findings)
+        assert all(f["source"] == "rule" for f in findings)
+        assert all("人工确认" in f["description"] for f in findings)
+        assert all("TimeoutError" in f["description"] for f in findings)
+
+    @pytest.mark.asyncio
+    async def test_llm_parse_error_returns_review_findings(self):
+        """LLM 返回无法解析的 JSON 时应 fail-closed 标记人工复核。"""
+        from core.cross_page_analyzer import _llm_fallback_check
+        llm_queue = [
+            {"page": 2, "step_no": 2, "name": "含量", "spec": "≥98.0%", "actual": "97.0", "unit": "%"},
+        ]
+        with patch("core.cross_page_analyzer.get_llm_client") as mock:
+            mock.return_value.chat_json = AsyncMock(return_value={"_parse_error": True, "_raw": "not json"})
+            findings = await _llm_fallback_check(llm_queue, job_id="test")
+        assert len(findings) == 1
+        f = findings[0]
+        assert f["type"] == "completeness"
+        assert f["source"] == "rule"
+        assert f["page"] == 2
+        assert "JSON 解析失败" in f["description"]
+        assert "人工确认" in f["description"]
+
+    def test_fallback_fail_closed_through_analyze_cross_page(self, mock_llm):
+        """端到端：LLM fallback 异常时 findings 应进入最终结果（不丢失）。"""
+        pages = [
+            _make_page(1, [
+                _make_step(1, start_time="2024.01.01 10:00", end_time="2024.01.01 11:00",
+                           operator="张三", reviewer="李四",
+                           signatures=[{"role": "qa", "name": "王五"}],
+                           parameters=[
+                               {"name": "外观", "spec_range": "应澄清",
+                                "value": "浑浊", "unit": ""},
+                           ]),
+            ]),
+        ]
+        # 第一次 chat_json：_llm_fallback_check 抛异常 → fail-closed
+        # 第二次 chat_json：_llm_based_check 返回空 list（成功）
+        mock_llm.chat_json.side_effect = [
+            RuntimeError("API down"),
+            [],
+        ]
+        findings = asyncio.run(analyze_cross_page(pages))
+        review_findings = [f for f in findings if f.get("type") == "completeness"
+                           and f.get("source") == "rule"]
+        assert len(review_findings) == 1
+        assert "外观" in review_findings[0]["description"]
+        assert "人工确认" in review_findings[0]["description"]

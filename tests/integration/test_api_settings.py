@@ -5,17 +5,40 @@
 - POST /api/settings 更新配置 + 内存同步
 - 供应商切换 bug 修复验证
 """
+import os
+import shutil
+from pathlib import Path
+from unittest.mock import patch
+
 import pytest
 import pytest_asyncio
 from httpx import AsyncClient
 
 
 @pytest_asyncio.fixture
-async def settings_client(test_db):
+async def settings_client(test_db, tmp_path):
+    """提供 Settings API 测试客户端，隔离 config.json 文件避免 Windows 文件锁。
+
+    Phase 9: 配置系统从 .env 迁移到 JSON 后，Settings API 写入 config.json。
+    将 _settings_config_path 重定向到 tmp_path/config.json，避免污染项目根。
+    """
     from main import app
     from httpx import ASGITransport
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://localhost:8000") as client:
-        yield client
+    import api.settings as settings_mod
+
+    # 重定向 _settings_config_path 到临时目录（无需备份 — 测试用的 JSON
+    # 内容由 POST /api/settings 在测试中按需生成，不需要预置）
+    test_config = tmp_path / "config.json"
+
+    with patch.object(settings_mod, "_settings_config_path", return_value=test_config), \
+         patch("api.settings._config_path", return_value=test_config), \
+         patch("config._config_path", return_value=test_config):
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://127.0.0.1:8000",
+            headers={"Origin": "http://127.0.0.1:8000"},
+        ) as client:
+            yield client
 
 
 class TestGetSettings:
@@ -29,7 +52,7 @@ class TestGetSettings:
         assert "llm" in data
         assert "ocr" in data
         assert "app" in data
-        assert "env_file" in data
+        assert "config_file" in data
 
     @pytest.mark.asyncio
     async def test_llm_has_provider_and_both_providers(self, settings_client):
@@ -123,6 +146,19 @@ class TestUpdateSettings:
         assert r2.json()["ocr"]["mineru"]["enable_formula"] is False
         assert r2.json()["ocr"]["mineru"]["enable_table"] is True
 
+    @pytest.mark.asyncio
+    async def test_empty_base_url_allowed_restores_default(self, settings_client):
+        """对抗审查(cr-10): 空 base_url = 恢复 SDK 默认地址，应放行而非
+        被 SSRF 校验拒绝（此前会 400，用户只能手改文件）。"""
+        r = await settings_client.post("/api/settings", json={
+            "deepseek_base_url": "",
+        })
+        assert r.status_code == 200
+        assert r.json()["updated"] == 1
+        # 确认内存配置也同步为空（恢复默认）
+        from config import config as _cfg
+        assert _cfg["providers"]["deepseek"].base_url == ""
+
 
 class TestDynamicProviders:
     """Phase 7: 动态 provider 注册表测试。
@@ -161,7 +197,7 @@ class TestDynamicProviders:
         r = await settings_client.post("/api/settings", json={
             "llm_providers_add": "glm",
             "glm_protocol": "openai",
-            "glm_api_key": "sk-glm-test",
+            "glm_api_key": "sk-glm-1234567890abcdef1234567890",
             "glm_base_url": "https://open.bigmodel.cn/api/paas/v4",
             "glm_model": "glm-4-plus",
         })
@@ -260,7 +296,7 @@ class TestDynamicProviders:
 
     @pytest.mark.asyncio
     async def test_unknown_field_ignored(self, settings_client):
-        """非白名单字段应被静默忽略（不写入 .env）。"""
+        """非白名单字段应被静默忽略（不写入 config.json）。"""
         r = await settings_client.post("/api/settings", json={
             "random_unknown_field": "should_be_ignored",
             "deepseek_model": "deepseek-chat",  # 加一个合法字段避免 "无更新"
@@ -279,3 +315,120 @@ class TestDynamicProviders:
         data = r.json()
         assert "providers" in data
         assert isinstance(data["providers"], list)
+
+
+class TestSetActiveProviderEndpoint:
+    """S1: POST /api/settings/set_active_provider 端点测试。"""
+
+    @pytest.mark.asyncio
+    async def test_switch_active_provider_persists(self, settings_client):
+        """切换 active provider 应持久化到 config.json + 内存热更新。"""
+        # 先确保 siliconflow 已注册并有 key
+        await settings_client.post("/api/settings", json={
+            "llm_provider": "deepseek",
+            "siliconflow_api_key": "sk-realkey1234567890abcdef",
+        })
+        # 切换到 siliconflow
+        r = await settings_client.post("/api/settings/set_active_provider", json={
+            "provider": "siliconflow",
+        })
+        assert r.status_code == 200
+        data = r.json()
+        assert data["ok"] is True
+        assert data["active_provider"] == "siliconflow"
+
+        # 验证已持久化（再次 GET 应返回新的 active_provider）
+        r2 = await settings_client.get("/api/settings")
+        data2 = r2.json()
+        assert data2["llm"]["active_provider"] == "siliconflow"
+        assert data2["llm"]["provider"] == "siliconflow"  # 向后兼容字段
+
+    @pytest.mark.asyncio
+    async def test_switch_to_unknown_provider_returns_404(self, settings_client):
+        """切换到不存在的 provider 应返回 404。"""
+        r = await settings_client.post("/api/settings/set_active_provider", json={
+            "provider": "nonexistent_provider",
+        })
+        assert r.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_switch_to_invalid_name_returns_400(self, settings_client):
+        """非法 provider 名应返回 400。"""
+        r = await settings_client.post("/api/settings/set_active_provider", json={
+            "provider": "Invalid Name With Spaces",
+        })
+        assert r.status_code == 400
+
+
+class TestTestProviderEndpoint:
+    """S4: POST /api/settings/test_provider 端点测试。"""
+
+    @pytest.mark.asyncio
+    async def test_test_provider_without_key_returns_not_configured(self, settings_client):
+        """测试未配置 Key 的 provider 应返回 ok=False + 'API key not configured'。"""
+        # 确保 deepseek 没配置 key
+        await settings_client.post("/api/settings", json={
+            "llm_provider": "deepseek",
+            "deepseek_clear_key": True,
+        })
+        r = await settings_client.post("/api/settings/test_provider", json={
+            "provider": "deepseek",
+        })
+        assert r.status_code == 200
+        data = r.json()
+        assert data["ok"] is False
+        assert "not configured" in data["reason"].lower() or "api key" in data["reason"].lower()
+
+    @pytest.mark.asyncio
+    async def test_test_unknown_provider_returns_404(self, settings_client):
+        """测试不存在的 provider 应返回 404。"""
+        r = await settings_client.post("/api/settings/test_provider", json={
+            "provider": "nonexistent_xyz",
+        })
+        assert r.status_code == 404
+
+
+class TestOcrTokenClear:
+    """S6: OCR token 清除（__CLEAR__ 标记）测试。"""
+
+    @pytest.mark.asyncio
+    async def test_clear_paddle_ocr_token(self, settings_client):
+        """发送 __CLEAR__ 应将 paddle_ocr_token 清空。"""
+        # 先设置一个 token
+        await settings_client.post("/api/settings", json={
+            "llm_provider": "deepseek",
+            "paddle_ocr_token": "some_token_value",
+        })
+        # 验证已设置
+        r1 = await settings_client.get("/api/settings")
+        assert r1.json()["ocr"]["paddle"]["configured"] is True
+
+        # 清除
+        r2 = await settings_client.post("/api/settings", json={
+            "llm_provider": "deepseek",
+            "paddle_ocr_token": "__CLEAR__",
+        })
+        assert r2.status_code == 200
+
+        # 验证已清空
+        r3 = await settings_client.get("/api/settings")
+        assert r3.json()["ocr"]["paddle"]["configured"] is False
+
+    @pytest.mark.asyncio
+    async def test_clear_mineru_token(self, settings_client):
+        """发送 __CLEAR__ 应将 mineru_token 清空。"""
+        await settings_client.post("/api/settings", json={
+            "llm_provider": "deepseek",
+            "mineru_token": "some_mineru_token",
+        })
+        r1 = await settings_client.get("/api/settings")
+        assert r1.json()["ocr"]["mineru"]["configured"] is True
+
+        r2 = await settings_client.post("/api/settings", json={
+            "llm_provider": "deepseek",
+            "mineru_token": "__CLEAR__",
+        })
+        assert r2.status_code == 200
+
+        r3 = await settings_client.get("/api/settings")
+        assert r3.json()["ocr"]["mineru"]["configured"] is False

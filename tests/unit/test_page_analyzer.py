@@ -138,7 +138,11 @@ class TestPromptConstruction:
     @pytest.mark.asyncio
     async def test_user_prompt_contains_html_and_prefix(self):
         """用户提示应以固定前缀开头、包含 prompt-injection 防护标签和清洗后的 HTML。"""
-        html = "<table style=\"color:red\" width=\"100\"><tr><td>提取数据</td></tr></table>"
+        html = ("<table style=\"color:red\" width=\"100\""
+                "<tr><td>步骤</td><td>参数</td></tr>"
+                "<tr><td>压片</td><td>25.5</td></tr>"
+                "<tr><td>包衣</td><td>40.0</td></tr>"
+                "<tr><td>灌装</td><td>提取数据</td></tr></table>")
         mock_client = _make_mock_client(_ok_payload())
         with patch("core.page_analyzer.get_llm_client", return_value=mock_client):
             await analyze_page(html, page_num=1)
@@ -260,3 +264,92 @@ class TestHtmlCleaning:
         # 核心结构应保留
         assert "<table>" in user_prompt
         assert "<td>X</td>" in user_prompt
+
+
+class TestEmptyPageShortCircuit:
+    """robustness-D1: 空/无内容页短路 — 不调 LLM，返回 _ocr_empty 标记。"""
+
+    @pytest.mark.asyncio
+    async def test_mineru_empty_marker_skips_llm(self):
+        """MinerU 空块页标记（此页无文本内容）→ 短路，不调 LLM。"""
+        mock_client = _make_mock_client(_ok_payload())
+        with patch("core.page_analyzer.get_llm_client", return_value=mock_client):
+            result = await analyze_page("## 第 3 页\n\n（此页无文本内容）", page_num=3)
+
+        assert result["_ocr_empty"] is True
+        assert result["_parse_error"] is False
+        assert result["steps"] == []
+        assert result["findings"] == []
+        assert result["overall_confidence"] == "low"
+        mock_client.chat_json.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_blank_text_skips_llm(self):
+        """Paddle 空串/纯空白 → 短路，不调 LLM。"""
+        mock_client = _make_mock_client(_ok_payload())
+        with patch("core.page_analyzer.get_llm_client", return_value=mock_client):
+            result = await analyze_page("", page_num=5)
+
+        assert result["_ocr_empty"] is True
+        mock_client.chat_json.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_normal_page_still_calls_llm(self):
+        """正常内容页不受影响，照常调 LLM。"""
+        mock_client = _make_mock_client(_ok_payload())
+        with patch("core.page_analyzer.get_llm_client", return_value=mock_client):
+            result = await analyze_page("<table><tr><td>浓度 25.5</td></tr></table>", page_num=1)
+
+        assert "_ocr_empty" not in result or result["_ocr_empty"] is not True
+        mock_client.chat_json.assert_awaited_once()
+
+
+class TestSparsePageShortCircuit:
+    """robustness-E1: 稀疏内容页（无表格且文本极少）→ 仍调 LLM 但注入
+    保守警告 + 返回 _ocr_sparse 标记。"""
+
+    @pytest.mark.asyncio
+    async def test_sparse_text_gets_warning_and_marker(self):
+        """短文本无表格 → prompt 含系统警告 + _ocr_sparse 标记。"""
+        mock_client = _make_mock_client(_ok_payload())
+        with patch("core.page_analyzer.get_llm_client", return_value=mock_client):
+            result = await analyze_page("日期：2024-01-01", page_num=4)
+
+        assert result["_ocr_sparse"] is True
+        mock_client.chat_json.assert_awaited_once()
+        prompt_arg = mock_client.chat_json.call_args.args[1]
+        assert "系统警告" in prompt_arg
+        assert "overall_confidence 设为 low" in prompt_arg
+
+    @pytest.mark.asyncio
+    async def test_short_table_with_few_rows_marked_sparse(self):
+        """含表格但仅 1-2 行且文本极少 → 表格可能残缺，标记稀疏。"""
+        html = "<table><tr><td>批次</td></tr></table>"
+        mock_client = _make_mock_client(_ok_payload())
+        with patch("core.page_analyzer.get_llm_client", return_value=mock_client):
+            result = await analyze_page(html, page_num=2)
+
+        assert result.get("_ocr_sparse") is True
+        prompt_arg = mock_client.chat_json.call_args.args[1]
+        assert "系统警告" in prompt_arg
+
+    @pytest.mark.asyncio
+    async def test_table_page_with_rows_not_marked_sparse(self):
+        """含表格且行数正常（≥3）→ 不判定为稀疏。"""
+        rows = "".join(f"<tr><td>第{i}行 {i}</td></tr>" for i in range(1, 6))
+        html = f"<table>{rows}</table>"
+        mock_client = _make_mock_client(_ok_payload())
+        with patch("core.page_analyzer.get_llm_client", return_value=mock_client):
+            result = await analyze_page(html, page_num=2)
+
+        assert result.get("_ocr_sparse") is not True
+
+    @pytest.mark.asyncio
+    async def test_long_text_page_not_marked_sparse(self):
+        """长文本（无表格）不判定为稀疏。"""
+        long_text = "工序记录" * 60  # 300 chars > threshold
+        mock_client = _make_mock_client(_ok_payload())
+        with patch("core.page_analyzer.get_llm_client", return_value=mock_client):
+            result = await analyze_page(long_text, page_num=7)
+
+        assert result.get("_ocr_sparse") is not True

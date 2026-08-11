@@ -14,7 +14,7 @@ BatchSentry 是面向制药企业的批生产记录（BPR）审核工具，通�
   - R3 参数越界（param_out_of_spec）
   - R4 签名异常（signature_time_anomaly）
   - R5 完整性检查（completeness）
-- **多 LLM 服务商**：DeepSeek / SiliconFlow / GLM / Kimi / Qwen / Anthropic，动态注册，无硬编码
+- **多 LLM 服务商**：DeepSeek / SiliconFlow（内置，可通过 config.json 动态注册更多），Anthropic 协议适配
 - **GMP 审计追踪**：所有状态转换、LLM 调用、人工复核操作均写入审计日志
 - **Electron 桌面应用**：Windows 便携版（解压即用），splash 启动、优雅关闭、卡死任务恢复
 
@@ -25,7 +25,7 @@ BatchSentry 是面向制药企业的批生产记录（BPR）审核工具，通�
 │                  Electron Shell                     │
 │  (splash + main window + graceful shutdown)         │
 └────────────────────┬────────────────────────────────┘
-                     │ http://127.0.0.1:58765
+                     │ http://127.0.0.1:8000 (dev) / 58765 (frozen)
 ┌────────────────────▼────────────────────────────────┐
 │              FastAPI Backend (PyInstaller)           │
 │  ┌──────────┐  ┌──────────┐  ┌──────────────────┐   │
@@ -60,21 +60,19 @@ BatchSentry 是面向制药企业的批生产记录（BPR）审核工具，通�
 # 1. 安装 Python 依赖
 pip install -r requirements.txt
 
-# 2. 配置环境变量
-cp .env.example .env
-# 编辑 .env，填入至少一个 LLM API key
-
-# 3. 构建前端 CSS（可选，首次需要）
+# 2. 构建前端 CSS（首次必须）
 npx tailwindcss -i ./static/input.css -o ./static/app.css --minify
 
-# 4. 启动后端
+# 3. 启动后端
 python server.py
-# 访问 http://127.0.0.1:58765
+# 访问 http://127.0.0.1:8000，进入设置页面配置 LLM + OCR
 
-# 5. 启动 Electron（可选，桌面应用）
+# 4. 启动 Electron（可选，桌面应用）
 npm install
 npm run dev
 ```
+
+> 配置通过设置页面管理，持久化到 `config.json`（开发模式在项目根，frozen 模式在 `%APPDATA%/PBC/config.json`）。`.env` 已弃用，仅作为旧版本迁移源。
 
 ### 生产打包（便携版）
 
@@ -86,31 +84,28 @@ npm run dev
 ```
 
 构建产物：
-- `static/app.css` — 压缩后的 Tailwind CSS（~15KB）
+- `static/app.css` — 压缩后的 Tailwind CSS（~14KB）
 - `dist/pbc-server/pbc-server.exe` — PyInstaller 打包的后端
-- `dist-electron/BatchSentry-Portable-1.0.0.exe` — Electron 便携版（单文件，解压即用）
+- `dist-electron/win-unpacked/` — Electron 文件夹便携版（双击 `BatchSentry.exe` 运行，无需安装）
 
 详细部署与运维见 [DEPLOYMENT.md](./DEPLOYMENT.md)，开发规范见 [CONTRIBUTING.md](./CONTRIBUTING.md)。
 
 ## 配置说明
 
-所有配置通过环境变量或 `.env` 文件管理，关键项：
+配置通过设置页面管理，持久化到 `config.json`（开发模式在项目根，frozen 模式在 `%APPDATA%/PBC/config.json`）。关键项：
 
-| 变量 | 说明 | 默认值 |
+| 配置项 | 说明 | 默认值 |
 |------|------|--------|
-| `LLM_PROVIDER` | 默认 LLM 服务商 | `deepseek` |
-| `OCR_BACKEND` | OCR 后端 (`paddle`/`mineru`) | `paddle` |
-| `MAX_CONCURRENT_JOBS` | 最大并发任务数 | `3` |
-| `APP_HOST` | 监听地址 | `127.0.0.1` |
-| `APP_PORT` | 监听端口 | `58765` |
-| `DEEPSEEK_API_KEY` | DeepSeek API key | — |
-| `GLM_API_KEY` | 智谱 GLM API key | — |
-| `KIMI_API_KEY` | Moonshot Kimi API key | — |
-| `QWEN_API_KEY` | 通义千问 API key | — |
-| `PADDLE_OCR_TOKEN` | PaddleOCR-VL token | — |
-| `MINERU_TOKEN` | MinerU token | — |
+| `llm_provider` | 默认 LLM 服务商 | `deepseek` |
+| `ocr_backend` | OCR 后端 (`paddle`/`mineru`) | `paddle` |
+| `max_concurrent_jobs` | 最大并发任务数 | `3` |
+| `app_host` / `app_port` | 监听地址/端口 | `127.0.0.1` / `58765`（开发模式 8000） |
+| `deepseek.api_key` | DeepSeek API key | — |
+| `siliconflow.api_key` | SiliconFlow API key | — |
+| `paddle_ocr.token` | PaddleOCR-VL token | — |
+| `mineru.token` | MinerU token | — |
 
-新增 LLM 服务商：在 `.env` 中添加 `<NAME>_API_KEY` + `<NAME>_BASE_URL` + `<NAME>_MODEL`，无需改代码。
+> `.env` 已弃用，仅作为旧版本迁移源（首次启动且 `config.json` 不存在时自动迁移）。新增 LLM 服务商通过设置页面或直接编辑 `config.json` 的 `providers` 字段添加，无需改代码。
 
 ## 测试
 
@@ -119,7 +114,7 @@ npm run dev
 $env:PBC_NO_FILE_LOG='1'
 python -m pytest tests/ --cov=. --cov-report=term --timeout=30
 
-# 当前状态：458 passed, 95% coverage
+# 当前状态：631 passed, 92.19% coverage
 ```
 
 ## 安全设计

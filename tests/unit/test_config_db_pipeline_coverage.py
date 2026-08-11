@@ -52,11 +52,11 @@ class TestConfigAppDataDir:
         assert "PBC" in str(result)
 
 
-class TestConfigFrozenEnvLoad:
-    """frozen 模式下 .env 加载逻辑（通过 _env_path 间接验证，避免 reload 副作用）。"""
+class TestConfigFrozenConfigPath:
+    """frozen 模式下 config.json 路径解析（通过 _settings_config_path 验证）。"""
 
-    def test_frozen_env_path_in_appdata(self, monkeypatch, tmp_path):
-        """frozen 模式 _env_path 应指向 %APPDATA%/PBC/.env。"""
+    def test_frozen_config_path_in_appdata(self, monkeypatch, tmp_path):
+        """frozen 模式 _settings_config_path 应指向 %APPDATA%/PBC/config.json。"""
         appdata = tmp_path / "AppData"
         pbc_dir = appdata / "PBC"
         pbc_dir.mkdir(parents=True)
@@ -65,11 +65,11 @@ class TestConfigFrozenEnvLoad:
         monkeypatch.setattr(sys, "platform", "win32")
         monkeypatch.setenv("APPDATA", str(appdata))
 
-        # _env_path 每次调用都检查 sys.frozen，无需 reload
-        from api.settings import _env_path
-        path = _env_path()
+        # _settings_config_path 每次调用都检查 sys.frozen，无需 reload
+        from api.settings import _settings_config_path
+        path = _settings_config_path()
         assert "PBC" in str(path)
-        assert path.name == ".env"
+        assert path.name == "config.json"
 
     def test_frozen_load_config_uses_appdata_defaults(self, monkeypatch, tmp_path):
         """frozen 模式 load_config 默认 db/output 路径应在 %APPDATA%/PBC 下。"""
@@ -234,6 +234,53 @@ class TestDbClientEdgeCases:
             await migrate(db)  # source 列已存在，应安全跳过
 
     @pytest.mark.asyncio
+    async def test_migrate_sets_and_persists_user_version(self, tmp_path):
+        """版本化迁移：首次 migrate 后 user_version 应为 SCHEMA_VERSION，
+        再次 migrate 幂等（跳过探测迁移）。"""
+        import aiosqlite
+        from db.client import migrate, SCHEMA_VERSION
+
+        db_path = str(tmp_path / "ver.db")
+        async with aiosqlite.connect(db_path) as db:
+            await migrate(db)
+            cursor = await db.execute("PRAGMA user_version")
+            assert (await cursor.fetchone())[0] == SCHEMA_VERSION
+
+        # 重新打开（模拟重启）→ user_version 已持久化，migrate 直接跳过
+        async with aiosqlite.connect(db_path) as db:
+            await migrate(db)
+            cursor = await db.execute("PRAGMA user_version")
+            assert (await cursor.fetchone())[0] == SCHEMA_VERSION
+
+    @pytest.mark.asyncio
+    async def test_migrate_upgrades_legacy_v0_database(self, tmp_path):
+        """v0 老库（无版本号、缺 jobs 新列）→ migrate 补列并写入版本号。"""
+        import aiosqlite
+        from db.client import migrate, SCHEMA_VERSION
+
+        db_path = str(tmp_path / "legacy.db")
+        async with aiosqlite.connect(db_path) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("""
+                CREATE TABLE jobs (
+                    id TEXT PRIMARY KEY,
+                    filename TEXT,
+                    status TEXT,
+                    pdf_path TEXT,
+                    total_pages INTEGER
+                )
+            """)
+            await db.commit()
+
+            await migrate(db)
+            cursor = await db.execute("PRAGMA table_info(jobs)")
+            cols = {row["name"] for row in await cursor.fetchall()}
+            assert {"failed_pages", "stage1_ms", "stage2_ms",
+                    "stage3_ms", "ocr_progress"} <= cols
+            cursor = await db.execute("PRAGMA user_version")
+            assert (await cursor.fetchone())[0] == SCHEMA_VERSION
+
+    @pytest.mark.asyncio
     async def test_get_db_returns_existing_connection(self, tmp_path):
         """get_db 第二次调用应返回已存在的连接（_db is not None 分支）。"""
         import db.client as db_mod
@@ -374,7 +421,7 @@ class TestPipelineEdgeCases:
 
         with patch(
             "core.pipeline._get_ocr_backend",
-            return_value=lambda p: fake_pages,
+            return_value=lambda p, cb: fake_pages,
         ), patch(
             "core.pipeline.analyze_page", new=boom
         ), patch(
@@ -416,7 +463,7 @@ class TestPipelineEdgeCases:
         )
         with patch(
             "core.pipeline._get_ocr_backend",
-            return_value=lambda p: fake_pages,
+            return_value=lambda p, cb: fake_pages,
         ), patch(
             "core.pipeline.analyze_page", new=analyze_mock
         ), patch(
@@ -435,7 +482,7 @@ class TestPipelineEdgeCases:
         analyze_mock.reset_mock()
         with patch(
             "core.pipeline._get_ocr_backend",
-            return_value=lambda p: fake_pages,
+            return_value=lambda p, cb: fake_pages,
         ), patch(
             "core.pipeline.analyze_page", new=analyze_mock
         ), patch(
@@ -476,7 +523,7 @@ class TestPipelineEdgeCases:
 
         with patch(
             "core.pipeline._get_ocr_backend",
-            return_value=lambda p: fake_pages,
+            return_value=lambda p, cb: fake_pages,
         ), patch(
             "core.pipeline.analyze_page",
             new=AsyncMock(return_value={"steps": [], "findings": [], "overall_confidence": "high"}),
@@ -516,7 +563,7 @@ class TestPipelineEdgeCases:
 
         with patch(
             "core.pipeline._get_ocr_backend",
-            return_value=lambda p: [{"markdown": {"text": "page 1"}}],
+            return_value=lambda p, cb: [{"markdown": {"text": "page 1"}}],
         ), patch(
             "core.pipeline.analyze_page", new=boom
         ), patch(
@@ -559,7 +606,7 @@ class TestPipelineEdgeCases:
 
         with patch(
             "core.pipeline._get_ocr_backend",
-            return_value=lambda p: [{"markdown": {"text": "page 1"}}],
+            return_value=lambda p, cb: [{"markdown": {"text": "page 1"}}],
         ), patch(
             "core.pipeline.analyze_page",
             new=AsyncMock(return_value={"steps": [], "findings": [], "overall_confidence": "high"}),

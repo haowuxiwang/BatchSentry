@@ -63,7 +63,8 @@ def poll(job_id: str, timeout: int = 3600):
             data = resp.json()
             status = data["status"]
             total_pages = data.get("total_pages", 0)
-            findings_count = len(data.get("findings", []))
+            # get_job_status 返回 total_findings（计数），不是 findings 列表
+            findings_count = data.get("total_findings", 0)
             error_msg = data.get("error_message", "")
 
             if status != last_status:
@@ -88,15 +89,32 @@ def poll(job_id: str, timeout: int = 3600):
 
 
 def verify(job_data: dict):
-    """验证 job 结果的完整性。"""
+    """验证 job 结果的完整性。
+
+    job_data 来自 GET /api/jobs/{id}，包含 total_findings（计数）但不含
+    findings 列表。此处额外调用 /api/jobs/{id}/report.json 获取完整
+    findings 列表用于分类统计与抽样打印。
+    """
     print("\n" + "=" * 60)
     print("[E2E] VERIFICATION")
     print("=" * 60)
 
     status = job_data["status"]
     total_pages = job_data.get("total_pages", 0)
-    findings = job_data.get("findings", [])
     filename = job_data.get("filename", "?")
+    job_id = job_data["id"]
+
+    # GET /api/jobs/{id} 只返回 total_findings 计数；调用 report.json
+    # 端点获取完整 findings 列表用于分类统计。
+    findings = []
+    try:
+        resp = requests.get(f"{BASE}/api/jobs/{job_id}/report.json", timeout=30)
+        if resp.status_code == 200:
+            findings = resp.json().get("findings", [])
+        else:
+            print(f"[E2E] WARN: report.json returned {resp.status_code}")
+    except Exception as e:
+        print(f"[E2E] WARN: report.json fetch failed: {e}")
 
     print(f"  Filename:    {filename}")
     print(f"  Status:      {status}")
@@ -139,23 +157,26 @@ def verify(job_data: dict):
             desc = f.get("description", "")[:80]
             print(f"    [p{page}] {sev}/{typ}: {desc}")
 
-    # 验证 audit log
+    # 验证 audit log — 端点返回 {"entries": [...], "count": N}
     try:
-        resp = requests.get(f"{BASE}/api/jobs/{job_data['id']}/audit", timeout=10)
+        resp = requests.get(f"{BASE}/api/jobs/{job_id}/audit", timeout=10)
         if resp.status_code == 200:
-            audit = resp.json()
-            print(f"\n  Audit entries: {len(audit)}")
+            audit_data = resp.json()
+            entries = audit_data.get("entries", [])
+            print(f"\n  Audit entries: {len(entries)}")
             # 显示最后 3 条
-            for entry in audit[-3:]:
+            for entry in entries[-3:]:
                 action = entry.get("action", "?")
                 detail = entry.get("detail", "")[:60]
                 print(f"    {action}: {detail}")
+        else:
+            print(f"\n  Audit log fetch failed: HTTP {resp.status_code}")
     except Exception as e:
         print(f"  Audit log fetch failed: {e}")
 
-    # 验证报告生成
+    # 验证报告生成 — 端点是 /report.md（不是 /report）
     try:
-        resp = requests.get(f"{BASE}/api/jobs/{job_data['id']}/report", timeout=30)
+        resp = requests.get(f"{BASE}/api/jobs/{job_id}/report.md", timeout=30)
         if resp.status_code == 200:
             report_len = len(resp.text)
             print(f"\n  Report (MD): {report_len} chars")
