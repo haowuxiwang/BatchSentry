@@ -1,11 +1,12 @@
 /* ============================================================
-   Settings page — dynamic LLM provider list + OCR config
-   ============================================================
-   - Providers are rendered dynamically from GET /api/settings
-   - Each provider row has: name + protocol selector + api_key + base_url + model
-   - "Use" button selects the active provider (radio-style)
-   - "Remove" button removes custom providers (built-in deepseek/siliconflow cannot be removed)
-   - Submit sends all changed fields using <provider>_<field> naming
+   Settings page — 业界做法重构 (参考 OpenAI/Anthropic/Linear)
+   ------------------------------------------------------------
+   设计原则:
+   1. 已配置 provider = 脱敏只读展示 + 操作按钮 (更换/测试/移除/设为当前)
+   2. 未配置 provider = 空白 input + "保存此 Key" 即时保存
+   3. active provider 切换 = 立即持久化 (不等底部保存)
+   4. 单独 provider 测试连接 = 不混淆 active 状态
+   5. 底部"保存通用设置" = 仅 OCR backend / 选项等通用字段
    ============================================================ */
 (function () {
   "use strict";
@@ -20,7 +21,7 @@
   // Built-in providers (cannot be removed via UI)
   const BUILTIN = new Set(["deepseek", "siliconflow"]);
 
-  // Provider display name overrides (for nicer labels)
+  // Provider display name overrides
   const DISPLAY_NAMES = {
     deepseek: "DeepSeek",
     siliconflow: "SiliconFlow",
@@ -29,16 +30,15 @@
     qwen: "Qwen · 通义千问",
     mimo: "MiMo · 小米",
     anthropic: "Anthropic · Claude",
+    anthropictest: "Anthropic · Claude",
     openai: "OpenAI",
   };
 
   let current = {};
   let activeProvider = "";
-  // Track providers added in this session (sent as llm_providers_add on save)
   const pendingAdds = new Set();
 
-  // HTML escape — protects against XSS when rendering user-controlled
-  // strings (base_url / model / provider name) into innerHTML.
+  // HTML escape — XSS protection for user-controlled strings
   const esc = (s) =>
     String(s == null ? "" : s)
       .replace(/&/g, "&amp;")
@@ -49,6 +49,12 @@
 
   function display(name) {
     return DISPLAY_NAMES[name] || name;
+  }
+
+  // OCR 后端显示名（测试连接消息用）
+  const OCR_DISPLAY = { mineru: "MinerU", paddle: "PaddleOCR" };
+  function ocrDisplay(backend) {
+    return OCR_DISPLAY[backend] || backend;
   }
 
   function showBackendForm(backend) {
@@ -63,69 +69,104 @@
       : '<span class="badge-no">未配置</span>';
   }
 
-  // Render a single provider row
+  // ============================================================
+  // S5: Provider 卡片渲染 — 已配置=脱敏只读 / 未配置=空白 input
+  // ============================================================
   function renderProvider(prov, isActive) {
     const div = document.createElement("div");
-    div.className = "provider-row";
+    div.className = "provider-row" + (isActive ? " is-active" : "");
     div.dataset.provider = prov.name;
+    const isConfigured = prov.configured;
+
     div.innerHTML = `
       <div class="provider-head">
         <div class="provider-name-row">
           <span class="provider-name">${esc(display(prov.name))}</span>
-          <code class="provider-key">${esc(prov.name)}</code>
+          ${isActive ? '<span class="provider-active-tag">当前</span>' : ""}
+          <span class="provider-status">${statusBadge(prov.configured)}</span>
         </div>
         <div class="provider-actions">
-          <button type="button" class="provider-use-btn ${
-            isActive ? "active" : ""
-          }" data-action="use">
-            ${isActive ? "✓ 当前使用" : "使用"}
-          </button>
-          ${
-            BUILTIN.has(prov.name)
-              ? ""
-              : `<button type="button" class="provider-remove-btn" data-action="remove">移除</button>`
-          }
+          ${isActive ? "" : `<button type="button" class="provider-use-btn" data-action="use" title="设为当前使用的提供商">设为当前</button>`}
+          <button type="button" class="provider-test-btn" data-action="test" title="测试此提供商的连通性">测试</button>
+          <button type="button" class="provider-toggle-btn" data-action="toggle">${isConfigured ? "更换 Key" : "展开"}</button>
+          ${BUILTIN.has(prov.name) ? "" : `<button type="button" class="provider-remove-btn" data-action="remove" title="移除该提供商">移除</button>`}
         </div>
       </div>
-      <div class="provider-body">
-        <div class="grid grid-cols-2 gap-3">
-          <div>
-            <label class="field-label">协议</label>
-            <select class="input" name="${esc(prov.name)}_protocol">
-              <option value="openai" ${
-                prov.protocol === "openai" ? "selected" : ""
-              }>openai</option>
-              <option value="anthropic" ${
-                prov.protocol === "anthropic" ? "selected" : ""
-              }>anthropic</option>
-            </select>
-          </div>
-          <div>
-            <label class="field-label">模型</label>
-            <input class="input" name="${esc(prov.name)}_model" value="${esc(
-              prov.model,
-            )}" />
-          </div>
-        </div>
-        <div class="mt-2">
-          <label class="field-label">Base URL</label>
-          <input class="input" name="${esc(prov.name)}_base_url" value="${esc(
-            prov.base_url,
-          )}" />
-        </div>
-        <div class="mt-2">
-          <label class="field-label">API Key</label>
-          <input class="input" name="${esc(
-            prov.name,
-          )}_api_key" placeholder="${esc(prov.api_key) || "sk-..."}" autocomplete="off" />
-          <p class="field-hint">${statusBadge(prov.configured)}</p>
-        </div>
+      <div class="provider-body hidden">
+        ${renderProviderBody(prov, isConfigured)}
       </div>
+      <div class="provider-test-result hidden"></div>
     `;
     return div;
   }
 
-  // Render the entire provider list
+  // 已配置: 显示脱敏 key + base_url/model 只读 + "更换 Key" input (默认隐藏)
+  // 未配置: 显示空白 input + 引导文案
+  function renderProviderBody(prov, isConfigured) {
+    if (isConfigured) {
+      // 已配置 — 脱敏只读展示
+      return `
+        <div class="grid grid-cols-2 gap-3 mt-3">
+          <div>
+            <label class="field-label">协议</label>
+            <select class="input" name="${esc(prov.name)}_protocol">
+              <option value="openai" ${prov.protocol === "openai" ? "selected" : ""}>openai</option>
+              <option value="anthropic" ${prov.protocol === "anthropic" ? "selected" : ""}>anthropic</option>
+            </select>
+          </div>
+          <div>
+            <label class="field-label">模型</label>
+            <input class="input" name="${esc(prov.name)}_model" value="${esc(prov.model)}" />
+          </div>
+        </div>
+        <div class="mt-3">
+          <label class="field-label">Base URL</label>
+          <input class="input" name="${esc(prov.name)}_base_url" value="${esc(prov.base_url)}" />
+        </div>
+        <div class="mt-3">
+          <label class="field-label">当前 API Key</label>
+          <div class="key-display">${esc(prov.api_key)} <span class="muted">(已保存)</span></div>
+          <div class="mt-2 key-replace-section hidden">
+            <label class="field-label">输入新 Key 覆盖原值</label>
+            <input class="input" type="password" name="${esc(prov.name)}_api_key" placeholder="粘贴新的 API Key..." autocomplete="new-password" />
+            <div class="mt-2 flex gap-2">
+              <button type="button" class="save-key-btn btn-primary-small" data-provider="${esc(prov.name)}">保存此 Key</button>
+              <button type="button" class="clear-key-btn btn-danger-small" data-provider="${esc(prov.name)}" title="清除已保存的 API Key">移除 Key</button>
+              <button type="button" class="cancel-replace-btn btn-text">取消</button>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+    // 未配置 — 空白 input 引导
+    return `
+      <div class="grid grid-cols-2 gap-3 mt-3">
+        <div>
+          <label class="field-label">协议</label>
+          <select class="input" name="${esc(prov.name)}_protocol">
+            <option value="openai" ${prov.protocol === "openai" ? "selected" : ""}>openai</option>
+            <option value="anthropic" ${prov.protocol === "anthropic" ? "selected" : ""}>anthropic</option>
+          </select>
+        </div>
+        <div>
+          <label class="field-label">模型</label>
+          <input class="input" name="${esc(prov.name)}_model" value="${esc(prov.model)}" />
+        </div>
+      </div>
+      <div class="mt-3">
+        <label class="field-label">Base URL</label>
+        <input class="input" name="${esc(prov.name)}_base_url" value="${esc(prov.base_url)}" />
+      </div>
+      <div class="mt-3">
+        <label class="field-label">API Key <span class="muted">— 粘贴 ${esc(display(prov.name))} 的密钥</span></label>
+        <input class="input" type="password" name="${esc(prov.name)}_api_key" placeholder="sk-..." autocomplete="new-password" />
+        <div class="mt-2">
+          <button type="button" class="save-key-btn btn-primary-small" data-provider="${esc(prov.name)}">保存此 Key</button>
+        </div>
+      </div>
+    `;
+  }
+
   function renderProviders(providers, active) {
     const list = document.getElementById("llm-providers-list");
     list.innerHTML = "";
@@ -138,71 +179,332 @@
     for (const prov of sorted) {
       list.appendChild(renderProvider(prov, prov.name === active));
     }
-    // Bind action buttons
-    list.querySelectorAll(".provider-use-btn").forEach((btn) => {
-      btn.addEventListener("click", (e) => {
-        const row = e.currentTarget.closest(".provider-row");
-        setActive(row.dataset.provider);
-      });
-    });
-    list.querySelectorAll(".provider-remove-btn").forEach((btn) => {
-      btn.addEventListener("click", (e) => {
-        const row = e.currentTarget.closest(".provider-row");
-        removeProvider(row.dataset.provider);
-      });
-    });
+    bindProviderActions();
   }
 
-  function setActive(name) {
-    activeProvider = name;
-    document.getElementById("llm-active-name").textContent = display(name);
-    document.getElementById("llm-provider-badge").textContent = display(name);
-    // Update button states without full re-render (avoids input focus loss)
-    document.querySelectorAll(".provider-row").forEach((row) => {
-      const isActive = row.dataset.provider === name;
-      const btn = row.querySelector(".provider-use-btn");
-      if (btn) {
-        btn.textContent = isActive ? "✓ 当前使用" : "使用";
-        btn.classList.toggle("active", isActive);
+  // ============================================================
+  // Provider 操作事件绑定 (事件委托)
+  // ============================================================
+  function bindProviderActions() {
+    const list = document.getElementById("llm-providers-list");
+
+    // Use event delegation to handle all clicks via data-action
+    list.addEventListener("click", async (e) => {
+      const btn = e.target.closest("[data-action]");
+      if (!btn) return;
+      e.stopPropagation();
+      const row = btn.closest(".provider-row");
+      if (!row) return;
+      const providerName = row.dataset.provider;
+      const action = btn.dataset.action;
+
+      switch (action) {
+        case "use":
+          await setActiveProvider(providerName);
+          break;
+        case "test":
+          await testProvider(providerName, row);
+          break;
+        case "toggle":
+          toggleProviderBody(row, btn);
+          break;
+        case "remove":
+          await removeProvider(providerName, row);
+          break;
+      }
+    });
+
+    // Per-provider "保存此 Key" + "移除 Key" + "取消"
+    list.addEventListener("click", async (e) => {
+      const saveBtn = e.target.closest(".save-key-btn");
+      const clearBtn = e.target.closest(".clear-key-btn");
+      const cancelBtn = e.target.closest(".cancel-replace-btn");
+      if (!saveBtn && !clearBtn && !cancelBtn) return;
+      e.stopPropagation();
+      const row = e.target.closest(".provider-row");
+      if (!row) return;
+      const providerName = row.dataset.provider;
+
+      if (saveBtn) {
+        await saveProviderKey(providerName, row);
+      } else if (clearBtn) {
+        await clearProviderKey(providerName, row);
+      } else if (cancelBtn) {
+        // 取消更换 Key: 隐藏 input 区域
+        const replaceSection = row.querySelector(".key-replace-section");
+        if (replaceSection) replaceSection.classList.add("hidden");
       }
     });
   }
 
-  function removeProvider(name) {
-    // Just remove the row from DOM; backend will keep the env var but it
-    // won't be loaded unless LLM_PROVIDERS still lists it. We don't auto-
-    // rewrite LLM_PROVIDERS here — that's an advanced action the user can
-    // do by editing .env manually or via a future "purge" action.
-    if (
-      !confirm(`移除 ${display(name)} 的表单？\n（不会清除 .env 中已有的配置）`)
-    )
-      return;
-    const row = document.querySelector(
-      `.provider-row[data-provider="${CSS.escape(name)}"]`,
-    );
-    if (row) row.remove();
-    if (activeProvider === name) {
-      // Fall back to deepseek if we removed the active one
-      const firstRow = document.querySelector(".provider-row");
-      if (firstRow) setActive(firstRow.dataset.provider);
+  // ============================================================
+  // S1: setActiveProvider — 立即保存到后端 (业界做法)
+  // opts.silent: 不显示自己的 "已切换" 消息（由调用方负责提示）
+  // opts.autoReason: auto-activated 时的文案后缀
+  // ============================================================
+  async function setActiveProvider(name, opts = {}) {
+    log("switching active provider", { from: activeProvider, to: name });
+    const badgeEl = document.getElementById("llm-provider-badge");
+    if (badgeEl) badgeEl.textContent = display(name);
+
+    try {
+      const r = await fetch("/api/settings/set_active_provider", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider: name }),
+      });
+      const data = await r.json();
+      if (r.ok && data.ok) {
+        activeProvider = name;
+        // 用后端返回的最新 providers 列表刷新本地缓存（configured 标志等）
+        if (Array.isArray(data.providers) && data.providers.length) {
+          current.llm.providers = data.providers;
+        }
+        if (!opts.silent) {
+          const suffix = opts.autoReason ? `（${opts.autoReason}）` : "（立即生效）";
+          showMsg(`✓ 已切换到 ${display(name)}${suffix}`, "info");
+        }
+        // 重新渲染列表: active 排首位
+        renderProviders(current.llm.providers || [], activeProvider);
+        log("active provider switched live", { active: activeProvider });
+      } else {
+        showMsg(`✗ 切换失败: ${data.detail || data.message || "未知错误"}`, "err");
+      }
+    } catch (err) {
+      showMsg(`✗ 切换失败: ${err.message}`, "err");
+      log.err("set active provider failed", err);
     }
   }
 
+  // ============================================================
+  // toggleProviderBody — "更换 Key"/"展开" 按钮
+  // ============================================================
+  function toggleProviderBody(row, btn) {
+    const body = row.querySelector(".provider-body");
+    const replaceSection = row.querySelector(".key-replace-section");
+    if (body.classList.contains("hidden")) {
+      body.classList.remove("hidden");
+      btn.textContent = "折叠";
+      // 已配置的 provider: 自动展开"更换 Key"输入区
+      if (replaceSection) replaceSection.classList.remove("hidden");
+    } else {
+      body.classList.add("hidden");
+      btn.textContent = row.querySelector(".key-display") ? "更换 Key" : "展开";
+      if (replaceSection) replaceSection.classList.add("hidden");
+    }
+  }
+
+  // ============================================================
+  // S5: saveProviderKey — 单 provider 保存 Key (立即生效)
+  // ============================================================
+  async function saveProviderKey(providerName, row) {
+    const input = row.querySelector(`input[name="${CSS.escape(providerName)}_api_key"]`);
+    if (!input) return;
+    const keyValue = input.value.trim();
+    if (!keyValue) {
+      showMsg("请输入 API Key", "warn");
+      input.focus();
+      return;
+    }
+    if (keyValue === "__CLEAR__") {
+      showMsg("Key 不能为 __CLEAR__ 保留字", "err");
+      return;
+    }
+
+    const btn = row.querySelector(".save-key-btn");
+    const original = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = "保存中…";
+
+    try {
+      const body = {
+        llm_provider: activeProvider,
+        [`${providerName}_api_key`]: keyValue,
+      };
+      const r = await fetch("/api/settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await r.json();
+      if (r.ok && data.ok) {
+        // Auto-activate (业界做法 — OpenAI/Anthropic/Linear):
+        // 若当前 active provider 未配置 Key，保存新 provider 的 Key 后自动切到它。
+        // 根除"配置了 SiliconFlow 但测试报 deepseek 未配置 Key"的死亡陷阱。
+        const activeProv = (current.llm.providers || []).find(
+          (p) => p.name === activeProvider,
+        );
+        const activeUnconfigured = !(activeProv && activeProv.configured);
+        if (providerName !== activeProvider && activeUnconfigured) {
+          showMsg(
+            `✓ ${display(providerName)} 的 Key 已保存，并自动设为当前提供商`,
+            "info",
+          );
+          await setActiveProvider(providerName, { silent: true });
+        } else {
+          showMsg(
+            `✓ ${display(providerName)} 的 Key 已保存并立即生效`,
+            "info",
+          );
+          // 用后端返回的 providers 列表刷新（避免 stale configured 标志）
+          if (Array.isArray(data.providers) && data.providers.length) {
+            current.llm.providers = data.providers;
+          }
+          renderProviders(current.llm.providers || [], activeProvider);
+        }
+      } else {
+        const errMsg = data.detail?.errors?.join("; ") || data.detail || data.message || "保存失败";
+        showMsg(`✗ ${errMsg}`, "err");
+      }
+    } catch (err) {
+      showMsg(`✗ 保存失败: ${err.message}`, "err");
+      log.err("save provider key failed", err);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = original;
+    }
+  }
+
+  // ============================================================
+  // S5: clearProviderKey — 单 provider 清除 Key (立即生效)
+  // ============================================================
+  async function clearProviderKey(providerName, row) {
+    const ok = await window.PBC.confirmDialog({
+      title: `确认清除 ${display(providerName)} 的 API Key？`,
+      message: "Key 将从配置文件中删除，立即生效。",
+      confirmText: "确认清除",
+      cancelText: "取消",
+      danger: true,
+    });
+    if (!ok) return;
+
+    try {
+      const body = {
+        llm_provider: activeProvider,
+        [`${providerName}_clear_key`]: true,
+      };
+      const r = await fetch("/api/settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await r.json();
+      if (r.ok && data.ok) {
+        showMsg(`✓ ${display(providerName)} 的 Key 已清除`, "info");
+        await load();
+      } else {
+        showMsg(`✗ 清除失败: ${data.detail || data.message}`, "err");
+      }
+    } catch (err) {
+      showMsg(`✗ 清除失败: ${err.message}`, "err");
+      log.err("clear provider key failed", err);
+    }
+  }
+
+  // ============================================================
+  // S4+S8: testProvider — 单独测试指定 provider
+  // ============================================================
+  async function testProvider(providerName, row) {
+    const resultEl = row.querySelector(".provider-test-result");
+    if (!resultEl) return;
+
+    resultEl.classList.remove("hidden");
+    resultEl.innerHTML = `<span class="muted">检测中…</span>`;
+
+    try {
+      const r = await fetch("/api/settings/test_provider", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider: providerName }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (r.ok && data.ok) {
+        const latency = data.latency_ms ? ` ${data.latency_ms}ms` : "";
+        resultEl.innerHTML = `<span class="badge-ok">✓ 连通正常${latency} · 模型: ${esc(data.model || "")}</span>`;
+      } else {
+        // 非 200 (如 403 Forbidden) 或 ok=false — 优先显示后端 reason，其次 detail
+        const reason = data.reason || data.detail || `HTTP ${r.status}`;
+        if (reason.includes("not configured") || reason.includes("API key")) {
+          resultEl.innerHTML = `<span class="badge-no">✗ 未配置 API Key — 请点击"更换 Key"或"展开"输入</span>`;
+        } else {
+          resultEl.innerHTML = `<span class="badge-no">✗ ${esc(reason)}</span>`;
+        }
+      }
+    } catch (err) {
+      resultEl.innerHTML = `<span class="badge-no">✗ 请求失败: ${esc(err.message)}</span>`;
+      log.err("test provider failed", err);
+    }
+  }
+
+  // ============================================================
+  // removeProvider — 从注册表移除 (仅前端, 保存通用设置时持久化)
+  // ============================================================
+  async function removeProvider(name, row) {
+    const ok = await window.PBC.confirmDialog({
+      title: `确认移除 ${display(name)} 提供商？`,
+      message: "（配置文件将保留，仅从 UI 列表移除）",
+      confirmText: "确认",
+      cancelText: "取消",
+      danger: true,
+    });
+    if (!ok) return;
+    row.remove();
+    current.llm.providers = (current.llm.providers || []).filter(p => p.name !== name);
+    if (activeProvider === name) {
+      const firstRow = document.querySelector(".provider-row");
+      if (firstRow) await setActiveProvider(firstRow.dataset.provider);
+    }
+  }
+
+  // ============================================================
+  // 加载设置 — 初始渲染
+  // ============================================================
   async function load() {
     const r = await fetch("/api/settings");
     current = await r.json();
     log("settings loaded", current);
-    document.getElementById("env-path").textContent = current.env_file;
 
-    // LLM — render dynamic provider list
-    activeProvider = current.llm.provider;
-    renderProviders(current.llm.providers || [], activeProvider);
-    document.getElementById("llm-active-name").textContent =
-      display(activeProvider);
-    document.getElementById("llm-provider-badge").textContent =
-      display(activeProvider);
+    activeProvider = current.llm.active_provider || current.llm.provider;
 
-    // OCR — unchanged
+    // Auto-activate 迁移（修复存量配置的死亡陷阱）：
+    // 若当前 active provider 未配置 Key，但另一个 provider 已配置 Key，
+    // 自动切换到第一个已配置的 provider（持久化 + 热更新）。
+    // 场景：用户之前保存了 SiliconFlow Key，但 active 仍是默认 deepseek（无 Key），
+    // 导致测试连接报 "API key not configured"。此处静默修复，无需用户手动操作。
+    const providers = current.llm.providers || [];
+    const activeProv = providers.find((p) => p.name === activeProvider);
+    if (activeProv && !activeProv.configured) {
+      const firstConfigured = providers.find(
+        (p) => p.configured && p.name !== activeProvider,
+      );
+      if (firstConfigured) {
+        log(
+          "auto-activating first configured provider (active is unconfigured)",
+          { from: activeProvider, to: firstConfigured.name },
+        );
+        // 先渲染，再静默切换（切换会重新渲染）
+        renderProviders(providers, activeProvider);
+        await setActiveProvider(firstConfigured.name, {
+          silent: false,
+          autoReason: `${display(activeProvider)} 未配置，已自动切换`,
+        });
+        // setActiveProvider 已重新渲染 + 更新 badge，跳过下面的重复渲染
+        // 但仍需填充 OCR 表单
+        fillOcrForm();
+        return;
+      }
+    }
+
+    renderProviders(providers, activeProvider);
+    fillOcrForm();
+  }
+
+  // OCR 表单填充（从 load() 抽出，auto-activate 路径也复用）
+  function fillOcrForm() {
+    const badgeEl = document.getElementById("llm-provider-badge");
+    if (badgeEl) badgeEl.textContent = display(activeProvider);
+
+    // OCR
     setSeg("ocr-backend-seg", current.ocr.backend);
     showBackendForm(current.ocr.backend);
     document.getElementById("paddle_ocr_token").placeholder =
@@ -224,6 +526,8 @@
       current.ocr.mineru.enable_formula;
     document.getElementById("mineru_enable_table").checked =
       current.ocr.mineru.enable_table;
+    document.getElementById("ocr_slices").value =
+      current.ocr.slices != null ? current.ocr.slices : 1;
     document.getElementById("mineru-status").innerHTML = statusBadge(
       current.ocr.mineru.configured,
     );
@@ -237,7 +541,9 @@
     });
   }
 
+  // ============================================================
   // OCR backend segment switch
+  // ============================================================
   document.getElementById("ocr-backend-seg").addEventListener("click", (e) => {
     if (e.target.dataset.value) {
       setSeg("ocr-backend-seg", e.target.dataset.value);
@@ -247,34 +553,77 @@
     }
   });
 
-  // Add new provider — show custom input when "__custom" is selected
+  // ============================================================
+  // S6: OCR token 清除按钮 (PaddleOCR + MinerU) — 立即生效
+  // ============================================================
+  document.addEventListener("click", async (e) => {
+    const btn = e.target.closest(".ocr-clear-btn");
+    if (!btn) return;
+    const target = btn.dataset.target; // "paddle_ocr_token" or "mineru_token"
+    const ok = await window.PBC.confirmDialog({
+      title: "确认清除 OCR Token？",
+      message: "Token 将从配置文件中删除，立即生效。",
+      confirmText: "确认清除",
+      cancelText: "取消",
+      danger: true,
+    });
+    if (!ok) return;
+    try {
+      // 发送 __CLEAR__ 标记，后端识别后写入空字符串
+      const body = { llm_provider: activeProvider, [target]: "__CLEAR__" };
+      const r = await fetch("/api/settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await r.json();
+      if (r.ok && data.ok) {
+        showMsg(`✓ OCR Token 已清除（立即生效）`, "info");
+        await load();
+      } else {
+        showMsg(`✗ 清除失败: ${data.detail || data.message}`, "err");
+      }
+    } catch (err) {
+      showMsg(`✗ 清除失败: ${err.message}`, "err");
+      log.err("OCR clear failed", err);
+    }
+  });
+
+  // ============================================================
+  // Add provider — toggle form visibility
+  // ============================================================
+  document.getElementById("llm-add-toggle").addEventListener("click", () => {
+    document.getElementById("llm-add-form").classList.remove("hidden");
+    document.getElementById("llm-add-toggle").classList.add("hidden");
+    document.getElementById("llm-add-select").focus();
+  });
+
+  document.getElementById("llm-add-cancel").addEventListener("click", () => {
+    document.getElementById("llm-add-form").classList.add("hidden");
+    document.getElementById("llm-add-toggle").classList.remove("hidden");
+    document.getElementById("llm-add-select").value = "";
+    document.getElementById("llm-add-custom").value = "";
+    document.getElementById("llm-add-custom").classList.add("hidden");
+  });
+
   document.getElementById("llm-add-select").addEventListener("change", (e) => {
     const custom = document.getElementById("llm-add-custom");
-    if (e.target.value === "__custom") {
-      custom.classList.remove("hidden");
-      custom.focus();
-    } else {
-      custom.classList.add("hidden");
-    }
+    custom.classList.toggle("hidden", e.target.value !== "__custom");
   });
 
   document.getElementById("llm-add-btn").addEventListener("click", () => {
     const select = document.getElementById("llm-add-select");
     const custom = document.getElementById("llm-add-custom");
     let name = select.value;
-    if (name === "__custom") {
-      name = custom.value.trim().toLowerCase();
-    }
+    if (name === "__custom") name = custom.value.trim().toLowerCase();
     if (!name) {
-      showMsg("请选择或输入 provider 名称", "warn");
+      showMsg("请选择或输入提供商名称", "warn");
       return;
     }
-    // Validate: only [a-z0-9_-], 2-32 chars (mirror backend rule)
     if (!/^[a-z0-9_-]{2,32}$/.test(name)) {
-      showMsg("名称只能含小写字母、数字、下划线、连字符（2-32 字符）", "err");
+      showMsg("名称格式：小写字母、数字、_ 或 -（2-32 字符）", "err");
       return;
     }
-    // Don't add if already exists
     const existing = document.querySelector(
       `.provider-row[data-provider="${CSS.escape(name)}"]`,
     );
@@ -283,8 +632,8 @@
       return;
     }
 
-    // Default protocol per known providers
-    const defaultProtocol = name === "anthropic" ? "anthropic" : "openai";
+    const defaultProtocol =
+      name === "anthropic" || name === "anthropictest" ? "anthropic" : "openai";
     const defaultBaseUrls = {
       glm: "https://open.bigmodel.cn/api/paas/v4",
       kimi: "https://api.moonshot.cn/v1",
@@ -309,55 +658,74 @@
       model: defaultModels[name] || "",
       configured: false,
     };
-    // Add to current.providers and re-render
     current.llm.providers = current.llm.providers || [];
     current.llm.providers.push(newProv);
-    renderProviders(current.llm.providers, activeProvider);
-    // Track that this is a "new" provider to add via llm_providers_add
     pendingAdds.add(name);
-    // Reset selector
+    renderProviders(current.llm.providers, activeProvider);
+    // Reset form
     select.value = "";
     custom.value = "";
     custom.classList.add("hidden");
-    showMsg(`已添加 ${display(name)}，填写后点击保存`, "info");
+    document.getElementById("llm-add-form").classList.add("hidden");
+    document.getElementById("llm-add-toggle").classList.remove("hidden");
+    showMsg(`已添加 ${display(name)} — 请填写字段并保存 Key`, "info");
   });
 
-  // Submit — collect all fields, including dynamic <provider>_<field>
+  // ============================================================
+  // S7: 底部"保存通用设置" — 仅保存 OCR backend / enable_* 等通用字段
+  // (per-provider Key 已由"保存此 Key"按钮即时保存)
+  // ============================================================
   document
     .getElementById("settings-form")
     .addEventListener("submit", async (e) => {
       e.preventDefault();
       const fd = new FormData(e.target);
       const body = {};
-      // Skip empty values (placeholder-driven UX)
+
+      // 收集所有非空字段(排除 per-provider api_key — 已独立保存)
       for (const [k, v] of fd.entries()) {
-        if (v !== "") body[k] = v;
+        if (v === "") continue;
+        if (k.endsWith("_api_key")) continue; // per-provider Key 由独立按钮处理
+        body[k] = v;
       }
-      // Active provider
+
+      // 收集 per-provider 的 protocol/base_url/model (允许批量更新)
+      for (const [k, v] of fd.entries()) {
+        if (k.endsWith("_protocol") || k.endsWith("_base_url") || k.endsWith("_model")) {
+          if (v !== "") body[k] = v;
+        }
+      }
+
       body.llm_provider = activeProvider;
-      // Pending new providers — tell backend to register them
-      if (pendingAdds.size > 0) {
+      if (pendingAdds.size > 0)
         body.llm_providers_add = Array.from(pendingAdds).join(",");
-      }
-      // OCR backend
-      body.ocr_backend = document.querySelector(
+
+      // OCR 通用设置
+      const activeSegBtn = document.querySelector(
         "#ocr-backend-seg button.active",
-      ).dataset.value;
-      // bool fields
+      );
+      if (!activeSegBtn) {
+        showMsg("请先选择 OCR 后端", "err");
+        return;
+      }
+      body.ocr_backend = activeSegBtn.dataset.value;
       body.mineru_enable_formula = document.getElementById(
         "mineru_enable_formula",
       ).checked;
       body.mineru_enable_table = document.getElementById(
         "mineru_enable_table",
       ).checked;
-      log("saving settings", Object.keys(body));
+      const slicesEl = document.getElementById("ocr_slices");
+      if (slicesEl) {
+        const n = parseInt(slicesEl.value, 10);
+        body.ocr_slices = Number.isFinite(n) && n >= 1 ? n : 1;
+      }
+
+      log("saving general settings", Object.keys(body));
       const btn = document.getElementById("save-btn");
       const original = btn.textContent;
       btn.disabled = true;
       btn.textContent = "保存中…";
-      const msg = document.getElementById("save-msg");
-      msg.textContent = "保存中…";
-      msg.style.color = "hsl(var(--muted-foreground))";
       try {
         const r = await fetch("/api/settings", {
           method: "POST",
@@ -366,10 +734,10 @@
         });
         const data = await r.json();
         if (r.ok && data.ok) {
-          msg.textContent = "✓ " + data.message;
-          msg.style.color = "hsl(142 71% 35%)";
+          showMsg("✓ " + data.message, "info");
           log("save ok", data);
           pendingAdds.clear();
+          // 重新加载所有状态
           setTimeout(() => load(), 500);
         } else {
           const errMsg =
@@ -380,8 +748,7 @@
           throw new Error(errMsg);
         }
       } catch (err) {
-        msg.textContent = "✗ " + err.message;
-        msg.style.color = "hsl(0 84% 50%)";
+        showMsg(`✗ ${err.message}`, "err");
         log.err("save failed", err);
       } finally {
         btn.disabled = false;
@@ -397,43 +764,77 @@
         ? "hsl(0 84% 50%)"
         : level === "warn"
           ? "hsl(38 92% 50%)"
-          : "hsl(var(--muted-foreground))";
+          : level === "info"
+            ? "hsl(142 71% 35%)"
+            : "hsl(var(--muted-foreground))";
   }
 
-  // === 测试连接按钮 ===
+  // ============================================================
+  // 底部"测试连接"按钮 — 并行测试 OCR + 所有 LLM provider
+  // (不再只测 active；逐个显示结果，避免"配了 SiliconFlow 却报
+  //  deepseek 未配置 Key"的死亡陷阱)
+  // ============================================================
   document
     .getElementById("test-conn-btn")
     ?.addEventListener("click", async (e) => {
       const btn = e.currentTarget;
       const originalText = btn.textContent;
       btn.disabled = true;
-      btn.textContent = "测试中…";
-      const msg = document.getElementById("save-msg");
-      msg.textContent = "正在探测 OCR 与 LLM 服务…";
-      msg.style.color = "hsl(var(--muted-foreground))";
+      btn.textContent = "检测中…";
+      const providers = current.llm.providers || [];
+      showMsg(`正在检测 OCR + ${providers.length} 个 LLM 提供商…`, "info");
       try {
-        const r = await fetch("/api/health/downstream");
-        const data = await r.json();
-        log("health probe result", data);
-        if (data.all_ok) {
-          const ocrLatency = data.ocr.latency_ms
-            ? ` ${data.ocr.latency_ms}ms`
-            : "";
-          const llmLatency = data.llm.latency_ms
-            ? ` ${data.llm.latency_ms}ms`
-            : "";
-          msg.textContent = `✓ OCR(${data.ocr_backend})${ocrLatency} · LLM(${data.llm.provider})${llmLatency}`;
-          msg.style.color = "hsl(142 71% 35%)";
+        // 并行: downstream (用于 OCR) + 每个 provider 的 test_provider
+        const [healthData, ...providerTests] = await Promise.all([
+          fetch("/api/health/downstream").then((r) => r.json()),
+          ...providers.map(async (p) => {
+            const r = await fetch("/api/settings/test_provider", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ provider: p.name }),
+            });
+            const data = await r.json().catch(() => ({}));
+            return { name: p.name, ok: r.ok && data.ok, data };
+          }),
+        ]);
+        log("health probe result", healthData);
+        log("provider test results", providerTests);
+
+        const parts = [];
+        // OCR
+        const ocr = healthData.ocr || {};
+        const ocrLat = ocr.latency_ms ? ` ${ocr.latency_ms}ms` : "";
+        if (ocr.ok) {
+          parts.push(`✓ OCR(${ocrDisplay(healthData.ocr_backend)})${ocrLat}`);
         } else {
-          const parts = [];
-          if (!data.ocr.ok) parts.push(`OCR: ${data.ocr.reason || "失败"}`);
-          if (!data.llm.ok) parts.push(`LLM: ${data.llm.reason || "失败"}`);
-          msg.textContent = "✗ " + parts.join(" · ");
-          msg.style.color = "hsl(0 84% 50%)";
+          parts.push(`✗ OCR(${ocrDisplay(healthData.ocr_backend)}): ${ocr.reason || "失败"}`);
         }
+        // LLM providers: 已配置/连通的排前
+        const sorted = [...providerTests].sort((a, b) => {
+          const ac = a.ok ? 0 : 1;
+          const bc = b.ok ? 0 : 1;
+          return ac - bc;
+        });
+        let llmAnyOk = false;
+        for (const { name, ok, data } of sorted) {
+          const tag = name === activeProvider ? "·当前" : "";
+          if (ok) {
+            llmAnyOk = true;
+            const lat = data.latency_ms ? ` ${data.latency_ms}ms` : "";
+            parts.push(`✓ ${display(name)}${lat}${tag}`);
+          } else {
+            const reason = data.reason || data.detail || "失败";
+            if (reason.includes("not configured") || reason.includes("API key")) {
+              parts.push(`○ ${display(name)}:未配置${tag}`);
+            } else {
+              parts.push(`✗ ${display(name)}:${reason}${tag}`);
+            }
+          }
+        }
+        const allOk = ocr.ok && llmAnyOk;
+        showMsg(parts.join(" | "), allOk ? "info" : "err");
       } catch (err) {
-        msg.textContent = "✗ 探测失败: " + err.message;
-        msg.style.color = "hsl(0 84% 50%)";
+        showMsg(`✗ 检测失败: ${err.message}`, "err");
         log.err("health probe failed", err);
       } finally {
         btn.disabled = false;

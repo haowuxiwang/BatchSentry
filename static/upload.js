@@ -113,6 +113,20 @@
       setStatus("文件超过 200MB 上限", "err");
       return;
     }
+    // 前端预检：未配置 LLM 时引导用户先去设置（与后端 400 拦截双保险）
+    if (ctx.needs_setup) {
+      log.warn("uploadFile — blocked (needs_setup)");
+      confirmDialog({
+        title: "未配置 LLM 服务商",
+        message:
+          "上传后无法进行结构化分析，请先前往「设置」完成 API Key 配置。",
+        confirmText: "前往设置",
+        cancelText: "取消",
+      }).then((ok) => {
+        if (ok) window.location.href = "/settings";
+      });
+      return;
+    }
     const mb = (file.size / 1024 / 1024).toFixed(1);
     setStatus(`上传中 ${file.name} (${mb} MB)...`, "info");
     const fd = new FormData();
@@ -125,7 +139,7 @@
     });
 
     // 禁用上传区域，防止重复提交
-    const dropZone = document.getElementById("drop-zone");
+    const dropZone = document.getElementById("upload-area");
     if (dropZone) dropZone.style.pointerEvents = "none";
 
     // 使用 XHR 替代 fetch，以获取 upload progress 事件
@@ -189,7 +203,14 @@
         }
       } else {
         log.err("uploadFile — HTTP error", xhr.status, xhr.responseText);
-        setStatus(`上传失败: HTTP ${xhr.status}`, "err");
+        // robustness-C7: 展示后端返回的 detail（如"未配置 LLM/OCR"等中文
+        // 友好提示），此前仅显示状态码，用户无法得知具体原因。
+        let detail = "";
+        try {
+          const body = JSON.parse(xhr.responseText || "{}");
+          if (body && body.detail) detail = `: ${String(body.detail)}`;
+        } catch (_) { /* 非 JSON 响应（网关/代理错误），忽略 */ }
+        setStatus(`上传失败: HTTP ${xhr.status}${detail}`, "err");
         if (progressBar) progressBar.classList.add("hidden");
         if (dropZone) dropZone.style.pointerEvents = "";
       }
@@ -205,52 +226,691 @@
     xhr.send(fd);
   }
 
-  // === Job 归档/删除 ===
-  async function archiveJob(jobId, filename) {
-    if (
-      !confirm(
-        `归档 "${filename}"？\n\n归档后将从列表移除，但数据保留，可在归档列表查看。`,
-      )
-    )
-      return;
-    log("archiveJob", { jobId, filename });
+  // === Job 历史记录 AJAX 加载 ===
+
+  const STATUS_ZH = {
+    pending: "待处理",
+    confirmed: "已确认",
+    rejected: "已拒绝",
+    corrected: "已修正",
+    queued: "排队中",
+    processing: "处理中",
+    review: "可复核",
+    partial_review: "部分可复核",
+    error: "出错",
+    cancelled: "已取消",
+    cancelling: "取消中",
+    ocr_running: "识别中",
+    ocr_done: "识别完成",
+    analyzing: "分析中",
+    done: "已完成",
+    archived: "已归档",
+  };
+
+  function statusDotClass(st) {
+    if (["review", "partial_review", "done"].includes(st)) return "bg-success";
+    if (st === "error") return "bg-destructive";
+    if (["cancelled", "cancelling", "archived"].includes(st))
+      return "bg-muted-foreground/40";
+    return "bg-info";
+  }
+
+  function esc(s) {
+    return String(s == null ? "" : s)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }
+
+  let currentPage = 1;
+  let totalPages = 1;
+  let totalJobs = 0;
+  // 翻页竞态守卫：每次 loadHistory 递增 token，仅最后一次请求的结果生效。
+  // 否则快速点 "下一页→上一页" 时，先发的 page 2 响应可能后到，覆盖 page 1。
+  let loadHistoryToken = 0;
+
+  async function loadHistory(page) {
+    const token = ++loadHistoryToken;
+    currentPage = page;
+    const listEl = document.getElementById("history-list");
+    const pagEl = document.getElementById("history-pagination");
+    const countEl = document.getElementById("history-count");
+    listEl.innerHTML =
+      '<li class="px-5 py-8 text-center text-[12px] text-muted-foreground">加载中…</li>';
+    pagEl.classList.add("hidden");
     try {
-      const r = await fetch(`/api/jobs/${jobId}/archive`, { method: "POST" });
+      const r = await fetch(`/api/jobs?page=${page}&page_size=20`);
       if (!r.ok) throw new Error("HTTP " + r.status);
       const data = await r.json();
-      log("archiveJob — success", data);
-      setStatus(`已归档 ${filename}`, "ok");
-      setTimeout(() => location.reload(), 800);
+      // 竞态守卫：若期间又发起了新请求，丢弃本次结果
+      if (token !== loadHistoryToken) {
+        log("loadHistory — stale response dropped", { page, token });
+        return;
+      }
+      totalPages = data.total_pages || 1;
+      totalJobs = data.total_jobs || 0;
+      countEl.textContent = `${totalJobs} 份`;
+      log("loadHistory", { page, jobs: data.jobs.length, totalJobs });
+
+      if (data.jobs.length === 0) {
+        listEl.innerHTML =
+          '<li class="px-5 py-12 text-center text-[12px] text-muted-foreground">暂无历史记录</li>';
+        return;
+      }
+      listEl.innerHTML = "";
+      const frag = document.createDocumentFragment();
+      data.jobs.forEach((job, i) => frag.appendChild(renderJobRow(job, i)));
+      listEl.appendChild(frag);
+      renderPagination();
     } catch (err) {
-      log.err("archiveJob failed", err);
-      setStatus(`归档失败: ${err}`, "err");
+      if (token !== loadHistoryToken) return; // 同样丢弃过期错误
+      log.err("loadHistory failed", err);
+      listEl.innerHTML = `<li class="px-5 py-8 text-center text-[12px] text-destructive">加载失败: ${esc(err.message)}</li>`;
     }
   }
 
-  async function deleteJob(jobId, filename) {
-    const sure = confirm(
-      `彻底删除 "${filename}"？\n\n⚠️ 此操作不可恢复，将删除：\n• PDF 原文件\n• 所有 OCR 数据\n• 所有 findings\n• 审计日志`,
-    );
-    if (!sure) return;
-    log("deleteJob", { jobId, filename });
+  function renderJobRow(job, i) {
+    const st = job.status;
+    const stZh = STATUS_ZH[st] || st;
+    const dotCls = statusDotClass(st);
+    const canArchive = [
+      "review",
+      "partial_review",
+      "error",
+      "cancelled",
+      "done",
+    ].includes(st);
+    // 与后端 _ACTIVE_STATUSES 对齐：运行中状态禁用删除（防孤儿 pipeline task）
+    const ACTIVE_STATUSES = [
+      "pending",
+      "ocr_running",
+      "ocr_done",
+      "analyzing",
+      "cancelling",
+    ];
+    const isActive = ACTIVE_STATUSES.includes(st);
+    // Security: build DOM via createElement + textContent to fully neutralize
+    // XSS from job.id / job.filename.  Previous version used innerHTML with
+    // inline onclick="archiveJob('${esc(...)}')" — esc() encoded ' as &#39;
+    // but the HTML parser decodes entities BEFORE the JS engine parses the
+    // attribute, so a filename like `x');alert(document.cookie);//.pdf`
+    // broke out of the JS string literal.  In Electron this would be RCE.
+    const li = document.createElement("li");
+    li.className = "stagger-in group hover:bg-muted/20 transition-colors";
+    li.style.setProperty("--i", String(i + 3));
+    li.dataset.jobId = job.id;
+    li.dataset.filename = job.filename;
+    li.dataset.status = st;
+
+    const row = document.createElement("div");
+    row.className = "flex items-center gap-4 px-5 py-3.5";
+
+    const link = document.createElement("a");
+    link.href = `/jobs/${encodeURIComponent(job.id)}/review`;
+    link.className = "flex-1 min-w-0 flex items-center gap-4";
+
+    const info = document.createElement("div");
+    info.className = "flex-1 min-w-0";
+    const titleEl = document.createElement("div");
+    titleEl.className = "text-[13px] font-medium truncate";
+    titleEl.textContent = job.filename;
+    const metaEl = document.createElement("div");
+    metaEl.className = "text-[11px] text-muted-foreground mt-0.5 tabular-nums";
+    metaEl.textContent = `${job.id} · ${job.created_at}`;
+    info.appendChild(titleEl);
+    info.appendChild(metaEl);
+
+    const statusWrap = document.createElement("div");
+    statusWrap.className = "flex items-center gap-3 shrink-0";
+    const statusEl = document.createElement("span");
+    statusEl.className =
+      "inline-flex items-center gap-1.5 text-[11px] text-muted-foreground";
+    const dot = document.createElement("span");
+    dot.className = `w-1.5 h-1.5 rounded-full ${dotCls}`;
+    statusEl.appendChild(dot);
+    statusEl.appendChild(document.createTextNode(stZh));
+    const pagesEl = document.createElement("span");
+    pagesEl.className = "text-[11px] text-muted-foreground/70 tabular-nums";
+    // OCR 进行中且有实时进度时显示 "OCR 12/51"（后端 jobs.ocr_progress）
+    const prog = job.ocr_progress || {};
+    if ((st === "ocr_running" || st === "ocr_done") && prog.total > 0) {
+      pagesEl.textContent = `OCR ${prog.done}/${prog.total}`;
+    } else {
+      pagesEl.textContent = `${job.total_pages || "?"} 页`;
+    }
+    statusWrap.appendChild(statusEl);
+    statusWrap.appendChild(pagesEl);
+
+    link.appendChild(info);
+    link.appendChild(statusWrap);
+
+    const actions = document.createElement("div");
+    actions.className =
+      "flex items-center gap-1 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity";
+
+    const archiveBtn = document.createElement("button");
+    archiveBtn.type = "button";
+    archiveBtn.textContent = "归档";
+    archiveBtn.className = `btn-press text-[11px] px-2 py-1 rounded ${canArchive ? "text-muted-foreground hover:text-foreground hover:bg-muted" : "text-muted-foreground/30 cursor-not-allowed"}`;
+    archiveBtn.title = canArchive
+      ? "归档（保留数据，从列表移除）"
+      : "任务处理中，无法归档";
+    archiveBtn.disabled = !canArchive;
+    archiveBtn.dataset.action = "archive";
+
+    const deleteBtn = document.createElement("button");
+    deleteBtn.type = "button";
+    deleteBtn.textContent = "删除";
+    // 运行中任务（pending/analyzing 等）：禁用删除，避免孤儿 pipeline task
+    // 与归档按钮 canArchive 逻辑对齐，hover tooltip 说明原因和操作路径
+    if (isActive) {
+      deleteBtn.className =
+        "btn-press text-[11px] px-2 py-1 rounded text-muted-foreground/30 cursor-not-allowed";
+      deleteBtn.title = `任务${stZh}中，请先取消并等待进入终态后再删除`;
+      deleteBtn.disabled = true;
+    } else {
+      deleteBtn.className =
+        "btn-press text-[11px] px-2 py-1 rounded text-muted-foreground/60 hover:text-destructive hover:bg-destructive/5 transition-colors";
+      deleteBtn.title = "彻底删除（含 PDF 文件，不可恢复）";
+    }
+    deleteBtn.dataset.action = "delete";
+
+    actions.appendChild(archiveBtn);
+    actions.appendChild(deleteBtn);
+
+    row.appendChild(link);
+    row.appendChild(actions);
+    li.appendChild(row);
+    return li;
+  }
+
+  function renderPagination() {
+    const pagEl = document.getElementById("history-pagination");
+    if (totalPages <= 1) {
+      pagEl.classList.add("hidden");
+      return;
+    }
+    pagEl.classList.remove("hidden");
+    const atFirst = currentPage <= 1;
+    const atLast = currentPage >= totalPages;
+    pagEl.innerHTML = `
+      <div class="flex items-center justify-between px-5 py-3 border-t border-border text-[11px] text-muted-foreground">
+        <span class="tabular-nums">第 ${currentPage} 页 / 共 ${totalPages} 页 · ${totalJobs} 份</span>
+        <div class="flex items-center gap-1">
+          <button onclick="goToPage(1)" ${atFirst ? "disabled" : ""}
+            class="btn-press focus-ring px-2 py-1 rounded ${atFirst ? "text-muted-foreground/30 cursor-not-allowed" : "hover:text-foreground hover:bg-muted/50 transition-colors"}">首页</button>
+          <button onclick="goToPage(${currentPage - 1})" ${atFirst ? "disabled" : ""}
+            class="btn-press focus-ring px-2 py-1 rounded ${atFirst ? "text-muted-foreground/30 cursor-not-allowed" : "hover:text-foreground hover:bg-muted/50 transition-colors"}">← 上一页</button>
+          <span class="px-2 py-1 tabular-nums text-foreground/70">${currentPage} / ${totalPages}</span>
+          <button onclick="goToPage(${currentPage + 1})" ${atLast ? "disabled" : ""}
+            class="btn-press focus-ring px-2 py-1 rounded ${atLast ? "text-muted-foreground/30 cursor-not-allowed" : "hover:text-foreground hover:bg-muted/50 transition-colors"}">下一页 →</button>
+          <button onclick="goToPage(${totalPages})" ${atLast ? "disabled" : ""}
+            class="btn-press focus-ring px-2 py-1 rounded ${atLast ? "text-muted-foreground/30 cursor-not-allowed" : "hover:text-foreground hover:bg-muted/50 transition-colors"}">末页</button>
+        </div>
+      </div>`;
+  }
+
+  window.goToPage = function (page) {
+    if (page < 1 || page > totalPages || page === currentPage) return;
+    loadHistory(page);
+  };
+
+  // === Toast 提示 ===
+  function showToast(msg, type = "info") {
+    let container = document.getElementById("toast-container");
+    if (!container) {
+      container = document.createElement("div");
+      container.id = "toast-container";
+      container.className = "fixed bottom-4 right-4 z-50 flex flex-col gap-2";
+      document.body.appendChild(container);
+    }
+    const color =
+      type === "ok"
+        ? "text-success"
+        : type === "err"
+          ? "text-destructive"
+          : "text-info";
+    const toast = document.createElement("div");
+    toast.className = `bg-card border border-border rounded-md px-4 py-2.5 text-[12px] ${color} shadow-md`;
+    toast.style.cssText = "animation: fade-in-up 0.2s ease-out both;";
+    toast.textContent = msg;
+    container.appendChild(toast);
+    setTimeout(() => {
+      toast.style.transition = "opacity 0.3s, transform 0.3s";
+      toast.style.opacity = "0";
+      toast.style.transform = "translateY(4px)";
+      setTimeout(() => toast.remove(), 300);
+    }, 3000);
+  }
+
+  // === Notion 风格确认弹窗（替代原生 confirm()）===
+  // 返回 Promise<boolean>，支持 Esc 取消 / Enter 确认 / 点击遮罩取消
+  // danger=true 时确认按钮用 destructive 色调（用于删除等不可恢复操作）
+  // statusBadge 可选：{ text, dotClass } — 在标题下方展示任务状态徽章
+  function confirmDialog({
+    title,
+    message = "",
+    confirmText = "确认",
+    cancelText = "取消",
+    danger = false,
+    statusBadge = null,
+  }) {
+    return new Promise((resolve) => {
+      let settled = false;
+      const settle = (val) => {
+        if (settled) return;
+        settled = true;
+        overlay.style.transition = "opacity 0.15s ease-out";
+        modal.style.transition =
+          "opacity 0.15s ease-out, transform 0.15s ease-out";
+        overlay.style.opacity = "0";
+        modal.style.transform = "scale(0.96)";
+        modal.style.opacity = "0";
+        setTimeout(() => {
+          overlay.remove();
+          document.removeEventListener("keydown", onKey);
+          document.body.style.overflow = "";
+          resolve(val);
+        }, 150);
+      };
+
+      const overlay = document.createElement("div");
+      overlay.className =
+        "fixed inset-0 z-[60] flex items-center justify-center px-4";
+      overlay.style.cssText =
+        "background: hsl(222 47% 11% / 0.32); backdrop-filter: blur(2px); animation: fade-in-up 0.15s ease-out both;";
+
+      const modal = document.createElement("div");
+      modal.className =
+        "bg-card border border-border rounded-lg w-full max-w-sm overflow-hidden";
+      modal.style.cssText =
+        "box-shadow: var(--shadow-strong); animation: pbc-modal-in 0.2s cubic-bezier(0.2, 0.9, 0.1, 1) both;";
+
+      const body = document.createElement("div");
+      body.className = "px-5 py-4";
+      const titleEl = document.createElement("div");
+      titleEl.className = "text-[14px] font-medium";
+      titleEl.textContent = title;
+      body.appendChild(titleEl);
+      // 状态徽章 — 展示任务当前状态，让用户预判操作后果
+      if (statusBadge) {
+        const badge = document.createElement("div");
+        badge.className =
+          "inline-flex items-center gap-1.5 mt-2 text-[11px] text-muted-foreground bg-muted/50 px-2 py-0.5 rounded";
+        const dot = document.createElement("span");
+        dot.className = `w-1.5 h-1.5 rounded-full ${statusBadge.dotClass}`;
+        badge.appendChild(dot);
+        badge.appendChild(
+          document.createTextNode(`当前状态：${statusBadge.text}`),
+        );
+        body.appendChild(badge);
+      }
+      if (message) {
+        const msgEl = document.createElement("div");
+        msgEl.className =
+          "text-[12px] text-muted-foreground mt-1.5 whitespace-pre-line leading-relaxed";
+        msgEl.textContent = message;
+        body.appendChild(msgEl);
+      }
+      modal.appendChild(body);
+
+      const footer = document.createElement("div");
+      footer.className =
+        "flex items-center justify-end gap-2 px-5 py-3 border-t border-border bg-muted/30";
+      const cancelBtn = document.createElement("button");
+      cancelBtn.type = "button";
+      cancelBtn.textContent = cancelText;
+      cancelBtn.className =
+        "btn-press focus-ring text-[12px] px-3 py-1.5 rounded text-muted-foreground hover:text-foreground";
+      const confirmBtn = document.createElement("button");
+      confirmBtn.type = "button";
+      confirmBtn.textContent = confirmText;
+      confirmBtn.className = danger
+        ? "btn-press focus-ring text-[12px] px-3 py-1.5 rounded bg-destructive text-destructive-foreground hover:bg-destructive/90 font-medium"
+        : "btn-press focus-ring text-[12px] px-3 py-1.5 rounded bg-primary text-primary-foreground hover:bg-primary/90 font-medium";
+      cancelBtn.addEventListener("click", () => settle(false));
+      confirmBtn.addEventListener("click", () => settle(true));
+      footer.appendChild(cancelBtn);
+      footer.appendChild(confirmBtn);
+      modal.appendChild(footer);
+
+      overlay.appendChild(modal);
+      // 点击遮罩空白处取消（点击 modal 本身不取消）
+      overlay.addEventListener("click", (e) => {
+        if (e.target === overlay) settle(false);
+      });
+      document.body.appendChild(overlay);
+      document.body.style.overflow = "hidden";
+
+      const onKey = (e) => {
+        if (e.key === "Escape") {
+          e.preventDefault();
+          settle(false);
+        } else if (e.key === "Enter") {
+          // 安全规范：Enter 行为跟随当前焦点。
+          // 焦点在按钮上时，让浏览器默认行为处理（button Enter → click），
+          // 这样危险操作默认聚焦 cancel，Enter 会触发 cancel 而非 confirm。
+          // 焦点不在按钮时（如刚打开未 Tab），非危险操作默认确认（用户期望），
+          // 危险操作默认取消（安全兜底）。
+          if (
+            document.activeElement === cancelBtn ||
+            document.activeElement === confirmBtn
+          ) {
+            return; // 不 preventDefault，让浏览器触发 button click
+          }
+          e.preventDefault();
+          settle(danger ? false : true);
+        }
+      };
+      document.addEventListener("keydown", onKey);
+
+      // 安全规范：危险操作默认聚焦"取消"按钮，防止回车误触删除
+      // （APG/Polaris/Material 3 一致规范）。用户需主动 Tab 到确认按钮
+      // 并按 Enter 才会确认，或鼠标点击确认按钮。
+      setTimeout(() => cancelBtn.focus(), 50);
+    });
+  }
+
+  // === Job 归档/删除 (事件委托，DOM 淡出) ===
+  // 用事件委托替代全局 window.archiveJob/deleteJob — 避免内联 onclick 字符串
+  // 拼接导致的 XSS 风险，且对动态渲染的 DOM 自然生效。
+  async function archiveJob(jobId, filename) {
+    const ok = await confirmDialog({
+      title: `归档 "${filename}"？`,
+      message: `归档后将从列表移除，但数据保留，可在下方"已归档"区查看。`,
+      confirmText: "归档",
+    });
+    if (!ok) return;
+    log("archiveJob", { jobId, filename });
     try {
-      const r = await fetch(`/api/jobs/${jobId}?keep_pdf=false`, {
-        method: "DELETE",
+      const r = await fetch(`/api/jobs/${encodeURIComponent(jobId)}/archive`, {
+        method: "POST",
       });
       if (!r.ok) throw new Error("HTTP " + r.status);
       const data = await r.json();
-      log("deleteJob — success", data);
-      setStatus(`已删除 ${filename}`, "ok");
-      setTimeout(() => location.reload(), 800);
+      log("archiveJob — success", data);
+      fadeOutJobRow(jobId);
+      showToast(`已归档 ${filename}`, "ok");
+      // Refresh archived list — only if already expanded (lazy load)
+      if (archivedLoaded) loadArchivedList();
+      else updateArchivedCount();
     } catch (err) {
-      log.err("deleteJob failed", err);
-      setStatus(`删除失败: ${err}`, "err");
+      log.err("archiveJob failed", err);
+      showToast(`归档失败: ${err.message}`, "err");
     }
   }
 
-  // 暴露到全局（onclick 处理器需要）
-  window.archiveJob = archiveJob;
-  window.deleteJob = deleteJob;
+  async function deleteJob(jobId, filename, status) {
+    const stZh = STATUS_ZH[status] || status || "";
+    const ok = await confirmDialog({
+      title: `彻底删除 "${filename}"？`,
+      message: `此操作不可恢复，将删除：\n• PDF 原文件\n• 所有 OCR 数据\n• 所有 findings\n• 审计日志`,
+      confirmText: "删除",
+      danger: true,
+      statusBadge: stZh
+        ? { text: stZh, dotClass: statusDotClass(status) }
+        : null,
+    });
+    if (!ok) return;
+    log("deleteJob", { jobId, filename });
+    try {
+      const r = await fetch(
+        `/api/jobs/${encodeURIComponent(jobId)}?keep_pdf=false`,
+        { method: "DELETE" },
+      );
+      if (!r.ok) {
+        // 解析后端 detail，409 时含可操作引导文案
+        let detail = "HTTP " + r.status;
+        try {
+          const errBody = await r.json();
+          detail = errBody.detail || detail;
+        } catch {}
+        throw new Error(detail);
+      }
+      const data = await r.json();
+      log("deleteJob — success", data);
+      fadeOutJobRow(jobId);
+      showToast(`已删除 ${filename}`, "ok");
+    } catch (err) {
+      log.err("deleteJob failed", err);
+      showToast(`删除失败: ${err.message}`, "err");
+    }
+  }
+
+  function fadeOutJobRow(jobId) {
+    const row = document.querySelector(
+      `#history-list li[data-job-id="${CSS.escape(jobId)}"]`,
+    );
+    if (!row) return;
+    row.style.transition = "opacity 0.3s, height 0.3s, padding 0.3s";
+    row.style.opacity = "0";
+    setTimeout(() => {
+      row.style.height = "0";
+      row.style.padding = "0";
+      row.style.overflow = "hidden";
+      setTimeout(() => {
+        row.remove();
+        // Update count
+        totalJobs = Math.max(0, totalJobs - 1);
+        document.getElementById("history-count").textContent =
+          `${totalJobs} 份`;
+        // If current page is now empty, reload — go back if page > 1,
+        // otherwise reload page 1 to show empty-state or new data.
+        const remaining = document.querySelectorAll(
+          "#history-list li[data-job-id]",
+        ).length;
+        if (remaining === 0) {
+          const targetPage = currentPage > 1 ? currentPage - 1 : 1;
+          loadHistory(targetPage);
+        }
+      }, 300);
+    }, 300);
+  }
+
+  // 事件委托 — 一个监听器处理所有动态按钮（archive/delete/unarchive/delete-archived）
+  function handleListClick(e) {
+    const btn = e.target.closest("button[data-action]");
+    if (!btn) return;
+    const li = btn.closest("li[data-job-id]");
+    if (!li) return;
+    const jobId = li.dataset.jobId;
+    const filename = li.dataset.filename || "";
+    const status = li.dataset.status || "";
+    const action = btn.dataset.action;
+    if (action === "archive") archiveJob(jobId, filename);
+    else if (action === "delete") deleteJob(jobId, filename, status);
+    else if (action === "unarchive") unarchiveJob(jobId, filename);
+    else if (action === "delete-archived") deleteArchivedJob(jobId, filename);
+  }
+
+  const historyListEl = document.getElementById("history-list");
+  if (historyListEl) historyListEl.addEventListener("click", handleListClick);
+  const archivedListEl = document.getElementById("archived-list");
+  if (archivedListEl) archivedListEl.addEventListener("click", handleListClick);
+
+  // === 已归档列表 ===
+  let archivedLoaded = false;
+  async function loadArchivedList() {
+    const listEl = document.getElementById("archived-list");
+    const countEl = document.getElementById("archived-count");
+    try {
+      const r = await fetch("/api/jobs/archived/list");
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      const data = await r.json();
+      countEl.textContent = data.count > 0 ? `(${data.count})` : "";
+      log("loadArchivedList", { count: data.count });
+      listEl.innerHTML = "";
+      if (data.archived.length === 0) {
+        const empty = document.createElement("li");
+        empty.className =
+          "px-5 py-6 text-center text-[12px] text-muted-foreground/60";
+        empty.textContent = "暂无归档记录";
+        listEl.appendChild(empty);
+        return;
+      }
+      const frag = document.createDocumentFragment();
+      for (const job of data.archived) frag.appendChild(renderArchivedRow(job));
+      listEl.appendChild(frag);
+    } catch (err) {
+      log.err("loadArchivedList failed", err);
+      listEl.innerHTML = "";
+      const errLi = document.createElement("li");
+      errLi.className = "px-5 py-6 text-center text-[12px] text-destructive";
+      errLi.textContent = "加载失败";
+      listEl.appendChild(errLi);
+    }
+  }
+
+  // 仅刷新计数（归档区未展开时使用，避免拉取完整列表）
+  async function updateArchivedCount() {
+    const countEl = document.getElementById("archived-count");
+    if (!countEl) return;
+    try {
+      const r = await fetch("/api/jobs/archived/list");
+      if (!r.ok) return;
+      const data = await r.json();
+      countEl.textContent = data.count > 0 ? `(${data.count})` : "";
+    } catch (err) {
+      // 静默失败 — count 是次要 UI
+      log.warn("updateArchivedCount failed", err);
+    }
+  }
+
+  function renderArchivedRow(job) {
+    const li = document.createElement("li");
+    li.className = "group hover:bg-muted/20 transition-colors";
+    li.dataset.jobId = job.id;
+    li.dataset.filename = job.filename;
+
+    const row = document.createElement("div");
+    row.className = "flex items-center gap-4 px-5 py-3";
+
+    const link = document.createElement("a");
+    link.href = `/jobs/${encodeURIComponent(job.id)}/review`;
+    link.className = "flex-1 min-w-0 flex items-center gap-4";
+
+    const info = document.createElement("div");
+    info.className = "flex-1 min-w-0";
+    const titleEl = document.createElement("div");
+    titleEl.className =
+      "text-[13px] font-medium truncate text-muted-foreground";
+    titleEl.textContent = job.filename;
+    const metaEl = document.createElement("div");
+    metaEl.className =
+      "text-[11px] text-muted-foreground/70 mt-0.5 tabular-nums";
+    metaEl.textContent = `${job.id} · ${job.created_at}`;
+    info.appendChild(titleEl);
+    info.appendChild(metaEl);
+
+    const pagesEl = document.createElement("span");
+    pagesEl.className = "text-[11px] text-muted-foreground/50";
+    pagesEl.textContent = `${job.total_pages || "?"} 页`;
+
+    link.appendChild(info);
+    link.appendChild(pagesEl);
+
+    const actions = document.createElement("div");
+    actions.className =
+      "flex items-center gap-1 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity";
+
+    const unarchiveBtn = document.createElement("button");
+    unarchiveBtn.type = "button";
+    unarchiveBtn.textContent = "恢复";
+    unarchiveBtn.className =
+      "btn-press text-[11px] px-2 py-1 rounded text-muted-foreground hover:text-foreground hover:bg-muted transition-colors";
+    unarchiveBtn.title = "取消归档，恢复到列表";
+    unarchiveBtn.dataset.action = "unarchive";
+
+    const deleteBtn = document.createElement("button");
+    deleteBtn.type = "button";
+    deleteBtn.textContent = "删除";
+    deleteBtn.className =
+      "btn-press text-[11px] px-2 py-1 rounded text-muted-foreground/60 hover:text-destructive hover:bg-destructive/5 transition-colors";
+    deleteBtn.title = "彻底删除（不可恢复）";
+    deleteBtn.dataset.action = "delete-archived";
+
+    actions.appendChild(unarchiveBtn);
+    actions.appendChild(deleteBtn);
+
+    row.appendChild(link);
+    row.appendChild(actions);
+    li.appendChild(row);
+    return li;
+  }
+
+  async function unarchiveJob(jobId, filename) {
+    const ok = await confirmDialog({
+      title: `恢复 "${filename}" 到历史记录？`,
+      message: "取消归档后，该记录将重新出现在历史记录列表中。",
+      confirmText: "恢复",
+    });
+    if (!ok) return;
+    log("unarchiveJob", { jobId, filename });
+    try {
+      const r = await fetch(
+        `/api/jobs/${encodeURIComponent(jobId)}/unarchive`,
+        { method: "POST" },
+      );
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      const data = await r.json();
+      log("unarchiveJob — success", data);
+      showToast(`已恢复 ${filename}`, "ok");
+      // Refresh both lists
+      loadHistory(currentPage);
+      loadArchivedList();
+    } catch (err) {
+      log.err("unarchiveJob failed", err);
+      showToast(`恢复失败: ${err.message}`, "err");
+    }
+  }
+
+  async function deleteArchivedJob(jobId, filename) {
+    const ok = await confirmDialog({
+      title: `彻底删除已归档的 "${filename}"？`,
+      message: "⚠️ 此操作不可恢复，将永久删除该记录及其所有关联数据。",
+      confirmText: "删除",
+      danger: true,
+    });
+    if (!ok) return;
+    log("deleteArchivedJob", { jobId, filename });
+    try {
+      const r = await fetch(
+        `/api/jobs/${encodeURIComponent(jobId)}?keep_pdf=false`,
+        { method: "DELETE" },
+      );
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      const data = await r.json();
+      log("deleteArchivedJob — success", data);
+      showToast(`已删除 ${filename}`, "ok");
+      // 直接 reload 列表 — 之前的 fade setTimeout(300) 会被 loadArchivedList
+      // 的 innerHTML 替换打断，导致视觉跳跃。改为直接重新渲染。
+      loadArchivedList();
+    } catch (err) {
+      log.err("deleteArchivedJob failed", err);
+      showToast(`删除失败: ${err.message}`, "err");
+    }
+  }
+
+  // === 归档区展开时加载 ===
+  const archivedDetails = document.querySelector("#archived-section details");
+  if (archivedDetails) {
+    archivedDetails.addEventListener("toggle", () => {
+      if (archivedDetails.open && !archivedLoaded) {
+        archivedLoaded = true;
+        loadArchivedList();
+      }
+    });
+  }
+
+  // === 上传成功后刷新列表 ===
+  window.refreshHistory = function () {
+    loadHistory(1);
+  };
+
+  // === 初始化：加载第一页 ===
+  loadHistory(1);
 
   // 捕获全局错误
   window.addEventListener("error", (e) => {
@@ -265,4 +925,11 @@
   window.addEventListener("unhandledrejection", (e) => {
     log.err("unhandledrejection", e.reason);
   });
+
+  // === 暴露共享原语到 window.PBC 命名空间 ===
+  // review.js / settings.js 通过 <script src="/static/confirm-dialog.js"> 加载
+  // 独立副本；upload.html 不引入该文件，故在此导出本页定义的 confirmDialog，
+  // 供未来跨页面复用（showToast 为本页私有，未导出）。
+  window.PBC = window.PBC || {};
+  window.PBC.confirmDialog = confirmDialog;
 })();

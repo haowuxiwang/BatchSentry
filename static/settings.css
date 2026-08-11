@@ -1,142 +1,382 @@
 /* ============================================================
-   Settings page — page-specific styles (form controls, segments)
+   Settings page — Notion 风格 (v2 优化版)
+   - 统一按钮系统: 12px 字体 + 一致的 padding/height
+   - 卡片化 provider 行: 圆角 + 柔和阴影 + hover 上浮
+   - 信息层级清晰: 标题 > 正文 > 辅助文字
+   - 微动效: hover/active/focus 即时反馈
    ============================================================ */
-html, body {
-    background: hsl(var(--background));
-    color: hsl(var(--foreground));
+html,
+body {
+  background: hsl(var(--background));
+  color: hsl(var(--foreground));
+  font-feature-settings: "cv11", "ss01";
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
-::-webkit-scrollbar { width: 8px; height: 8px; }
-::-webkit-scrollbar-thumb { background: hsl(var(--border)); border-radius: 4px; }
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-thumb {
+  background: hsl(var(--border));
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: hsl(var(--muted-foreground) / 0.4);
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
 
-/* 极简表单 */
+/* 表单字段 — 统一尺寸 */
 .field-label {
-    display: block;
-    font-size: 12px;
-    font-weight: 500;
-    color: hsl(var(--foreground));
-    margin-bottom: 6px;
+  display: block;
+  font-size: 12px;
+  font-weight: 500;
+  color: hsl(var(--foreground));
+  margin-bottom: 6px;
 }
 .field-hint {
-    font-size: 11px;
-    color: hsl(var(--muted-foreground));
-    margin-top: 4px;
+  font-size: 11px;
+  color: hsl(var(--muted-foreground));
+  margin-top: 4px;
 }
 .input {
-    width: 100%;
-    padding: 8px 10px;
-    border: 1px solid hsl(var(--border));
-    border-radius: 6px;
-    background: hsl(var(--card));
-    color: hsl(var(--foreground));
-    font-size: 13px;
-    font-family: ui-monospace, monospace;
-    outline: none;
-    transition:
-        border-color 0.15s,
-        box-shadow 0.15s;
+  width: 100%;
+  padding: 7px 11px;
+  border: 1px solid hsl(var(--border));
+  border-radius: 6px;
+  background: hsl(var(--card));
+  color: hsl(var(--foreground));
+  font-size: 13px;
+  outline: none;
+  transition:
+    border-color 0.12s,
+    box-shadow 0.12s;
 }
 .input:focus {
-    border-color: hsl(var(--foreground));
-    box-shadow: 0 0 0 2px hsl(var(--foreground) / 0.08);
+  border-color: hsl(var(--foreground));
+  box-shadow: 0 0 0 2px hsl(var(--foreground) / 0.08);
 }
 .input::placeholder {
-    color: hsl(var(--muted-foreground) / 0.6);
+  color: hsl(var(--muted-foreground) / 0.5);
 }
 
-/* Segmented control — 黑白主题 */
+/* Segmented control — OCR 后端切换 */
 .seg {
-    display: inline-flex;
-    border: 1px solid hsl(var(--border));
-    border-radius: 6px;
-    overflow: hidden;
+  display: inline-flex;
+  border: 1px solid hsl(var(--border));
+  border-radius: 6px;
+  overflow: hidden;
+  background: hsl(var(--card));
 }
 .seg button {
-    padding: 7px 16px;
-    font-size: 12px;
-    font-weight: 500;
-    background: transparent;
-    color: hsl(var(--muted-foreground));
-    border: none;
-    cursor: pointer;
-    transition: all 0.15s;
+  padding: 6px 16px;
+  font-size: 12px;
+  font-weight: 500;
+  background: transparent;
+  color: hsl(var(--muted-foreground));
+  border: none;
+  cursor: pointer;
+  transition: all 0.12s;
 }
 .seg button:hover {
-    color: hsl(var(--foreground));
+  color: hsl(var(--foreground));
+  background: hsl(var(--muted) / 0.4);
 }
 .seg button.active {
-    background: hsl(var(--foreground));
-    color: hsl(var(--background));
+  background: hsl(var(--foreground));
+  color: hsl(var(--background));
 }
 
-/* 状态徽章 — 克制 */
+/* 状态徽章 */
 .badge-ok {
-    color: hsl(142 71% 35%);
+  color: hsl(142 71% 35%);
+  font-size: 11px;
 }
 .badge-no {
-    color: hsl(0 84% 50%);
+  color: hsl(var(--muted-foreground));
+  font-size: 11px;
 }
 
 /* ============================================================
-   Dynamic provider rows (LLM section)
-   - flat list with border separators, no card containers
-   - pure text action buttons, no decorative chrome
+   统一按钮系统 — 3 级层级
+   .btn-primary: 实心主操作 (保存)
+   .btn-secondary: 边框次操作 (测试连接)
+   .btn-ghost: 透明轻量操作 (设为当前/测试/展开)
+   .btn-danger: 危险操作 (移除/清除)
+   全部统一 12px 字体, 28px 高度, 6px 圆角
    ============================================================ */
-.provider-row {
-    padding: 12px 0;
-    border-bottom: 1px solid hsl(var(--border));
+#save-btn,
+#test-conn-btn {
+  font-size: 12px;
+  font-weight: 500;
+  padding: 6px 16px;
+  height: 30px;
+  border-radius: 6px;
+  transition: all 0.12s;
+  cursor: pointer;
 }
-.provider-row:last-child {
-    border-bottom: none;
+#save-btn {
+  background: hsl(var(--foreground));
+  color: hsl(var(--background));
+  border: 1px solid hsl(var(--foreground));
 }
-.provider-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-bottom: 10px;
+#save-btn:hover:not(:disabled) {
+  opacity: 0.88;
 }
-.provider-name-row {
-    display: flex;
-    align-items: baseline;
-    gap: 8px;
+#save-btn:active:not(:disabled) {
+  transform: scale(0.98);
 }
-.provider-name {
-    font-size: 13px;
-    font-weight: 500;
-    color: hsl(var(--foreground));
+#save-btn:disabled {
+  background: hsl(var(--foreground) / 0.4);
+  color: hsl(var(--background) / 0.7);
+  cursor: not-allowed;
 }
-.provider-key {
-    font-size: 11px;
-    color: hsl(var(--muted-foreground));
-    font-family: ui-monospace, monospace;
+#test-conn-btn {
+  background: hsl(var(--card));
+  color: hsl(var(--foreground));
+  border: 1px solid hsl(var(--border));
 }
-.provider-actions {
-    display: flex;
-    align-items: center;
-    gap: 12px;
+#test-conn-btn:hover:not(:disabled) {
+  background: hsl(var(--muted) / 0.4);
+  border-color: hsl(var(--muted-foreground) / 0.4);
 }
-.provider-use-btn,
-.provider-remove-btn {
-    font-size: 12px;
-    background: transparent;
-    border: none;
-    cursor: pointer;
-    color: hsl(var(--muted-foreground));
-    padding: 2px 0;
-    transition: color 0.15s;
+#test-conn-btn:active:not(:disabled) {
+  transform: scale(0.98);
 }
-.provider-use-btn:hover,
-.provider-remove-btn:hover {
-    color: hsl(var(--foreground));
-}
-.provider-use-btn.active {
-    color: hsl(var(--foreground));
-    font-weight: 500;
-}
-.provider-remove-btn:hover {
-    color: hsl(0 84% 50%);
-}
-.provider-body {
-    /* slight left padding to visually nest under the provider name */
-    padding-left: 0;
+#test-conn-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
+/* ============================================================
+   Provider 卡片 — 每个 provider 独立卡片
+   ============================================================ */
+.provider-row {
+  border: 1px solid hsl(var(--border));
+  border-radius: 8px;
+  background: hsl(var(--card));
+  overflow: hidden;
+  transition:
+    border-color 0.12s,
+    box-shadow 0.12s;
+}
+.provider-row:hover {
+  border-color: hsl(var(--muted-foreground) / 0.3);
+  box-shadow: 0 1px 3px hsl(0 0% 0% / 0.04);
+}
+.provider-row.is-active {
+  border-color: hsl(var(--foreground) / 0.4);
+  box-shadow: 0 1px 4px hsl(0 0% 0% / 0.06);
+}
+.provider-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.1s;
+}
+.provider-head:hover {
+  background: hsl(var(--muted) / 0.25);
+}
+.provider-name-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+}
+.provider-name {
+  font-size: 13px;
+  font-weight: 500;
+  color: hsl(var(--foreground));
+}
+.provider-active-tag {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 7px;
+  background: hsl(var(--foreground));
+  color: hsl(var(--background));
+  border-radius: 3px;
+  line-height: 1.6;
+  letter-spacing: 0.02em;
+}
+.provider-status {
+  font-size: 11px;
+  color: hsl(var(--muted-foreground));
+  margin-left: 8px;
+}
+
+/* ============================================================
+   Provider 操作按钮 — 统一 ghost 风格
+   12px 字体, 24px 高度, 紧凑排列
+   ============================================================ */
+.provider-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.provider-use-btn,
+.provider-test-btn,
+.provider-toggle-btn,
+.provider-remove-btn {
+  font-size: 11px;
+  font-weight: 500;
+  padding: 4px 10px;
+  height: 24px;
+  background: transparent;
+  border: 1px solid transparent;
+  color: hsl(var(--muted-foreground));
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.1s;
+  white-space: nowrap;
+}
+/* "设为当前" — 轻量主操作 */
+.provider-use-btn {
+  color: hsl(var(--foreground));
+  background: hsl(var(--muted) / 0.3);
+}
+.provider-use-btn:hover {
+  background: hsl(var(--muted) / 0.5);
+}
+/* "测试" — 次操作 */
+.provider-test-btn:hover {
+  color: hsl(var(--foreground));
+  background: hsl(var(--muted) / 0.4);
+}
+/* "更换 Key" / "展开" — 边框按钮 */
+.provider-toggle-btn {
+  border-color: hsl(var(--border));
+  color: hsl(var(--foreground));
+}
+.provider-toggle-btn:hover {
+  background: hsl(var(--muted) / 0.4);
+  border-color: hsl(var(--muted-foreground) / 0.4);
+}
+/* "移除" — 危险操作 */
+.provider-remove-btn:hover {
+  color: hsl(var(--destructive));
+  background: hsl(var(--destructive) / 0.06);
+}
+/* active 按钮反馈 */
+.provider-use-btn:active,
+.provider-test-btn:active,
+.provider-toggle-btn:active,
+.provider-remove-btn:active {
+  transform: scale(0.96);
+}
+
+/* Provider body 展开区 */
+.provider-body {
+  padding: 0 14px 14px 14px;
+  border-top: 1px solid hsl(var(--border));
+  animation: providerExpand 0.15s ease-out;
+}
+@keyframes providerExpand {
+  from { opacity: 0; transform: translateY(-2px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* ============================================================
+   API Key 展示 + 操作按钮
+   ============================================================ */
+.key-display {
+  padding: 7px 11px;
+  border: 1px solid hsl(var(--border));
+  border-radius: 6px;
+  background: hsl(var(--muted) / 0.15);
+  font-size: 12px;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  color: hsl(var(--foreground));
+  letter-spacing: 0.02em;
+}
+.key-display .muted {
+  color: hsl(var(--muted-foreground));
+  font-family: inherit;
+}
+.key-replace-section {
+  margin-top: 8px;
+  padding: 10px;
+  border: 1px solid hsl(var(--border));
+  border-radius: 6px;
+  background: hsl(var(--card));
+}
+
+/* 小按钮 — provider 卡片内操作 (保存Key/移除Key/取消) */
+.btn-primary-small,
+.btn-danger-small,
+.btn-text {
+  font-size: 11px;
+  font-weight: 500;
+  padding: 4px 10px;
+  height: 24px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.1s;
+  white-space: nowrap;
+}
+.btn-primary-small {
+  background: hsl(var(--foreground));
+  color: hsl(var(--background));
+  border: 1px solid hsl(var(--foreground));
+}
+.btn-primary-small:hover:not(:disabled) {
+  opacity: 0.88;
+}
+.btn-primary-small:active:not(:disabled) {
+  transform: scale(0.96);
+}
+.btn-primary-small:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.btn-danger-small {
+  background: transparent;
+  color: hsl(var(--destructive));
+  border: 1px solid hsl(var(--destructive) / 0.3);
+}
+.btn-danger-small:hover {
+  background: hsl(var(--destructive) / 0.06);
+  border-color: hsl(var(--destructive) / 0.6);
+}
+.btn-danger-small:active {
+  transform: scale(0.96);
+}
+.btn-text {
+  background: transparent;
+  color: hsl(var(--muted-foreground));
+  border: none;
+}
+.btn-text:hover {
+  color: hsl(var(--foreground));
+}
+
+/* Provider 测试结果显示 */
+.provider-test-result {
+  padding: 8px 14px 10px 14px;
+  border-top: 1px solid hsl(var(--border));
+  background: hsl(var(--muted) / 0.1);
+  font-size: 12px;
+}
+.provider-test-result.hidden {
+  display: none;
+}
+.provider-test-result .muted {
+  color: hsl(var(--muted-foreground));
+}
+
+/* OCR 移除按钮 */
+.ocr-clear-btn {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+/* save-msg 提示文字 */
+#save-msg {
+  font-size: 12px;
+  line-height: 1.4;
+}

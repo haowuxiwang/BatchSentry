@@ -118,41 +118,51 @@
   --stagger-step: 40ms;
 }
 
-/* === 5. Elevation — border-first, 阴影仅 hover/modal === */
+/* === 5. Elevation — Notion 风格:柔和卡片阴影,hover 增强 === */
 :root {
-  --shadow-subtle: 0 1px 2px 0 hsl(222 47% 11% / 0.04);
+  /* 卡片默认:极轻阴影,营造层次感但不突兀 */
+  --shadow-subtle:
+    0 1px 3px 0 hsl(222 47% 11% / 0.04), 0 1px 2px -1px hsl(222 47% 11% / 0.03);
+  /* 卡片 hover:柔和上浮阴影,Notion 风格 */
   --shadow-medium:
     0 4px 12px -2px hsl(222 47% 11% / 0.08),
-    0 2px 4px -1px hsl(222 47% 11% / 0.04);
+    0 2px 4px -2px hsl(222 47% 11% / 0.04);
+  /* 模态/弹出:更深阴影 */
   --shadow-strong:
     0 12px 32px -8px hsl(222 47% 11% / 0.12),
     0 4px 8px -2px hsl(222 47% 11% / 0.06);
+  /* 卡片 hover 上浮位移量 (Notion 微动效) */
+  --card-hover-lift: -2px;
 }
 
 /* === 6. Utility Classes === */
 
-/* Hover-lift — 仅卡片 hover 用，默认无阴影 */
+/* Hover-lift — Notion 风格卡片:默认轻阴影,hover 上浮 + 加深阴影 */
 .hover-lift {
+  box-shadow: var(--shadow-subtle);
   transition:
+    transform var(--motion-hover),
     box-shadow var(--motion-hover),
     border-color var(--motion-hover);
 }
 .hover-lift:hover {
+  transform: translateY(var(--card-hover-lift));
   box-shadow: var(--shadow-medium);
   border-color: hsl(var(--border) / 1);
 }
 
-/* Button press — 极轻反馈 */
+/* Button press — Notion 风格:轻微缩放反馈 */
 .btn-press {
   transition:
     transform var(--motion-pressed),
-    background-color var(--motion-hover);
+    background-color var(--motion-hover),
+    box-shadow var(--motion-hover);
 }
 .btn-press:hover {
-  background-color: hsl(var(--muted));
+  background-color: hsl(var(--muted) / 0.6);
 }
 .btn-press:active {
-  transform: scale(0.98);
+  transform: scale(0.97);
 }
 
 /* Focus ring — 仅键盘 */
@@ -175,6 +185,18 @@
 .stagger-in {
   animation: fade-in-up var(--ms-200) var(--ease-entrance) both;
   animation-delay: calc(var(--i, 0) * var(--stagger-step));
+}
+
+/* Modal entrance — Notion 风格:轻微 scale + fade */
+@keyframes pbc-modal-in {
+  from {
+    opacity: 0;
+    transform: scale(0.96) translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
 }
 
 /* === 7. PDF spinner === */
