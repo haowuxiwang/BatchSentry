@@ -5,6 +5,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Form
 
 from db.client import get_db
+from core.pipeline import db_lock
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["review"])
@@ -145,17 +146,17 @@ async def update_finding(
         params.append(corrected_text)
     if status in ("confirmed", "rejected", "corrected"):
         sets.append("reviewed_at = CURRENT_TIMESTAMP")
+    elif status == "pending":
+        sets.append("reviewed_at = NULL")
 
     if not sets:
         raise HTTPException(400, "No fields to update")
 
     params.extend([finding_id, job_id])
-    await db.execute(
-        f"UPDATE findings SET {', '.join(sets)} WHERE id = ? AND job_id = ?",
-        params,
-    )
 
-    # Audit log
+    # P-ADV3 修复：UPDATE findings + INSERT audit_log + commit 必须在 db_lock
+    # 内原子执行，与 pipeline 的并发写入共享同一锁，防止 aiosqlite 单连接
+    # 上的事务边界被穿插。
     action_parts = []
     if status:
         action_parts.append(f"status: {old_status} → {status}")
@@ -164,11 +165,16 @@ async def update_finding(
     if corrected_text is not None:
         action_parts.append(f"corrected: '{corrected_text[:50]}'")
 
-    await db.execute(
-        "INSERT INTO audit_log (job_id, finding_id, action, detail) VALUES (?, ?, ?, ?)",
-        (job_id, finding_id, "finding_update", "; ".join(action_parts)),
-    )
-    await db.commit()
+    async with db_lock:
+        await db.execute(
+            f"UPDATE findings SET {', '.join(sets)} WHERE id = ? AND job_id = ?",
+            params,
+        )
+        await db.execute(
+            "INSERT INTO audit_log (job_id, finding_id, action, detail) VALUES (?, ?, ?, ?)",
+            (job_id, finding_id, "finding_update", "; ".join(action_parts)),
+        )
+        await db.commit()
     logger.info(f"[{job_id}] Finding {finding_id} updated: {old_status} → {status or old_status}")
     return {"ok": True}
 
@@ -213,11 +219,17 @@ async def get_page(job_id: str, page: int):
     row = await cursor.fetchone()
     if not row:
         raise HTTPException(404, "Page not found")
+    # 对抗审查(cr-6): structured_json 可能非 JSON（旧版本/手动编辑），
+    # 直接 json.loads 会让 review 页 500；与 jobs.get_page_data 一致降级。
+    try:
+        structured = json.loads(row["structured_json"]) if row["structured_json"] else None
+    except json.JSONDecodeError:
+        structured = None
     return {
         "job_id": job_id,
         "page": page,
         "raw_html": row["raw_html"],
-        "structured": json.loads(row["structured_json"]) if row["structured_json"] else None,
+        "structured": structured,
     }
 
 
@@ -236,7 +248,11 @@ async def get_page_measurements(job_id: str, page: int):
     row = await cursor.fetchone()
     if not row:
         raise HTTPException(404, "Page not found")
-    data = json.loads(row["structured_json"]) if row["structured_json"] else {}
+    # 对抗审查(cr-6): 同 get_page_data — 非 JSON 的 structured_json 降级为空。
+    try:
+        data = json.loads(row["structured_json"]) if row["structured_json"] else {}
+    except json.JSONDecodeError:
+        data = {}
     measurements = []
     column_set: dict[str, None] = {}  # ordered set of column names
     for step in data.get("steps", []) or []:

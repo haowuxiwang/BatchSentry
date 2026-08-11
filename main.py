@@ -21,6 +21,10 @@ from core.pipeline import recover_stuck_jobs
 setup_logging()
 logger = logging.getLogger(__name__)
 
+# Application version — single source of truth.
+# Avoids duplicate hardcoded "1.0.0" in FastAPI(app=...) and /health endpoint.
+APP_VERSION = "1.0.0"
+
 
 # Phase 5B: resolve resource paths under both dev and PyInstaller frozen mode.
 # In frozen mode, sys._MEIPASS points to the temporary bundle directory where
@@ -55,12 +59,17 @@ async def lifespan(app: FastAPI):
     logger.info(f"  frozen: {getattr(sys, 'frozen', False)}")
     await get_db()  # initializes schema on first connect
     # 启动时恢复卡死的 job（应用上次崩溃/强杀时留下的非终态 job）
-    try:
-        recovered = await recover_stuck_jobs()
-        if recovered:
-            logger.warning(f"  recovered {recovered} stuck jobs (marked as error)")
-    except Exception as e:
-        logger.error(f"  stuck job recovery failed: {e}", exc_info=True)
+    # 异步执行：不阻塞 lifespan yield，避免 Electron 首屏延迟
+    async def _recover_bg():
+        try:
+            recovered = await recover_stuck_jobs()
+            if recovered:
+                logger.warning(f"  recovered {recovered} stuck jobs (marked as error)")
+        except Exception as e:
+            logger.error(f"  stuck job recovery failed: {e}", exc_info=True)
+
+    import asyncio as _asyncio
+    _asyncio.create_task(_recover_bg())
     yield
     await close_db()
     logger.info("Shutdown complete.")
@@ -69,22 +78,18 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="BatchSentry",
     description="GMP 批生产记录半自动合规检查系统",
-    version="1.0.0",
+    version=APP_VERSION,
     lifespan=lifespan,
 )
 
-# Phase 5A: explicit CORS — only allow the local Electron renderer
-# (127.0.0.1) and the loopback origin. Production deployments behind a
-# reverse proxy should override APP_HOST/APP_PORT and tighten this.
-# Note: file:// was removed — Electron renderer must load via http(s) origin
-# to prevent arbitrary-file XSS from reaching the API.
+# Phase 8 adversarial review: tightened CORS — only 127.0.0.1 variants.
+# Removed localhost:* to align with project constraint (127.0.0.1 only).
+# Electron renderer loads http://127.0.0.1:58765/, dev server uses 8000.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "http://127.0.0.1:8000",
-        "http://localhost:8000",
+        "http://127.0.0.1:8000",   # dev server (uvicorn)
         "http://127.0.0.1:58765",  # Electron default port
-        "http://localhost:58765",
     ],
     allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["Content-Type", "X-Request-ID"],
@@ -104,6 +109,9 @@ async def security_headers_middleware(request: Request, call_next):
     #   SSR 桥接数据（Jinja2 → JS），onclick 调用外部 JS 函数。
     #   后续可用 CSP nonce 重构移除 'unsafe-inline'。
     # style-src 'unsafe-inline': Tailwind 工具类需要内联样式。
+    # frame-ancestors 'self' + X-Frame-Options SAMEORIGIN:
+    #   允许同源 iframe 嵌入 PDF 预览（review.html 的 <iframe src="/api/jobs/{id}/pdf">），
+    #   仍禁止跨站嵌入（clickjacking 防御不削弱）。
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; "
         "script-src 'self' 'unsafe-inline'; "
@@ -111,11 +119,11 @@ async def security_headers_middleware(request: Request, call_next):
         "img-src 'self' data:; "
         "font-src 'self'; "
         "connect-src 'self'; "
-        "frame-ancestors 'none'; "  # 禁止被 iframe 嵌入（clickjacking 防御）
+        "frame-ancestors 'self'; "
         "base-uri 'self'"
     )
     response.headers["X-Content-Type-Options"] = "nosniff"
-    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-Frame-Options"] = "SAMEORIGIN"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     response.headers["X-XSS-Protection"] = "0"  # 现代浏览器用 CSP，关闭旧的 XSS Auditor
     # 静态资源缓存：CSS/JS/字体长期缓存（文件名不变即可），HTML 不缓存
@@ -226,6 +234,10 @@ async def index(request: Request, page: int = 1):
     # 检查是否需要首次配置（无 provider 配置了 API key）
     providers = config["providers"]
     needs_setup = not any(p.api_key for p in providers.values())
+    # robustness-C8: 日志路径暴露到页面底部，frozen/开发模式路径均可见
+    from logging_config import _default_log_dir
+
+    log_dir = _default_log_dir()
     return templates.TemplateResponse(
         request,
         "upload.html",
@@ -235,6 +247,7 @@ async def index(request: Request, page: int = 1):
             "page": page,
             "total_pages": total_pages,
             "total_jobs": total_jobs,
+            "log_dir": log_dir,
         },
     )
 
@@ -247,7 +260,7 @@ async def settings_page(request: Request):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "version": "1.0.0"}
+    return {"status": "ok", "version": APP_VERSION}
 
 
 @app.post("/api/shutdown")
@@ -353,6 +366,8 @@ async def review_page(job_id: str, request: Request, page: int = 1):
         # Phase 5C: extract page-level confidence + parse_error flag for the
         # template so reviewers can see when LLM parsing failed or was unsure.
         page_parse_error = bool(data.get("_parse_error"))
+        page_ocr_empty = bool(data.get("_ocr_empty"))
+        page_ocr_sparse = bool(data.get("_ocr_sparse"))
         page_confidence = data.get("overall_confidence") or ""
         col_set: dict[str, None] = {}
         for step in data.get("steps", []) or []:
@@ -368,6 +383,8 @@ async def review_page(job_id: str, request: Request, page: int = 1):
         matrix_columns = list(col_set.keys())
     else:
         page_parse_error = False
+        page_ocr_empty = False
+        page_ocr_sparse = False
         page_confidence = ""
 
     # Count findings by severity (all pages, for status bar)
@@ -406,6 +423,7 @@ async def review_page(job_id: str, request: Request, page: int = 1):
         "job_id": job_id,
         "filename": job["filename"],
         "status": job["status"],
+        "error_message": job["error_message"] if "error_message" in job.keys() else None,
         "page": page,
         "total_pages": total_pages,
         "ocr_text": ocr_text[:5000],
@@ -422,19 +440,35 @@ async def review_page(job_id: str, request: Request, page: int = 1):
         "matrix_columns": matrix_columns,
         # Phase 5C: transparency flags for reviewer trust
         "page_parse_error": page_parse_error,
+        "page_ocr_empty": page_ocr_empty,
+        "page_ocr_sparse": page_ocr_sparse,
         "page_confidence": page_confidence,
     })
 
 
 @app.get("/api/jobs/{job_id}/pdf")
 async def serve_pdf(job_id: str):
-    """Serve the original PDF for in-browser preview."""
+    """Serve the original PDF for in-browser preview.
+
+    Security: validate pdf_path is within output_dir to prevent path
+    traversal. If DB is tampered (SQL injection or direct edit), the
+    pdf_path could point to arbitrary system files like C:\\Windows\\...
+    """
     db = await get_db()
     cursor = await db.execute("SELECT pdf_path FROM jobs WHERE id = ?", (job_id,))
     row = await cursor.fetchone()
     if not row or not row["pdf_path"]:
         raise HTTPException(404, "PDF not found")
-    pdf_path = Path(row["pdf_path"])
+    pdf_path = Path(row["pdf_path"]).resolve()
+    # 路径遍历防护：pdf_path 必须在 output_dir 内
+    output_root = Path(config["app"].output_dir).resolve()
+    try:
+        pdf_path.relative_to(output_root)
+    except ValueError:
+        logger.warning(
+            f"Path traversal blocked: pdf_path={pdf_path} outside output_dir={output_root}"
+        )
+        raise HTTPException(403, "Access denied")
     if not pdf_path.exists():
         raise HTTPException(404, "PDF file missing")
     return FileResponse(

@@ -8,6 +8,7 @@ job 删除时缓存项自然淘汰。
 字典迭代器失效或 key 覆盖。
 """
 import asyncio
+import html
 import json
 import logging
 from datetime import datetime
@@ -24,7 +25,7 @@ router = APIRouter(prefix="/api", tags=["report"])
 
 
 # 缓存：key=(job_id, findings_count, last_finding_id) → markdown 文本
-_report_cache: dict[tuple[str, int, int], str] = {}
+_report_cache: dict[tuple, str] = {}
 _report_cache_lock = asyncio.Lock()
 _REPORT_CACHE_MAX = 32
 
@@ -55,7 +56,12 @@ async def _generate_report_md_cached(job_id: str) -> str:
 
     # 缓存 key：findings 数量 + 最后一条 finding 的 id
     last_id = findings[-1]["id"] if findings else 0
-    cache_key = (job_id, len(findings), last_id)
+    # Include status hash in cache key so review operations (confirm/reject/correct)
+    # invalidate the cache — without this, reports show stale finding statuses.
+    status_hash = hash(tuple(sorted(
+        (f["id"], f["status"]) for f in findings
+    )))
+    cache_key = (job_id, len(findings), last_id, status_hash)
 
     # 并发安全：用锁保护字典读写
     async with _report_cache_lock:
@@ -139,10 +145,16 @@ def _generate_markdown(job: dict, findings: list[dict], total_pages: int) -> str
         "corrected": "✏️",
     }
 
+    # 对抗审查(cr-7): 报告里的 LLM/OCR 内容是模型生成的可疑文本，可能含
+    # HTML/脚本。Markdown 本身浏览器不渲染，但用户常用 Typora/Obsidian 等
+    # 自动渲染 HTML 的编辑器打开 → 形成 XSS 执行面。统一 HTML-escape。
+    def esc(text) -> str:
+        return html.escape(str(text), quote=False)
+
     lines = [
         f"# GMP 批生产记录合规检查报告",
         f"",
-        f"- **文件名**: {job['filename']}",
+        f"- **文件名**: {esc(job['filename'])}",
         f"- **总页数**: {total_pages}",
         f"- **生成时间**: {now}",
         f"- **Job ID**: {job['id']}",
@@ -164,14 +176,14 @@ def _generate_markdown(job: dict, findings: list[dict], total_pages: int) -> str
         lines.append("")
         for f in sev_findings:
             st_icon = StatusIcon.get(f["status"], "")
-            lines.append(f"- **第{f['page']}页** | `{f['type']}` {st_icon} {f['status']}")
-            lines.append(f"  - {f['description']}")
+            lines.append(f"- **第{f['page']}页** | `{esc(f['type'])}` {st_icon} {f['status']}")
+            lines.append(f"  - {esc(f['description'])}")
             if f.get("ocr_text"):
-                lines.append(f"  - OCR原文: `{f['ocr_text'][:100]}`")
+                lines.append(f"  - OCR原文: `{esc(f['ocr_text'])[:100]}`")
             if f.get("corrected_text"):
-                lines.append(f"  - 修正为: `{f['corrected_text'][:100]}`")
+                lines.append(f"  - 修正为: `{esc(f['corrected_text'])[:100]}`")
             if f.get("reviewer_note"):
-                lines.append(f"  - 审查员备注: {f['reviewer_note']}")
+                lines.append(f"  - 审查员备注: {esc(f['reviewer_note'])}")
             lines.append("")
 
     # Summary

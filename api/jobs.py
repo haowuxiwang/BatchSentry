@@ -1,15 +1,20 @@
 """Job management API — upload PDF, check status, cancel, retry."""
+import json
 import logging
 import os
 import shutil
+import time
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, UploadFile, File, HTTPException
+import fitz  # PyMuPDF — 页码 PNG 渲染
+
+from fastapi import APIRouter, UploadFile, File, HTTPException, Request
+from fastapi.responses import Response
 
 from config import config
 from db.client import get_db
-from core.pipeline import launch_pipeline, transition_status, InvalidTransitionError
+from core.pipeline import launch_pipeline, transition_status, InvalidTransitionError, db_lock
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
@@ -23,8 +28,45 @@ _MAX_PDF_BYTES = 200 * 1024 * 1024  # 200 MB
 # Concurrency guard — prevents memory exhaustion from many parallel pipelines.
 # Each pipeline holds the OCR result + LLM JSON in memory; 3 concurrent 200MB
 # PDFs with multi-page OCR results can hit ~2GB. Override via MAX_CONCURRENT_JOBS.
-_MAX_CONCURRENT_JOBS = int(os.getenv("MAX_CONCURRENT_JOBS", "3"))
+# 对抗审查(cr-11): 非法 env 值兜底为默认 3，避免 import 崩溃。
+try:
+    _MAX_CONCURRENT_JOBS = int(os.getenv("MAX_CONCURRENT_JOBS", "3"))
+except (TypeError, ValueError):
+    _MAX_CONCURRENT_JOBS = 3
 _ACTIVE_STATUSES = ("pending", "ocr_running", "ocr_done", "analyzing", "cancelling")
+
+# PDF 文档句柄缓存（fitz Document）— 页码 PNG 渲染用，避免每次翻页重新
+# 打开大 PDF（200MB 文件打开需数秒）。简单容量 + TTL 淘汰。
+_pdf_doc_cache: dict[str, tuple] = {}  # job_id -> (fitz.Document, last_ts)
+_PDF_CACHE_MAX = 4
+_PDF_CACHE_TTL = 600.0  # 秒
+_PDF_RENDER_ZOOM = 1.5  # ~108 dpi，批记录扫描件清晰度/体积平衡
+
+
+def _get_pdf_doc(job_id: str, pdf_path: str):
+    """取 job 的 fitz Document 句柄（带缓存），缓存过期/超容量时淘汰。"""
+    now = time.time()
+    stale = [k for k, (_, ts) in _pdf_doc_cache.items() if now - ts > _PDF_CACHE_TTL]
+    for k in stale:
+        try:
+            _pdf_doc_cache[k][0].close()
+        except Exception:
+            pass
+        _pdf_doc_cache.pop(k, None)
+    cached = _pdf_doc_cache.get(job_id)
+    if cached:
+        _pdf_doc_cache[job_id] = (cached[0], now)
+        return cached[0]
+    doc = fitz.open(pdf_path)
+    if len(_pdf_doc_cache) >= _PDF_CACHE_MAX:
+        oldest = min(_pdf_doc_cache, key=lambda k: _pdf_doc_cache[k][1])
+        try:
+            _pdf_doc_cache[oldest][0].close()
+        except Exception:
+            pass
+        _pdf_doc_cache.pop(oldest, None)
+    _pdf_doc_cache[job_id] = (doc, now)
+    return doc
 
 
 @router.post("")
@@ -35,22 +77,49 @@ async def create_job(
     if not file.filename or not file.filename.lower().endswith(".pdf"):
         raise HTTPException(400, "Only PDF files accepted")
 
-    # Concurrency guard: count active jobs before accepting new work.
-    db = await get_db()
-    cursor = await db.execute(
-        f"SELECT COUNT(*) FROM jobs WHERE status IN ({','.join('?' * len(_ACTIVE_STATUSES))})",
-        _ACTIVE_STATUSES,
+    # 友好拦截：未配置 LLM 服务商时拒绝上传。
+    # 批记录审查核心价值是 LLM 结构化分析，未配置时上传必然在 analysis
+    # 阶段失败，浪费用户上传时间（PDF 可能很大）。拦截比"上传后失败"体验更好。
+    # 注意：config 的键是 "providers"（与 config.py:200 / main.py:227 /
+    # llm/client.py:30 保持一致），不是 "llm_providers"。早期实现误用
+    # "llm_providers" 导致 production 永远拿不到 provider，所有上传被错误拒绝。
+    # 检查"是否有非空 api_key"即可（UI 的 _is_real_api_key 严格筛掉 test
+    # 占位 key，那是 UI 显示用途；上传守卫只需要"用户配过任意 key"）。
+    providers = config.get("providers", {}) or {}
+    has_any_key = any(
+        bool(p.get("api_key")) if isinstance(p, dict)
+        else bool(getattr(p, "api_key", None))
+        for p in providers.values()
     )
-    active_count = (await cursor.fetchone())[0]
-    if active_count >= _MAX_CONCURRENT_JOBS:
-        logger.warning(
-            f"Upload rejected: {active_count} active jobs >= limit {_MAX_CONCURRENT_JOBS}"
-        )
+    if not has_any_key:
+        logger.warning("Upload rejected: no LLM provider configured")
         raise HTTPException(
-            409,
-            f"已有 {active_count} 个任务在处理中，上限为 {_MAX_CONCURRENT_JOBS}。请等待完成或取消后再试。",
+            400,
+            "尚未配置 LLM 服务商，无法进行结构化分析。请先前往「设置」完成配置后再上传。",
         )
 
+    # Concurrency guard: count active jobs before accepting new work.
+    # 性能优化：COUNT 检查在 db_lock 内（保证读一致性），但 PDF 写盘移到锁外，
+    # 避免大文件上传期间阻塞所有 DB 操作（cancel/retry/transition_status）。
+    # COUNT 与 INSERT 之间有间隙，但 MAX_CONCURRENT_JOBS 是软限制，
+    # 偶尔多一个 job 不会导致系统崩溃（pipeline 内部有 per-job lock 保护）。
+    db = await get_db()
+    async with db_lock:
+        cursor = await db.execute(
+            f"SELECT COUNT(*) FROM jobs WHERE status IN ({','.join('?' * len(_ACTIVE_STATUSES))})",
+            _ACTIVE_STATUSES,
+        )
+        active_count = (await cursor.fetchone())[0]
+        if active_count >= _MAX_CONCURRENT_JOBS:
+            logger.warning(
+                f"Upload rejected: {active_count} active jobs >= limit {_MAX_CONCURRENT_JOBS}"
+            )
+            raise HTTPException(
+                409,
+                f"已有 {active_count} 个任务在处理中，上限为 {_MAX_CONCURRENT_JOBS}。请等待完成或取消后再试。",
+            )
+
+    # PDF 写盘 + 校验在 db_lock 外执行，不阻塞其他 DB 操作
     job_id = str(uuid.uuid4())[:12]
     # Phase 5B: use config output_dir (frozen mode → %APPDATA%/PBC/output)
     job_dir = Path(config["app"].output_dir) / job_id
@@ -108,21 +177,136 @@ async def create_job(
         pdf_path.unlink(missing_ok=True)
         raise HTTPException(400, "Empty file")
 
-    await db.execute(
-        "INSERT INTO jobs (id, filename, status, pdf_path) VALUES (?, ?, 'pending', ?)",
-        (job_id, safe_name, str(pdf_path)),
-    )
-    await db.execute(
-        "INSERT INTO audit_log (job_id, action, detail) VALUES (?, 'pipeline_start', ?)",
-        (job_id, f"Uploaded {safe_name} ({total_bytes} bytes)"),
-    )
-    await db.commit()
+    # 上传后立即读取 PDF 总页数 — OCR/分析期间 review 页面就能显示正确的
+    # "X / Y" 页码（之前 total_pages 在 OCR 完成后才写入，导致显示 "1 / 0"）。
+    # 用 PyMuPDF (fitz) 读取，开销 < 100ms 即使 200MB PDF。
+    pdf_page_count = 0
+    try:
+        import fitz  # PyMuPDF
+        with fitz.open(str(pdf_path)) as doc:
+            pdf_page_count = doc.page_count
+        logger.info(f"[{job_id}] PDF page count: {pdf_page_count}")
+    except Exception as e:
+        # 读页数失败不阻断上传 — pipeline 仍会在 OCR 完成后设置 total_pages
+        logger.warning(f"[{job_id}] Failed to read PDF page count: {e}")
+        pdf_page_count = 0
+
+    # INSERT 在 db_lock 内（与其他 DB 写入序列化）
+    async with db_lock:
+        try:
+            await db.execute(
+                "INSERT INTO jobs (id, filename, status, pdf_path, total_pages) "
+                "VALUES (?, ?, 'pending', ?, ?)",
+                (job_id, safe_name, str(pdf_path), pdf_page_count or None),
+            )
+            await db.execute(
+                "INSERT INTO audit_log (job_id, action, detail) VALUES (?, 'pipeline_start', ?)",
+                (job_id, f"Uploaded {safe_name} ({total_bytes} bytes, {pdf_page_count} pages)"),
+            )
+            await db.commit()
+        except Exception as e:
+            # INSERT 失败时清理孤儿 PDF 文件 + job_dir，避免磁盘累积
+            logger.error(f"[{job_id}] DB INSERT failed, cleaning up job_dir: {e}", exc_info=True)
+            try:
+                await db.rollback()
+            except Exception:
+                pass
+            shutil.rmtree(job_dir, ignore_errors=True)
+            raise HTTPException(500, "数据库写入失败，请重试")
 
     # Launch async pipeline（注册到 _pipeline_tasks 以便优雅关闭）
     launch_pipeline(job_id, str(pdf_path))
     logger.info(f"[{job_id}] Upload complete: {total_bytes} bytes, pipeline launched")
 
     return {"job_id": job_id, "filename": safe_name, "status": "pending"}
+
+
+@router.get("")
+async def list_jobs(page: int = 1, page_size: int = 20):
+    """List active (non-archived) jobs with pagination.
+
+    Returns JSON for AJAX-loaded history list (no full page reload).
+    """
+    page = max(1, page)
+    page_size = max(1, min(page_size, 100))  # cap to prevent abuse
+    offset = (page - 1) * page_size
+
+    db = await get_db()
+    count_cursor = await db.execute(
+        "SELECT COUNT(*) FROM jobs WHERE status != 'archived'"
+    )
+    total_jobs = (await count_cursor.fetchone())[0]
+    total_pages = (total_jobs + page_size - 1) // page_size
+
+    cursor = await db.execute(
+        "SELECT id, filename, status, total_pages, created_at, finished_at, pdf_path, ocr_progress "
+        "FROM jobs WHERE status != 'archived' "
+        "ORDER BY created_at DESC LIMIT ? OFFSET ?",
+        (page_size, offset),
+    )
+    rows = [dict(r) for r in await cursor.fetchall()]
+    # Don't expose pdf_path in JSON response
+    for r in rows:
+        r.pop("pdf_path", None)
+        r["ocr_progress"] = _parse_ocr_progress(r.get("ocr_progress"))
+
+    return {
+        "jobs": rows,
+        "page": page,
+        "page_size": page_size,
+        "total_jobs": total_jobs,
+        "total_pages": total_pages,
+    }
+
+
+@router.get("/{job_id}/page/{page_num}")
+async def get_job_page_image(job_id: str, page_num: int):
+    """Render a PDF page to PNG for inline preview.
+
+    替代浏览器原生 PDF viewer（iframe）：新版 Chromium/Electron 的 PDF
+    viewer 忽略 toolbar=0 参数，自带打印/下载/更多操作按钮且缩放不可控。
+    PyMuPDF 渲染 PNG 后以 <img> 展示 — 无浏览器工具栏、缩放 fit-width
+    由 CSS 控制、页码与渲染页严格对应。
+
+    Security: pdf_path 校验同 serve_pdf（必须在 output_dir 内，防路径穿越）。
+    page_num 1-based；越界返回 404。文档句柄缓存 _pdf_doc_cache 避免
+    大 PDF 反复打开。
+    """
+    db = await get_db()
+    cursor = await db.execute("SELECT pdf_path FROM jobs WHERE id = ?", (job_id,))
+    row = await cursor.fetchone()
+    if not row or not row["pdf_path"]:
+        raise HTTPException(404, "PDF not found")
+    pdf_path = Path(row["pdf_path"]).resolve()
+    output_root = Path(config["app"].output_dir).resolve()
+    try:
+        pdf_path.relative_to(output_root)
+    except ValueError:
+        logger.warning(
+            f"Path traversal blocked: pdf_path={pdf_path} outside output_dir={output_root}"
+        )
+        raise HTTPException(403, "Access denied")
+    if not pdf_path.exists():
+        raise HTTPException(404, "PDF file missing")
+    try:
+        doc = _get_pdf_doc(job_id, str(pdf_path))
+    except Exception as e:
+        logger.error(f"[{job_id}] Failed to open PDF for rendering: {e}")
+        raise HTTPException(500, "PDF cannot be rendered")
+    if page_num < 1 or page_num > doc.page_count:
+        raise HTTPException(404, f"Page out of range (1-{doc.page_count})")
+    try:
+        page = doc.load_page(page_num - 1)
+        pix = page.get_pixmap(matrix=fitz.Matrix(_PDF_RENDER_ZOOM, _PDF_RENDER_ZOOM), alpha=False)
+        png = pix.tobytes("png")
+    except Exception as e:
+        logger.error(f"[{job_id}] Page render failed (p{page_num}): {e}")
+        raise HTTPException(500, "Page render failed")
+    return Response(
+        content=png,
+        media_type="image/png",
+        # 注：Cache-Control 由 main.py 全局中间件统一设置（非 /static/ 一律 no-cache）
+    )
 
 
 @router.get("/{job_id}")
@@ -155,6 +339,8 @@ async def get_job_status(job_id: str):
     )
     review_findings = (await cursor.fetchone())[0]
 
+    page_finding_counts = await _page_finding_counts(db, job_id)
+
     return {
         "id": job["id"],
         "filename": job["filename"],
@@ -171,7 +357,29 @@ async def get_job_status(job_id: str):
         "stage1_ms": job["stage1_ms"],
         "stage2_ms": job["stage2_ms"],
         "stage3_ms": job["stage3_ms"],
+        "ocr_progress": _parse_ocr_progress(job["ocr_progress"] if "ocr_progress" in job.keys() else None),
+        "page_finding_counts": page_finding_counts,
     }
+
+
+async def _page_finding_counts(db, job_id: str) -> dict[int, dict]:
+    """每页 finding 统计（severity）— 前端页码导航圆点实时更新用。"""
+    cursor = await db.execute(
+        "SELECT page, severity, COUNT(*) AS cnt FROM findings "
+        "WHERE job_id = ? GROUP BY page, severity",
+        (job_id,),
+    )
+    counts: dict[int, dict] = {}
+    for r in await cursor.fetchall():
+        p = r["page"]
+        entry = counts.setdefault(
+            p, {"critical": 0, "warning": 0, "info": 0, "total": 0}
+        )
+        sev = r["severity"]
+        if sev in entry:
+            entry[sev] += r["cnt"]
+        entry["total"] += r["cnt"]
+    return counts
 
 
 # 终态：SSE 流遇到这些状态时关闭
@@ -204,6 +412,8 @@ async def _get_job_progress(db, job_id: str) -> dict:
     )
     total_findings = (await cursor.fetchone())[0]
 
+    page_finding_counts = await _page_finding_counts(db, job_id)
+
     return {
         "id": job["id"],
         "status": job["status"],
@@ -215,11 +425,29 @@ async def _get_job_progress(db, job_id: str) -> dict:
         "stage1_ms": job["stage1_ms"],
         "stage2_ms": job["stage2_ms"],
         "stage3_ms": job["stage3_ms"],
+        "ocr_progress": _parse_ocr_progress(job["ocr_progress"] if "ocr_progress" in job.keys() else None),
+        "page_finding_counts": page_finding_counts,
     }
 
 
+def _parse_ocr_progress(raw) -> dict:
+    """解析 jobs.ocr_progress JSON 字符串 → {"done": N, "total": M}。
+
+    容忍 None / 空 / 非法 JSON（返回空 dict，前端回退到 pages_ocr_done）。
+    """
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+        if isinstance(data, dict):
+            return {"done": int(data.get("done", 0)), "total": int(data.get("total", 0))}
+    except (ValueError, TypeError):
+        pass
+    return {}
+
+
 @router.get("/{job_id}/stream")
-async def stream_job_progress(job_id: str):
+async def stream_job_progress(job_id: str, request: Request):
     """SSE 端点：实时推送 job 进度，直到终态。
 
     前端通过 EventSource 订阅，每 2 秒收到一次进度更新。
@@ -231,6 +459,9 @@ async def stream_job_progress(job_id: str):
     async def event_generator():
         db = await get_db()
         while True:
+            if await request.is_disconnected():
+                logger.info(f"[{job_id}] SSE client disconnected, stopping progress stream")
+                return
             progress = await _get_job_progress(db, job_id)
             if progress is None:
                 yield f"event: error\ndata: {json.dumps({'message': 'Job not found'})}\n\n"
@@ -304,40 +535,6 @@ async def get_page_data(job_id: str, page: int):
     }
 
 
-@router.get("/{job_id}/findings")
-async def get_page_findings(job_id: str, page: int = None):
-    """获取 findings（可按页过滤）— AJAX 用。
-
-    统一由 review.py 的 list_findings 处理（支持 page + status 过滤）。
-    """
-    db = await get_db()
-    severity_order = (
-        "CASE severity WHEN 'critical' THEN 0 "
-        "WHEN 'warning' THEN 1 "
-        "WHEN 'info' THEN 2 ELSE 3 END"
-    )
-    source_order = (
-        "CASE COALESCE(source, 'rule') WHEN 'rule' THEN 0 "
-        "WHEN 'llm_fallback' THEN 1 "
-        "WHEN 'llm_page' THEN 2 "
-        "WHEN 'llm_cross' THEN 3 ELSE 4 END"
-    )
-    if page:
-        cursor = await db.execute(
-            f"SELECT * FROM findings WHERE job_id = ? AND page = ? "
-            f"ORDER BY {severity_order}, {source_order}, id",
-            (job_id, page),
-        )
-    else:
-        cursor = await db.execute(
-            f"SELECT * FROM findings WHERE job_id = ? "
-            f"ORDER BY {severity_order}, {source_order}, id",
-            (job_id,),
-        )
-    findings = [dict(r) for r in await cursor.fetchall()]
-    return {"findings": findings, "count": len(findings), "page": page}
-
-
 @router.post("/{job_id}/retry")
 async def retry_job(job_id: str):
     """Retry a failed or cancelled job from where it left off."""
@@ -352,6 +549,13 @@ async def retry_job(job_id: str):
 
     try:
         await transition_status(db, job_id, "pending", f"Retry from {job['status']}")
+        # 清除上次的 error_message，避免 review 页面残留旧的错误提示
+        # （recover_stuck_jobs / 之前失败会写入 error_message，重试应视为全新尝试）
+        await db.execute(
+            "UPDATE jobs SET error_message = NULL, finished_at = NULL WHERE id = ?",
+            (job_id,),
+        )
+        await db.commit()
         logger.info(f"[{job_id}] Retry requested from status={job['status']}")
     except InvalidTransitionError as e:
         logger.warning(f"[{job_id}] Retry blocked: {e}")
@@ -390,7 +594,13 @@ async def archive_job(job_id: str, keep_pdf: bool = True):
             try:
                 job_dir = pdf.parent.resolve()
                 job_dir.relative_to(output_root)
-                if pdf.exists():
+                # 对抗审查(cr-8): 纵深防御 — pdf_path 恰为 output 根时
+                # relative_to 返回 '.' 通过校验，rmtree 会删除全部 job 目录
+                if job_dir == output_root or job_dir.name != job_id:
+                    logger.warning(
+                        f"[{job_id}] Archive PDF cleanup skipped (unsafe path: {job_dir})"
+                    )
+                elif pdf.exists():
                     import shutil
                     shutil.rmtree(job_dir, ignore_errors=True)
                     logger.info(f"[{job_id}] Archived + PDF removed: {job_dir}")
@@ -404,13 +614,19 @@ async def archive_job(job_id: str, keep_pdf: bool = True):
 async def unarchive_job(job_id: str):
     """取消归档 — 恢复到 review 状态。"""
     db = await get_db()
+    # 对抗审查(cr-9): 归档时 keep_pdf=False 会删除 PDF，恢复后 review 页
+    # PDF 预览 404、retry 报"PDF file not found"。无 PDF 的 job 允许恢复
+    # 查看 findings（数据仍完整），但给出明确提示由前端展示。
+    cursor = await db.execute("SELECT pdf_path FROM jobs WHERE id = ?", (job_id,))
+    row = await cursor.fetchone()
+    pdf_missing = bool(row and (not row["pdf_path"] or not Path(row["pdf_path"]).exists()))
     try:
         await transition_status(db, job_id, "review", "User unarchived")
-        logger.info(f"[{job_id}] Unarchived by user")
+        logger.info(f"[{job_id}] Unarchived by user (pdf_missing={pdf_missing})")
     except InvalidTransitionError as e:
         logger.warning(f"[{job_id}] Unarchive blocked: {e}")
         raise HTTPException(400, str(e))
-    return {"ok": True, "status": "review"}
+    return {"ok": True, "status": "review", "pdf_missing": pdf_missing}
 
 
 @router.delete("/{job_id}")
@@ -431,16 +647,44 @@ async def delete_job(job_id: str, keep_pdf: bool = False):
     if not row:
         raise HTTPException(404, "Job not found")
 
-    pdf_path = row["pdf_path"]
-    logger.info(f"[{job_id}] Delete requested: filename={row['filename']} keep_pdf={keep_pdf}")
+    # 安全检查：拒绝删除正在运行的 job。运行中的 pipeline task 仍会
+    # 向 DB / 文件系统写入，强行删除会留下孤儿 task 与不一致状态。
+    # 用户应先 cancel 等待终态后再删除。
+    if row["status"] in _ACTIVE_STATUSES:
+        logger.warning(
+            f"[{job_id}] Delete blocked: job is active (status={row['status']})"
+        )
+        if row["status"] == "cancelling":
+            msg = "任务正在取消中，请等待取消完成（可能需要数秒等 LLM 调用返回）后再删除。"
+        else:
+            msg = f"任务正在处理中（状态: {row['status']}），请先取消并等待任务进入终态后再删除。"
+        raise HTTPException(409, msg)
 
-    # 删除数据库记录（级联删除 page_cache, findings, audit_log, llm_call_audit）
-    await db.execute("DELETE FROM page_cache WHERE job_id = ?", (job_id,))
-    await db.execute("DELETE FROM findings WHERE job_id = ?", (job_id,))
-    await db.execute("DELETE FROM audit_log WHERE job_id = ?", (job_id,))
-    await db.execute("DELETE FROM llm_call_audit WHERE job_id = ?", (job_id,))
-    await db.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
-    await db.commit()
+    pdf_path = row["pdf_path"]
+    # P-ADV3 修复：DELETE 操作的 audit_log INSERT + 级联 DELETE 必须在 db_lock
+    # 内原子执行，与 pipeline 的 transition_status / _record_llm_call 共享
+    # 同一锁，防止 aiosqlite 单连接上的事务边界被穿插（一个 commit 可能
+    # 提前提交另一方的未完成写入）。
+    async with db_lock:
+        # Record deletion in a separate audit row (survives cascade delete)
+        # GMP traceability: record destruction must itself be traceable
+        await db.execute(
+            "INSERT INTO audit_log (job_id, action, detail) VALUES (?, ?, ?)",
+            ("_system", "job_deleted", f"job_id={job_id} filename={row['filename']} status={row['status']} keep_pdf={keep_pdf}"),
+        )
+        logger.info(f"[{job_id}] Delete requested: filename={row['filename']} keep_pdf={keep_pdf}")
+
+        # 删除数据库记录（级联删除 page_cache, findings, audit_log, llm_call_audit）
+        try:
+            await db.execute("DELETE FROM page_cache WHERE job_id = ?", (job_id,))
+            await db.execute("DELETE FROM findings WHERE job_id = ?", (job_id,))
+            await db.execute("DELETE FROM audit_log WHERE job_id = ?", (job_id,))
+            await db.execute("DELETE FROM llm_call_audit WHERE job_id = ?", (job_id,))
+            await db.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
 
     # 删除 PDF 文件
     if not keep_pdf and pdf_path:
@@ -451,6 +695,10 @@ async def delete_job(job_id: str, keep_pdf: bool = False):
         try:
             job_dir = pdf.parent.resolve()
             job_dir.relative_to(output_root)
+            # 对抗审查(cr-8): 纵深防御 — pdf_path 恰为 output 根时
+            # relative_to 返回 '.' 通过校验，rmtree 会删除全部 job 目录
+            if job_dir == output_root:
+                raise ValueError("job_dir is output root")
         except (ValueError, RuntimeError):
             logger.error(
                 f"[{job_id}] Refused delete: job_dir {pdf.parent} "
