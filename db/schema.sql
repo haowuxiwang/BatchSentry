@@ -13,7 +13,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     stage3_ms INTEGER,              -- cross-page analysis duration
     error_message TEXT,
     pdf_path TEXT,
-    ocr_progress TEXT               -- OCR 轮询进度 JSON {"done":N,"total":M}（Stage 1 实时）
+    ocr_progress TEXT,              -- OCR 轮询进度 JSON {"done":N,"total":M}（Stage 1 实时）
+    ocr_backend_used TEXT           -- 实际执行 OCR 的后端（双 OCR 主备切换后的审计记录）
 );
 
 CREATE TABLE IF NOT EXISTS page_cache (

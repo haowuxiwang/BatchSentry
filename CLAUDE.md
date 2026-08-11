@@ -10,7 +10,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 用户上传 PDF 批生产记录 → OCR 识别 → LLM 结构化提取 → 规则+LLM 跨页合规分析 → 人工复核界面 → 导出报告。
 
-**Current phase**: Phase 7 (multi-provider LLM architecture), v0.1.0, local single-user deployment via PyInstaller exe + Electron wrapper.
+**Current phase**: Phase 9 (JSON config persistence + dual-OCR failover + SSE live progress), v0.1.0, local single-user deployment via PyInstaller exe + Electron wrapper.
 
 ---
 
@@ -71,9 +71,9 @@ Copy `.env.example` → `.env` and fill in:
 
 Both `openai` (DeepSeek/SiliconFlow/GLM/Kimi/Qwen/MiMo) and `anthropic` (Claude) protocols are supported via the adapter layer in `llm/adapters/`.
 
-**Frozen mode (PyInstaller bundle)**: `.env` is read from `%APPDATA%/PBC/.env` (Windows), `~/Library/Application Support/PBC/.env` (macOS), `~/.local/share/PBC/.env` (Linux). Database and output files redirect to `%APPDATA%/PBC/` as well. Use the in-app Settings page to edit credentials at runtime — saves are applied live without restart.
+**Frozen mode (PyInstaller bundle)**: config is read from `%APPDATA%/PBC/config.json` (Windows), `~/Library/Application Support/PBC/config.json` (macOS), `~/.local/share/PBC/config.json` (Linux). Database and output files redirect to `%APPDATA%/PBC/` as well. Use the in-app Settings page to edit credentials at runtime — saves are applied live without restart.
 
-`config.py` reads `.env` via `python-dotenv` at import time. Settings page calls `update_config()` to mutate the in-memory config for live reload.
+**Runtime config source is `config.json` (Phase 9)**, not `.env`. On first run, a legacy `.env` is auto-migrated into `config.json` (loaded once; thereafter `config.json` wins). `config.py` exposes `update_config()` to mutate the in-memory config for live reload when the Settings page saves.
 
 ---
 
@@ -100,8 +100,11 @@ Entry point: `main.py` (dev) or `server.py` (bundled, port 58765).
 **Three-stage pipeline** (`core/pipeline.py`) runs as FastAPI `BackgroundTask`:
 
 1. **Stage 1 — OCR** (`core/ocr_client.py` or `core/mineru_client.py`): submit PDF → poll → download JSON. 10-minute poll timeout, 5s interval. Blocking `requests` wrapped via `asyncio.to_thread`.
+   **Dual-OCR failover**: `_get_ocr_chain()` builds a primary+secondary chain (primary = `OCR_BACKEND`, secondary = the other backend if its token/api_url is configured). `_run_ocr_with_failover()` retries the whole job on the secondary when the primary raises, returns 0 pages, or loses >20%/5 pages vs the PDF physical page count (`_pdf_page_count`). The actual backend is stored in `jobs.ocr_backend_used` and surfaced in `/api/jobs/{id}` + SSE snapshots (GMP traceability). Sliced mode (`OCR_SLICES>1`, MinerU only) keeps its own path without failover.
 2. **Stage 2 — Per-page LLM** (`core/page_analyzer.py`): each page's HTML table → LLM extraction prompt → structured JSON with `steps[].measurements[]` time series. Uses string concatenation (NOT `.format()`) to avoid brace collision with HTML. 180s timeout, 3 retries with exponential backoff.
 3. **Stage 3 — Cross-page analysis** (`core/cross_page_analyzer.py`): rule-based time reversal + LLM-based semantic anomalies. Both write to the same `findings` table with `source` field (`rule` / `llm_page` / `llm_cross` / `llm_fallback`).
+
+**Live progress (SSE, Phase 10)**: `GET /api/jobs/{id}/stream` pushes a progress snapshot every 3s (default `message` event, `done` event + close on terminal state, `error` event when the job is missing). Review page subscribes and hot-refreshes the current page's findings as `pages_analyzed` grows (page-level streaming — no need to wait for the whole job). Upload page tracks active job rows the same way: inline `OCR 12/51` counts, per-page analysis counts, and auto re-enabling of archive/delete buttons at terminal state. Frontend logs page-level events via `[PBC]` logger.
 
 **State machine** (`pipeline.VALID_TRANSITIONS`): `pending → ocr_running → ocr_done → analyzing → review | partial_review | error | cancelled`. Terminal states can `archived`. Invalid transitions raise `InvalidTransitionError`.
 
@@ -121,7 +124,7 @@ PDF upload → output/{job_id}/filename.pdf
 
 ### Database Schema (`db/schema.sql`)
 
-- **`jobs`**: id, filename, status, pdf_path, total_pages, failed_pages, stage1_ms/stage2_ms/stage3_ms, error_message, created_at, finished_at
+- **`jobs`**: id, filename, status, pdf_path, total_pages, failed_pages, stage1_ms/stage2_ms/stage3_ms, ocr_progress (JSON), ocr_backend_used (dual-OCR audit), error_message, created_at, finished_at
 - **`page_cache`**: (job_id, page) → raw_html + structured_json + analyzed_at
 - **`findings`**: id, job_id, page, type, severity, source, description, ocr_text, operator, status (`pending → confirmed | rejected | corrected`), reviewer_note, corrected_text, reviewed_at
 - **`audit_log`**: id, job_id, finding_id, action, detail, created_at

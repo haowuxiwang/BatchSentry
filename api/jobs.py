@@ -359,6 +359,7 @@ async def get_job_status(job_id: str):
         "stage3_ms": job["stage3_ms"],
         "ocr_progress": _parse_ocr_progress(job["ocr_progress"] if "ocr_progress" in job.keys() else None),
         "page_finding_counts": page_finding_counts,
+        "ocr_backend_used": job["ocr_backend_used"] if "ocr_backend_used" in job.keys() else None,
     }
 
 
@@ -427,6 +428,7 @@ async def _get_job_progress(db, job_id: str) -> dict:
         "stage3_ms": job["stage3_ms"],
         "ocr_progress": _parse_ocr_progress(job["ocr_progress"] if "ocr_progress" in job.keys() else None),
         "page_finding_counts": page_finding_counts,
+        "ocr_backend_used": job["ocr_backend_used"] if "ocr_backend_used" in job.keys() else None,
     }
 
 

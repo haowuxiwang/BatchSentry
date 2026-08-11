@@ -255,6 +255,22 @@
     return "bg-info";
   }
 
+  // 与后端 _ACTIVE_STATUSES 对齐：运行中状态禁用删除（防孤儿 pipeline task）
+  const ACTIVE_STATUSES = [
+    "pending",
+    "ocr_running",
+    "ocr_done",
+    "analyzing",
+    "cancelling",
+  ];
+  const TERMINAL_STATUSES = [
+    "review",
+    "partial_review",
+    "error",
+    "cancelled",
+    "archived",
+  ];
+
   function esc(s) {
     return String(s == null ? "" : s)
       .replace(/&/g, "&amp;")
@@ -274,6 +290,7 @@
   async function loadHistory(page) {
     const token = ++loadHistoryToken;
     currentPage = page;
+    closeAllLiveSources(); // 翻页/重载：关闭旧页 job 的实时订阅
     const listEl = document.getElementById("history-list");
     const pagEl = document.getElementById("history-pagination");
     const countEl = document.getElementById("history-count");
@@ -304,11 +321,97 @@
       data.jobs.forEach((job, i) => frag.appendChild(renderJobRow(job, i)));
       listEl.appendChild(frag);
       renderPagination();
+      startLiveTracking();
     } catch (err) {
       if (token !== loadHistoryToken) return; // 同样丢弃过期错误
       log.err("loadHistory failed", err);
       listEl.innerHTML = `<li class="px-5 py-8 text-center text-[12px] text-destructive">加载失败: ${esc(err.message)}</li>`;
     }
+  }
+
+  const liveSources = new Map(); // jobId -> EventSource
+
+  // === Job 行实时状态（SSE） ===
+  // 列表渲染后对每个活跃 job 订阅 /api/jobs/{id}/stream：OCR 进度、
+  // 页级分析进度实时更新到行内，终态后自动关闭连接。翻页时全部关闭。
+  function startLiveTracking() {
+    document
+      .querySelectorAll("#history-list li[data-job-id]")
+      .forEach((li) => {
+        const st = li.dataset.status;
+        const jid = li.dataset.jobId;
+        if (!jid || !ACTIVE_STATUSES.includes(st)) return;
+        if (liveSources.has(jid)) return;
+        const es = new EventSource(`/api/jobs/${encodeURIComponent(jid)}/stream`);
+        liveSources.set(jid, es);
+        es.onmessage = (e) => {
+          let d;
+          try {
+            d = JSON.parse(e.data);
+          } catch (_) {
+            return;
+          }
+          updateJobRowLive(li, d);
+          if (TERMINAL_STATUSES.includes(d.status)) {
+            es.close();
+            liveSources.delete(jid);
+            // 终态：重建该行以刷新按钮可用状态（归档/删除/复核链接）
+            const fresh = buildRowFromSnapshot(li, d);
+            if (fresh) li.replaceWith(fresh);
+          }
+        };
+        let errCount = 0;
+        es.onerror = () => {
+          errCount += 1;
+          if (errCount > 2) {
+            es.close();
+            liveSources.delete(jid);
+          }
+        };
+      });
+  }
+
+  function updateJobRowLive(li, d) {
+    const st = d.status;
+    li.dataset.status = st;
+    const dot = li.querySelector(".status-dot");
+    const stText = li.querySelector(".status-text");
+    const pages = li.querySelector(".job-pages");
+    if (dot) dot.className = `w-1.5 h-1.5 rounded-full ${statusDotClass(st)}`;
+    if (stText) stText.textContent = STATUS_ZH[st] || st;
+    if (pages) {
+      const prog = d.ocr_progress || {};
+      if ((st === "ocr_running" || st === "ocr_done") && prog.total > 0) {
+        pages.textContent = `OCR ${prog.done}/${prog.total}`;
+      } else if (st === "analyzing") {
+        pages.textContent = `分析 ${d.pages_analyzed || 0}/${d.total_pages || "?"}`;
+      } else if (st === "partial_review" && d.error_message) {
+        pages.textContent = `部分可复核 · ${d.pages_analyzed}/${d.total_pages || "?"} 页`;
+      } else {
+        pages.textContent = `${d.total_pages || "?"} 页`;
+      }
+    }
+  }
+
+  // 用 SSE 快照重建终态行（filename/created_at 从旧行保留）
+  function buildRowFromSnapshot(li, d) {
+    const old = li;
+    const job = {
+      id: d.id || old.dataset.jobId,
+      filename: old.dataset.filename || d.id,
+      created_at: old.querySelector(".job-meta")?.textContent.split("· ")[1] || "",
+      status: d.status,
+      total_pages: d.total_pages || 0,
+      ocr_progress: d.ocr_progress || {},
+      error_message: d.error_message || "",
+    };
+    return renderJobRow(job, 0);
+  }
+
+  // 翻页前关闭全部实时连接（旧页 job 不在视口内，继续订阅无意义）
+  function closeAllLiveSources() {
+    liveSources.forEach((es) => es.close());
+    liveSources.clear();
   }
 
   function renderJobRow(job, i) {
@@ -323,13 +426,6 @@
       "done",
     ].includes(st);
     // 与后端 _ACTIVE_STATUSES 对齐：运行中状态禁用删除（防孤儿 pipeline task）
-    const ACTIVE_STATUSES = [
-      "pending",
-      "ocr_running",
-      "ocr_done",
-      "analyzing",
-      "cancelling",
-    ];
     const isActive = ACTIVE_STATUSES.includes(st);
     // Security: build DOM via createElement + textContent to fully neutralize
     // XSS from job.id / job.filename.  Previous version used innerHTML with
@@ -357,7 +453,8 @@
     titleEl.className = "text-[13px] font-medium truncate";
     titleEl.textContent = job.filename;
     const metaEl = document.createElement("div");
-    metaEl.className = "text-[11px] text-muted-foreground mt-0.5 tabular-nums";
+    metaEl.className =
+      "text-[11px] text-muted-foreground mt-0.5 tabular-nums job-meta";
     metaEl.textContent = `${job.id} · ${job.created_at}`;
     info.appendChild(titleEl);
     info.appendChild(metaEl);
@@ -368,11 +465,16 @@
     statusEl.className =
       "inline-flex items-center gap-1.5 text-[11px] text-muted-foreground";
     const dot = document.createElement("span");
-    dot.className = `w-1.5 h-1.5 rounded-full ${dotCls}`;
+    // status-dot / status-text / job-pages: live SSE updates locate these
+    dot.className = `w-1.5 h-1.5 rounded-full ${dotCls} status-dot`;
     statusEl.appendChild(dot);
-    statusEl.appendChild(document.createTextNode(stZh));
+    const stTextSpan = document.createElement("span");
+    stTextSpan.className = "status-text";
+    stTextSpan.textContent = stZh;
+    statusEl.appendChild(stTextSpan);
     const pagesEl = document.createElement("span");
-    pagesEl.className = "text-[11px] text-muted-foreground/70 tabular-nums";
+    pagesEl.className =
+      "text-[11px] text-muted-foreground/70 tabular-nums job-pages";
     // OCR 进行中且有实时进度时显示 "OCR 12/51"（后端 jobs.ocr_progress）
     const prog = job.ocr_progress || {};
     if ((st === "ocr_running" || st === "ocr_done") && prog.total > 0) {
@@ -908,6 +1010,10 @@
   window.refreshHistory = function () {
     loadHistory(1);
   };
+
+  // 页面卸载（跳转 review / 关闭窗口）时关闭实时订阅，避免 EventSource 泄漏
+  window.addEventListener("pagehide", closeAllLiveSources);
+  window.addEventListener("beforeunload", closeAllLiveSources);
 
   // === 初始化：加载第一页 ===
   loadHistory(1);

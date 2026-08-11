@@ -129,6 +129,21 @@ class TestGetJobStatus:
         assert data["ocr_progress"] == {}
 
     @pytest.mark.asyncio
+    async def test_get_status_reports_ocr_backend_used(self, client_with_job, test_db):
+        """双 OCR 审计：快照应包含实际使用的 OCR 后端（未设置时为 None）。"""
+        c, _ = client_with_job
+        data = (await c.get("/api/jobs/coverage-job")).json()
+        assert data["ocr_backend_used"] is None
+
+        await test_db.execute(
+            "UPDATE jobs SET ocr_backend_used = ? WHERE id = ?",
+            ("paddle", "coverage-job"),
+        )
+        await test_db.commit()
+        data = (await c.get("/api/jobs/coverage-job")).json()
+        assert data["ocr_backend_used"] == "paddle"
+
+    @pytest.mark.asyncio
     async def test_get_status_page_finding_counts(self, client_with_job):
         """page_finding_counts 应按 (page, severity) 聚合统计。
 

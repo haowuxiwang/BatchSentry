@@ -60,6 +60,31 @@ def _get_ocr_backend():
     return paddle_run
 
 
+def _get_ocr_chain() -> list[tuple[callable, str]]:
+    """返回 OCR 主备链：[(run_ocr, name), ...]，首个为主后端。
+
+    双 OCR 兜底：主后端（OCR_BACKEND 配置）之外的另一个后端若已配置
+    token/api_url，则作为 failover 备选。仅当两个后端都可用时链长为 2。
+    """
+    backend = config["app"].ocr_backend.lower()
+    primary = _get_ocr_backend()
+    chain = [(primary, backend if backend in ("paddle", "mineru") else "paddle")]
+    # 备选：未激活的后端配置完整时才加入 failover 链
+    if backend == "mineru":
+        paddle_cfg = config["paddle_ocr"]
+        if paddle_cfg.api_url and paddle_cfg.token:
+            from core.ocr_client import run_ocr as paddle_run
+            chain.append((paddle_run, "paddle"))
+            logger.info("[Pipeline] OCR failover 备选: PaddleOCR-VL")
+    else:
+        mineru_cfg = config["mineru"]
+        if mineru_cfg.token:
+            from core.mineru_client import run_ocr as mineru_run
+            chain.append((mineru_run, "mineru"))
+            logger.info("[Pipeline] OCR failover 备选: MinerU")
+    return chain
+
+
 def _sanitize_ocr_text(text: str) -> str:
     """清洗 OCR 原始文本（存库前），消除 MinerU/Paddle 产物噪音。
 
@@ -345,6 +370,58 @@ async def run_pipeline(job_id: str, pdf_path: str):
         logger.info(f"[{job_id}] Pipeline exited, PDF retained for review: {Path(pdf_path).name}")
 
 
+async def _run_ocr_with_failover(db, job_id: str, pdf_path: str, progress_cb) -> tuple[list, str, list[str]]:
+    """整份 OCR 主备链执行（双 OCR 兜底）。
+
+    返回 (pages, used_backend, failures)：
+    - pages: 成功的 OCR 结果，全部失败时 []
+    - used_backend: 实际成功执行的后端名（"paddle"/"mineru"）
+    - failures: 失败记录列表（每个元素描述一个后端的失败原因）
+
+    失败判定：异常 / 0 页 / 严重页数缺失（缺 >20% 或 >5 页）。
+    任一失败 → 切下一个后端整单重试；全部失败时 failures 非空。
+    仅整份路径使用；分片路径（MinerU + OCR_SLICES>1）保持原逻辑。
+    """
+    from logging_config import ocr_job_id_var
+
+    chain = _get_ocr_chain()
+    failures: list[str] = []
+    for attempt, (run_fn, name) in enumerate(chain):
+        if attempt > 0:
+            logger.warning(
+                f"[{job_id}] OCR failover: {chain[0][1]} failed → trying {name}"
+            )
+            await _audit_log(
+                db, job_id, "ocr_failover",
+                f"from={chain[0][1]} to={name} reason={failures[-1] if failures else 'unknown'}",
+            )
+        _ocr_ctx_token = ocr_job_id_var.set(job_id)
+        try:
+            try:
+                pages = await asyncio.to_thread(run_fn, pdf_path, progress_cb)
+            finally:
+                ocr_job_id_var.reset(_ocr_ctx_token)
+        except Exception as e:
+            failures.append(f"{name}: {type(e).__name__}: {str(e)[:300]}")
+            logger.error(f"[{job_id}] OCR attempt failed (backend={name}): {failures[-1]}")
+            continue
+        if not pages:
+            failures.append(f"{name}: 0 pages returned")
+            logger.error(f"[{job_id}] OCR attempt returned 0 pages (backend={name})")
+            continue
+        pdf_total = _pdf_page_count(pdf_path)
+        if pdf_total is not None and len(pages) != pdf_total:
+            missing = pdf_total - len(pages)
+            if missing > max(5, int(pdf_total * 0.2)):
+                failures.append(f"{name}: page mismatch ({len(pages)}/{pdf_total})")
+                logger.error(
+                    f"[{job_id}] OCR page count mismatch (backend={name}): {failures[-1]}"
+                )
+                continue
+        return pages, name, failures
+    return [], "", failures
+
+
 async def _run_pipeline_impl(job_id: str, pdf_path: str):
     """Pipeline implementation — guarded by per-job lock from run_pipeline."""
     db = await get_db()
@@ -369,7 +446,6 @@ async def _run_pipeline_impl(job_id: str, pdf_path: str):
         logger.info(f"[{job_id}] Stage 1: Starting OCR (backend={ocr_backend})...")
 
         stage1_start = time.time()
-        ocr_run = _get_ocr_backend()
 
         # Stage 1 流式反馈：OCR 轮询线程（to_thread）中回调进度 →
         # run_coroutine_threadsafe 调度回主事件循环 → 更新 job.ocr_progress
@@ -424,63 +500,51 @@ async def _run_pipeline_impl(job_id: str, pdf_path: str):
                 return
             pages = []  # Stage 3 不依赖 pages（数据已在 page_cache）
         else:
-            # robustness-F1: to_thread 拷贝当前 context → OCR 客户端日志
-            # 自动带 [job_id] 前缀（JobIdFilter）。不传参给 backend，对任意
-            # 签名（含测试 mock）透明。
-            from logging_config import ocr_job_id_var
-
-            _ocr_ctx_token = ocr_job_id_var.set(job_id)
-            try:
-                pages = await asyncio.to_thread(ocr_run, pdf_path, _ocr_progress_cb)
-            finally:
-                ocr_job_id_var.reset(_ocr_ctx_token)
+            # 双 OCR 兜底：主后端失败（异常/0 页/严重缺页）自动切换备后端
+            # 整单重试，job 记录实际使用的后端（jobs.ocr_backend_used）审计。
+            pages, used_backend, ocr_failures = await _run_ocr_with_failover(
+                db, job_id, pdf_path, _ocr_progress_cb
+            )
             stage1_ms = int((time.time() - stage1_start) * 1000)
-            logger.info(f"[{job_id}] Stage 1: OCR complete: {len(pages)} pages in {stage1_ms}ms")
-            await _audit_log(db, job_id, "stage1_complete", f"pages={len(pages)} duration={stage1_ms}ms")
-
-            # 0 页防御性检查：OCR 后端正常情况下应在空结果时抛异常（见 ocr_client.download_result
-            # / mineru_client.download_result），此处兜底防止未来回归导致 pipeline
-            # 继续走到 Stage 2/3，最终生成空 findings 使 review 页面空白。
             if not pages:
-                err_msg = f"OCR 返回 0 页（backend={ocr_backend}, duration={stage1_ms}ms）— 上游服务未返回任何页面内容"
+                reason = ocr_failures[0] if ocr_failures else f"backend={ocr_backend}"
+                err_parts = [f"OCR 处理失败（{ocr_backend}）— {reason}"]
+                if len(ocr_failures) > 1:
+                    err_parts.append(
+                        "备选失败: " + "; ".join(ocr_failures[1:])
+                    )
+                err_msg = "; ".join(err_parts)[:2000]
                 logger.error(f"[{job_id}] {err_msg}")
                 await db.execute(
                     "UPDATE jobs SET error_message = ?, finished_at = CURRENT_TIMESTAMP, "
                     "stage1_ms = ? WHERE id = ?",
                     (err_msg, stage1_ms, job_id),
                 )
-                await transition_status(db, job_id, "error", "OCR returned 0 pages")
+                await transition_status(db, job_id, "error", "OCR failed (all backends)")
                 await db.commit()
-                await _audit_log(db, job_id, "stage1_empty", err_msg)
+                await _audit_log(db, job_id, "stage1_failed", err_msg)
                 return
 
-            # 页数完整性校验（robustness-A1）：OCR 结果页数 vs PDF 物理页数。
-            # 上游 schema 变化/上游静默截断会导致"解析成功但缺页"，LLM 只能
-            # 基于残缺内容分析却无任何提示——这是本工具最危险的静默失败模式。
-            # 严重丢失（>20% 或 >5 页）→ 显式失败；轻微差异 → 审计日志可见。
+            await db.execute(
+                "UPDATE jobs SET ocr_backend_used = ? WHERE id = ?",
+                (used_backend, job_id),
+            )
+            logger.info(
+                f"[{job_id}] Stage 1: OCR complete: {len(pages)} pages "
+                f"in {stage1_ms}ms (backend={used_backend})"
+            )
+            await _audit_log(
+                db, job_id, "stage1_complete",
+                f"pages={len(pages)} duration={stage1_ms}ms backend={used_backend}",
+            )
+
+            # 轻微页数差异（缺 ≤5 页且 ≤20%）→ 审计日志可见，不阻断
             pdf_total = _pdf_page_count(pdf_path)
             if pdf_total is not None and len(pages) != pdf_total:
-                ocr_pages = len(pages)
-                missing = pdf_total - ocr_pages
-                if missing > max(5, int(pdf_total * 0.2)):
-                    err_msg = (
-                        f"OCR 结果页数异常: PDF 共 {pdf_total} 页, OCR 仅返回 "
-                        f"{ocr_pages} 页（缺 {missing} 页）— 可能解析不完整, "
-                        f"请重试或更换 OCR 后端"
-                    )
-                    logger.error(f"[{job_id}] {err_msg}")
-                    await db.execute(
-                        "UPDATE jobs SET error_message = ?, finished_at = CURRENT_TIMESTAMP, "
-                        "stage1_ms = ? WHERE id = ?",
-                        (err_msg, stage1_ms, job_id),
-                    )
-                    await transition_status(db, job_id, "error", "OCR page count mismatch")
-                    await db.commit()
-                    await _audit_log(db, job_id, "stage1_pagemismatch", err_msg)
-                    return
+                missing = pdf_total - len(pages)
                 warn_msg = (
                     f"OCR 页数与 PDF 物理页数不一致: PDF {pdf_total} 页, "
-                    f"OCR 返回 {ocr_pages} 页（差异 {missing} 页）— 分析可能不完整"
+                    f"OCR 返回 {len(pages)} 页（差异 {missing} 页）— 分析可能不完整"
                 )
                 logger.warning(f"[{job_id}] {warn_msg}")
                 await _audit_log(db, job_id, "stage1_pagemismatch", warn_msg)

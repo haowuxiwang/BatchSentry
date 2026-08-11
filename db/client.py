@@ -21,7 +21,7 @@ def _get_init_lock() -> asyncio.Lock:
     return _db_init_lock
 
 # Current schema migration level, persisted via PRAGMA user_version.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 async def get_db() -> aiosqlite.Connection:
@@ -63,6 +63,9 @@ async def migrate(db: aiosqlite.Connection):
 
     if current_version < 1:
         await _migrate_v1(db)
+
+    if current_version < 2:
+        await _migrate_v2(db)
 
     # PRAGMA user_version cannot be parameterized; SCHEMA_VERSION is an int
     # constant defined in this module, so f-string is safe.
@@ -120,6 +123,21 @@ async def _migrate_v1(db: aiosqlite.Connection):
     except Exception as e:
         logger.warning(f"Migration skip findings.source: {e}")
 
+    await db.commit()
+
+
+async def _migrate_v2(db: aiosqlite.Connection):
+    """v2: jobs.ocr_backend_used — 双 OCR 主备切换的审计记录列。"""
+    try:
+        cursor = await db.execute("PRAGMA table_info(jobs)")
+        existing_cols = {row["name"] for row in await cursor.fetchall()}
+        if "ocr_backend_used" not in existing_cols:
+            await db.execute(
+                "ALTER TABLE jobs ADD COLUMN ocr_backend_used TEXT"
+            )
+            logger.info("Migration: added jobs.ocr_backend_used")
+    except Exception as e:
+        logger.warning(f"Migration skip jobs.ocr_backend_used: {e}")
     await db.commit()
 
 
