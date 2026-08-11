@@ -6,6 +6,9 @@
 - Pipeline: 独立文件，便于分析
 - RequestIdFilter: 自动注入 request_id 到每条日志
 
+frozen 模式下日志写入 %APPDATA%/PBC/logs/（与 DB/output 同目录），
+确保用户能找到日志用于诊断。开发模式写入项目根 logs/。
+
 用法：
     from logging_config import get_logger
     logger = get_logger(__name__)
@@ -14,12 +17,56 @@
 import logging
 import logging.handlers
 import os
+import sys
 import uuid
 from contextvars import ContextVar
 from pathlib import Path
 
+
+def _default_log_dir() -> str:
+    """返回日志目录路径。
+
+    frozen 模式：写入 %APPDATA%/PBC/logs/（与 DB/output 同目录），
+    确保 用户能找到日志，且不依赖 exe 所在目录的写权限。
+    开发模式：写入项目根 logs/。
+    """
+    if getattr(sys, "frozen", False):
+        if sys.platform == "win32":
+            base = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
+        elif sys.platform == "darwin":
+            base = Path.home() / "Library" / "Application Support"
+        else:
+            base = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
+        log_dir = base / "PBC" / "logs"
+    else:
+        log_dir = Path("logs")
+    log_dir.mkdir(parents=True, exist_ok=True)
+    return str(log_dir)
+
 # Context-var: 每个请求独立 request_id，自动注入到日志
 request_id_var: ContextVar[str] = ContextVar("request_id", default="-")
+
+# Context-var: OCR 客户端日志的 job_id 前缀（robustness-F1）。
+# pipeline 在 to_thread 调用前 set（asyncio.to_thread 自动拷贝当前 context），
+# OCR 客户端模块 logger 挂上 JobIdFilter 后，Stage 1 全流程日志自动带
+# [job_id]，排障时可按 job 反查上传/轮询/下载/页拆分完整链路。
+ocr_job_id_var: ContextVar[str] = ContextVar("ocr_job_id", default="")
+
+
+class JobIdFilter(logging.Filter):
+    """为 OCR 客户端日志注入 [job_id] 前缀（若 ContextVar 已设置）。
+
+    对抗审查(cr-4): 修改 record.msg 后必须清空 record.args —— formatter 的
+    getMessage() 会执行第二次 `msg % args`，OCR 文本若含字面 %s/%d 会抛
+    TypeError 导致整条日志丢失。
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        job_id = ocr_job_id_var.get()
+        if job_id and record.getMessage().find(f"[{job_id}]") == -1:
+            record.msg = f"[{job_id}] {record.msg}"
+            record.args = ()
+        return True
 
 
 class RequestIdFilter(logging.Filter):
@@ -43,13 +90,19 @@ def generate_request_id() -> str:
     return uuid.uuid4().hex[:8]
 
 
-def setup_logging(log_dir: str = "logs", level: str = "INFO"):
+def setup_logging(log_dir: str = "", level: str = "INFO"):
     """配置日志系统 — console + file + pipeline。
+
+    frozen 模式下 log_dir 默认为 %APPDATA%/PBC/logs/，开发模式默认 logs/。
+    显式传入 log_dir 时覆盖默认值（用于测试）。
 
     环境变量 PBC_NO_FILE_LOG=1 时跳过所有文件 handler（用于测试环境，
     避免 Windows 下多进程持有同一日志文件导致 RotatingFileHandler
     doRollover 触发 PermissionError [WinError 32]）。
     """
+    if not log_dir:
+        log_dir = _default_log_dir()
+
     # 人类可读格式（含 request_id + job_id）
     fmt = "%(asctime)s [%(levelname)s] [req=%(request_id)s job=%(job_id)s] %(name)s: %(message)s"
     datefmt = "%Y-%m-%d %H:%M:%S"
@@ -76,7 +129,7 @@ def setup_logging(log_dir: str = "logs", level: str = "INFO"):
     if os.getenv("PBC_NO_FILE_LOG", "").lower() in ("1", "true", "yes"):
         return
 
-    Path(log_dir).mkdir(exist_ok=True)
+    Path(log_dir).mkdir(parents=True, exist_ok=True)
 
     # File handler (rotate at 10MB, keep 5 backups)
     file_handler = logging.handlers.RotatingFileHandler(

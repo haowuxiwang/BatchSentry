@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import html
 import logging
+import math
 import re
 from collections import Counter
 from dataclasses import dataclass
@@ -39,21 +40,26 @@ class SpecBounds:
     high: Optional[float] = None
 
 
-# Match 2015.01.27 / 2015-01-27 / 2015/01/27 / 2015.1.7 (with optional HH:MM).
+# Match 2015.01.27 / 2015-01-27 / 2015/01/27 / 2015.1.7 (with optional HH:MM or HH:MM:SS).
 # Year prefix (19|20) lets us detect suspiciously old years (e.g. 1990) so R4
 # can flag them — restricting to 20xx would hide them.
 _DATE_RE = re.compile(
     r"(?<!\d)"                                       # no leading digit (avoid matching inside long digit run)
     r"((?:19|20)\d{2})[.\-/](\d{1,2})[.\-/](\d{1,2})"  # year-mon-day
-    r"(?:\s+(\d{1,2}):(\d{2}))?"                      # optional HH:MM
+    r"(?:[\sT]+(\d{1,2}):(\d{2})(?::(\d{2}))?)?"      # optional HH:MM or HH:MM:SS (ISO T separator)
 )
 # Match Chinese date format: 2024年5月7日 / 2024年05月07日 (with optional HH:MM)
 _CN_DATE_RE = re.compile(
     r"((?:19|20)\d{2})年(\d{1,2})月(\d{1,2})日"
     r"(?:\s*(\d{1,2})[时:](\d{2})分?)?"
 )
-# Match a standalone HH:MM
-_TIME_ONLY_RE = re.compile(r"^\s*(\d{1,2}):(\d{2})\s*$")
+# Match a standalone HH:MM or HH:MM:SS
+_TIME_ONLY_RE = re.compile(r"^\s*(\d{1,2}):(\d{2})(?::(\d{2}))?\s*$")
+# Match MM-DD HH:MM (no year — needs fallback_date for year)
+# Used when high-quality scan has "07-17 14:30" without year prefix
+_MD_TIME_RE = re.compile(
+    r"(?<!\d)(\d{1,2})-(\d{1,2})\s+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*$"
+)
 # Glued name+date like "庞明女署2027.01.17" — we already extract via _DATE_RE,
 # but keep a fallback for cases without separator inside the date.
 _YEAR_RE = re.compile(r"\b((?:19|20)\d{2})\b")
@@ -69,9 +75,12 @@ def _parse_time(s: Optional[str], fallback_date: Optional[str] = None) -> Option
 
     Supported formats (in priority order):
       - "2015.01.27 14:30" / "2015-01-27 14:30" / "2015/1/7 9:05"
+      - "2015.01.27 14:30:45" (with seconds)
+      - "2015-01-27T14:30:00" (ISO 8601)
       - "2015.01.27"        / "2015-01-27"      / "2015/1/7"
       - "2024年5月7日" / "2024年05月07日 14时30分" (Chinese format)
-      - "11:04"              -> uses fallback_date (e.g. page production_date)
+      - "07-17 14:30"        -> uses fallback_date for year (no year prefix)
+      - "11:04" / "11:04:30" -> uses fallback_date (e.g. page production_date)
       - "2022/4/202205.07"   -> OCR noise, clean to "2022.05.07"
       - "庞明女署2027.01.17"  -> extract via regex
 
@@ -83,14 +92,28 @@ def _parse_time(s: Optional[str], fallback_date: Optional[str] = None) -> Option
     if not raw:
         return None
 
-    # 1) Standalone HH:MM
+    # 1) Standalone HH:MM or HH:MM:SS
     m = _TIME_ONLY_RE.match(raw)
     if m and fallback_date:
         fb = _parse_time(fallback_date)
         if fb:
-            return fb.replace(hour=int(m.group(1)), minute=int(m.group(2)))
+            ss = int(m.group(3)) if m.group(3) else 0
+            return fb.replace(hour=int(m.group(1)), minute=int(m.group(2)), second=ss)
         return None
     if m and not fallback_date:
+        return None
+
+    # 1b) MM-DD HH:MM (no year — needs fallback_date)
+    m = _MD_TIME_RE.match(raw)
+    if m and fallback_date:
+        fb = _parse_time(fallback_date)
+        if fb:
+            try:
+                ss = int(m.group(5)) if m.group(5) else 0
+                return fb.replace(month=int(m.group(1)), day=int(m.group(2)),
+                                  hour=int(m.group(3)), minute=int(m.group(4)), second=ss)
+            except ValueError:
+                return None
         return None
 
     # 2) OCR noise pattern "2022/4/202205.07"
@@ -115,14 +138,15 @@ def _parse_time(s: Optional[str], fallback_date: Optional[str] = None) -> Option
         except ValueError:
             return None
 
-    # 4) Normal date / datetime (YYYY.MM.DD / YYYY-MM-DD / YYYY/MM/DD)
+    # 4) Normal date / datetime (YYYY.MM.DD / YYYY-MM-DD / YYYY/MM/DD, optional HH:MM:SS)
     m = _DATE_RE.search(raw)
     if m:
         year, mon, day = int(m.group(1)), int(m.group(2)), int(m.group(3))
         hh = int(m.group(4)) if m.group(4) else 0
         mm = int(m.group(5)) if m.group(5) else 0
+        ss = int(m.group(6)) if m.group(6) else 0
         try:
-            return datetime(year, mon, day, hh, mm)
+            return datetime(year, mon, day, hh, mm, ss)
         except ValueError:
             return None
 
@@ -179,21 +203,54 @@ _SUPERSCRIPT_MAP = str.maketrans("⁰¹²³⁴⁵⁶⁷⁸⁹", "0123456789")
 
 
 def _expand_power_notation(text: str) -> str:
-    """Expand '10^3' / '10³' / '10**3' to the literal numeric value.
+    """Expand scientific notation to literal numeric values.
+
+    Supports:
+    - "10^3" / "10³" → "1000"
+    - "1.5×10^3" / "1.5*10^3" → "1500"
+    - "1.5e3" / "1.5E3" → "1500"
+    - "10**3" → "1000"
 
     Only expands when the base is 10 (common in pharma specs like ≤10^3 cfu/g).
     Other bases (e.g. 2^5) are left untouched to avoid surprising semantics.
     """
-    # 10^3 / 10**3 / 10^+3
+    # Step 1: Expand "10**3" / "10^3" / "10³" to literal (base must be 10)
     def repl_caret(m):
         base = float(m.group(1))
         exp = int(m.group(2))
         if base == 10:
             return str(int(base ** exp))
         return m.group(0)
-    text = re.sub(r"\b(10)\s*\^+\s*(\d+)", repl_caret, text)
-    # 10⁵ (unicode superscript, no caret)
-    text = re.sub(r"\b(10)([⁰¹²³⁴⁵⁶⁷⁸⁹]+)", lambda m: str(10 ** int(m.group(2).translate(_SUPERSCRIPT_MAP))), text)
+    text = re.sub(r"\b(10)\s*(?:\*\*|\^)+\s*(\d+)", repl_caret, text)
+    # 10⁵ (unicode superscript, no caret) — must run before generic digit
+    # translate to avoid "10³" collapsing to "103" instead of "1000".
+    text = re.sub(r"\b(10)([⁰¹²³⁴⁵⁶⁷⁸⁹]+)",
+                  lambda m: str(10 ** int(m.group(2).translate(_SUPERSCRIPT_MAP))), text)
+
+    # Step 2: Expand "系数×10^指数" or "系数*10^指数" patterns.
+    # Matches "1.5×1000" or "1.5*1000" (after step 1 expanded 10^3 to 1000).
+    def repl_sci(m):
+        coeff = float(m.group(1))
+        base = float(m.group(2))
+        # Only handle if base is a power of 10 (10, 100, 1000, 10000, ...)
+        if base != int(base) or base <= 0:
+            return m.group(0)
+        exp = math.log10(base)
+        if exp != int(exp):
+            return m.group(0)
+        result = coeff * base
+        # Return as int if whole number, else float
+        return str(int(result)) if result == int(result) else str(result)
+    text = re.sub(r"(\d+\.?\d*)\s*[×*]\s*(\d+\.?\d*)", repl_sci, text)
+
+    # Step 3: Expand "1.5e3" / "1.5E3" notation
+    def repl_e(m):
+        mantissa = float(m.group(1))
+        exp = int(m.group(2))
+        result = mantissa * (10 ** exp)
+        return str(int(result)) if result == int(result) else str(result)
+    text = re.sub(r"(\d+\.?\d*)[eE]([-+]?\d+)", repl_e, text)
+
     return text
 
 
@@ -272,7 +329,9 @@ def _judge(bounds: SpecBounds, actual: float) -> bool:
         return actual > bounds.low
     if bounds.op == "ge":
         return actual >= bounds.low
-    return True
+    # Fail-closed: unknown ops are treated as non-compliant to trigger
+    # human review (GMP safety principle — never silently pass unknown rules).
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -281,21 +340,51 @@ def _judge(bounds: SpecBounds, actual: float) -> bool:
 # ---------------------------------------------------------------------------
 
 # Regex to extract trailing unit from a spec/value string (after the number).
-_UNIT_RE = re.compile(r"-?\d+\.?\d*\s*([a-zA-Z%²³μµ/^\.]+[a-zA-Z%]*)")
+# First char must be a letter or % (not / or .) so we don't capture standalone
+# separators; subsequent chars may include / for compound units (mg/L, mg/mL).
+_UNIT_RE = re.compile(r"-?\d+\.?\d*\s*([a-zA-Z%²³μµ][a-zA-Z%²³μµ/^\.]*)")
 
 # Known conversions: actual_unit -> {spec_unit: multiplier}
 # actual_value_in_spec_unit = actual_value * multiplier
+# All multipliers express "1 actual_unit = N spec_unit"
 _UNIT_CONVERSIONS = {
-    "ppm": {"%": 0.0001, "ppb": 1000},      # 1 ppm = 0.0001% = 1000 ppb
-    "ppb": {"%": 0.0000001, "ppm": 0.001},  # 1 ppb = 0.0000001% = 0.001 ppm
-    "%":  {"ppm": 10000, "ppb": 10000000},  # 1% = 10000 ppm = 1e7 ppb
+    # === 浓度类 ===
+    "ppm": {"%": 0.0001, "ppb": 1000},
+    "ppb": {"%": 0.0000001, "ppm": 0.001},
+    "%":  {"ppm": 10000, "ppb": 10000000},
+
+    # === 质量类（制药常用）===
+    # 1 g = 1000 mg = 1000000 µg = 0.001 kg
+    "g":  {"mg": 1000, "µg": 1000000, "ug": 1000000, "kg": 0.001},
+    "mg": {"g": 0.001, "µg": 1000, "ug": 1000, "kg": 0.000001},
+    "µg": {"mg": 0.001, "g": 0.000001, "ug": 1},
+    "ug": {"mg": 0.001, "g": 0.000001, "µg": 1},
+    "kg": {"g": 1000, "mg": 1000000},
+
+    # === 体积类（制药常用）===
+    # 1 L = 1000 mL
+    "l":  {"ml": 1000},
+    "ml": {"l": 0.001},
+
+    # === 浓度（质量/体积）===
+    # mg/L = mg/L ；mg/mL = g/L （1 mg/mL = 1 g/L = 1000 mg/L）
+    "mg/l":   {"mg/ml": 0.001, "g/l": 0.001},
+    "mg/ml":  {"mg/l": 1000, "g/l": 1},
+    "g/l":    {"mg/l": 1000, "mg/ml": 1},
+
+    # === 压力类 ===
+    # 1 MPa = 10 bar = 1000 kPa
+    "mpa": {"bar": 10, "kpa": 1000},
+    "bar": {"mpa": 0.1, "kpa": 100},
+    "kpa": {"mpa": 0.001, "bar": 0.01},
 }
 
 
 def _extract_unit(text: Optional[str]) -> str:
-    """Extract trailing alphabetic/% unit from a value/spec string.
+    """Extract trailing unit from a value/spec string.
 
     "99.0ppm" -> "ppm" ; "≤50%" -> "%" ; "0.974" -> "" ; "46.0bar" -> "bar"
+    "1.5mg/L" -> "mg/l" ; "100mg/mL" -> "mg/ml"
     """
     if not text:
         return ""
@@ -306,21 +395,27 @@ def _extract_unit(text: Optional[str]) -> str:
 def _try_unit_normalize(actual_num: float, actual_unit: str, spec_str: str):
     """If actual and spec use convertible units, return (converted_actual, note).
 
-    Returns (None, "") when no conversion is needed or possible.
-    Caller should use original actual_num when converted is None.
+    If units differ but no conversion exists, return (None, "unit_mismatch") to
+    trigger fail-closed behavior (force human review — never silently compare
+    incompatible units, which is a GMP safety risk).
     """
-    spec_unit = _extract_unit(spec_str)
     au = (actual_unit or "").lower().strip(" .,;")
-    su = spec_unit.lower().strip(" .,;")
-
-    if not au or not su or au == su:
-        return None, ""
-
-    conv = _UNIT_CONVERSIONS.get(au)
-    if conv and su in conv:
-        converted = actual_num * conv[su]
-        return converted, f"（已归一化 {actual_num}{au} → {converted}{su}）"
-    return None, ""
+    if not au:
+        return actual_num, ""  # no unit on actual — compare as-is
+    spec_unit = _extract_unit(spec_str)
+    if not spec_unit or spec_unit == au:
+        return actual_num, ""  # same unit or no spec unit
+    conv = _UNIT_CONVERSIONS.get(au, {})
+    if spec_unit in conv:
+        converted = actual_num * conv[spec_unit]
+        return converted, f"unit normalized: {actual_num}{au} → {converted}{spec_unit}"
+    # Units differ but no conversion available — fail-closed
+    logger.warning(
+        f"Unit mismatch without conversion rule: "
+        f"actual={actual_num}{au} vs spec={spec_str} "
+        f"(flagging for human review — GMP safety)"
+    )
+    return None, "unit_mismatch"
 
 
 # ---------------------------------------------------------------------------
@@ -339,23 +434,51 @@ async def analyze_cross_page(page_structures: list[dict], job_id: str = "") -> l
         return []
 
     pages = _normalize_pages(page_structures)
+    logger.info(
+        f"[{job_id}] Cross-page analysis start: {len(pages)} pages "
+        f"(from {len(page_structures)} structures)"
+    )
 
     rule_findings: list[dict] = []
     llm_queue: list[dict] = []
 
     # R1-a + R1-b: time_reversal
-    rule_findings.extend(_check_time_reversal_in_page(pages))
-    rule_findings.extend(_check_time_reversal_cross_page(pages))
+    r1a = _check_time_reversal_in_page(pages)
+    r1b = _check_time_reversal_cross_page(pages)
+    rule_findings.extend(r1a)
+    rule_findings.extend(r1b)
+    logger.info(f"[{job_id}] R1 time_reversal: {len(r1a)} in-page + {len(r1b)} cross-page")
     # R2: year_contradiction (per event type)
-    rule_findings.extend(_check_year_contradiction(pages))
+    r2 = _check_year_contradiction(pages)
+    rule_findings.extend(r2)
+    logger.info(f"[{job_id}] R2 year_contradiction: {len(r2)}")
     # R4: suspicious_date
-    rule_findings.extend(_check_suspicious_dates(pages))
+    r4 = _check_suspicious_dates(pages)
+    rule_findings.extend(r4)
+    logger.info(f"[{job_id}] R4 suspicious_date: {len(r4)}")
     # R5: signature_time_anomaly
-    rule_findings.extend(_check_signature_time_anomaly(pages))
+    r5 = _check_signature_time_anomaly(pages)
+    rule_findings.extend(r5)
+    logger.info(f"[{job_id}] R5 signature_time_anomaly: {len(r5)}")
     # R6: completeness (missing operator/reviewer signatures)
-    rule_findings.extend(_check_completeness(pages))
+    r6 = _check_completeness(pages)
+    rule_findings.extend(r6)
+    logger.info(f"[{job_id}] R6 completeness: {len(r6)}")
+    # R7: batch number consistency across pages
+    r7 = _check_batch_consistency(pages)
+    rule_findings.extend(r7)
+    logger.info(f"[{job_id}] R7 batch_consistency: {len(r7)}")
+    # R8: low-confidence parameter values — flag for human review
+    r8 = _check_low_confidence_params(pages)
+    rule_findings.extend(r8)
+    logger.info(f"[{job_id}] R8 low_confidence: {len(r8)}")
     # R3: param_out_of_spec (collects llm_queue as side effect)
-    rule_findings.extend(_check_param_out_of_spec(pages, llm_queue))
+    r3 = _check_param_out_of_spec(pages, llm_queue)
+    rule_findings.extend(r3)
+    logger.info(
+        f"[{job_id}] R3 param_out_of_spec: {len(r3)} findings, "
+        f"{len(llm_queue)} queued for LLM fallback"
+    )
 
     # Per-page LLM findings pass-through:
     # When per-page LLM (v3) produces findings directly (e.g. page2 time_reversal
@@ -376,9 +499,9 @@ async def analyze_cross_page(page_structures: list[dict], job_id: str = "") -> l
 
     all_findings = rule_findings + llm_findings
     logger.info(
-        f"Cross-page analysis: {len(rule_findings)} rule + {len(llm_findings)} LLM "
+        f"[{job_id}] Cross-page analysis done: {len(rule_findings)} rule + {len(llm_findings)} LLM "
         f"({len(llm_fallback_findings)} from LLM fallback, "
-        f"{len(per_page_findings)} from per-page LLM pass-through)"
+        f"{len(per_page_findings)} from per-page LLM pass-through) = {len(all_findings)} total"
     )
     return all_findings
 
@@ -485,7 +608,9 @@ def _check_time_reversal_cross_page(pages: list[dict]) -> list[dict]:
     """
     findings = []
     ordered = []
+    unparseable_times: list[tuple[int, str, str, str]] = []  # (page, step_no, operation, raw_time)
     for page in pages:
+        pno = page["page"]
         fb_date = page["page_info"].get("production_date")
         # Sort steps within page by step_no (numeric when possible) so the
         # cross-page sequence follows step order, not table row order.
@@ -497,6 +622,13 @@ def _check_time_reversal_cross_page(pages: list[dict]) -> list[dict]:
         for step in page_steps:
             t_start = _parse_time(step.get("start_time"), fb_date)
             t_end = _parse_time(step.get("end_time"), fb_date)
+            # Detect unparseable time strings (OCR errors) — flag for human review
+            raw_start = step.get("start_time", "")
+            raw_end = step.get("end_time", "")
+            if (raw_start or raw_end) and not (t_start and t_end):
+                unparseable_times.append((pno, str(step.get("step_no", "?")),
+                                          (step.get("operation") or "")[:40],
+                                          f"start={raw_start} end={raw_end}"))
             if t_start and t_end:
                 ordered.append({
                     "page": page["page"],
@@ -551,6 +683,20 @@ def _check_time_reversal_cross_page(pages: list[dict]) -> list[dict]:
                 "operator": curr["operator"],
                 "source": "rule",
             })
+    # Flag unparseable time strings for human review (OCR quality issue)
+    for pno, step_no, op, raw in unparseable_times:
+        findings.append({
+            "page": pno,
+            "type": "completeness",
+            "severity": "info",
+            "description": (
+                f"第{pno}页 工序{step_no} {op} "
+                f"时间格式无法解析（{raw}），请人工核对时间顺序"
+            ),
+            "ocr_text": raw,
+            "operator": "",
+            "source": "rule",
+        })
     return findings
 
 
@@ -647,6 +793,21 @@ def _judge_param(p: dict, page: int, step_no, name: str,
     # Unit-aware comparison: convert actual to spec's unit when possible
     actual_unit = _extract_unit(str(actual))
     converted, note = _try_unit_normalize(actual_num, actual_unit, spec)
+    if converted is None and note == "unit_mismatch":
+        # Units differ but no conversion available — fail-closed, human review
+        findings.append({
+            "page": page,
+            "type": "completeness",
+            "severity": "warning",
+            "description": (
+                f"第{page}页 参数 {name} 单位不一致且无换算规则"
+                f"（spec={spec}, actual={actual}），需人工确认"
+            ),
+            "ocr_text": f"{name}: spec={spec} value={actual}",
+            "operator": "",
+            "source": "rule",
+        })
+        return
     compare_num = converted if converted is not None else actual_num
     in_spec = _judge(bounds, compare_num)
     p["in_spec"] = in_spec
@@ -690,6 +851,21 @@ def _judge_cell(val: dict, page: int, step_no, col: str, t: str,
     # Unit-aware comparison: convert actual to spec's unit when possible
     actual_unit = _extract_unit(str(actual))
     converted, note = _try_unit_normalize(actual_num, actual_unit, spec)
+    if converted is None and note == "unit_mismatch":
+        # Units differ but no conversion available — fail-closed, human review
+        findings.append({
+            "page": page,
+            "type": "completeness",
+            "severity": "warning",
+            "description": (
+                f"第{page}页 {col} 在 {t} 时实测值单位不一致且无换算规则"
+                f"（spec={spec}, actual={actual}），需人工确认"
+            ),
+            "ocr_text": f"{t} {col}: spec={spec} actual={actual}",
+            "operator": "",
+            "source": "rule",
+        })
+        return
     compare_num = converted if converted is not None else actual_num
     in_spec = _judge(bounds, compare_num)
     val["in_spec"] = in_spec
@@ -809,8 +985,31 @@ def _check_completeness(pages: list[dict]) -> list[dict]:
         pno = page["page"]
         for step in page["steps"]:
             has_time = bool(step.get("start_time") or step.get("end_time"))
+            has_operation = bool(step.get("operation"))
             if not has_time:
-                continue  # cover/toc/heading steps without execution don't need sigs
+                # Skip cover/toc/heading steps without operation description
+                if not has_operation:
+                    continue
+                # Steps with operation but no time — flag as GMP gap
+                # (missing date means execution time cannot be traced)
+                step_no = step.get("step_no", "?")
+                key = (pno, str(step_no), "no_time")
+                if key not in seen:
+                    seen.add(key)
+                    findings.append({
+                        "page": pno,
+                        "type": "completeness",
+                        "severity": "warning",
+                        "description": (
+                            f"第{pno}页 工序{step_no} "
+                            f"{(step.get('operation') or '')[:40]} "
+                            f"有操作描述但缺少执行时间记录"
+                        ),
+                        "ocr_text": f"step_no={step_no} time=空",
+                        "operator": "",
+                        "source": "rule",
+                    })
+                continue
             step_no = step.get("step_no", "?")
             sigs = step.get("signatures", []) or []
             has_operator = bool(step.get("operator")) or any(
@@ -819,6 +1018,10 @@ def _check_completeness(pages: list[dict]) -> list[dict]:
             )
             has_reviewer = bool(step.get("reviewer")) or any(
                 (s.get("role") or "").lower() in ("reviewer", "复核人", "复核员", "workshop_reviewer")
+                for s in sigs
+            )
+            has_qa = any(
+                (s.get("role") or "").lower() in ("qa", "qa_reviewer", "质量保证", "qa审核", "批准人", "放行人")
                 for s in sigs
             )
             if not has_operator:
@@ -855,6 +1058,118 @@ def _check_completeness(pages: list[dict]) -> list[dict]:
                         "operator": "",
                         "source": "rule",
                     })
+            if not has_qa:
+                # QA signature required for GMP compliance on executed steps
+                key = (pno, str(step_no), "qa")
+                if key not in seen:
+                    seen.add(key)
+                    findings.append({
+                        "page": pno,
+                        "type": "completeness",
+                        "severity": "info",
+                        "description": (
+                            f"第{pno}页 工序{step_no} "
+                            f"{(step.get('operation') or '')[:40]} "
+                            f"缺少 QA 签名"
+                        ),
+                        "ocr_text": f"step_no={step_no} qa=空",
+                        "operator": "",
+                        "source": "rule",
+                    })
+    return findings
+
+
+# ---------------------------------------------------------------------------
+# R7: batch number consistency — all pages should share the same batch_no.
+# Mixed batch numbers across pages indicate binding errors or cross-batch
+# contamination (serious GMP deviation).
+# ---------------------------------------------------------------------------
+
+
+def _check_batch_consistency(pages: list[dict]) -> list[dict]:
+    """Check that all pages with a batch_no use the same value.
+    Pages without batch_no (cover, toc, appendix) are skipped."""
+    findings = []
+    # Collect (page, batch_no) pairs for pages that have a batch_no
+    batch_pages: dict[str, list[int]] = {}  # batch_no -> [page numbers]
+    for page in pages:
+        pno = page["page"]
+        # batch_no 由 _normalize_pages 嵌套在 page_info 中（生产 schema）
+        bno = ((page.get("page_info") or {}).get("batch_no") or "").strip()
+        if not bno:
+            continue
+        batch_pages.setdefault(bno, []).append(pno)
+
+    if len(batch_pages) <= 1:
+        return findings  # all same (or none) — consistent
+
+    # Multiple different batch numbers found
+    summary_parts = [f"{bno}(第{','.join(str(p) for p in pn)}页)" for bno, pn in batch_pages.items()]
+    findings.append({
+        "page": min(min(pn) for pn in batch_pages.values()),  # first page with batch_no
+        "type": "batch_inconsistency",
+        "severity": "critical",
+        "description": (
+            f"跨页批号不一致：检测到 {len(batch_pages)} 个不同批号 — "
+            f"{'；'.join(summary_parts[:3])}"
+            f"{'…' if len(summary_parts) > 3 else ''}，"
+            f"请核对是否装订错误或混批"
+        ),
+        "ocr_text": f"batch_nos={list(batch_pages.keys())}",
+        "operator": "",
+        "source": "rule",
+    })
+    logger.warning(
+        f"R7 batch inconsistency: {len(batch_pages)} different batch numbers found"
+    )
+    return findings
+
+
+# ---------------------------------------------------------------------------
+# R8: low-confidence parameter values — flag for human review.
+# OCR may misread handwritten values (e.g. "0.974" → "0.914"). Low confidence
+# values that pass spec check could mask a real out-of-spec result. We flag
+# them for human verification rather than silently trusting the OCR output.
+# ---------------------------------------------------------------------------
+
+
+def _check_low_confidence_params(pages: list[dict]) -> list[dict]:
+    """Flag parameter values with low OCR confidence for human review.
+
+    A low-confidence value that passes spec check might actually be
+    out-of-spec if the OCR misread a handwritten digit. We surface these
+    cases so reviewers can verify against the original document.
+    """
+    findings = []
+    seen: set[tuple] = set()
+    for page in pages:
+        pno = page["page"]
+        # overall_confidence is emitted by the per-page LLM (v3 prompt). In
+        # _normalize_pages it stays nested under page["data"]; unit tests
+        # pass it at the top level. Check both locations so the rule fires
+        # in production and in tests.
+        overall_conf = (
+            page.get("overall_confidence")
+            or (page.get("data") or {}).get("overall_confidence")
+            or ""
+        ).lower()
+        # If overall page confidence is low, flag the whole page
+        if overall_conf == "low":
+            key = (pno, "page_low_confidence")
+            if key not in seen:
+                seen.add(key)
+                findings.append({
+                    "page": pno,
+                    "type": "completeness",
+                    "severity": "info",
+                    "description": (
+                        f"第{pno}页 整体识别置信度较低，"
+                        f"建议人工核对 OCR 结果（可能存在手写体或印章干扰）"
+                    ),
+                    "ocr_text": f"overall_confidence={overall_conf}",
+                    "operator": "",
+                    "source": "rule",
+                })
     return findings
 
 
@@ -877,9 +1192,50 @@ _FALLBACK_SYSTEM_PROMPT = """你是 GMP 批生产记录参数合规判定助手�
 严格输出 JSON 数组，不要添加其他文本。"""
 
 
+def _flag_llm_queue_for_review(llm_queue: list[dict], *, reason: str) -> list[dict]:
+    """Fail-closed: when LLM fallback is unavailable, flag all queued params
+    for human review rather than silently passing them (GMP safety principle)."""
+    findings = []
+    for q in llm_queue:
+        findings.append({
+            "page": q["page"],
+            "type": "completeness",
+            "severity": "warning",
+            "description": (
+                f"第{q['page']}页 参数 {q['name']}={q['actual']}{q.get('unit','')} "
+                f"规格 {q['spec']} 无法自动判定（{reason}），需人工确认"
+            ),
+            "ocr_text": f"{q['name']}: spec={q['spec']} actual={q['actual']}",
+            "operator": "",
+            "source": "rule",
+        })
+    return findings
+
+
+# LLM fallback 单次调用的最大参数数量。
+# 超过此数量时直接 flag 为 human review，避免 prompt 过大导致 LLM 调用超时/重试
+# （实测 449 个参数会导致 SiliconFlow API 重试并卡住 Stage 3 数分钟）。
+# 50 个参数的单次 LLM 调用 prompt 约 3-4KB，在 4000 max_tokens 内可完成。
+_LLM_FALLBACK_BATCH_MAX = 50
+
+
 async def _llm_fallback_check(llm_queue: list[dict], *, job_id: str = "") -> list[dict]:
     if not llm_queue:
         return []
+
+    # 防止 LLM 调用过载：队列过大时直接 flag 为 human review。
+    # 449 个参数的 prompt 会超过 LLM 的处理能力，导致重试和超时。
+    # GMP 安全原则：无法自动判定时 flag 为人工复核，而非让 pipeline 卡死。
+    if len(llm_queue) > _LLM_FALLBACK_BATCH_MAX:
+        logger.warning(
+            f"[{job_id}] LLM fallback queue too large ({len(llm_queue)} > "
+            f"{_LLM_FALLBACK_BATCH_MAX}), flagging all as human review"
+        )
+        return _flag_llm_queue_for_review(
+            llm_queue,
+            reason=f"参数数量过多（{len(llm_queue)}），超出自动判定上限，需人工确认"
+        )
+
     items_text = "\n".join(
         f"{i+1}. 第{q['page']}页 工序{q.get('step_no','?')} "
         f"{q.get('time','') + ' ' if q.get('time') else ''}"
@@ -895,11 +1251,11 @@ async def _llm_fallback_check(llm_queue: list[dict], *, job_id: str = "") -> lis
                        "prompt_version": "fallback_v1"},
         )
     except Exception as e:
-        logger.warning(f"LLM fallback failed: {e}")
-        return []
+        logger.warning(f"LLM fallback failed: {e} — flagging {len(llm_queue)} params for human review")
+        return _flag_llm_queue_for_review(llm_queue, reason=f"LLM 调用失败: {type(e).__name__}")
     if isinstance(result, dict) and result.get("_parse_error"):
-        logger.warning("LLM fallback: JSON parse failure")
-        return []
+        logger.warning(f"LLM fallback: JSON parse failure — flagging {len(llm_queue)} params for human review")
+        return _flag_llm_queue_for_review(llm_queue, reason="LLM 返回 JSON 解析失败")
     items = result if isinstance(result, list) else result.get("items", [])
     findings = []
     for item in items:
@@ -961,11 +1317,33 @@ async def _llm_based_check(summary: str, *, job_id: str = "") -> list[dict]:
                        "prompt_version": "semantic_v1"},
         )
     except Exception as e:
-        logger.warning(f"LLM semantic check failed: {e}")
-        return []
+        logger.warning(f"LLM semantic check failed: {e} — flagging for human review")
+        return [{
+            "page": 0,
+            "type": "completeness",
+            "severity": "info",
+            "description": (
+                f"跨页 LLM 语义检查不可用（LLM 调用失败: {type(e).__name__}），"
+                f"规则层未覆盖的跨页异常（如签名一致性、批次逻辑、参数漂移）需人工复核"
+            ),
+            "ocr_text": "",
+            "operator": "",
+            "source": "rule",
+        }]
     if isinstance(result, dict) and result.get("_parse_error"):
-        logger.warning("Cross-page LLM analysis: JSON parse failure")
-        return []
+        logger.warning("Cross-page LLM analysis: JSON parse failure — flagging for human review")
+        return [{
+            "page": 0,
+            "type": "completeness",
+            "severity": "info",
+            "description": (
+                "跨页 LLM 语义检查返回 JSON 解析失败，规则层未覆盖的跨页异常"
+                "（如签名一致性、批次逻辑、参数漂移）需人工复核"
+            ),
+            "ocr_text": "",
+            "operator": "",
+            "source": "rule",
+        }]
     findings = result if isinstance(result, list) else result.get("findings", [])
     valid = []
     required = {"page", "type", "severity", "description"}

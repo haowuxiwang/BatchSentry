@@ -17,15 +17,26 @@ MinerU 输出 Markdown + 结构化 JSON，对表格/公式的识别精度更高�
 import io
 import json
 import logging
+import shutil
+import tempfile
 import time
 import zipfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import requests
 
 from config import config
+from logging_config import ocr_job_id_var, JobIdFilter
 
 logger = logging.getLogger(__name__)
+
+# robustness-F1: job_id 透传 — 与 core/ocr_client.py 相同机制：共享
+# logging_config.ocr_job_id_var（ContextVar）+ JobIdFilter 给本模块所有日志
+# 加 [job_id] 前缀。pipeline 在 to_thread 前 set，排障时按 job 反查完整
+# MinerU 流程（上传/轮询/下载/页拆分）；分片 worker 线程不复刻 context，
+# 由 run_ocr_sliced 在 _ocr_one 内显式 set。
+logger.addFilter(JobIdFilter())
 
 POLL_INTERVAL = 5  # 秒
 POLL_TIMEOUT = 1800  # 30 分钟（批记录 PDF 较大，MinerU 解析耗时较长）
@@ -38,7 +49,7 @@ def _headers() -> dict:
     token = config["mineru"].token
     if not token:
         raise RuntimeError(
-            "MinerU token 未配置，请在 .env 中设置 MINERU_TOKEN "
+            "MinerU token 未配置，请在设置页面配置 MINERU_TOKEN "
             "（在 https://mineru.net/apiManage 页面创建）"
         )
     return {
@@ -57,7 +68,7 @@ def submit_pdf(pdf_path: str) -> tuple[str, str]:
     # Token 检查提前，配置缺失时立即报清晰错误
     if not cfg.token:
         raise RuntimeError(
-            "MinerU token 未配置，请在 .env 中设置 MINERU_TOKEN "
+            "MinerU token 未配置，请在设置页面配置 MINERU_TOKEN "
             "（在 https://mineru.net/apiManage 页面创建）"
         )
 
@@ -116,11 +127,14 @@ def submit_pdf(pdf_path: str) -> tuple[str, str]:
     return batch_id, pdf_name
 
 
-def poll_job(batch_id: str) -> dict:
+def poll_job(batch_id: str, progress_callback=None) -> dict:
     """轮询批次结果直到全部完成。
 
     MinerU 批量上传后用 batch_id 查询整体进度。
     返回 extract_result 列表中的第一个（我们只上传了一个文件）。
+
+    progress_callback(done, total): 每次轮询到 extract_progress 时回调，
+    供 pipeline 实时更新 job 进度（Stage 1 流式反馈）。
     """
     start = time.time()
     url = f"{_API_BASE}/extract-results/batch/{batch_id}"
@@ -138,7 +152,18 @@ def poll_job(batch_id: str) -> dict:
             time.sleep(POLL_INTERVAL)
             continue
 
-        j = resp.json()
+        # P-W6 修复：响应可能非 JSON（HTML 错误页、空响应、网关拦截页等），
+        # resp.json() 会抛 ValueError/json.JSONDecodeError，未被 except
+        # requests.RequestException 捕获 → 轮询中断。这里显式捕获并重试。
+        try:
+            j = resp.json()
+        except (ValueError, json.JSONDecodeError) as e:
+            logger.warning(
+                f"[MinerU] 轮询返回非 JSON 响应 (status={resp.status_code}): "
+                f"{resp.text[:200]} (parse_err: {e})"
+            )
+            time.sleep(POLL_INTERVAL)
+            continue
         if j.get("code") != 0:
             logger.warning(f"[MinerU] 轮询返回错误码: {j.get('msg')}")
             time.sleep(POLL_INTERVAL)
@@ -156,10 +181,12 @@ def poll_job(batch_id: str) -> dict:
         state = str(task.get("state") or "").lower()
         task_id = task.get("task_id", "?")
 
-        # 提取进度（running 时有效）
+        # 提取进度（running 时有效）+ 实时回调（Stage 1 流式反馈）
         progress = task.get("extract_progress") or {}
         extracted = progress.get("extracted_pages", "?")
         total = progress.get("total_pages", "?")
+        if progress_callback and isinstance(extracted, int) and isinstance(total, int):
+            progress_callback(extracted, total)
         elapsed = int(time.time() - start)
         logger.info(
             f"[MinerU] task={task_id} state={state} "
@@ -205,9 +232,12 @@ def download_result(task_result: dict) -> list[dict]:
         names = zf.namelist()
         logger.info(f"[MinerU] zip 内容: {names}")
 
-        # 优先找 content_list.json（含 page_idx，可按页拆分）
-        content_list_name = next(
-            (n for n in names if n.endswith("content_list.json")), None
+        # 优先 content_list_v2.json（新版按页分组结构，信息完整），
+        # 降级 content_list.json（旧版扁平结构）。注意 endswith 匹配
+        # "content_list.json" 不会命中 "_v2.json" 文件名，必须显式分开找。
+        content_list_name = (
+            next((n for n in names if n.endswith("content_list_v2.json")), None)
+            or next((n for n in names if n.endswith("content_list.json")), None)
         )
         full_md_name = next((n for n in names if n.endswith("full.md")), None)
 
@@ -232,12 +262,25 @@ def download_result(task_result: dict) -> list[dict]:
 
 
 def _split_pages_by_content_list(zf: zipfile.ZipFile, name: str) -> list[dict]:
-    """用 content_list.json 的 page_idx 字段按页分组。
+    """用 content_list 按页分组，保留整页结构（表格 HTML + 正文）。
 
-    content_list.json 是一个数组，每个元素形如:
-      {"type": "text"|"table"|"image"|..., "text"|"markdown"|..., "page_idx": N}
+    优先 content_list_v2.json，其结构为按页分组的二维数组
+    [[page1_blocks], [page2_blocks], ...]，块类型为
+    page_header / page_footer / page_number / paragraph / table / title
+    / image / equation_interline / page_aside_text 等，文本位于
+    content.<type>_content[].content 嵌套结构中。
 
-    将同一 page_idx 的块拼接为该页的 Markdown 文本。
+    降级：content_list.json（v1）为扁平数组，块带 page_idx 字段，
+    表格内容在 table_body 字段（HTML），文本在 text 字段。
+
+    整页解析策略（减少噪音，对 LLM 友好）：
+    1. 表格块保留 HTML（page_analyzer 的 prompt 按 HTML 表格设计），
+       不再丢失 56 个表格的内容
+    2. 页脚/页码块（footer / page_footer / page_number）过滤 —
+       批记录页脚是 "15.60%"、页码 "2/24" 之类的重复噪音
+    3. 页眉/标题块保留为 markdown 标题（含起草/审核日期信息）
+    4. 图片/公式块保留占位提示，让 LLM 知道此处有图
+    5. 每页开头添加 "## 第 N 页" 标题，便于 LLM 理解页面边界
     """
     raw = zf.read(name).decode("utf-8", errors="replace")
     try:
@@ -245,55 +288,235 @@ def _split_pages_by_content_list(zf: zipfile.ZipFile, name: str) -> list[dict]:
     except json.JSONDecodeError as e:
         raise RuntimeError(f"[MinerU] content_list.json 解析失败: {e}")
 
+    # v2 格式：按页分组的二维数组，索引即页号（0-based）
+    if isinstance(blocks, list) and blocks and isinstance(blocks[0], list):
+        pages = []
+        for i, group in enumerate(blocks):
+            text, discarded_count = _compose_page_markdown(
+                i + 1, [b for b in group if isinstance(b, dict)]
+            )
+            page_dict = {
+                "markdown": {"text": text},
+                "page_count": i + 1,
+                "_source": "mineru",
+            }
+            if discarded_count > 0:
+                # 暴露页级 OCR 完整性信息，pipeline 用于 UI 警告 + LLM 降级提示
+                page_dict["_discarded_count"] = discarded_count
+            pages.append(page_dict)
+        return pages
+
+    # v1 格式：扁平数组 + page_idx 字段
     if not isinstance(blocks, list):
         raise RuntimeError(f"[MinerU] content_list.json 不是数组: {type(blocks)}")
 
-    # 按 page_idx 分组（page_idx 从 0 开始）
-    page_map: dict[int, list[str]] = {}
+    # 按 page_idx 分组（page_idx 从 0 开始），保留块顺序
+    page_blocks: dict[int, list[dict]] = {}
     max_page = 0
     for block in blocks:
+        if not isinstance(block, dict):
+            continue
         page_idx = block.get("page_idx", 0)
         if not isinstance(page_idx, int):
             page_idx = 0
-        content = _block_to_markdown(block)
-        if content:
-            page_map.setdefault(page_idx, []).append(content)
-            if page_idx > max_page:
-                max_page = page_idx
+        page_blocks.setdefault(page_idx, []).append(block)
+        if page_idx > max_page:
+            max_page = page_idx
 
     # 生成连续页（1-based，与 pipeline 一致）
     pages = []
     for i in range(max_page + 1):
-        parts = page_map.get(i, [])
-        text = "\n\n".join(parts) if parts else ""
-        pages.append({
+        blocks_for_page = page_blocks.get(i, [])
+        text, discarded_count = _compose_page_markdown(i + 1, blocks_for_page)
+        page_dict = {
             "markdown": {"text": text},
             "page_count": i + 1,
             "_source": "mineru",
-        })
+        }
+        if discarded_count > 0:
+            page_dict["_discarded_count"] = discarded_count
+        pages.append(page_dict)
     return pages
+
+
+# 句末标点 — 用于判断 text 块是否构成完整段落
+_SENTENCE_END = set("。！？.!?;；")
+
+
+def _compose_page_markdown(page_num: int, blocks: list[dict]) -> tuple[str, int]:
+    """将同一页的所有块组合为整页 Markdown 文本。
+
+    段落合并规则：
+    - 连续的 text 块视为同一段落，用空格连接
+    - 遇到句末标点（。！？.!?）时，结束当前段落并换行
+    - 表格/图片/标题块前后自动加空行，与正文分隔
+    - 每页开头添加 "## 第 N 页" 标题
+
+    Returns:
+        (markdown_text, discarded_count)：discarded_count 为本页因低置信度
+        被 MinerU 丢弃的块数，供上游生成"OCR 不完整"警告。
+    """
+    if not blocks:
+        return f"## 第 {page_num} 页\n\n（此页无文本内容）", 0
+
+    parts: list[str] = [f"## 第 {page_num} 页"]
+    current_paragraph: list[str] = []
+    discarded_count = 0
+
+    def flush_paragraph():
+        """把当前累积的 text 块合并为一个段落并输出。"""
+        if current_paragraph:
+            # 用空格连接同一段落内的 text 块（MinerU 可能把一个段落拆成多块）
+            para = " ".join(current_paragraph).strip()
+            if para:
+                parts.append(para)
+            current_paragraph.clear()
+
+    for block in blocks:
+        btype = block.get("type", "text")
+        if btype in ("discarded", "discard") or block.get("discard") is True:
+            # 低置信度丢弃块：不进入正文，但计数供 OCR 不完整警告
+            discarded_count += 1
+            continue
+        content = _block_to_markdown(block)
+        if not content:
+            continue
+
+        if btype == "text":
+            # 文本块：累积到当前段落
+            current_paragraph.append(content)
+            # 句末标点 → 结束当前段落
+            if content and content[-1] in _SENTENCE_END:
+                flush_paragraph()
+        elif btype == "table":
+            # 表格块：先结束当前段落，表格前后加空行
+            flush_paragraph()
+            parts.append("")
+            parts.append(content)
+            parts.append("")
+        elif btype in ("image", "equation"):
+            # 图片/公式：先结束当前段落，占位提示独占一行
+            flush_paragraph()
+            parts.append(content)
+        else:
+            # heading 等其他类型：先结束当前段落，独占一行
+            flush_paragraph()
+            parts.append(content)
+
+    # 输出最后一个段落
+    flush_paragraph()
+
+    return "\n".join(parts).strip(), discarded_count
 
 
 def _block_to_markdown(block: dict) -> str:
     """将 content_list 的单个块转为 Markdown 文本。
 
-    MinerU 块类型: text / table / image / equation / heading 等。
-    - text: 直接取 text 字段
-    - table: 取 markdown/html 字段（优先 markdown）
-    - image/equation: 跳过（批记录检查不需要图片/公式渲染）
+    同时支持 v1（扁平 + page_idx）与 v2（按页分组 + content 嵌套）格式：
+    - table: 取 table_body / content.html（HTML 表格，page_analyzer 的
+      prompt 按 HTML 设计，保留原始结构对 LLM 最友好）
+    - text/paragraph: 取 text 或 content.paragraph_content[].content
+    - header/page_header: 保留为 markdown 三级标题（含起草/审核日期信息）
+    - title: 保留为 markdown 二级标题
+    - footer/page_footer/page_number: 过滤 — 批记录页脚/页码是重复噪音
+      （"15.60%"、"2/24"），LLM 无需看到
+    - image/equation: 保留占位提示，让 LLM 知道此处有图
     """
     btype = block.get("type", "text")
-    if btype == "text":
-        return block.get("text", "").strip()
+
+    # 噪音过滤：页脚/页码块直接丢弃
+    if btype in ("footer", "page_footer", "page_number"):
+        return ""
+
+    # 低置信度丢弃块：MinerU 因置信度过低丢弃的内容（type="discarded" 或
+    # discard 标记），不放入正文——否则 LLM 会把残缺片段当正常文本分析。
+    # 由 _compose_page_markdown 计数，用于页面 OCR 不完整警告。
+    if btype in ("discarded", "discard") or block.get("discard") is True:
+        return ""
+
     if btype == "table":
-        # MinerU 表格输出 markdown 格式，对 LLM 分析非常友好
-        return (block.get("markdown") or block.get("text") or "").strip()
-    if btype in ("image", "equation"):
-        # 图片/公式块：保留占位提示，便于 LLM 知道此处有图
-        caption = block.get("text") or block.get("caption") or ""
-        return f"[{btype}: {caption}]" if caption else ""
+        html = _table_html(block)
+        return html if html else ""
+
+    if btype == "paragraph":
+        txt = _content_text(block) or (block.get("text") or "").strip()
+        return txt
+
+    if btype in ("header", "page_header"):
+        txt = _content_text(block) or (block.get("text") or "").strip()
+        return f"### {txt}" if txt else ""
+
+    if btype == "title":
+        txt = _content_text(block) or (block.get("text") or "").strip()
+        return f"## {txt}" if txt else ""
+
+    if btype in ("image", "equation", "equation_interline"):
+        # 图片/公式块：保留占位提示，便于 LLM 知道此处有图。
+        # caption 来源：v2 嵌套 content > 顶层 caption 字段 > 顶层 text 字段
+        caption = (
+            _content_text(block)
+            or (block.get("caption") or "").strip()
+            or (block.get("text") or "").strip()
+        )
+        return f"[{btype}: {caption}]" if caption else f"[{btype}]"
+
+    if btype in ("page_aside_text", "aside_text"):
+        return _content_text(block) or (block.get("text") or "").strip()
+
     # 其他类型：尝试取 text 字段
-    return (block.get("text") or "").strip()
+    return _content_text(block) or (block.get("text") or "").strip()
+
+
+def _table_html(block: dict) -> str:
+    """提取表格 HTML：v2 在 content.html，v1 在 table_body 字段。"""
+    content = block.get("content")
+    if isinstance(content, dict) and content.get("html"):
+        return content["html"]
+    body = block.get("table_body")
+    if isinstance(body, str) and body.strip():
+        return body.strip()
+    md = block.get("markdown")
+    if isinstance(md, str) and md.strip():
+        return md.strip()
+    return ""
+
+
+def _content_text(block: dict) -> str:
+    """递归提取 v2 嵌套结构 content.<type>_content[].content 中的文本。
+
+    例：{"content": {"paragraph_content": [{"type": "text", "content": "..."}]}}
+    叶子节点的 content 是 str，需直接返回；中间节点是 dict/list 递归
+    （superscript / italic 等行内块在真实 v2 结果中会再嵌套一层）。
+    """
+    content = block.get("content")
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        # content 本身是列表（superscript 等行内块：{"content": [{...}]}）
+        parts = []
+        for item in content:
+            if isinstance(item, dict):
+                t = _content_text(item)
+                if t:
+                    parts.append(t)
+            elif isinstance(item, str):
+                parts.append(item)
+        return " ".join(parts).strip()
+    if not isinstance(content, dict):
+        return ""
+    parts: list[str] = []
+    for key, val in content.items():
+        if isinstance(val, list):
+            for item in val:
+                if isinstance(item, dict):
+                    t = _content_text(item)
+                    if t:
+                        parts.append(t)
+                elif isinstance(item, str):
+                    parts.append(item)
+        elif isinstance(val, str):
+            parts.append(val)
+    return " ".join(parts).strip()
 
 
 def _split_pages_by_separator(full_md: str) -> list[dict]:
@@ -322,11 +545,132 @@ def _split_pages_by_separator(full_md: str) -> list[dict]:
     return pages if pages else [{"markdown": {"text": full_md}, "page_count": 1, "_source": "mineru"}]
 
 
-def run_ocr(pdf_path: str) -> list[dict]:
+def run_ocr(pdf_path: str, progress_callback=None, job_id: str = "") -> list[dict]:
     """端到端 MinerU 解析: 上传 → 轮询 → 下载 → 按页拆分。
 
     返回格式与 core.ocr_client.run_ocr 兼容，pipeline.py 可透明替换。
+    progress_callback 透传给 poll_job（Stage 1 实时进度）。
+    job_id: 应用层 job id — 仅用于日志前缀（本模块日志自动带 [job_id]）。
     """
-    batch_id, _ = submit_pdf(pdf_path)
-    task_result = poll_job(batch_id)
-    return download_result(task_result)
+    if job_id:
+        _token = ocr_job_id_var.set(job_id)
+    try:
+        batch_id, _ = submit_pdf(pdf_path)
+        task_result = poll_job(batch_id, progress_callback=progress_callback)
+        return download_result(task_result)
+    finally:
+        if job_id:
+            ocr_job_id_var.reset(_token)
+
+
+def split_pdf(pdf_path: str, slice_pages: int) -> tuple[int, list[tuple[int, str]]]:
+    """按 slice_pages 页/片拆分 PDF 为临时单文件切片。
+
+    Args:
+        pdf_path: 源 PDF 路径
+        slice_pages: 每片页数（>=1）
+
+    Returns:
+        (total_pages, [(start_page_1based, tmp_path), ...])
+        切片文件位于临时目录，调用方用完后应调用 cleanup_slices() 清理。
+    """
+    import fitz  # PyMuPDF — 拆页
+
+    doc = fitz.open(pdf_path)
+    try:
+        total = doc.page_count
+        tmp_dir = Path(tempfile.mkdtemp(prefix="pbc_slice_"))
+        slices: list[tuple[int, str]] = []
+        for start in range(0, total, slice_pages):
+            end = min(start + slice_pages, total)
+            out = tmp_dir / f"pages_{start + 1}_{end}.pdf"
+            pdoc = fitz.open()
+            pdoc.insert_pdf(doc, from_page=start, to_page=end - 1)
+            pdoc.save(out)
+            pdoc.close()
+            slices.append((start + 1, str(out)))
+    finally:
+        doc.close()
+    return total, slices
+
+
+def cleanup_slices(slices: list[tuple[int, str]]) -> None:
+    """删除 split_pdf 生成的临时切片文件及其目录。"""
+    dirs = {str(Path(p).parent) for _, p in slices}
+    for d in dirs:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def run_ocr_sliced(
+    pdf_path: str,
+    slice_pages: int,
+    on_batch=None,
+    progress_callback=None,
+    job_id: str = "",
+) -> list[tuple[int, list[dict]]]:
+    """分片并行 OCR — 流式输出（问题 2 核心）。
+
+    把 PDF 切成多片，每片独立提交 MinerU batch 并并行轮询；**一片完成
+    立即回调 on_batch(start_page, pages)**（不等其他片），让 pipeline 可以
+    "第一片 OCR 完成即开始该片页面的 LLM 分析"，用户无需等全部 51 页
+    OCR 完成才看到任何结果。
+
+    Args:
+        pdf_path: 源 PDF
+        slice_pages: 每片页数
+        on_batch: 每片完成时回调 on_batch(start_page_1based, pages)。
+            pages 内每页 page_count 已重映射为全局页号（非片内页号）。
+        progress_callback: 全局进度回调 (done_global, total_global)，
+            由每片的 poll_job 进度合并而来。
+        job_id: 应用层 job id — 仅用于日志前缀（线程池内 ContextVar
+            自动继承，每片日志统一带 [job_id]）。
+
+    Returns:
+        [(start_page, pages), ...]（按提交顺序）。pages 元素结构同
+        run_ocr 的返回值（{"markdown": {...}, "page_count": 全局页号}）。
+
+    Raises:
+        单片提交/轮询/下载失败时向上抛出（与整份 run_ocr 语义一致）。
+    """
+    if job_id:
+        _token = ocr_job_id_var.set(job_id)
+    try:
+        total, slices = split_pdf(pdf_path, slice_pages)
+    finally:
+        if job_id:
+            ocr_job_id_var.reset(_token)
+    n = len(slices)
+    results: list = [None] * n
+    try:
+        with ThreadPoolExecutor(max_workers=min(n, 4)) as pool:
+            def _ocr_one(index: int, start_page: int, path: str):
+                # worker 线程不继承 ContextVar（ThreadPoolExecutor 不复刻
+                # 调用方 context），显式 set 保证该片日志带 [job_id] 前缀
+                if job_id:
+                    ocr_job_id_var.set(job_id)
+                # 片内进度 → 全局进度（start_page 是全局 1-based 页号）
+                def _cb(done: int, total_in_slice: int):
+                    if progress_callback:
+                        progress_callback(start_page - 1 + done, total)
+
+                batch_id, _ = submit_pdf(path)
+                task = poll_job(batch_id, progress_callback=_cb)
+                pages = download_result(task)
+                # page_count 重映射为全局页号（download_result 返回片内 1-based）
+                for p in pages:
+                    p["page_count"] = start_page + p["page_count"] - 1
+                return start_page, pages
+
+            futures = {
+                pool.submit(_ocr_one, i, s, p): i for i, (s, p) in enumerate(slices)
+            }
+            # as_completed：一片完成立即回调（不等待全部片）
+            for fut in as_completed(futures):
+                idx = futures[fut]
+                start_page, pages = fut.result()  # 失败直接上抛
+                results[idx] = (start_page, pages)
+                if on_batch:
+                    on_batch(start_page, pages)
+    finally:
+        cleanup_slices(slices)
+    return results

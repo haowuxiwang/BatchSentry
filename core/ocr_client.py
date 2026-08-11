@@ -11,8 +11,15 @@ from pathlib import Path
 import requests
 
 from config import config
+from logging_config import ocr_job_id_var, JobIdFilter
 
 logger = logging.getLogger(__name__)
+
+# robustness-F1: job_id 透传 — 内部函数（submit/poll/download）不逐一改
+# 签名，通过 logging_config.ocr_job_id_var（ContextVar）+ JobIdFilter 给本
+# 模块所有日志加 [job_id] 前缀。pipeline 在 to_thread 调用前 set（asyncio
+# 自动拷贝 context 到线程），排障时从 pipeline.log 按 job 反查全流程。
+logger.addFilter(JobIdFilter())
 
 POLL_INTERVAL = 5  # seconds
 POLL_TIMEOUT = 600  # 10 minutes
@@ -79,10 +86,12 @@ def submit_pdf(pdf_path: str, retries: int = 3) -> str:
         pdf_file.close()
 
 
-def poll_job(job_id: str) -> dict:
+def poll_job(job_id: str, progress_callback=None) -> dict:
     """Poll until job done. Returns the final poll response dict.
 
     容错：网络异常重试，最多 POLL_MAX_RETRIES 次后放弃。
+    progress_callback(done, total): 每次轮询到 extractProgress 时回调，
+    供 pipeline 实时更新 job 进度（Stage 1 流式反馈）。
     """
     cfg = config["paddle_ocr"]
     headers = {"Authorization": f"bearer {cfg.token}"}
@@ -106,6 +115,8 @@ def poll_job(job_id: str) -> dict:
             progress = j.get("data", {}).get("extractProgress", {})
             extracted = progress.get("extractedPages", "?")
             total = progress.get("totalPages", "?")
+            if progress_callback and isinstance(extracted, int) and isinstance(total, int):
+                progress_callback(extracted, total)
             logger.info(f"Poll state={state} pages={extracted}/{total}")
             if state in ("done", "success"):
                 elapsed = int(time.time() - start)
@@ -157,8 +168,22 @@ def download_result(poll_response: dict) -> list[dict]:
     try:
         obj = json.loads(raw)
         lpr = obj.get("result", {}).get("layoutParsingResults", [])
-        if lpr:
-            pages.extend(lpr)
+        if not lpr:
+            # JSON 解析成功但 layoutParsingResults 为空 — 上游 OCR 服务返回了
+            # 异常结构。记录完整响应便于诊断，抛异常让 pipeline 转 error 状态，
+            # 而非静默返回空列表导致 review 页面空白。
+            result_obj = obj.get("result", {})
+            logger.error(
+                f"OCR result JSON parsed but layoutParsingResults is empty. "
+                f"top_keys={list(obj.keys())} result_keys={list(result_obj.keys()) if isinstance(result_obj, dict) else type(result_obj).__name__} "
+                f"raw_first_500={raw[:500]!r}"
+            )
+            raise RuntimeError(
+                "OCR 返回空结果: layoutParsingResults 为空。"
+                f"top_keys={list(obj.keys())}, "
+                f"result_keys={list(result_obj.keys()) if isinstance(result_obj, dict) else type(result_obj).__name__}"
+            )
+        pages.extend(lpr)
         data_info = obj.get("result", {}).get("dataInfo", {})
         if data_info:
             for i, p in enumerate(pages):
@@ -172,10 +197,12 @@ def download_result(poll_response: dict) -> list[dict]:
         pass
 
     # JSONL (one JSON object per line, each with 4 pages)
+    line_count = 0
     for line in raw.strip().split("\n"):
         line = line.strip()
         if not line:
             continue
+        line_count += 1
         try:
             obj = json.loads(line)
         except json.JSONDecodeError:
@@ -189,14 +216,43 @@ def download_result(poll_response: dict) -> list[dict]:
             for i, p in enumerate(pages):
                 if not p.get("page_count"):
                     p["page_count"] = i + 1
+
+    if not pages:
+        # JSONL 解析后仍无页 — 记录诊断信息并抛异常，避免 pipeline 继续
+        # 走到 Stage 2/3 最终生成空 findings 导致 review 页面空白。
+        logger.error(
+            f"OCR JSONL parsing yielded 0 pages. lines={line_count} "
+            f"raw_first_500={raw[:500]!r}"
+        )
+        raise RuntimeError(
+            f"OCR 返回空结果: JSONL 解析后 0 页（共 {line_count} 行）。"
+            f"raw_first_200={raw[:200]!r}"
+        )
     logger.info(
         f"OCR download complete (JSONL): {len(pages)} pages, {raw_size_kb:.1f}KB"
     )
     return pages
 
 
-def run_ocr(pdf_path: str) -> list[dict]:
-    """End-to-end OCR: submit → poll → download. Returns list of page results."""
-    job_id = submit_pdf(pdf_path)
-    poll_response = poll_job(job_id)
-    return download_result(poll_response)
+def run_ocr(pdf_path: str, progress_callback=None, job_id: str = "") -> list[dict]:
+    """End-to-end OCR: submit → poll → download. Returns list of page results.
+
+    progress_callback 透传给 poll_job（Stage 1 实时进度）。
+    job_id: 应用层 job id — 仅用于日志前缀（本模块所有日志自动带
+    [job_id]），便于从 pipeline.log 反查某个 job 的 OCR 全流程。
+    """
+    if job_id:
+        _token = ocr_job_id_var.set(job_id)
+    try:
+        paddle_job_id = submit_pdf(pdf_path)
+        poll_response = poll_job(paddle_job_id, progress_callback=progress_callback)
+        pages = download_result(poll_response)
+        if not pages:
+            # download_result 现在应在空结果时抛异常，此处为防御性兜底
+            logger.warning(
+                f"OCR returned 0 pages for job_id={paddle_job_id} (defensive check)"
+            )
+    finally:
+        if job_id:
+            ocr_job_id_var.reset(_token)
+    return pages

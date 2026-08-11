@@ -108,24 +108,46 @@ class LLMClient:
                 # Phase 7: GMP audit — record this call for traceability
                 if audit_ctx is not None:
                     await _record_llm_call(
-                        audit_ctx, result, last_latency_ms, success=True
+                        audit_ctx, self, result, last_latency_ms, success=True
                     )
 
                 return result.content
             except Exception as e:
                 last_error = e
+                # Distinguish retryable vs non-retryable errors
+                err_str = str(e).lower()
+                is_non_retryable = any(kw in err_str for kw in [
+                    "401", "authentication", "unauthorized",
+                    "403", "forbidden",
+                    "400", "bad request", "invalid",
+                ])
+                if is_non_retryable:
+                    logger.error(
+                        f"LLM call failed (non-retryable){ctx_tag}: "
+                        f"{type(e).__name__}: {e}"
+                    )
+                    # Record audit and fail immediately
+                    if audit_ctx is not None:
+                        await _record_llm_call(
+                            audit_ctx, self, last_result, last_latency_ms,
+                            success=False, error=str(last_error)[:200]
+                        )
+                    raise RuntimeError(
+                        f"LLM call failed (non-retryable){ctx_tag}: {last_error}"
+                    )
                 logger.warning(
                     f"LLM call attempt {attempt}/{retries} failed{ctx_tag}: "
                     f"{type(e).__name__}: {e}"
                 )
                 if attempt < retries:
-                    backoff = 2 * attempt
-                    logger.info(f"LLM retry{ctx_tag}: backing off {backoff}s before attempt {attempt + 1}")
+                    import random
+                    backoff = (2 ** attempt) * random.uniform(0.5, 1.5)
+                    logger.info(f"LLM retry{ctx_tag}: backing off {backoff:.1f}s before attempt {attempt + 1}")
                     await asyncio.sleep(backoff)
         # Final failure — record audit if requested
         if audit_ctx is not None:
             await _record_llm_call(
-                audit_ctx, last_result, last_latency_ms,
+                audit_ctx, self, last_result, last_latency_ms,
                 success=False, error=str(last_error)[:200]
             )
         raise RuntimeError(
@@ -248,6 +270,7 @@ def reset_llm_client() -> None:
 
 async def _record_llm_call(
     ctx: dict,
+    llm_client: "LLMClient",
     result: "ChatResult | None",
     latency_ms: int,
     success: bool = True,
@@ -258,33 +281,41 @@ async def _record_llm_call(
     Best-effort: if the DB write fails, we log but do NOT propagate — the
     user's pipeline should still complete even if audit recording is broken.
     Avoids circular import: db.client imported lazily here, not at module top.
+
+    P-C4 修复：execute + commit 包在 core.pipeline.db_lock 内，与 _analyze_one
+    / transition_status / _audit_log 共享同一锁，避免并发写入触发 aiosqlite
+    "Recursive use of cursors" 错误。
     """
     try:
         from db.client import get_db
+        # 延迟导入避免循环依赖（core.pipeline 不在 module top 引入 llm.client，
+        # 但 llm.adapters 可能间接被 core 引入，保险起见在此 lazy import）
+        from core.pipeline import db_lock
         db = await get_db()
-        client = get_llm_client()
-        await db.execute(
-            """INSERT INTO llm_call_audit
-               (job_id, page, stage, provider, protocol, model,
-                prompt_version, prompt_tokens, completion_tokens,
-                total_tokens, latency_ms, success, error)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                ctx.get("job_id", ""),
-                ctx.get("page"),
-                ctx.get("stage", ""),
-                client.provider,
-                client.adapter.protocol,
-                client.model,
-                ctx.get("prompt_version"),
-                result.prompt_tokens if result else None,
-                result.completion_tokens if result else None,
-                result.total_tokens if result else None,
-                latency_ms,
-                1 if success else 0,
-                error,
-            ),
-        )
-        await db.commit()
+        client = llm_client
+        async with db_lock:
+            await db.execute(
+                """INSERT INTO llm_call_audit
+                   (job_id, page, stage, provider, protocol, model,
+                    prompt_version, prompt_tokens, completion_tokens,
+                    total_tokens, latency_ms, success, error)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    ctx.get("job_id", ""),
+                    ctx.get("page"),
+                    ctx.get("stage", ""),
+                    client.provider,
+                    client.adapter.protocol,
+                    client.model,
+                    ctx.get("prompt_version"),
+                    result.prompt_tokens if result else None,
+                    result.completion_tokens if result else None,
+                    result.total_tokens if result else None,
+                    latency_ms,
+                    1 if success else 0,
+                    error,
+                ),
+            )
+            await db.commit()
     except Exception as e:
         logger.warning(f"LLM audit record failed (non-fatal): {e}")
