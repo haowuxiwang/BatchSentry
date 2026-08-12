@@ -1471,13 +1471,14 @@ class TestUserRulesInjection:
         import json
         cfg = tmp_path / "config.json"
         cfg.write_text(json.dumps({"user_rules": [
-            {"text": "中间体储存温度必须 15-25°C", "active": True},
-            {"text": "关键工序必须双人复核", "active": True},
+            {"id": "fixed-1", "text": "中间体储存温度必须 15-25°C", "active": True},
+            {"id": "fixed-2", "text": "关键工序必须双人复核", "active": True},
         ]}), encoding="utf-8")
         with patch("config._config_path", return_value=cfg):
             section, rules_hash = _user_rules_section()
         assert "15-25°C" in section
         assert "双人复核" in section
+        assert "[规则ID: " in section  # 每条规则注入唯一 ID 供 LLM 回填 rule_id
         assert rules_hash != "none"
         assert len(rules_hash) == 8
         with patch("config._config_path", return_value=cfg):
@@ -1558,3 +1559,45 @@ class TestUserRulesInjection:
 
         sources = {f["type"]: f["source"] for f in findings}
         assert sources == {"user_rule": "user_rule", "signature_mismatch": "llm_cross"}
+
+    def test_user_rule_findings_carry_valid_rule_id(self, tmp_path):
+        """rule_id 只在启用规则集合内保留；幻觉/缺失 id 一律置 None（防伪）。"""
+        import json
+        from core.cross_page_analyzer import _llm_based_check
+        cfg = tmp_path / "config.json"
+        cfg.write_text(json.dumps({"user_rules": [
+            {"id": "abc123", "text": "储存温度必须 15-25°C", "active": True},
+            {"id": "def456", "text": "双人复核", "active": False},
+        ]}), encoding="utf-8")
+
+        class FakeClient:
+            async def chat_json(self, system_prompt, user_content, **kwargs):
+                return [
+                    # 合法 id → 保留
+                    {"page": 1, "type": "user_rule", "severity": "warning",
+                     "description": "温度超标", "rule_id": "abc123"},
+                    # 幻觉 id（不在启用集合，且指向停用规则）→ None
+                    {"page": 2, "type": "user_rule", "severity": "warning",
+                     "description": "复核缺失", "rule_id": "def456"},
+                    # 完全编造 → None
+                    {"page": 3, "type": "user_rule", "severity": "warning",
+                     "description": "混批", "rule_id": "fake999"},
+                    # 缺失 → None
+                    {"page": 4, "type": "user_rule", "severity": "info",
+                     "description": "无 id"},
+                    # 非 user_rule 类型不受影响
+                    {"page": 5, "type": "signature_mismatch", "severity": "critical",
+                     "description": "签名不一致", "rule_id": "abc123"},
+                ]
+
+        with patch("config._config_path", return_value=cfg), \
+             patch("core.cross_page_analyzer.get_llm_client",
+                   return_value=FakeClient()):
+            findings = asyncio.run(_llm_based_check("摘要", job_id="job-1"))
+
+        by_page = {f["page"]: f["rule_id"] for f in findings}
+        assert by_page[1] == "abc123"
+        assert by_page[2] is None
+        assert by_page[3] is None
+        assert by_page[4] is None
+        assert by_page[5] is None  # 非 user_rule 一律不带 rule_id

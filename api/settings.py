@@ -540,10 +540,26 @@ def _write_raw_config(existing: dict) -> None:
 
 @router.get("/api/settings/rules")
 async def get_user_rules(request: Request):
-    """返回用户填写的合规规则（注入跨页 LLM 分析用）。"""
+    """返回用户填写的合规规则 + 各规则历史命中数（source='user_rule' 按 id 统计）。
+
+    hits: {rule_id: 命中次数}，未回填 id 的历史命中归入空串键（GMP 溯源辅助）。
+    """
     if not is_local_request(request):
         raise HTTPException(403, "Forbidden (non-local request)")
-    return {"rules": load_user_rules()}
+    try:
+        from db.client import get_db
+        db = await get_db()
+        cursor = await db.execute(
+            "SELECT user_rule_id, COUNT(*) AS cnt FROM findings "
+            "WHERE source = 'user_rule' AND user_rule_id IS NOT NULL GROUP BY user_rule_id"
+        )
+        hits = {}
+        for row in await cursor.fetchall():
+            hits[str(row["user_rule_id"])] = row["cnt"]
+    except Exception as e:
+        logger.warning(f"Failed to gather user-rule hit stats: {e}")
+        hits = {}
+    return {"rules": load_user_rules(), "hits": hits}
 
 
 @router.put("/api/settings/rules")

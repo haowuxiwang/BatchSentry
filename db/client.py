@@ -21,7 +21,7 @@ def _get_init_lock() -> asyncio.Lock:
     return _db_init_lock
 
 # Current schema migration level, persisted via PRAGMA user_version.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 async def get_db() -> aiosqlite.Connection:
@@ -69,6 +69,9 @@ async def migrate(db: aiosqlite.Connection):
 
     if current_version < 3:
         await _migrate_v3(db)
+
+    if current_version < 4:
+        await _migrate_v4(db)
 
     # PRAGMA user_version cannot be parameterized; SCHEMA_VERSION is an int
     # constant defined in this module, so f-string is safe.
@@ -154,6 +157,21 @@ async def _migrate_v3(db: aiosqlite.Connection):
             logger.info("Migration: added jobs.md5")
     except Exception as e:
         logger.warning(f"Migration skip jobs.md5: {e}")
+    await db.commit()
+
+
+async def _migrate_v4(db: aiosqlite.Connection):
+    """v4: findings.user_rule_id — 用户规则命中溯源列（GMP 可追溯）。"""
+    try:
+        cursor = await db.execute("PRAGMA table_info(findings)")
+        finding_cols = {row["name"] for row in await cursor.fetchall()}
+        if "user_rule_id" not in finding_cols:
+            await db.execute(
+                "ALTER TABLE findings ADD COLUMN user_rule_id TEXT"
+            )
+            logger.info("Migration: added findings.user_rule_id")
+    except Exception as e:
+        logger.warning(f"Migration skip findings.user_rule_id: {e}")
     await db.commit()
 
 

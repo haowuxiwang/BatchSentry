@@ -309,6 +309,65 @@ class TestDbClientEdgeCases:
             assert (await cursor.fetchone())[0] == SCHEMA_VERSION
 
     @pytest.mark.asyncio
+    async def test_migrate_v4_adds_user_rule_id_column(self, tmp_path):
+        """v3 库（user_version=3，无 findings.user_rule_id）→ migrate 应补列并升到 v4。"""
+        import aiosqlite
+        from db.client import migrate, SCHEMA_VERSION
+
+        db_path = str(tmp_path / "v3.db")
+        async with aiosqlite.connect(db_path) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("""
+                CREATE TABLE findings (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    job_id TEXT NOT NULL,
+                    page INTEGER NOT NULL,
+                    type TEXT NOT NULL,
+                    severity TEXT NOT NULL,
+                    description TEXT NOT NULL,
+                    source TEXT DEFAULT 'rule'
+                )
+            """)
+            await db.execute("PRAGMA user_version = 3")
+            await db.commit()
+
+            await migrate(db)
+            cursor = await db.execute("PRAGMA table_info(findings)")
+            cols = {row["name"] for row in await cursor.fetchall()}
+            assert "user_rule_id" in cols
+            cursor = await db.execute("PRAGMA user_version")
+            assert (await cursor.fetchone())[0] == SCHEMA_VERSION
+
+    @pytest.mark.asyncio
+    async def test_migration_is_idempotent_on_v4_db(self, tmp_path):
+        """v4 库再跑 migrate 应干净跳过（幂等）。"""
+        import aiosqlite
+        from db.client import migrate, SCHEMA_VERSION
+        from db.client import get_db
+
+        db_path = str(tmp_path / "v4.db")
+        async with aiosqlite.connect(db_path) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("""
+                CREATE TABLE findings (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    job_id TEXT NOT NULL,
+                    page INTEGER NOT NULL,
+                    type TEXT NOT NULL,
+                    severity TEXT NOT NULL,
+                    description TEXT NOT NULL,
+                    source TEXT DEFAULT 'rule',
+                    user_rule_id TEXT
+                )
+            """)
+            await db.execute("PRAGMA user_version = SCHEMA_VERSION")
+            await db.commit()
+
+            await migrate(db)  # 不应抛出异常
+            cursor = await db.execute("PRAGMA user_version")
+            assert (await cursor.fetchone())[0] == SCHEMA_VERSION
+
+    @pytest.mark.asyncio
     async def test_get_db_returns_existing_connection(self, tmp_path):
         """get_db 第二次调用应返回已存在的连接（_db is not None 分支）。"""
         import db.client as db_mod

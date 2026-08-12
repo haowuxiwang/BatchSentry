@@ -1303,9 +1303,10 @@ SYSTEM_PROMPT = """你是一个 GMP 批生产记录合规分析专家。
 请只关注规则层无法判定的语义异常，例如签名一致性、批次逻辑、跨页参数漂移等。
 
 输出 JSON 数组，每个 finding 包含：
-{"page":页码,"type":"signature_mismatch|param_out_of_spec|completeness|user_rule","severity":"critical|warning|info","description":"问题描述","ocr_text":"原文摘录","operator":"涉及人员"}
+{"page":页码,"type":"signature_mismatch|param_out_of_spec|completeness|user_rule","severity":"critical|warning|info","description":"问题描述","ocr_text":"原文摘录","operator":"涉及人员","rule_id":"命中规则的ID"}
 
-type 为 "user_rule" 时表示命中用户自定义合规规则（按用户规则逐条核对）。"""
+type 为 "user_rule" 时表示命中用户自定义合规规则（按用户规则逐条核对），
+且 rule_id 必须填写命中的那条规则的 ID（取自下方规则清单中的 [规则ID: xxx]，逐字照抄；未命中用户规则时该字段填 null）。"""
 
 
 def _user_rules_section() -> tuple[str, str]:
@@ -1318,10 +1319,10 @@ def _user_rules_section() -> tuple[str, str]:
     rules = [r for r in load_user_rules() if r.get("active")]
     if not rules:
         return "", "none"
-    lines = [f"- {r['text']}" for r in rules]
+    lines = [f"- [规则ID: {r['id']}] {r['text']}" for r in rules]
     section = (
         "用户自定义合规规则（必须逐条核对记录是否满足，"
-        "违反时输出 type=user_rule 的 finding，按影响定级）：\n"
+        "违反时输出 type=user_rule 的 finding，按影响定级，rule_id 照抄对应规则 ID）：\n"
         + "\n".join(lines)
     )
     import hashlib
@@ -1373,6 +1374,9 @@ async def _llm_based_check(summary: str, *, job_id: str = "") -> list[dict]:
     findings = result if isinstance(result, list) else result.get("findings", [])
     valid = []
     required = {"page", "type", "severity", "description"}
+    # 启用规则 id 集合：user_rule finding 的 rule_id 只接受集合内的 id
+    from config import load_user_rules
+    enabled_rule_ids = {r["id"] for r in load_user_rules() if r.get("active")}
     for f in findings:
         if not isinstance(f, dict) or not required.issubset(f.keys()):
             logger.warning(f"Skipping invalid finding (missing fields): {f}")
@@ -1381,6 +1385,12 @@ async def _llm_based_check(summary: str, *, job_id: str = "") -> list[dict]:
         f.setdefault("operator", "")
         # user_rule 类型的 finding 标记独立 source，便于复核页区分来源
         f["source"] = "user_rule" if f.get("type") == "user_rule" else "llm_cross"
+        # rule_id 防伪：超出启用规则集合（含缺失/幻觉 id）一律置 None
+        rid = f.get("rule_id")
+        if f["source"] == "user_rule" and rid in enabled_rule_ids:
+            f["rule_id"] = rid
+        else:
+            f["rule_id"] = None
         valid.append(f)
     return valid
 

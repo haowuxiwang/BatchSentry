@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS findings (
     status TEXT DEFAULT 'pending',
     corrected_text TEXT,
     source TEXT DEFAULT 'rule',  -- Phase 3: rule | llm_page | llm_fallback | llm_cross
+    user_rule_id TEXT,           -- Phase 11: 命中的用户规则 id（source='user_rule' 时，GMP 溯源）
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     reviewed_at TIMESTAMP,
     FOREIGN KEY (job_id) REFERENCES jobs(id)

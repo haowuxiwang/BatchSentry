@@ -718,10 +718,11 @@ async def _run_pipeline_impl(job_id: str, pdf_path: str):
                 )
                 continue
             await db.execute(
-                "INSERT INTO findings (job_id, page, type, severity, description, ocr_text, operator, source) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO findings (job_id, page, type, severity, description, ocr_text, operator, source, user_rule_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (job_id, f["page"], f["type"], f["severity"], f["description"],
-                 f.get("ocr_text"), f.get("operator"), f.get("source", "rule")),
+                 f.get("ocr_text"), f.get("operator"), f.get("source", "rule"),
+                 f.get("rule_id") if f.get("source") == "user_rule" else None),
             )
             inserted += 1
         await db.commit()  # Flush findings before status transition (prevent ghost findings)

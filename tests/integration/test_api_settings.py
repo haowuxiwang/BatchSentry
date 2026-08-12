@@ -519,6 +519,43 @@ class TestUserRules:
         assert "1 rules" in rows[0][1]
 
     @pytest.mark.asyncio
+    async def test_get_rules_reports_hits(self, settings_client):
+        """GET /api/settings/rules 应返回各规则历史命中数（source=user_rule 按 id 分组）。"""
+        from db.client import get_db
+        db = await get_db()
+        await db.execute(
+            "INSERT INTO jobs (id, filename, status) VALUES ('job-hit-1', 'hit.pdf', 'review')"
+        )
+        await db.execute(
+            "INSERT INTO findings (job_id, page, type, severity, description, source, user_rule_id) "
+            "VALUES ('job-hit-1', 1, 'user_rule', 'warning', '温度超标', 'user_rule', 'rule-a')"
+        )
+        await db.execute(
+            "INSERT INTO findings (job_id, page, type, severity, description, source, user_rule_id) "
+            "VALUES ('job-hit-1', 2, 'user_rule', 'warning', '复核缺失', 'user_rule', 'rule-a')"
+        )
+        await db.execute(
+            "INSERT INTO findings (job_id, page, type, severity, description, source, user_rule_id) "
+            "VALUES ('job-hit-1', 3, 'user_rule', 'info', '混批', 'user_rule', 'rule-b')"
+        )
+        # 未回填 id 的历史命中不计入（NULL 被 GROUP BY 排除）
+        await db.execute(
+            "INSERT INTO findings (job_id, page, type, severity, description, source, user_rule_id) "
+            "VALUES ('job-hit-1', 4, 'user_rule', 'info', '无 id', 'user_rule', NULL)"
+        )
+        # 非 user_rule 来源不计数
+        await db.execute(
+            "INSERT INTO findings (job_id, page, type, severity, description, source) "
+            "VALUES ('job-hit-1', 5, 'signature_mismatch', 'critical', '签名', 'llm_cross')"
+        )
+        await db.commit()
+
+        r = await settings_client.get("/api/settings/rules")
+        assert r.status_code == 200
+        hits = r.json()["hits"]
+        assert hits == {"rule-a": 2, "rule-b": 1}
+
+    @pytest.mark.asyncio
     async def test_non_local_origin_rejected(self, tmp_path):
         """非本地 Origin 的 PUT 应被拒绝（CSRF 防护）。"""
         from main import app

@@ -547,6 +547,7 @@
   // 合规规则编辑器 — 用户自定义规则注入跨页 LLM 分析
   // ============================================================
   let rules = [];
+  let ruleHits = {};
 
   const RULE_TEMPLATES = [
     "产品 {产品名} 的中间体储存温度必须控制在 15-25°C",
@@ -560,6 +561,7 @@
       const r = await fetch("/api/settings/rules");
       const data = await r.json();
       rules = Array.isArray(data.rules) ? data.rules : [];
+      ruleHits = data.hits && typeof data.hits === "object" ? data.hits : {};
       log("rules loaded", { count: rules.length });
       renderRules();
     } catch (err) {
@@ -630,7 +632,12 @@
       row.appendChild(checkbox);
       row.appendChild(textarea);
       row.appendChild(del);
+      const hit = document.createElement("div");
+      hit.className =
+        "pl-6 text-[11px] text-muted-foreground/60";
+      hit.textContent = `历史命中 ${ruleHits[rule.id] ?? 0} 次`;
       listEl.appendChild(row);
+      listEl.appendChild(hit);
     });
   }
 
