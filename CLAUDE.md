@@ -71,7 +71,7 @@ Copy `.env.example` → `.env` and fill in:
 
 Both `openai` (DeepSeek/SiliconFlow/GLM/Kimi/Qwen/MiMo) and `anthropic` (Claude) protocols are supported via the adapter layer in `llm/adapters/`.
 
-**Frozen mode (PyInstaller bundle)**: config is read from `%APPDATA%/PBC/config.json` (Windows), `~/Library/Application Support/PBC/config.json` (macOS), `~/.local/share/PBC/config.json` (Linux). Database and output files redirect to `%APPDATA%/PBC/` as well. Use the in-app Settings page to edit credentials at runtime — saves are applied live without restart.
+**Frozen mode (PyInstaller bundle)**: config is read from `%APPDATA%/PBC/config.json` (Windows), `~/Library/Application Support/PBC/config.json` (macOS), `~/.local/share/PBC/config.json` (Linux). Database and output files redirect to `%APPDATA%/PBC/` as well. Use the in-app Settings page to edit credentials at runtime — saves are applied live without restart. **Gotcha**: `config.json` must be UTF-8 **without BOM** — PowerShell 5.1 `Set-Content -Encoding UTF8` writes a BOM that makes the frozen server exit with code 1 at startup (config parse fails before logging initializes). Use the Settings page or write with `encoding="utf-8"` from Python.
 
 **Runtime config source is `config.json` (Phase 9)**, not `.env`. On first run, a legacy `.env` is auto-migrated into `config.json` (loaded once; thereafter `config.json` wins). `config.py` exposes `update_config()` to mutate the in-memory config for live reload when the Settings page saves.
 
