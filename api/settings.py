@@ -26,7 +26,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 from typing import Optional
 
-from config import config, update_config, _config_path, load_user_rules
+from config import config, update_config, _config_path, load_user_rules, load_feishu_config
 from core.security import validate_external_url, is_local_request
 from db.client import get_db
 from llm.client import reset_llm_client
@@ -165,6 +165,12 @@ async def get_settings():
             "host": cfg["app"].host,
             "port": cfg["app"].port,
         },
+        "feishu": {
+            "enabled": bool(load_feishu_config().get("enabled", False)),
+            "webhook_url": _mask(load_feishu_config().get("webhook_url", "")),
+            "secret": _mask(load_feishu_config().get("secret", "")),
+            "events": load_feishu_config().get("events") or ["review", "partial_review", "error"],
+        },
     }
 
 
@@ -186,6 +192,11 @@ _STATIC_FIELDS = {
     "mineru_language": "MINERU_LANGUAGE",
     "mineru_enable_formula": "MINERU_ENABLE_FORMULA",
     "mineru_enable_table": "MINERU_ENABLE_TABLE",
+    # 飞书通知（Phase 12）— 全走 _read_raw_config/_write_raw_config 落 config.json
+    "feishu_enabled": "feishu_enabled",
+    "feishu_webhook_url": "feishu_webhook_url",
+    "feishu_secret": "feishu_secret",
+    "feishu_events": "feishu_events",
 }
 
 
@@ -252,6 +263,21 @@ def _build_env_updates(
         if field not in raw:
             continue
         value = raw[field]
+        # 飞书敏感字段：掩码回写保护 — 收到与当前掩码相同的值视为未修改，跳过
+        if field in ("feishu_webhook_url", "feishu_secret"):
+            if str(value).strip() == _mask(load_feishu_config().get("webhook_url" if field == "feishu_webhook_url" else "secret", "")):
+                continue
+        # 飞书事件白名单校验
+        if field == "feishu_events":
+            events = [e.strip().lower() for e in str(value).split(",") if e.strip()]
+            allowed = {"review", "partial_review", "error", "cancelled"}
+            bad = [e for e in events if e not in allowed]
+            if bad:
+                errors.append(f"invalid feishu events: {bad} (allowed: {sorted(allowed)})")
+                continue
+            env_updates[env_key] = ",".join(events)
+            mem_updates[field] = ",".join(events)
+            continue
         # llm_provider 需校验为已注册的 provider（如果新增 provider 的
         # llm_providers_add 与 llm_provider 同批提交，注册表尚未更新，
         # 我们允许这次写入但内存热更新在 add 之后执行）
@@ -774,3 +800,62 @@ async def test_provider(req: TestProviderRequest, request: Request):
             "provider": name,
             "reason": reason,
         }
+
+
+class TestFeishuRequest(BaseModel):
+    """飞书通知测试请求（webhook_url/secret 可选—缺省用已保存配置）。"""
+    webhook_url: Optional[str] = None
+    secret: Optional[str] = None
+
+
+@router.post("/api/settings/test_feishu")
+async def test_feishu(req: TestFeishuRequest, request: Request):
+    """发送一条测试消息验证飞书 webhook 可用性（真实调用，非假端点）。
+
+    校验顺序：URL 存在 → 私网地址拦截（SSRF）→ 签名 + 发送 →
+    解析业务 code（HTTP 200 不等于成功）。失败原因中文化便于设置页提示。
+    """
+    if not is_local_request(request):
+        raise HTTPException(403, "Forbidden (non-local request)")
+
+    saved = load_feishu_config()
+    url = (req.webhook_url or "").strip() or saved.get("webhook_url", "")
+    secret = (req.secret or "").strip() or saved.get("secret", "")
+    if not url:
+        return {"ok": False, "reason": "未配置 webhook URL"}
+    # 掩码回填保护：掩码本身不是合法 URL，先拦截给出明确提示（避免先落入 URL 格式报错）
+    if url == _mask(saved.get("webhook_url", "")):
+        return {"ok": False, "reason": "填写的 URL 与掩码一致，请粘贴完整 webhook URL"}
+    ok, reason = validate_external_url(url, kind="Feishu webhook")
+    if not ok:
+        return {"ok": False, "reason": reason}
+
+    from core.notify import _post_sync, build_text_message
+    import asyncio as _asyncio
+    payload = build_text_message("（测试消息）", "review", 0, None, "")
+    payload["content"]["text"] = "【BatchSentry】飞书通知测试消息 — 配置成功 ✅"
+    ok, detail = await _asyncio.to_thread(_post_sync, url, payload, secret)
+    try:
+        from db.client import get_db
+        db = await get_db()
+        await db.execute(
+            "INSERT INTO audit_log (job_id, action, detail) VALUES ('system', 'feishu_test', ?)",
+            (f"ok={ok} {detail}",),
+        )
+        await db.commit()
+    except Exception:
+        pass
+    if ok:
+        return {"ok": True, "reason": ""}
+    hint = {
+        "code=19021": "签名校验失败（检查 secret 与本机时间）",
+        "code=19024": "消息不含群关键词（请在群机器人里加关键词 BatchSentry）",
+        "code=19022": "IP 白名单校验失败（改用签名校验）",
+        "code=9499": "消息体超过 20KB（请联系开发者）",
+        "code=11232": "触发频率限制（稍后再试）",
+    }
+    for k, v in hint.items():
+        if k in detail:
+            detail = v
+            break
+    return {"ok": False, "reason": f"发送失败: {detail}"}

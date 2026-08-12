@@ -491,6 +491,7 @@
         // setActiveProvider 已重新渲染 + 更新 badge，跳过下面的重复渲染
         // 但仍需填充 OCR 表单
         fillOcrForm();
+        fillFeishuForm();
         await loadRules();
         return;
       }
@@ -498,6 +499,7 @@
 
     renderProviders(providers, activeProvider);
     fillOcrForm();
+    fillFeishuForm();
     await loadRules();
   }
 
@@ -542,6 +544,138 @@
       b.classList.toggle("active", b.dataset.value === value);
     });
   }
+
+  // ============================================================
+  // 飞书通知 — 群机器人 Webhook（任务完成/出错推送）
+  // ============================================================
+  const FEISHU_EVENT_OPTIONS = [
+    { value: "review", label: "分析完成" },
+    { value: "partial_review", label: "部分完成" },
+    { value: "error", label: "处理失败" },
+    { value: "cancelled", label: "已取消" },
+  ];
+
+  function fillFeishuForm() {
+    const f = current.feishu || {};
+    const enabledEl = document.getElementById("feishu-enabled");
+    const urlEl = document.getElementById("feishu-url");
+    const secretEl = document.getElementById("feishu-secret");
+    if (enabledEl) enabledEl.checked = !!f.enabled;
+    if (urlEl) {
+      urlEl.value = "";
+      urlEl.placeholder = f.webhook_url || "https://open.feishu.cn/open-apis/bot/v2/hook/…";
+    }
+    if (secretEl) {
+      secretEl.value = "";
+      secretEl.placeholder = f.secret
+        ? `${f.secret}（已保存，留空保持不变）`
+        : "群机器人安全设置中的加签密钥";
+    }
+    const eventsEl = document.getElementById("feishu-events");
+    if (!eventsEl) return;
+    eventsEl.innerHTML = "";
+    const selected = new Set(f.events || []);
+    FEISHU_EVENT_OPTIONS.forEach((opt) => {
+      const label = document.createElement("label");
+      label.className =
+        "flex items-center gap-1.5 px-2 py-1 text-[12px] border border-border rounded-md cursor-pointer hover:bg-muted/40";
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.value = opt.value;
+      cb.checked = selected.has(opt.value);
+      cb.className = "w-3.5 h-3.5 accent-foreground cursor-pointer";
+      cb.dataset.feishuEvent = opt.value;
+      label.appendChild(cb);
+      label.appendChild(document.createTextNode(opt.label));
+      eventsEl.appendChild(label);
+    });
+  }
+
+  function feishuSelectedEvents() {
+    return Array.from(
+      document.querySelectorAll('input[data-feishu-event]:checked'),
+    ).map((el) => el.value);
+  }
+
+  function feishuMsg(text, kind = "info") {
+    const msg = document.getElementById("feishu-msg");
+    if (!msg) return;
+    msg.textContent = text;
+    msg.className = "text-[12px] " + (kind === "err" ? "text-destructive" : "text-muted-foreground");
+  }
+
+  async function saveFeishu() {
+    const urlEl = document.getElementById("feishu-url");
+    const secretEl = document.getElementById("feishu-secret");
+    const body = {
+      feishu_enabled: document.getElementById("feishu-enabled").checked,
+      feishu_events: feishuSelectedEvents().join(","),
+    };
+    // 掩码/空白输入不回写（保持已保存的值）
+    if (urlEl && urlEl.value.trim() && !urlEl.value.includes("…")) {
+      body.feishu_webhook_url = urlEl.value.trim();
+    }
+    if (secretEl && secretEl.value.trim()) {
+      body.feishu_secret = secretEl.value.trim();
+    }
+    try {
+      const r = await fetch("/api/settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await r.json();
+      if (!r.ok) {
+        feishuMsg(`✗ 保存失败: ${JSON.stringify(data.detail || data)}`, "err");
+        return;
+      }
+      feishuMsg(`✓ 已保存（${data.updated} 项）`);
+      await load();
+    } catch (err) {
+      feishuMsg(`✗ 保存失败: ${err.message}`, "err");
+      log.err("feishu save failed", err);
+    }
+  }
+
+  async function testFeishu() {
+    const urlEl = document.getElementById("feishu-url");
+    const secretEl = document.getElementById("feishu-secret");
+    const btn = document.getElementById("feishu-test-btn");
+    if (!btn) return;
+    const original = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = "发送中…";
+    const body = {};
+    if (urlEl && urlEl.value.trim() && !urlEl.value.includes("…")) {
+      body.webhook_url = urlEl.value.trim();
+    }
+    if (secretEl && secretEl.value.trim()) {
+      body.secret = secretEl.value.trim();
+    }
+    try {
+      const r = await fetch("/api/settings/test_feishu", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await r.json();
+      if (data.ok) {
+        feishuMsg("✓ 测试消息已发送，请查看飞书群", "info");
+      } else {
+        feishuMsg(`✗ ${data.reason || "发送失败"}`, "err");
+      }
+    } catch (err) {
+      feishuMsg(`✗ 测试失败: ${err.message}`, "err");
+    } finally {
+      btn.disabled = false;
+      btn.textContent = original;
+    }
+  }
+
+  const feishuSaveBtn = document.getElementById("feishu-save-btn");
+  if (feishuSaveBtn) feishuSaveBtn.addEventListener("click", saveFeishu);
+  const feishuTestBtn = document.getElementById("feishu-test-btn");
+  if (feishuTestBtn) feishuTestBtn.addEventListener("click", testFeishu);
 
   // ============================================================
   // 合规规则编辑器 — 用户自定义规则注入跨页 LLM 分析

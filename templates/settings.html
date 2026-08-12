@@ -341,8 +341,68 @@
           </div>
         </section>
 
+        <!-- 飞书通知 — 任务完成/出错推送群消息 -->
+        <section class="stagger-in" style="--i: 6">
+          <h2 class="text-[12px] font-semibold tracking-widest text-muted-foreground uppercase mb-3">
+            飞书通知
+          </h2>
+          <p class="text-[12px] text-muted-foreground leading-relaxed mb-3">
+            在飞书群「设置 → 群机器人 → 添加机器人 → 自定义机器人」创建 Webhook，勾选签名校验（可选）。
+            任务完成/出错时推送摘要到该群。仅发送到机器人所在群。
+          </p>
+          <div class="flex flex-col gap-3">
+            <label class="flex items-center gap-2 text-[13px]">
+              <input
+                type="checkbox"
+                id="feishu-enabled"
+                class="w-4 h-4 accent-foreground cursor-pointer"
+              />
+              启用飞书通知
+            </label>
+            <div class="flex flex-col gap-1">
+              <label class="text-[12px] text-muted-foreground" for="feishu-url">Webhook URL</label>
+              <input
+                type="text"
+                id="feishu-url"
+                placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/…"
+                class="rounded-md border border-border bg-background px-3 py-2 text-[13px] focus:outline-none focus:ring-2 focus:ring-foreground/40"
+              />
+            </div>
+            <div class="flex flex-col gap-1">
+              <label class="text-[12px] text-muted-foreground" for="feishu-secret">签名密钥（可选，留空不签名）</label>
+              <input
+                type="password"
+                id="feishu-secret"
+                placeholder="群机器人安全设置中的加签密钥"
+                class="rounded-md border border-border bg-background px-3 py-2 text-[13px] focus:outline-none focus:ring-2 focus:ring-foreground/40"
+              />
+            </div>
+            <div class="flex flex-col gap-1">
+              <label class="text-[12px] text-muted-foreground" for="feishu-events">触发事件（逗号分隔，可多选）</label>
+              <div id="feishu-events" class="flex flex-wrap gap-2"></div>
+            </div>
+            <div class="flex items-center gap-2">
+              <button
+                type="button"
+                id="feishu-save-btn"
+                class="btn-press focus-ring inline-flex items-center px-3 py-1.5 text-[12px] font-medium bg-foreground text-background rounded-md hover:opacity-90 transition-opacity"
+              >
+                保存飞书设置
+              </button>
+              <button
+                type="button"
+                id="feishu-test-btn"
+                class="btn-press focus-ring inline-flex items-center px-3 py-1.5 text-[12px] text-foreground border border-border rounded-md hover:bg-muted/40 transition-colors"
+              >
+                发送测试消息
+              </button>
+              <span id="feishu-msg" class="text-[12px]"></span>
+            </div>
+          </div>
+        </section>
+
         <!-- 操作按钮 — Notion 风格 -->
-        <div class="stagger-in flex items-center gap-3" style="--i: 6">
+        <div class="stagger-in flex items-center gap-3" style="--i: 7">
           <button
             type="submit"
             id="save-btn"

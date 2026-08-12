@@ -231,6 +231,50 @@ def uuid_str() -> str:
 
 
 # ============================================================
+# Feishu notification (Phase 12)
+
+_FEISHU_DEFAULTS: dict = {
+    "enabled": False,
+    "webhook_url": "",
+    "secret": "",
+    "events": ["review", "partial_review", "error"],
+}
+
+
+def load_feishu_config() -> dict:
+    """读取飞书通知配置（config.json 顶层键，Settings 页可编辑）。
+
+    键: feishu_enabled / feishu_webhook_url / feishu_secret / feishu_events
+    events 为逗号分隔的触发状态白名单（默认 review,partial_review,error）。
+    读取失败时返回默认值（与 load_user_rules 同款防御式读取）。
+    """
+    json_path = _config_path()
+    out = dict(_FEISHU_DEFAULTS)
+    if not json_path.exists():
+        return out
+    try:
+        with open(json_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError, TypeError):
+        logger.warning(f"Failed to read feishu config from {json_path}")
+        return out
+    out["enabled"] = False
+    enabled_raw = data.get("feishu_enabled", False)
+    if isinstance(enabled_raw, str):
+        out["enabled"] = enabled_raw.strip().lower() in ("1", "true", "yes", "on")
+    else:
+        out["enabled"] = bool(enabled_raw)
+    out["webhook_url"] = str(data.get("feishu_webhook_url", "")).strip()
+    out["secret"] = str(data.get("feishu_secret", "")).strip()
+    events = data.get("feishu_events")
+    if events:
+        parsed_events = [e.strip() for e in str(events).split(",") if e.strip()]
+        if parsed_events:
+            out["events"] = parsed_events
+    return out
+
+
+# ============================================================
 # Provider configuration (Phase 7)
 # ============================================================
 

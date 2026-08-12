@@ -7,6 +7,7 @@
 """
 import os
 import shutil
+import unittest.mock
 from pathlib import Path
 from unittest.mock import patch
 
@@ -569,3 +570,135 @@ class TestUserRules:
                 "rules": [{"text": "恶意规则", "active": True}],
             })
             assert r.status_code == 403
+
+
+# ===========================================================================
+# 飞书通知（Phase 12）
+# ===========================================================================
+
+
+class TestFeishuNotifySettings:
+    """飞书通知配置的读写、掩码保护、事件白名单与测试消息端点。"""
+
+    @pytest.mark.asyncio
+    async def test_feishu_config_roundtrip(self, settings_client):
+        """保存飞书配置 → config.json 落盘 → load_feishu_config 读真值 → GET 掩码。"""
+        import config
+        r = await settings_client.post("/api/settings", json={
+            "feishu_enabled": True,
+            "feishu_webhook_url": "https://open.feishu.cn/open-apis/bot/v2/hook/tok123",
+            "feishu_secret": "sec456",
+            "feishu_events": "review,error",
+        })
+        assert r.status_code == 200
+
+        saved = config.load_feishu_config()
+        assert saved["enabled"] is True
+        assert saved["webhook_url"] == "https://open.feishu.cn/open-apis/bot/v2/hook/tok123"
+        assert saved["secret"] == "sec456"
+        assert saved["events"] == ["review", "error"]
+
+        r2 = await settings_client.get("/api/settings")
+        feishu = r2.json()["feishu"]
+        assert feishu["enabled"] is True
+        assert "tok123" not in feishu["webhook_url"]      # 掩码
+        assert "sec456" not in feishu["secret"]           # 掩码
+        assert "…" in feishu["webhook_url"] or "****" in feishu["webhook_url"] or feishu["webhook_url"]
+
+    @pytest.mark.asyncio
+    async def test_feishu_bool_string_false_parsed(self, settings_client):
+        """config.json 存的 "false" 字符串应解析为 False（bool() 陷阱防护）。"""
+        import config
+        await settings_client.post("/api/settings", json={
+            "feishu_enabled": False,
+        })
+        r = await settings_client.get("/api/settings")
+        assert r.json()["feishu"]["enabled"] is False
+        assert config.load_feishu_config()["enabled"] is False
+
+    @pytest.mark.asyncio
+    async def test_feishu_events_validation(self, settings_client):
+        """非法事件名应被拒绝（400），合法写入不受影响。"""
+        r = await settings_client.post("/api/settings", json={
+            "feishu_events": "review,not_a_real_status",
+        })
+        assert r.status_code == 400
+        r2 = await settings_client.post("/api/settings", json={
+            "feishu_events": "review,partial_review,error,cancelled",
+        })
+        assert r2.status_code == 200
+
+    @pytest.mark.asyncio
+    async def test_masked_value_not_overwritten(self, settings_client):
+        """回传与掩码相同的 URL → 忽略写入（保护已保存的真值）。"""
+        import config
+        await settings_client.post("/api/settings", json={
+            "feishu_webhook_url": "https://open.feishu.cn/open-apis/bot/v2/hook/realtoken",
+        })
+        assert config.load_feishu_config()["webhook_url"] == "https://open.feishu.cn/open-apis/bot/v2/hook/realtoken"
+        masked = (await settings_client.get("/api/settings")).json()["feishu"]["webhook_url"]
+        r = await settings_client.post("/api/settings", json={
+            "feishu_webhook_url": masked,
+        })
+        assert r.status_code == 200
+        # 真值未被掩码覆盖
+        assert config.load_feishu_config()["webhook_url"] == "https://open.feishu.cn/open-apis/bot/v2/hook/realtoken"
+
+    @pytest.mark.asyncio
+    async def test_test_feishu_success(self, settings_client):
+        """测试消息端点：mock webhook 返回 code=0 → ok=True + audit_log 留痕。"""
+        with unittest.mock.patch("core.notify.requests.post") as m:
+            resp = unittest.mock.MagicMock(status_code=200)
+            resp.json.return_value = {"code": 0, "msg": "success"}
+            m.return_value = resp
+            r = await settings_client.post("/api/settings/test_feishu", json={
+                "webhook_url": "https://open.feishu.cn/open-apis/bot/v2/hook/tok123",
+            })
+        assert r.status_code == 200
+        assert r.json()["ok"] is True
+        # 真实 Webhook URL 被调用（非假端点）
+        assert "https://open.feishu.cn/open-apis/bot/v2/hook/tok123" in [
+            c.args[0] for c in m.call_args_list
+        ]
+        from db.client import get_db
+        db = await get_db()
+        cur = await db.execute("SELECT detail FROM audit_log WHERE action = 'feishu_test'")
+        rows = await cur.fetchall()
+        assert len(rows) == 1
+        assert "ok=True" in rows[0][0]
+
+    @pytest.mark.asyncio
+    async def test_test_feishu_masked_url_rejected(self, settings_client):
+        """传掩码值作 URL → 拒绝（防止重复发测试消息到错误地址）。"""
+        await settings_client.post("/api/settings", json={
+            "feishu_webhook_url": "https://open.feishu.cn/open-apis/bot/v2/hook/realtoken",
+        })
+        masked = (await settings_client.get("/api/settings")).json()["feishu"]["webhook_url"]
+        r = await settings_client.post("/api/settings/test_feishu", json={
+            "webhook_url": masked,
+        })
+        assert r.status_code == 200
+        assert r.json()["ok"] is False
+        assert "掩码" in r.json()["reason"]
+
+    @pytest.mark.asyncio
+    async def test_test_feishu_private_url_blocked(self, settings_client):
+        """SSRF：私网 webhook URL 应被拦截。"""
+        r = await settings_client.post("/api/settings/test_feishu", json={
+            "webhook_url": "http://127.0.0.1:9999/hook",
+        })
+        assert r.status_code == 200
+        assert r.json()["ok"] is False
+
+    @pytest.mark.asyncio
+    async def test_test_feishu_business_error_hint(self, settings_client):
+        """业务错误（19024 关键词缺失）→ 中文提示。"""
+        with unittest.mock.patch("core.notify.requests.post") as m:
+            resp = unittest.mock.MagicMock(status_code=200)
+            resp.json.return_value = {"code": 19024, "msg": "keyword missing"}
+            m.return_value = resp
+            r = await settings_client.post("/api/settings/test_feishu", json={
+                "webhook_url": "https://open.feishu.cn/open-apis/bot/v2/hook/tok123",
+            })
+        assert r.json()["ok"] is False
+        assert "19024" in r.json()["reason"] or "关键词" in r.json()["reason"]

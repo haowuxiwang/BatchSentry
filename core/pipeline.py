@@ -745,6 +745,13 @@ async def _run_pipeline_impl(job_id: str, pdf_path: str):
         await transition_status(db, job_id, final_status,
                                 f"Pipeline complete: {len(findings)} findings, {len(failed_pages)} failed")
 
+        # 飞书通知（旁路：失败不影响主流程；成功/部分完成均推送）
+        try:
+            from core.notify import notify_job
+            await notify_job(job_id, final_status)
+        except Exception:
+            pass  # notify_job 自身已兜底，此处双保险防异常逃逸
+
         logger.info(f"[{job_id}] Pipeline complete: status={final_status}, "
                      f"{len(findings)} findings, {len(failed_pages)} failed pages, "
                      f"total={total_cost_ms}ms (OCR={stage1_ms} LLM={stage2_ms} Cross={stage3_ms})")
@@ -802,6 +809,12 @@ async def _run_pipeline_impl(job_id: str, pdf_path: str):
                 (error_msg, job_id),
             )
             await db.commit()
+            # 飞书通知（旁路，失败不影响主流程）
+            try:
+                from core.notify import notify_job
+                await notify_job(job_id, "error")
+            except Exception:
+                pass  # notify_job 自身已兜底，此处双保险防异常逃逸
         except InvalidTransitionError as ie:
             # P-W7 修复：已是终态，直接更新 error_message；但 DB 写入本身可能
             # 失败（连接断开/锁竞争），用内层 try/except 兜住，避免异常逃逸

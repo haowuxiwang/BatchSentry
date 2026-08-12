@@ -253,3 +253,63 @@ class TestLoadUserRules:
         ]})
         with patch("config._config_path", return_value=tmp_path / "config.json"):
             assert len(load_user_rules()) == 100
+
+
+class TestLoadFeishuConfig:
+    """load_feishu_config：飞书通知配置读取（Phase 12）。"""
+
+    def _write(self, tmp_path, data: dict):
+        import json
+        cfg = tmp_path / "config.json"
+        cfg.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        return cfg
+
+    def test_no_config_file_returns_defaults(self, tmp_path):
+        from config import load_feishu_config
+        with patch("config._config_path", return_value=tmp_path / "nope.json"):
+            cfg = load_feishu_config()
+        assert cfg["enabled"] is False
+        assert cfg["webhook_url"] == ""
+        assert cfg["events"] == ["review", "partial_review", "error"]
+
+    def test_full_config_parsed(self, tmp_path):
+        from config import load_feishu_config
+        self._write(tmp_path, {
+            "feishu_enabled": True,
+            "feishu_webhook_url": "https://open.feishu.cn/hook/x",
+            "feishu_secret": "s1",
+            "feishu_events": "review,error",
+        })
+        with patch("config._config_path", return_value=tmp_path / "config.json"):
+            cfg = load_feishu_config()
+        assert cfg["enabled"] is True
+        assert cfg["webhook_url"] == "https://open.feishu.cn/hook/x"
+        assert cfg["events"] == ["review", "error"]
+
+    def test_string_false_parsed_as_false(self, tmp_path):
+        """config.json 中的 "false" 字符串必须解析为 False（bool("false")=True 陷阱）。"""
+        from config import load_feishu_config
+        self._write(tmp_path, {"feishu_enabled": "false"})
+        with patch("config._config_path", return_value=tmp_path / "config.json"):
+            assert load_feishu_config()["enabled"] is False
+
+    def test_string_true_parsed_as_true(self, tmp_path):
+        from config import load_feishu_config
+        self._write(tmp_path, {"feishu_enabled": "true"})
+        with patch("config._config_path", return_value=tmp_path / "config.json"):
+            assert load_feishu_config()["enabled"] is True
+
+    def test_corrupt_json_returns_defaults(self, tmp_path):
+        from config import load_feishu_config
+        cfg = tmp_path / "config.json"
+        cfg.write_text("{broken", encoding="utf-8")
+        with patch("config._config_path", return_value=cfg):
+            loaded = load_feishu_config()
+        assert loaded["enabled"] is False
+
+    def test_empty_events_key_keeps_defaults(self, tmp_path):
+        from config import load_feishu_config
+        self._write(tmp_path, {"feishu_enabled": True, "feishu_events": "  "})
+        with patch("config._config_path", return_value=tmp_path / "config.json"):
+            cfg = load_feishu_config()
+        assert cfg["events"] == ["review", "partial_review", "error"]
