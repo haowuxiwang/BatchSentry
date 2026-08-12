@@ -6,14 +6,18 @@ BatchSentry 是面向制药企业的批生产记录（BPR）审核工具，通�
 
 ## 核心能力
 
-- **多格式 PDF 解析**：PaddleOCR-VL / MinerU 双后端，支持扫描件、电子件、混合件
+- **多格式 PDF 解析**：PaddleOCR-VL / MinerU 双后端（主备 failover：主后端异常/0 页/缺页>20% 自动切换，`ocr_backend_used` 留痕），支持扫描件、电子件、混合件
 - **结构化提取**：LLM 提取工序步骤、参数矩阵、签名、时间、事件年份分组
-- **跨页合规分析**：规则引擎（R1-R5）+ LLM fallback 双层判定
-  - R1 时间倒序（time_reversal，critical）
+- **实时进度**：SSE 流式推送任务状态（上传页行内 OCR/分析计数 + 复核页按页热更 findings）
+- **跨页合规分析**：规则引擎（R1-R8）+ LLM fallback + LLM 语义检查三层判定
+  - R1 时间倒序（time_reversal，页内 + 跨页，critical）
   - R2 年份矛盾（year_contradiction）
-  - R3 参数越界（param_out_of_spec）
-  - R4 签名异常（signature_time_anomaly）
-  - R5 完整性检查（completeness）
+  - R3 参数越界（param_out_of_spec，规则无法判定时进 LLM fallback 队列）
+  - R4 可疑日期（suspicious_date，如 2000 年前 / 未来年份）
+  - R5 签名异常（signature_time_anomaly）
+  - R6 完整性检查（completeness，缺操作/复核签名）
+  - R7 批号一致性（batch_consistency，跨页批号漂移）
+  - R8 低置信度参数（low_confidence，标记人工复核）
 - **多 LLM 服务商**：DeepSeek / SiliconFlow（内置，可通过 config.json 动态注册更多），Anthropic 协议适配
 - **GMP 审计追踪**：所有状态转换、LLM 调用、人工复核操作均写入审计日志
 - **Electron 桌面应用**：Windows 便携版（解压即用），splash 启动、优雅关闭、卡死任务恢复
@@ -114,7 +118,7 @@ npm run dev
 $env:PBC_NO_FILE_LOG='1'
 python -m pytest tests/ --cov=. --cov-report=term --timeout=30
 
-# 当前状态：631 passed, 92.19% coverage
+# 当前状态：710 passed, 94.30% coverage（目标 ≥90%）
 ```
 
 ## 安全设计
