@@ -702,3 +702,135 @@ class TestFeishuNotifySettings:
             })
         assert r.json()["ok"] is False
         assert "19024" in r.json()["reason"] or "关键词" in r.json()["reason"]
+
+    # ---- App-bot 模式（Phase 12.1）----
+
+    @pytest.mark.asyncio
+    async def test_app_bot_config_roundtrip(self, settings_client):
+        """保存 app_bot 配置 → 落盘真值 → GET 返回（secret 掩码）。"""
+        import config
+        r = await settings_client.post("/api/settings", json={
+            "feishu_enabled": True,
+            "feishu_mode": "app_bot",
+            "feishu_app_id": "cli_test_app",
+            "feishu_app_secret": "appsecret123",
+            "feishu_open_id": "ou_test_receiver",
+            "feishu_mobile": "13800000000",
+        })
+        assert r.status_code == 200
+
+        saved = config.load_feishu_config()
+        assert saved["mode"] == "app_bot"
+        assert saved["app_id"] == "cli_test_app"
+        assert saved["app_secret"] == "appsecret123"
+        assert saved["open_id"] == "ou_test_receiver"
+        assert saved["mobile"] == "13800000000"
+
+        r2 = await settings_client.get("/api/settings")
+        feishu = r2.json()["feishu"]
+        assert feishu["mode"] == "app_bot"
+        assert "appsecret123" not in feishu["app_secret"]  # 掩码
+
+    @pytest.mark.asyncio
+    async def test_app_secret_masked_not_overwritten(self, settings_client):
+        """回传掩码 app_secret → 不覆盖真值。"""
+        import config
+        await settings_client.post("/api/settings", json={
+            "feishu_app_secret": "realsecret",
+        })
+        assert config.load_feishu_config()["app_secret"] == "realsecret"
+        masked = (await settings_client.get("/api/settings")).json()["feishu"]["app_secret"]
+        r = await settings_client.post("/api/settings", json={
+            "feishu_app_secret": masked,
+        })
+        assert r.status_code == 200
+        assert config.load_feishu_config()["app_secret"] == "realsecret"
+
+    @pytest.mark.asyncio
+    async def test_feishu_mode_validation(self, settings_client):
+        """非法 mode → 400。"""
+        r = await settings_client.post("/api/settings", json={
+            "feishu_mode": "slack",
+        })
+        assert r.status_code == 400
+        r2 = await settings_client.post("/api/settings", json={
+            "feishu_mode": "app_bot",
+        })
+        assert r2.status_code == 200
+
+    @pytest.mark.asyncio
+    async def test_test_feishu_app_bot_success(self, settings_client):
+        """app_bot 测试消息：mock token + 发消息 → ok=True + audit_log。"""
+        import core.notify as notify_mod
+        notify_mod._token_cache = {"token": "", "fetched_at": 0.0, "app_id": "", "app_secret": ""}
+        notify_mod._open_id_cache = {"open_id": "", "mobile": "", "resolved_at": 0.0, "app_id": ""}
+        tok_resp = unittest.mock.MagicMock(status_code=200)
+        tok_resp.json.return_value = {"code": 0, "tenant_access_token": "t-test", "expire": 7200}
+        msg_resp = unittest.mock.MagicMock(status_code=200)
+        msg_resp.json.return_value = {"code": 0, "msg": "success", "data": {"message_id": "om_1"}}
+        with unittest.mock.patch("core.notify.requests.post",
+                                 side_effect=[tok_resp, msg_resp]) as m:
+            r = await settings_client.post("/api/settings/test_feishu", json={
+                "mode": "app_bot",
+                "app_id": "cli_x",
+                "app_secret": "sec",
+                "open_id": "ou_1",
+            })
+        assert r.status_code == 200
+        assert r.json()["ok"] is True
+        # 真的调用了 im/v1/messages
+        urls = [c.args[0] for c in m.call_args_list]
+        assert any("/im/v1/messages" in u for u in urls)
+        from db.client import get_db
+        db = await get_db()
+        cur = await db.execute("SELECT detail FROM audit_log WHERE action = 'feishu_test'")
+        rows = await cur.fetchall()
+        assert any("mode=app_bot ok=True" in row[0] for row in rows)
+
+    @pytest.mark.asyncio
+    async def test_test_feishu_app_bot_masked_secret_rejected(self, settings_client):
+        """app_secret 传掩码 → 明确提示拒绝。"""
+        await settings_client.post("/api/settings", json={
+            "feishu_app_secret": "realsecret123",
+        })
+        masked = (await settings_client.get("/api/settings")).json()["feishu"]["app_secret"]
+        r = await settings_client.post("/api/settings/test_feishu", json={
+            "mode": "app_bot",
+            "app_id": "cli_x",
+            "app_secret": masked,
+            "open_id": "ou_1",
+        })
+        assert r.json()["ok"] is False
+        assert "掩码" in r.json()["reason"]
+
+    @pytest.mark.asyncio
+    async def test_test_feishu_app_bot_fatal_code_hint(self, settings_client):
+        """230013 不可用错误 → 中文提示。"""
+        import core.notify as notify_mod
+        notify_mod._token_cache = {"token": "", "fetched_at": 0.0, "app_id": "", "app_secret": ""}
+        notify_mod._open_id_cache = {"open_id": "", "mobile": "", "resolved_at": 0.0, "app_id": ""}
+        tok_resp = unittest.mock.MagicMock(status_code=200)
+        tok_resp.json.return_value = {"code": 0, "tenant_access_token": "t", "expire": 7200}
+        msg_resp = unittest.mock.MagicMock(status_code=200)
+        msg_resp.json.return_value = {"code": 230013, "msg": "no availability"}
+        with unittest.mock.patch("core.notify.requests.post",
+                                 side_effect=[tok_resp, msg_resp]):
+            r = await settings_client.post("/api/settings/test_feishu", json={
+                "mode": "app_bot",
+                "app_id": "cli_x",
+                "app_secret": "sec",
+                "open_id": "ou_1",
+            })
+        assert r.json()["ok"] is False
+        assert "230013" in r.json()["reason"] or "可用范围" in r.json()["reason"]
+
+    @pytest.mark.asyncio
+    async def test_test_feishu_app_bot_missing_receiver(self, settings_client):
+        """app_bot 缺接收者 → 拒绝。"""
+        r = await settings_client.post("/api/settings/test_feishu", json={
+            "mode": "app_bot",
+            "app_id": "cli_x",
+            "app_secret": "sec",
+        })
+        assert r.json()["ok"] is False
+        assert "接收者" in r.json()["reason"]

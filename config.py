@@ -235,16 +235,35 @@ def uuid_str() -> str:
 
 _FEISHU_DEFAULTS: dict = {
     "enabled": False,
+    "mode": "webhook",        # "webhook" (group custom bot) | "app_bot" (self-built app DM)
     "webhook_url": "",
     "secret": "",
+    "app_id": "",
+    "app_secret": "",
+    "open_id": "",            # receiver open_id (app-scoped, ou_ prefix)
+    "mobile": "",             # receiver mobile (optional helper to resolve open_id)
     "events": ["review", "partial_review", "error"],
 }
+
+
+def _feishu_bool_flag(data: dict, key: str, default: bool = False) -> bool:
+    """Parse a possibly-string boolean from raw config.json."""
+    raw = data.get(key, default)
+    if isinstance(raw, str):
+        return raw.strip().lower() in ("1", "true", "yes", "on")
+    return bool(raw)
 
 
 def load_feishu_config() -> dict:
     """读取飞书通知配置（config.json 顶层键，Settings 页可编辑）。
 
-    键: feishu_enabled / feishu_webhook_url / feishu_secret / feishu_events
+    键: feishu_enabled / feishu_mode / feishu_webhook_url / feishu_secret /
+        feishu_app_id / feishu_app_secret / feishu_open_id / feishu_mobile /
+        feishu_events
+    mode 支持两种通道：
+      - "webhook": 自定义群机器人（发到群里，附签名/关键词）
+      - "app_bot": 企业自建应用机器人（发单聊给个人，需 app_id +
+        app_secret + 接收者 open_id 或手机号）
     events 为逗号分隔的触发状态白名单（默认 review,partial_review,error）。
     读取失败时返回默认值（与 load_user_rules 同款防御式读取）。
     """
@@ -258,14 +277,15 @@ def load_feishu_config() -> dict:
     except (json.JSONDecodeError, OSError, TypeError):
         logger.warning(f"Failed to read feishu config from {json_path}")
         return out
-    out["enabled"] = False
-    enabled_raw = data.get("feishu_enabled", False)
-    if isinstance(enabled_raw, str):
-        out["enabled"] = enabled_raw.strip().lower() in ("1", "true", "yes", "on")
-    else:
-        out["enabled"] = bool(enabled_raw)
+    out["enabled"] = _feishu_bool_flag(data, "feishu_enabled", False)
+    mode = str(data.get("feishu_mode", "webhook")).strip().lower()
+    out["mode"] = mode if mode in ("webhook", "app_bot") else "webhook"
     out["webhook_url"] = str(data.get("feishu_webhook_url", "")).strip()
     out["secret"] = str(data.get("feishu_secret", "")).strip()
+    out["app_id"] = str(data.get("feishu_app_id", "")).strip()
+    out["app_secret"] = str(data.get("feishu_app_secret", "")).strip()
+    out["open_id"] = str(data.get("feishu_open_id", "")).strip()
+    out["mobile"] = str(data.get("feishu_mobile", "")).strip()
     events = data.get("feishu_events")
     if events:
         parsed_events = [e.strip() for e in str(events).split(",") if e.strip()]

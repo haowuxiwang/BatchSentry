@@ -347,8 +347,8 @@
             飞书通知
           </h2>
           <p class="text-[12px] text-muted-foreground leading-relaxed mb-3">
-            在飞书群「设置 → 群机器人 → 添加机器人 → 自定义机器人」创建 Webhook，勾选签名校验（可选）。
-            任务完成/出错时推送摘要到该群。仅发送到机器人所在群。
+            支持两种通道：<b>自建应用私聊</b>（推荐，机器人私信你本人）或<b>群机器人</b>（发送到群）。
+            任务完成/出错时推送摘要。通知失败不影响任务处理。
           </p>
           <div class="flex flex-col gap-3">
             <label class="flex items-center gap-2 text-[13px]">
@@ -359,23 +359,84 @@
               />
               启用飞书通知
             </label>
-            <div class="flex flex-col gap-1">
-              <label class="text-[12px] text-muted-foreground" for="feishu-url">Webhook URL</label>
-              <input
-                type="text"
-                id="feishu-url"
-                placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/…"
-                class="rounded-md border border-border bg-background px-3 py-2 text-[13px] focus:outline-none focus:ring-2 focus:ring-foreground/40"
-              />
+            <div class="flex items-center gap-2 text-[13px]">
+              <label class="text-muted-foreground">通道</label>
+              <select
+                id="feishu-mode"
+                class="rounded-md border border-border bg-background px-2 py-1.5 text-[13px] focus:outline-none focus:ring-2 focus:ring-foreground/40"
+              >
+                <option value="app_bot">自建应用私聊（推荐）</option>
+                <option value="webhook">群机器人 Webhook</option>
+              </select>
             </div>
-            <div class="flex flex-col gap-1">
-              <label class="text-[12px] text-muted-foreground" for="feishu-secret">签名密钥（可选，留空不签名）</label>
-              <input
-                type="password"
-                id="feishu-secret"
-                placeholder="群机器人安全设置中的加签密钥"
-                class="rounded-md border border-border bg-background px-3 py-2 text-[13px] focus:outline-none focus:ring-2 focus:ring-foreground/40"
-              />
+            <div class="feishu-app-bot flex flex-col gap-2">
+              <div class="flex flex-col gap-1">
+                <label class="text-[12px] text-muted-foreground" for="feishu-app-id">App ID</label>
+                <input
+                  type="text"
+                  id="feishu-app-id"
+                  placeholder="cli_xxxxxxxx（开发者后台「凭证与基础信息」）"
+                  class="rounded-md border border-border bg-background px-3 py-2 text-[13px] focus:outline-none focus:ring-2 focus:ring-foreground/40"
+                />
+              </div>
+              <div class="flex flex-col gap-1">
+                <label class="text-[12px] text-muted-foreground" for="feishu-app-secret">App Secret</label>
+                <input
+                  type="password"
+                  id="feishu-app-secret"
+                  placeholder="开发者后台「凭证与基础信息」"
+                  class="rounded-md border border-border bg-background px-3 py-2 text-[13px] focus:outline-none focus:ring-2 focus:ring-foreground/40"
+                />
+              </div>
+              <div class="flex flex-col gap-1">
+                <label class="text-[12px] text-muted-foreground" for="feishu-open-id">接收者 open_id（ou_ 开头，推荐）</label>
+                <input
+                  type="text"
+                  id="feishu-open-id"
+                  placeholder="ou_xxxxxxxx（API 调试台或事件订阅获取，详见下方说明）"
+                  class="rounded-md border border-border bg-background px-3 py-2 text-[13px] focus:outline-none focus:ring-2 focus:ring-foreground/40"
+                />
+              </div>
+              <div class="flex flex-col gap-1">
+                <label class="text-[12px] text-muted-foreground" for="feishu-mobile">或接收者手机号（自动解析 open_id，需 contact:user.id:readonly 权限）</label>
+                <input
+                  type="text"
+                  id="feishu-mobile"
+                  placeholder="13800000000"
+                  class="rounded-md border border-border bg-background px-3 py-2 text-[13px] focus:outline-none focus:ring-2 focus:ring-foreground/40"
+                />
+              </div>
+              <p class="text-[11px] text-muted-foreground leading-relaxed">
+                接入步骤：open.feishu.cn 创建企业自建应用 → 启用「机器人」能力 →
+                开通权限 im:message（发消息）＋ contact:user.id:readonly（按手机号查 open_id）→
+                创建版本并发布（自己管理时默认免审）→ 在「API 调试台」调
+                contact/v3/users/batch_get_id 填自己手机号复制 open_id。
+                open_id 与应用绑定，换应用需重新获取。
+              </p>
+            </div>
+            <div class="feishu-webhook flex flex-col gap-2">
+              <div class="flex flex-col gap-1">
+                <label class="text-[12px] text-muted-foreground" for="feishu-url">Webhook URL</label>
+                <input
+                  type="text"
+                  id="feishu-url"
+                  placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/…"
+                  class="rounded-md border border-border bg-background px-3 py-2 text-[13px] focus:outline-none focus:ring-2 focus:ring-foreground/40"
+                />
+              </div>
+              <div class="flex flex-col gap-1">
+                <label class="text-[12px] text-muted-foreground" for="feishu-secret">签名密钥（可选，留空不签名）</label>
+                <input
+                  type="password"
+                  id="feishu-secret"
+                  placeholder="群机器人安全设置中的加签密钥"
+                  class="rounded-md border border-border bg-background px-3 py-2 text-[13px] focus:outline-none focus:ring-2 focus:ring-foreground/40"
+                />
+              </div>
+              <p class="text-[11px] text-muted-foreground leading-relaxed">
+                在飞书群「设置 → 群机器人 → 添加机器人 → 自定义机器人」创建 Webhook，
+                可选勾选签名校验。仅发送到机器人所在群。
+              </p>
             </div>
             <div class="flex flex-col gap-1">
               <label class="text-[12px] text-muted-foreground" for="feishu-events">触发事件（逗号分隔，可多选）</label>

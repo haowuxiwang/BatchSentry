@@ -555,12 +555,26 @@
     { value: "cancelled", label: "已取消" },
   ];
 
+  function applyFeishuModeUI(mode) {
+    const modeEl = document.getElementById("feishu-mode");
+    if (modeEl) modeEl.value = mode || "app_bot";
+    const appBot = document.querySelectorAll(".feishu-app-bot");
+    const webhook = document.querySelectorAll(".feishu-webhook");
+    appBot.forEach((el) => (el.style.display = mode === "app_bot" ? "" : "none"));
+    webhook.forEach((el) => (el.style.display = mode === "webhook" ? "" : "none"));
+  }
+
   function fillFeishuForm() {
     const f = current.feishu || {};
     const enabledEl = document.getElementById("feishu-enabled");
     const urlEl = document.getElementById("feishu-url");
     const secretEl = document.getElementById("feishu-secret");
+    const appIdEl = document.getElementById("feishu-app-id");
+    const appSecretEl = document.getElementById("feishu-app-secret");
+    const openIdEl = document.getElementById("feishu-open-id");
+    const mobileEl = document.getElementById("feishu-mobile");
     if (enabledEl) enabledEl.checked = !!f.enabled;
+    applyFeishuModeUI(f.mode);
     if (urlEl) {
       urlEl.value = "";
       urlEl.placeholder = f.webhook_url || "https://open.feishu.cn/open-apis/bot/v2/hook/…";
@@ -571,6 +585,15 @@
         ? `${f.secret}（已保存，留空保持不变）`
         : "群机器人安全设置中的加签密钥";
     }
+    if (appIdEl) appIdEl.value = f.app_id || "";
+    if (appSecretEl) {
+      appSecretEl.value = "";
+      appSecretEl.placeholder = f.app_secret
+        ? `${f.app_secret}（已保存，留空保持不变）`
+        : "开发者后台「凭证与基础信息」";
+    }
+    if (openIdEl) openIdEl.value = f.open_id || "";
+    if (mobileEl) mobileEl.value = f.mobile || "";
     const eventsEl = document.getElementById("feishu-events");
     if (!eventsEl) return;
     eventsEl.innerHTML = "";
@@ -605,10 +628,16 @@
   }
 
   async function saveFeishu() {
+    const modeEl = document.getElementById("feishu-mode");
     const urlEl = document.getElementById("feishu-url");
     const secretEl = document.getElementById("feishu-secret");
+    const appIdEl = document.getElementById("feishu-app-id");
+    const appSecretEl = document.getElementById("feishu-app-secret");
+    const openIdEl = document.getElementById("feishu-open-id");
+    const mobileEl = document.getElementById("feishu-mobile");
     const body = {
       feishu_enabled: document.getElementById("feishu-enabled").checked,
+      feishu_mode: modeEl ? modeEl.value : "app_bot",
       feishu_events: feishuSelectedEvents().join(","),
     };
     // 掩码/空白输入不回写（保持已保存的值）
@@ -617,6 +646,18 @@
     }
     if (secretEl && secretEl.value.trim()) {
       body.feishu_secret = secretEl.value.trim();
+    }
+    if (appIdEl && appIdEl.value.trim()) {
+      body.feishu_app_id = appIdEl.value.trim();
+    }
+    if (appSecretEl && appSecretEl.value.trim() && !appSecretEl.value.includes("…")) {
+      body.feishu_app_secret = appSecretEl.value.trim();
+    }
+    if (openIdEl && openIdEl.value.trim()) {
+      body.feishu_open_id = openIdEl.value.trim();
+    }
+    if (mobileEl && mobileEl.value.trim()) {
+      body.feishu_mobile = mobileEl.value.trim();
     }
     try {
       const r = await fetch("/api/settings", {
@@ -638,20 +679,31 @@
   }
 
   async function testFeishu() {
+    const modeEl = document.getElementById("feishu-mode");
     const urlEl = document.getElementById("feishu-url");
     const secretEl = document.getElementById("feishu-secret");
+    const appIdEl = document.getElementById("feishu-app-id");
+    const appSecretEl = document.getElementById("feishu-app-secret");
+    const openIdEl = document.getElementById("feishu-open-id");
+    const mobileEl = document.getElementById("feishu-mobile");
     const btn = document.getElementById("feishu-test-btn");
     if (!btn) return;
     const original = btn.textContent;
     btn.disabled = true;
     btn.textContent = "发送中…";
-    const body = {};
+    const body = { mode: modeEl ? modeEl.value : "app_bot" };
     if (urlEl && urlEl.value.trim() && !urlEl.value.includes("…")) {
       body.webhook_url = urlEl.value.trim();
     }
     if (secretEl && secretEl.value.trim()) {
       body.secret = secretEl.value.trim();
     }
+    if (appIdEl && appIdEl.value.trim()) body.app_id = appIdEl.value.trim();
+    if (appSecretEl && appSecretEl.value.trim() && !appSecretEl.value.includes("…")) {
+      body.app_secret = appSecretEl.value.trim();
+    }
+    if (openIdEl && openIdEl.value.trim()) body.open_id = openIdEl.value.trim();
+    if (mobileEl && mobileEl.value.trim()) body.mobile = mobileEl.value.trim();
     try {
       const r = await fetch("/api/settings/test_feishu", {
         method: "POST",
@@ -660,7 +712,12 @@
       });
       const data = await r.json();
       if (data.ok) {
-        feishuMsg("✓ 测试消息已发送，请查看飞书群", "info");
+        feishuMsg(
+          body.mode === "app_bot"
+            ? "✓ 测试消息已发送，请查看飞书私聊"
+            : "✓ 测试消息已发送，请查看飞书群",
+          "info",
+        );
       } else {
         feishuMsg(`✗ ${data.reason || "发送失败"}`, "err");
       }
@@ -672,6 +729,8 @@
     }
   }
 
+  const feishuModeEl = document.getElementById("feishu-mode");
+  if (feishuModeEl) feishuModeEl.addEventListener("change", () => applyFeishuModeUI(feishuModeEl.value));
   const feishuSaveBtn = document.getElementById("feishu-save-btn");
   if (feishuSaveBtn) feishuSaveBtn.addEventListener("click", saveFeishu);
   const feishuTestBtn = document.getElementById("feishu-test-btn");

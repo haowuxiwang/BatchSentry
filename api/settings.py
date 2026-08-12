@@ -167,8 +167,13 @@ async def get_settings():
         },
         "feishu": {
             "enabled": bool(load_feishu_config().get("enabled", False)),
+            "mode": load_feishu_config().get("mode", "webhook"),
             "webhook_url": _mask(load_feishu_config().get("webhook_url", "")),
             "secret": _mask(load_feishu_config().get("secret", "")),
+            "app_id": load_feishu_config().get("app_id", ""),
+            "app_secret": _mask(load_feishu_config().get("app_secret", "")),
+            "open_id": load_feishu_config().get("open_id", ""),
+            "mobile": load_feishu_config().get("mobile", ""),
             "events": load_feishu_config().get("events") or ["review", "partial_review", "error"],
         },
     }
@@ -194,8 +199,13 @@ _STATIC_FIELDS = {
     "mineru_enable_table": "MINERU_ENABLE_TABLE",
     # 飞书通知（Phase 12）— 全走 _read_raw_config/_write_raw_config 落 config.json
     "feishu_enabled": "feishu_enabled",
+    "feishu_mode": "feishu_mode",
     "feishu_webhook_url": "feishu_webhook_url",
     "feishu_secret": "feishu_secret",
+    "feishu_app_id": "feishu_app_id",
+    "feishu_app_secret": "feishu_app_secret",
+    "feishu_open_id": "feishu_open_id",
+    "feishu_mobile": "feishu_mobile",
     "feishu_events": "feishu_events",
 }
 
@@ -264,9 +274,24 @@ def _build_env_updates(
             continue
         value = raw[field]
         # 飞书敏感字段：掩码回写保护 — 收到与当前掩码相同的值视为未修改，跳过
-        if field in ("feishu_webhook_url", "feishu_secret"):
-            if str(value).strip() == _mask(load_feishu_config().get("webhook_url" if field == "feishu_webhook_url" else "secret", "")):
+        if field in ("feishu_webhook_url", "feishu_secret", "feishu_app_secret"):
+            saved = load_feishu_config()
+            current = saved.get(
+                "webhook_url" if field == "feishu_webhook_url"
+                else "secret" if field == "feishu_secret" else "app_secret",
+                "",
+            )
+            if str(value).strip() == _mask(current):
                 continue
+        # 飞书模式白名单
+        if field == "feishu_mode":
+            mode = str(value).strip().lower()
+            if mode not in ("webhook", "app_bot"):
+                errors.append(f"invalid feishu_mode: {mode!r} (allowed: webhook, app_bot)")
+                continue
+            env_updates[env_key] = mode
+            mem_updates[field] = mode
+            continue
         # 飞书事件白名单校验
         if field == "feishu_events":
             events = [e.strip().lower() for e in str(value).split(",") if e.strip()]
@@ -803,22 +828,76 @@ async def test_provider(req: TestProviderRequest, request: Request):
 
 
 class TestFeishuRequest(BaseModel):
-    """飞书通知测试请求（webhook_url/secret 可选—缺省用已保存配置）。"""
+    """飞书通知测试请求（字段可选—缺省用已保存配置）。
+
+    mode: "webhook" 群机器人 | "app_bot" 自建应用私聊。
+    """
+    mode: Optional[str] = None
     webhook_url: Optional[str] = None
     secret: Optional[str] = None
+    app_id: Optional[str] = None
+    app_secret: Optional[str] = None
+    open_id: Optional[str] = None
+    mobile: Optional[str] = None
 
 
 @router.post("/api/settings/test_feishu")
 async def test_feishu(req: TestFeishuRequest, request: Request):
-    """发送一条测试消息验证飞书 webhook 可用性（真实调用，非假端点）。
+    """发送一条测试消息验证飞书通知可用性（真实调用，非假端点）。
 
-    校验顺序：URL 存在 → 私网地址拦截（SSRF）→ 签名 + 发送 →
-    解析业务 code（HTTP 200 不等于成功）。失败原因中文化便于设置页提示。
+    校验顺序：模式识别 → 必要配置存在 → 私网地址拦截（SSRF）→
+    签名 + 发送 → 解析业务 code（HTTP 200 不等于成功）。
+    失败原因中文化便于设置页提示。
     """
     if not is_local_request(request):
         raise HTTPException(403, "Forbidden (non-local request)")
 
     saved = load_feishu_config()
+    mode = (req.mode or "").strip().lower() or saved.get("mode", "webhook")
+    if mode not in ("webhook", "app_bot"):
+        return {"ok": False, "reason": f"未知模式 {mode!r}"}
+
+    import asyncio as _asyncio
+    from core.notify import (
+        _post_app_bot_sync, _post_sync, app_bot_error_zh, build_text_message,
+    )
+    test_text = "【BatchSentry】飞书通知测试消息 — 配置成功 ✅"
+
+    if mode == "app_bot":
+        app_id = (req.app_id or "").strip() or saved.get("app_id", "")
+        app_secret = (req.app_secret or "").strip() or saved.get("app_secret", "")
+        open_id = (req.open_id or "").strip() or saved.get("open_id", "")
+        mobile = (req.mobile or "").strip() or saved.get("mobile", "")
+        if not app_id or not app_secret:
+            return {"ok": False, "reason": "未配置 App ID / App Secret"}
+        if app_secret == _mask(saved.get("app_secret", "")):
+            return {"ok": False, "reason": "App Secret 为掩码，请粘贴完整值"}
+        if not open_id and not mobile:
+            return {"ok": False, "reason": "未配置接收者 open_id 或手机号"}
+        ok, detail = await _asyncio.to_thread(
+            _post_app_bot_sync, app_id, app_secret, open_id, mobile, test_text
+        )
+        # 失败时把业务码映射成中文提示
+        if not ok:
+            for code_str in ("230006", "230013", "230027", "230028", "230034", "230053", "230101", "99991661", "99991663"):
+                if f"code={code_str}" in detail:
+                    hint = app_bot_error_zh(int(code_str))
+                    detail = f"code={code_str} {hint}"
+                    break
+        try:
+            from db.client import get_db
+            db = await get_db()
+            await db.execute(
+                "INSERT INTO audit_log (job_id, action, detail) VALUES ('system', 'feishu_test', ?)",
+                (f"mode=app_bot ok={ok} {detail}",),
+            )
+            await db.commit()
+        except Exception:
+            pass
+        if ok:
+            return {"ok": True, "reason": ""}
+        return {"ok": False, "reason": f"发送失败: {detail}"}
+
     url = (req.webhook_url or "").strip() or saved.get("webhook_url", "")
     secret = (req.secret or "").strip() or saved.get("secret", "")
     if not url:
@@ -830,17 +909,15 @@ async def test_feishu(req: TestFeishuRequest, request: Request):
     if not ok:
         return {"ok": False, "reason": reason}
 
-    from core.notify import _post_sync, build_text_message
-    import asyncio as _asyncio
     payload = build_text_message("（测试消息）", "review", 0, None, "")
-    payload["content"]["text"] = "【BatchSentry】飞书通知测试消息 — 配置成功 ✅"
+    payload["content"]["text"] = test_text
     ok, detail = await _asyncio.to_thread(_post_sync, url, payload, secret)
     try:
         from db.client import get_db
         db = await get_db()
         await db.execute(
             "INSERT INTO audit_log (job_id, action, detail) VALUES ('system', 'feishu_test', ?)",
-            (f"ok={ok} {detail}",),
+            (f"mode=webhook ok={ok} {detail}",),
         )
         await db.commit()
     except Exception:

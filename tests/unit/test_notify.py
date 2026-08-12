@@ -269,3 +269,471 @@ class TestNotifyJob:
                 mock.patch("db.client.get_db", side_effect=RuntimeError("db down")):
             # 不应抛出异常
             asyncio.run(notify_job("job-x", "review"))
+
+
+# ===========================================================================
+# App-bot (self-built application DM) — Phase 12.1
+# ===========================================================================
+
+
+class TestShouldNotifyAppBot:
+    def test_app_bot_requires_app_credentials(self):
+        cfg = {"enabled": True, "mode": "app_bot", "app_id": "", "app_secret": "", "open_id": "ou_x", "events": ["review"]}
+        assert not _should_notify("review", cfg)
+
+    def test_app_bot_requires_receiver(self):
+        cfg = {"enabled": True, "mode": "app_bot", "app_id": "cli_x", "app_secret": "s", "open_id": "", "mobile": "", "events": ["review"]}
+        assert not _should_notify("review", cfg)
+
+    def test_app_bot_ok_with_open_id(self):
+        cfg = {"enabled": True, "mode": "app_bot", "app_id": "cli_x", "app_secret": "s", "open_id": "ou_1", "mobile": "", "events": ["review"]}
+        assert _should_notify("review", cfg)
+
+    def test_app_bot_ok_with_mobile_only(self):
+        cfg = {"enabled": True, "mode": "app_bot", "app_id": "cli_x", "app_secret": "s", "open_id": "", "mobile": "13800000000", "events": ["review"]}
+        assert _should_notify("review", cfg)
+
+    def test_webhook_mode_still_requires_url(self):
+        cfg = {"enabled": True, "mode": "webhook", "webhook_url": "", "events": ["review"]}
+        assert not _should_notify("review", cfg)
+
+
+class TestTenantAccessToken:
+    def test_fetches_token_and_caches(self):
+        import core.notify as notify_mod
+        resp = mock.MagicMock(status_code=200)
+        resp.json.return_value = {"code": 0, "tenant_access_token": "t-abc", "expire": 7200}
+        notify_mod._token_cache = {"token": "", "fetched_at": 0.0, "app_id": "", "app_secret": ""}
+        with mock.patch("core.notify.requests.post", return_value=resp) as m:
+            ok, tok = notify_mod._get_tenant_access_token_sync("cli_x", "sec")
+            ok2, tok2 = notify_mod._get_tenant_access_token_sync("cli_x", "sec")
+        assert ok and tok == "t-abc"
+        assert tok2 == tok
+        assert m.call_count == 1  # cached
+
+    def test_token_error_code_returns_failure(self):
+        import core.notify as notify_mod
+        resp = mock.MagicMock(status_code=200)
+        resp.json.return_value = {"code": 10003, "msg": "bad secret"}
+        notify_mod._token_cache = {"token": "", "fetched_at": 0.0, "app_id": "", "app_secret": ""}
+        with mock.patch("core.notify.requests.post", return_value=resp):
+            ok, detail = notify_mod._get_tenant_access_token_sync("cli_x", "wrong")
+        assert not ok
+        assert "10003" in detail
+
+    def test_transport_error_returns_failure(self):
+        import requests as _requests
+        import core.notify as notify_mod
+        notify_mod._token_cache = {"token": "", "fetched_at": 0.0, "app_id": "", "app_secret": ""}
+        with mock.patch("core.notify.requests.post",
+                        side_effect=_requests.exceptions.ConnectionError("boom")):
+            ok, detail = notify_mod._get_tenant_access_token_sync("cli_x", "sec")
+        assert not ok
+        assert "transport" in detail
+
+    def test_token_swap_resets_cache(self):
+        import core.notify as notify_mod
+        notify_mod._token_cache = {"token": "", "fetched_at": 0.0, "app_id": "", "app_secret": ""}
+        resp1 = mock.MagicMock(status_code=200)
+        resp1.json.return_value = {"code": 0, "tenant_access_token": "t-a", "expire": 7200}
+        resp2 = mock.MagicMock(status_code=200)
+        resp2.json.return_value = {"code": 0, "tenant_access_token": "t-b", "expire": 7200}
+        with mock.patch("core.notify.requests.post", side_effect=[resp1, resp2]) as m:
+            ok1, t1 = notify_mod._get_tenant_access_token_sync("cli_x", "sec")
+            ok2, t2 = notify_mod._get_tenant_access_token_sync("cli_y", "sec2")
+        assert t1 == "t-a" and t2 == "t-b"
+        assert m.call_count == 2
+
+
+class TestResolveOpenId:
+    def test_resolves_mobile_to_open_id_and_caches(self):
+        import core.notify as notify_mod
+        tok_resp = mock.MagicMock(status_code=200)
+        tok_resp.json.return_value = {"code": 0, "tenant_access_token": "t-abc", "expire": 7200}
+        user_resp = mock.MagicMock(status_code=200)
+        user_resp.json.return_value = {"code": 0, "data": {"user_list": [{"user_id": "ou_123", "mobile": "13800000000"}]}}
+        notify_mod._open_id_cache = {"open_id": "", "mobile": "", "resolved_at": 0.0, "app_id": ""}
+        with mock.patch("core.notify.requests.post", side_effect=[tok_resp, user_resp]) as m:
+            ok, oid = notify_mod.resolve_open_id_sync("cli_x", "sec", "13800000000")
+            ok2, oid2 = notify_mod.resolve_open_id_sync("cli_x", "sec", "13800000000")
+        assert ok and oid == "ou_123"
+        assert oid2 == oid
+        assert m.call_count == 2  # token + resolve, cached after
+
+    def test_empty_user_list_is_failure(self):
+        import core.notify as notify_mod
+        tok_resp = mock.MagicMock(status_code=200)
+        tok_resp.json.return_value = {"code": 0, "tenant_access_token": "t-abc", "expire": 7200}
+        user_resp = mock.MagicMock(status_code=200)
+        user_resp.json.return_value = {"code": 0, "data": {"user_list": []}}
+        notify_mod._open_id_cache = {"open_id": "", "mobile": "", "resolved_at": 0.0, "app_id": ""}
+        with mock.patch("core.notify.requests.post", side_effect=[tok_resp, user_resp]):
+            ok, detail = notify_mod.resolve_open_id_sync("cli_x", "sec", "13800000000")
+        assert not ok
+        assert "empty" in detail
+
+
+class TestPostAppBot:
+    def test_success_dm_send(self):
+        import core.notify as notify_mod
+        notify_mod._token_cache = {"token": "", "fetched_at": 0.0, "app_id": "", "app_secret": ""}
+        notify_mod._open_id_cache = {"open_id": "", "mobile": "", "resolved_at": 0.0, "app_id": ""}
+        tok_resp = mock.MagicMock(status_code=200)
+        tok_resp.json.return_value = {"code": 0, "tenant_access_token": "t-abc", "expire": 7200}
+        msg_resp = mock.MagicMock(status_code=200)
+        msg_resp.json.return_value = {"code": 0, "msg": "success", "data": {"message_id": "om_1"}}
+        with mock.patch("core.notify.requests.post", side_effect=[tok_resp, msg_resp]) as m:
+            ok, detail = notify_mod._post_app_bot_sync("cli_x", "sec", "ou_1", "", "hello")
+        assert ok and detail == "ok"
+        url = m.call_args_list[1].args[0]
+        payload = m.call_args_list[1].kwargs["json"]
+        assert "/im/v1/messages" in url
+        assert payload["receive_id"] == "ou_1"
+        assert payload["msg_type"] == "text"
+        assert "hello" in payload["content"]
+        # auth header with Bearer token
+        headers = m.call_args_list[1].kwargs["headers"]
+        assert headers["Authorization"] == "Bearer t-abc"
+
+    def test_content_json_escaped(self):
+        import core.notify as notify_mod
+        notify_mod._token_cache = {"token": "", "fetched_at": 0.0, "app_id": "", "app_secret": ""}
+        notify_mod._open_id_cache = {"open_id": "", "mobile": "", "resolved_at": 0.0, "app_id": ""}
+        tok_resp = mock.MagicMock(status_code=200)
+        tok_resp.json.return_value = {"code": 0, "tenant_access_token": "t", "expire": 7200}
+        msg_resp = mock.MagicMock(status_code=200)
+        msg_resp.json.return_value = {"code": 0, "msg": "ok"}
+        with mock.patch("core.notify.requests.post", side_effect=[tok_resp, msg_resp]) as m:
+            ok, _ = notify_mod._post_app_bot_sync("cli_x", "s", "ou_1", "", '含"引号"和\\反斜杠')
+        assert ok
+        payload = m.call_args_list[1].kwargs["json"]
+        parsed = json.loads(payload["content"])
+        assert parsed["text"] == '含"引号"和\\反斜杠'
+
+    def test_fatal_code_mapped_to_zh_no_retry(self):
+        import core.notify as notify_mod
+        notify_mod._token_cache = {"token": "", "fetched_at": 0.0, "app_id": "", "app_secret": ""}
+        notify_mod._open_id_cache = {"open_id": "", "mobile": "", "resolved_at": 0.0, "app_id": ""}
+        tok_resp = mock.MagicMock(status_code=200)
+        tok_resp.json.return_value = {"code": 0, "tenant_access_token": "t", "expire": 7200}
+        msg_resp = mock.MagicMock(status_code=200)
+        msg_resp.json.return_value = {"code": 230013, "msg": "no availability"}
+        with mock.patch("core.notify.requests.post", side_effect=[tok_resp, msg_resp]) as m:
+            ok, detail = notify_mod._post_app_bot_sync("cli_x", "s", "ou_1", "", "hi")
+        assert not ok
+        assert "230013" in detail
+        assert "可用范围" in detail
+        assert m.call_count == 2  # token + 1 message attempt, no retry
+
+    def test_retries_on_429_then_succeeds(self):
+        import core.notify as notify_mod
+        notify_mod._token_cache = {"token": "", "fetched_at": 0.0, "app_id": "", "app_secret": ""}
+        notify_mod._open_id_cache = {"open_id": "", "mobile": "", "resolved_at": 0.0, "app_id": ""}
+        tok_resp = mock.MagicMock(status_code=200)
+        tok_resp.json.return_value = {"code": 0, "tenant_access_token": "t", "expire": 7200}
+        resp_429 = mock.MagicMock(status_code=429)
+        msg_resp = mock.MagicMock(status_code=200)
+        msg_resp.json.return_value = {"code": 0, "msg": "ok"}
+        with mock.patch("core.notify.requests.post", side_effect=[tok_resp, resp_429, msg_resp]) as m, \
+                mock.patch("core.notify.time.sleep"):
+            ok, _ = notify_mod._post_app_bot_sync("cli_x", "s", "ou_1", "", "hi")
+        assert ok
+        assert m.call_count == 3
+
+    def test_missing_receiver_returns_failure(self):
+        import core.notify as notify_mod
+        ok, detail = notify_mod._post_app_bot_sync("cli_x", "s", "", "", "hi")
+        assert not ok
+        assert "receiver" in detail
+
+    def test_resolves_open_id_from_mobile(self):
+        import core.notify as notify_mod
+        notify_mod._token_cache = {"token": "", "fetched_at": 0.0, "app_id": "", "app_secret": ""}
+        notify_mod._open_id_cache = {"open_id": "", "mobile": "", "resolved_at": 0.0, "app_id": ""}
+        tok_resp = mock.MagicMock(status_code=200)
+        tok_resp.json.return_value = {"code": 0, "tenant_access_token": "t", "expire": 7200}
+        user_resp = mock.MagicMock(status_code=200)
+        user_resp.json.return_value = {"code": 0, "data": {"user_list": [{"user_id": "ou_999"}]}}
+        msg_resp = mock.MagicMock(status_code=200)
+        msg_resp.json.return_value = {"code": 0, "msg": "ok"}
+        with mock.patch("core.notify.requests.post",
+                        side_effect=[tok_resp, user_resp, msg_resp]) as m:
+            ok, _ = notify_mod._post_app_bot_sync("cli_x", "s", "", "13800000000", "hi")
+        assert ok
+        payload = m.call_args_list[2].kwargs["json"]
+        assert payload["receive_id"] == "ou_999"
+
+
+class TestNotifyJobAppBot:
+    def test_app_bot_mode_sends_dm_and_audits(self, tmp_path):
+        """app_bot 模式：notify_job 走 DM 通道并写 audit_log。"""
+        import aiosqlite
+        from db.client import init_schema, migrate
+        import db.client as db_mod
+        import core.notify as notify_mod
+
+        db_path = tmp_path / "t2.db"
+        cfg = tmp_path / "config.json"
+        cfg.write_text(json.dumps({
+            "feishu_enabled": True,
+            "feishu_mode": "app_bot",
+            "feishu_app_id": "cli_x",
+            "feishu_app_secret": "sec",
+            "feishu_open_id": "ou_1",
+            "feishu_events": "review",
+        }), encoding="utf-8")
+
+        async def run():
+            async with aiosqlite.connect(db_path) as conn:
+                conn.row_factory = aiosqlite.Row
+                await init_schema(conn)
+                await migrate(conn)
+                await conn.execute(
+                    "INSERT INTO jobs (id, filename, status, total_pages) "
+                    "VALUES ('job-x', 'f.pdf', 'review', 2)"
+                )
+                await conn.commit()
+                orig = db_mod._db
+                db_mod._db = conn
+                notify_mod._token_cache = {"token": "", "fetched_at": 0.0, "app_id": "", "app_secret": ""}
+                notify_mod._open_id_cache = {"open_id": "", "mobile": "", "resolved_at": 0.0, "app_id": ""}
+                tok_resp = mock.MagicMock(status_code=200)
+                tok_resp.json.return_value = {"code": 0, "tenant_access_token": "t", "expire": 7200}
+                msg_resp = mock.MagicMock(status_code=200)
+                msg_resp.json.return_value = {"code": 0, "msg": "ok"}
+                try:
+                    with mock.patch("config._config_path", return_value=cfg), \
+                            mock.patch("core.notify.requests.post",
+                                       side_effect=[tok_resp, msg_resp]):
+                        await notify_mod.notify_job("job-x", "review")
+                    cur = await conn.execute(
+                        "SELECT detail FROM audit_log WHERE action = 'feishu_notify'"
+                    )
+                    rows = await cur.fetchall()
+                    assert len(rows) == 1
+                    assert "ok=True" in rows[0]["detail"]
+                finally:
+                    db_mod._db = orig
+
+        asyncio.run(run())
+
+    def test_app_bot_incomplete_config_skips(self, tmp_path):
+        """app_bot 缺 app_secret → 不发请求。"""
+        cfg = tmp_path / "config.json"
+        cfg.write_text(json.dumps({
+            "feishu_enabled": True,
+            "feishu_mode": "app_bot",
+            "feishu_app_id": "cli_x",
+            "feishu_open_id": "ou_1",
+            "feishu_events": "review",
+        }), encoding="utf-8")
+        with mock.patch("config._config_path", return_value=cfg), \
+                mock.patch("core.notify.requests.post") as m:
+            asyncio.run(notify_job("job-x", "review"))
+        m.assert_not_called()
+
+
+# ===========================================================================
+# Edge / failure branches (coverage)
+# ===========================================================================
+
+
+class TestEdgeBranches:
+    """非 JSON 响应、异常状态码、空 token、resolve/token 链式失败等分支。"""
+
+    def test_post_sync_non_json_body(self):
+        resp = mock.MagicMock(status_code=200)
+        resp.json.side_effect = ValueError("not json")
+        with mock.patch("core.notify.requests.post", return_value=resp):
+            ok, detail = _post_sync("u", {"msg_type": "text"}, "")
+        assert not ok
+        assert "non-JSON" in detail
+
+    def test_post_app_bot_non_json_body(self):
+        import core.notify as notify_mod
+        notify_mod._token_cache = {"token": "", "fetched_at": 0.0, "app_id": "", "app_secret": ""}
+        notify_mod._open_id_cache = {"open_id": "", "mobile": "", "resolved_at": 0.0, "app_id": ""}
+        tok_resp = mock.MagicMock(status_code=200)
+        tok_resp.json.return_value = {"code": 0, "tenant_access_token": "t", "expire": 7200}
+        msg_resp = mock.MagicMock(status_code=200)
+        msg_resp.json.side_effect = ValueError("not json")
+        with mock.patch("core.notify.requests.post", side_effect=[tok_resp, msg_resp]):
+            ok, detail = notify_mod._post_app_bot_sync("cli_x", "s", "ou_1", "", "hi")
+        assert not ok
+        assert "non-JSON" in detail
+
+    def test_post_app_bot_unknown_business_code(self):
+        import core.notify as notify_mod
+        notify_mod._token_cache = {"token": "", "fetched_at": 0.0, "app_id": "", "app_secret": ""}
+        notify_mod._open_id_cache = {"open_id": "", "mobile": "", "resolved_at": 0.0, "app_id": ""}
+        tok_resp = mock.MagicMock(status_code=200)
+        tok_resp.json.return_value = {"code": 0, "tenant_access_token": "t", "expire": 7200}
+        msg_resp = mock.MagicMock(status_code=200)
+        msg_resp.json.return_value = {"code": 99999, "msg": "mystery"}
+        with mock.patch("core.notify.requests.post", side_effect=[tok_resp, msg_resp]):
+            ok, detail = notify_mod._post_app_bot_sync("cli_x", "s", "ou_1", "", "hi")
+        assert not ok
+        assert "99999" in detail and "mystery" in detail
+
+    def test_post_app_bot_transport_error_exhausts_retries(self):
+        import requests as _requests
+        import core.notify as notify_mod
+        notify_mod._token_cache = {"token": "", "fetched_at": 0.0, "app_id": "", "app_secret": ""}
+        notify_mod._open_id_cache = {"open_id": "", "mobile": "", "resolved_at": 0.0, "app_id": ""}
+        tok_resp = mock.MagicMock(status_code=200)
+        tok_resp.json.return_value = {"code": 0, "tenant_access_token": "t", "expire": 7200}
+        with mock.patch("core.notify.requests.post", side_effect=[tok_resp] + [
+            _requests.exceptions.ConnectionError("boom")] * 4) as m, \
+                mock.patch("core.notify.time.sleep"):
+            ok, detail = notify_mod._post_app_bot_sync("cli_x", "s", "ou_1", "", "hi")
+        assert not ok
+        assert "retries exhausted" in detail
+        assert m.call_count == 5  # token + 4 msg attempts
+
+    def test_token_http_error_non_json_empty(self):
+        import core.notify as notify_mod
+        # http != 200
+        notify_mod._token_cache = {"token": "", "fetched_at": 0.0, "app_id": "", "app_secret": ""}
+        resp = mock.MagicMock(status_code=500)
+        with mock.patch("core.notify.requests.post", return_value=resp):
+            ok, detail = notify_mod._get_tenant_access_token_sync("cli_x", "s")
+        assert not ok and "http 500" in detail
+        # non-JSON body
+        notify_mod._token_cache = {"token": "", "fetched_at": 0.0, "app_id": "", "app_secret": ""}
+        resp = mock.MagicMock(status_code=200)
+        resp.json.side_effect = ValueError()
+        with mock.patch("core.notify.requests.post", return_value=resp):
+            ok, detail = notify_mod._get_tenant_access_token_sync("cli_x", "s")
+        assert not ok and "non-JSON" in detail
+        # business error
+        notify_mod._token_cache = {"token": "", "fetched_at": 0.0, "app_id": "", "app_secret": ""}
+        resp = mock.MagicMock(status_code=200)
+        resp.json.return_value = {"code": 99991661, "msg": "no auth"}
+        with mock.patch("core.notify.requests.post", return_value=resp):
+            ok, detail = notify_mod._get_tenant_access_token_sync("cli_x", "s")
+        assert not ok and "99991661" in detail
+        # empty token
+        notify_mod._token_cache = {"token": "", "fetched_at": 0.0, "app_id": "", "app_secret": ""}
+        resp = mock.MagicMock(status_code=200)
+        resp.json.return_value = {"code": 0, "tenant_access_token": ""}
+        with mock.patch("core.notify.requests.post", return_value=resp):
+            ok, detail = notify_mod._get_tenant_access_token_sync("cli_x", "s")
+        assert not ok and "empty" in detail
+
+    def _reset_caches(self):
+        import core.notify as notify_mod
+        notify_mod._token_cache = {"token": "", "fetched_at": 0.0, "app_id": "", "app_secret": ""}
+        notify_mod._open_id_cache = {"open_id": "", "mobile": "", "resolved_at": 0.0, "app_id": ""}
+
+    def test_resolve_failure_branches(self):
+        import core.notify as notify_mod
+        # token 失败 → 直接返回
+        self._reset_caches()
+        resp = mock.MagicMock(status_code=500)
+        with mock.patch("core.notify.requests.post", return_value=resp):
+            ok, detail = notify_mod.resolve_open_id_sync("cli_x", "s", "13800000000")
+        assert not ok
+        # resolve transport error
+        import requests as _requests
+        self._reset_caches()
+        tok_resp = mock.MagicMock(status_code=200)
+        tok_resp.json.return_value = {"code": 0, "tenant_access_token": "t", "expire": 7200}
+        with mock.patch("core.notify.requests.post", side_effect=[tok_resp] + [
+            _requests.exceptions.ConnectionError()]):
+            ok, detail = notify_mod.resolve_open_id_sync("cli_x", "s", "13800000000")
+        assert not ok and "transport" in detail
+        # resolve http error
+        self._reset_caches()
+        tok_resp = mock.MagicMock(status_code=200)
+        tok_resp.json.return_value = {"code": 0, "tenant_access_token": "t", "expire": 7200}
+        resp500 = mock.MagicMock(status_code=500)
+        with mock.patch("core.notify.requests.post", side_effect=[tok_resp, resp500]):
+            ok, detail = notify_mod.resolve_open_id_sync("cli_x", "s", "13800000000")
+        assert not ok and "http 500" in detail
+        # resolve non-JSON
+        self._reset_caches()
+        tok_resp = mock.MagicMock(status_code=200)
+        tok_resp.json.return_value = {"code": 0, "tenant_access_token": "t", "expire": 7200}
+        bad = mock.MagicMock(status_code=200)
+        bad.json.side_effect = ValueError()
+        with mock.patch("core.notify.requests.post", side_effect=[tok_resp, bad]):
+            ok, detail = notify_mod.resolve_open_id_sync("cli_x", "s", "13800000000")
+        assert not ok and "non-JSON" in detail
+        # resolve business error
+        self._reset_caches()
+        tok_resp = mock.MagicMock(status_code=200)
+        tok_resp.json.return_value = {"code": 0, "tenant_access_token": "t", "expire": 7200}
+        biz = mock.MagicMock(status_code=200)
+        biz.json.return_value = {"code": 99991663, "msg": "token invalid"}
+        with mock.patch("core.notify.requests.post", side_effect=[tok_resp, biz]):
+            ok, detail = notify_mod.resolve_open_id_sync("cli_x", "s", "13800000000")
+        assert not ok and "99991663" in detail
+
+    def test_app_bot_resolve_failure_propagates(self):
+        """open_id 为空且手机号解析失败 → 消息体不带 receiver 即失败。"""
+        import core.notify as notify_mod
+        notify_mod._token_cache = {"token": "", "fetched_at": 0.0, "app_id": "", "app_secret": ""}
+        notify_mod._open_id_cache = {"open_id": "", "mobile": "", "resolved_at": 0.0, "app_id": ""}
+        tok_resp = mock.MagicMock(status_code=200)
+        tok_resp.json.return_value = {"code": 0, "tenant_access_token": "t", "expire": 7200}
+        biz = mock.MagicMock(status_code=200)
+        biz.json.return_value = {"code": 99991663, "msg": "token invalid"}
+        with mock.patch("core.notify.requests.post", side_effect=[tok_resp, biz]) as m:
+            ok, detail = notify_mod._post_app_bot_sync("cli_x", "s", "", "13800000000", "hi")
+        assert not ok
+        assert "99991663" in detail
+        assert m.call_count == 2  # 未到发消息
+
+    def test_app_bot_token_failure_propagates(self):
+        """token 获取失败 → 不发消息直接失败（token 单次尝试，无消息流量）。"""
+        import core.notify as notify_mod
+        notify_mod._token_cache = {"token": "", "fetched_at": 0.0, "app_id": "", "app_secret": ""}
+        notify_mod._open_id_cache = {"open_id": "", "mobile": "", "resolved_at": 0.0, "app_id": ""}
+        resp = mock.MagicMock(status_code=500)
+        with mock.patch("core.notify.requests.post", return_value=resp) as m:
+            ok, detail = notify_mod._post_app_bot_sync("cli_x", "s", "ou_1", "", "hi")
+        assert not ok and "token" in detail
+        assert m.call_count == 1  # 仅 token 尝试，未到消息阶段
+
+    def test_notify_job_failure_logs_warning(self, tmp_path):
+        """发送失败 → audit_log 记 ok=False，不抛异常。"""
+        import aiosqlite
+        from db.client import init_schema, migrate
+        import db.client as db_mod
+
+        db_path = tmp_path / "t3.db"
+        cfg = tmp_path / "config.json"
+        cfg.write_text(json.dumps({
+            "feishu_enabled": True,
+            "feishu_webhook_url": "https://open.feishu.cn/hook/abc",
+            "feishu_events": "review",
+        }), encoding="utf-8")
+
+        async def run():
+            async with aiosqlite.connect(db_path) as conn:
+                conn.row_factory = aiosqlite.Row
+                await init_schema(conn)
+                await migrate(conn)
+                await conn.execute(
+                    "INSERT INTO jobs (id, filename, status, total_pages) "
+                    "VALUES ('job-x', 'f.pdf', 'review', 2)"
+                )
+                await conn.commit()
+                orig = db_mod._db
+                db_mod._db = conn
+                resp = mock.MagicMock(status_code=200)
+                resp.json.return_value = {"code": 19024, "msg": "kw"}
+                try:
+                    with mock.patch("config._config_path", return_value=cfg), \
+                            mock.patch("core.notify.requests.post", return_value=resp):
+                        await notify_job("job-x", "review")
+                    cur = await conn.execute(
+                        "SELECT detail FROM audit_log WHERE action = 'feishu_notify'"
+                    )
+                    rows = await cur.fetchall()
+                    assert len(rows) == 1
+                    assert "ok=False" in rows[0]["detail"]
+                finally:
+                    db_mod._db = orig
+
+        asyncio.run(run())

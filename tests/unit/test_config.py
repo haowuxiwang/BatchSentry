@@ -313,3 +313,34 @@ class TestLoadFeishuConfig:
         with patch("config._config_path", return_value=tmp_path / "config.json"):
             cfg = load_feishu_config()
         assert cfg["events"] == ["review", "partial_review", "error"]
+
+    def test_default_mode_is_webhook(self, tmp_path):
+        from config import load_feishu_config
+        self._write(tmp_path, {"feishu_enabled": True})
+        with patch("config._config_path", return_value=tmp_path / "config.json"):
+            cfg = load_feishu_config()
+        assert cfg["mode"] == "webhook"
+
+    def test_app_bot_mode_and_credentials_parsed(self, tmp_path):
+        from config import load_feishu_config
+        self._write(tmp_path, {
+            "feishu_enabled": True,
+            "feishu_mode": "app_bot",
+            "feishu_app_id": "cli_x",
+            "feishu_app_secret": "sec123",
+            "feishu_open_id": "ou_1",
+            "feishu_mobile": "13800000000",
+        })
+        with patch("config._config_path", return_value=tmp_path / "config.json"):
+            cfg = load_feishu_config()
+        assert cfg["mode"] == "app_bot"
+        assert cfg["app_id"] == "cli_x"
+        assert cfg["app_secret"] == "sec123"
+        assert cfg["open_id"] == "ou_1"
+        assert cfg["mobile"] == "13800000000"
+
+    def test_invalid_mode_falls_back_to_webhook(self, tmp_path):
+        from config import load_feishu_config
+        self._write(tmp_path, {"feishu_mode": "slack"})
+        with patch("config._config_path", return_value=tmp_path / "config.json"):
+            assert load_feishu_config()["mode"] == "webhook"
