@@ -329,45 +329,83 @@
     }
   }
 
-  const liveSources = new Map(); // jobId -> EventSource
+  let liveSource = null; // single aggregated EventSource
+  const pollTimers = new Map(); // jobId -> interval (fallback polling after SSE loss)
 
-  // === Job 行实时状态（SSE） ===
-  // 列表渲染后对每个活跃 job 订阅 /api/jobs/{id}/stream：OCR 进度、
-  // 页级分析进度实时更新到行内，终态后自动关闭连接。翻页时全部关闭。
+  // === Job 行实时状态（SSE 聚合） ===
+  // 单条 /api/jobs/live 连接推送所有活跃任务快照，按 job_id 分发到行内。
+  // 对比逐任务 EventSource：HTTP/1.1 每域 6 连接上限下，多任务并行 +
+  // 多标签页不会饿死普通请求。断线 3 次后降级为逐 job 10s 轮询。
   function startLiveTracking() {
+    if (liveSource) return;
+    const es = new EventSource("/api/jobs/live");
+    liveSource = es;
+    es.onmessage = (e) => {
+      let d;
+      try {
+        d = JSON.parse(e.data);
+      } catch (_) {
+        return;
+      }
+      const jobs = Array.isArray(d) ? d : d.jobs || [];
+      jobs.forEach((snap) => {
+        if (!snap || !snap.id) return;
+        const li = findJobRow(snap.id);
+        if (!li) return;
+        updateJobRowLive(li, snap);
+        if (TERMINAL_STATUSES.includes(snap.status)) {
+          // 终态：重建该行以刷新按钮可用状态（归档/删除/复核链接）
+          const fresh = buildRowFromSnapshot(li, snap);
+          if (fresh) li.replaceWith(fresh);
+        }
+      });
+    };
+    let errCount = 0;
+    es.onerror = () => {
+      errCount += 1;
+      if (errCount >= 3) {
+        es.close();
+        liveSource = null;
+        log.warn("SSE aggregated stream lost, falling back to polling");
+        startFallbackPolling();
+      }
+    };
+  }
+
+  function findJobRow(jid) {
+    return document.querySelector(
+      `#history-list li[data-job-id="${CSS.escape(jid)}"]`,
+    );
+  }
+
+  // SSE 失效后兜底：对当前可见的每个活跃 job 开 10s 轮询直至终态
+  function startFallbackPolling() {
     document
       .querySelectorAll("#history-list li[data-job-id]")
       .forEach((li) => {
-        const st = li.dataset.status;
         const jid = li.dataset.jobId;
+        const st = li.dataset.status;
         if (!jid || !ACTIVE_STATUSES.includes(st)) return;
-        if (liveSources.has(jid)) return;
-        const es = new EventSource(`/api/jobs/${encodeURIComponent(jid)}/stream`);
-        liveSources.set(jid, es);
-        es.onmessage = (e) => {
-          let d;
+        if (pollTimers.has(jid)) return;
+        const timer = setInterval(async () => {
           try {
-            d = JSON.parse(e.data);
+            const row = findJobRow(jid);
+            if (!row) return;
+            const r = await fetch(`/api/jobs/${encodeURIComponent(jid)}`);
+            if (!r.ok) return;
+            const d = await r.json();
+            updateJobRowLive(row, d);
+            if (TERMINAL_STATUSES.includes(d.status)) {
+              clearInterval(timer);
+              pollTimers.delete(jid);
+              const fresh = buildRowFromSnapshot(row, d);
+              if (fresh) row.replaceWith(fresh);
+            }
           } catch (_) {
-            return;
+            /* transient network error — keep polling */
           }
-          updateJobRowLive(li, d);
-          if (TERMINAL_STATUSES.includes(d.status)) {
-            es.close();
-            liveSources.delete(jid);
-            // 终态：重建该行以刷新按钮可用状态（归档/删除/复核链接）
-            const fresh = buildRowFromSnapshot(li, d);
-            if (fresh) li.replaceWith(fresh);
-          }
-        };
-        let errCount = 0;
-        es.onerror = () => {
-          errCount += 1;
-          if (errCount > 2) {
-            es.close();
-            liveSources.delete(jid);
-          }
-        };
+        }, 10000);
+        pollTimers.set(jid, timer);
       });
   }
 
@@ -410,8 +448,12 @@
 
   // 翻页前关闭全部实时连接（旧页 job 不在视口内，继续订阅无意义）
   function closeAllLiveSources() {
-    liveSources.forEach((es) => es.close());
-    liveSources.clear();
+    if (liveSource) {
+      liveSource.close();
+      liveSource = null;
+    }
+    pollTimers.forEach((t) => clearInterval(t));
+    pollTimers.clear();
   }
 
   function renderJobRow(job, i) {

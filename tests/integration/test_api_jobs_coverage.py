@@ -740,6 +740,77 @@ class TestStreamJobProgress:
         assert "event: error" in body
         assert "Job not found" in body
 
+    @pytest.mark.asyncio
+    async def test_stream_events_carry_id_and_retry(self, client, test_db):
+        """每条 SSE 事件带自增 id + 块头 retry 指令（断线重连语义）。"""
+        await test_db.execute(
+            "INSERT INTO jobs (id, filename, pdf_path, status) VALUES (?, ?, ?, ?)",
+            ("stream-id-job", "t.pdf", "/tmp/t.pdf", "review"),
+        )
+        await test_db.commit()
+
+        body = ""
+        async with client.stream("GET", "/api/jobs/stream-id-job/stream") as resp:
+            assert resp.status_code == 200
+            async for chunk in resp.aiter_text():
+                body += chunk
+                if "event: done" in body:
+                    break
+        assert "retry: 2000" in body
+        ids = [ln[3:].strip() for ln in body.splitlines() if ln.startswith("id: ")]
+        assert len(ids) >= 2, f"expected sequential event ids, got {ids!r}"
+        assert ids == [str(i) for i in range(1, len(ids) + 1)]
+
+    @pytest.mark.asyncio
+    async def test_progress_snapshot_includes_failed_pages(self, client, test_db):
+        """SSE 快照（含 done 事件）应携带 failed_pages 便于终态判断。"""
+        await test_db.execute(
+            "INSERT INTO jobs (id, filename, pdf_path, status, failed_pages) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("stream-fp-job", "t.pdf", "/tmp/t.pdf", "partial_review", "[2]"),
+        )
+        await test_db.commit()
+
+        body = ""
+        async with client.stream("GET", "/api/jobs/stream-fp-job/stream") as resp:
+            async for chunk in resp.aiter_text():
+                body += chunk
+                if "event: done" in body:
+                    break
+        assert '"failed_pages": "[2]"' in body
+
+    @pytest.mark.asyncio
+    async def test_live_snapshot_only_includes_active_jobs(self, test_db):
+        """_live_jobs_snapshot 只含活跃任务，且快照携带终态判断所需字段。
+
+        注：不走 ASGITransport 流式（httpx 0.28 的 ASGITransport 要等 app
+        完成后才交付 Response，无法收永不结束的 SSE 流）；流式行为由
+        真实 server 的 E2E（e2e_full.py）覆盖。
+        """
+        from api.jobs import _live_jobs_snapshot
+
+        await test_db.execute(
+            "INSERT INTO jobs (id, filename, pdf_path, status) VALUES (?, ?, ?, ?)",
+            ("live-active", "a.pdf", "/tmp/a.pdf", "analyzing"),
+        )
+        await test_db.execute(
+            "INSERT INTO jobs (id, filename, pdf_path, status, failed_pages) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("live-active2", "c.pdf", "/tmp/c.pdf", "ocr_running", None),
+        )
+        await test_db.execute(
+            "INSERT INTO jobs (id, filename, pdf_path, status) VALUES (?, ?, ?, ?)",
+            ("live-terminal", "b.pdf", "/tmp/b.pdf", "review"),
+        )
+        await test_db.commit()
+
+        snaps = await _live_jobs_snapshot(test_db)
+        ids = {s["id"] for s in snaps}
+        assert ids == {"live-active", "live-active2"}, ids
+        snap = next(s for s in snaps if s["id"] == "live-active2")
+        assert "failed_pages" in snap
+        assert "status" in snap and snap["status"] == "ocr_running"
+
 
 class TestArchiveKeepPdfFalse:
     """POST /api/jobs/{id}/archive?keep_pdf=false — PDF 清理分支（lines 385-398）。"""

@@ -293,6 +293,61 @@ async def list_jobs(page: int = 1, page_size: int = 20):
     }
 
 
+async def _live_jobs_snapshot(db) -> list[dict]:
+    """收集所有活跃任务的进度快照（/api/jobs/live 推送体）。
+
+    抽成纯函数便于单测（httpx ASGITransport 无法交付永不结束的
+    SSE 流——它要等 app 完成后才返回 Response）。
+    """
+    placeholders = ",".join("?" * len(_ACTIVE_STATUSES))
+    cursor = await db.execute(
+        f"SELECT id FROM jobs WHERE status IN ({placeholders})",
+        _ACTIVE_STATUSES,
+    )
+    rows = await cursor.fetchall()
+    snapshots = []
+    for r in rows:
+        progress = await _get_job_progress(db, r["id"])
+        if progress:
+            snapshots.append(progress)
+    return snapshots
+
+
+@router.get("/live")
+async def stream_all_live_jobs(request: Request):
+    """SSE 聚合端点：单连接推送所有活跃任务的进度快照。
+
+    解决 HTTP/1.1 每域 6 条 EventSource 连接上限：upload 页多任务并行
+    时不再每个任务各开一条连接（MAX_CONCURRENT_JOBS=3 时多标签页
+    很容易撞上限），而是聚合为一条流，事件体为
+    {"jobs": [{job 快照}, ...]}，前端按 job_id 分发。
+    """
+    import asyncio
+    from fastapi.responses import StreamingResponse
+
+    async def event_generator():
+        db = await get_db()
+        seq = 0
+        yield "retry: 2000\n\n"
+        while True:
+            if await request.is_disconnected():
+                return
+            snapshots = await _live_jobs_snapshot(db)
+            seq += 1
+            yield f"id: {seq}\ndata: {json.dumps({'jobs': snapshots}, ensure_ascii=False)}\n\n"
+            await asyncio.sleep(3)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 @router.get("/{job_id}/page/{page_num}")
 async def get_job_page_image(job_id: str, page_num: int):
     """Render a PDF page to PNG for inline preview.
@@ -457,6 +512,7 @@ async def _get_job_progress(db, job_id: str) -> dict:
         "pages_analyzed": pages_analyzed,
         "total_findings": total_findings,
         "error_message": job["error_message"],
+        "failed_pages": job["failed_pages"],
         "stage1_ms": job["stage1_ms"],
         "stage2_ms": job["stage2_ms"],
         "stage3_ms": job["stage3_ms"],
@@ -494,20 +550,28 @@ async def stream_job_progress(job_id: str, request: Request):
 
     async def event_generator():
         db = await get_db()
+        seq = 0
+        yield "retry: 2000\n\n"
         while True:
             if await request.is_disconnected():
                 logger.info(f"[{job_id}] SSE client disconnected, stopping progress stream")
                 return
             progress = await _get_job_progress(db, job_id)
             if progress is None:
-                yield f"event: error\ndata: {json.dumps({'message': 'Job not found'})}\n\n"
+                seq += 1
+                yield (f"id: {seq}\nevent: error\n"
+                       f"data: {json.dumps({'message': 'Job not found'})}\n\n")
                 return
 
             payload = json.dumps(progress, ensure_ascii=False)
-            yield f"data: {payload}\n\n"
+            seq += 1
+            # 每条事件带自增 id：EventSource 断线重连时自动携带
+            # Last-Event-ID；快照是幂等全量，重放/重连后立即自愈。
+            yield f"id: {seq}\ndata: {payload}\n\n"
 
             if progress["status"] in _TERMINAL_STATUSES:
-                yield f"event: done\ndata: {payload}\n\n"
+                seq += 1
+                yield f"id: {seq}\nevent: done\ndata: {payload}\n\n"
                 return
 
             await asyncio.sleep(3)
