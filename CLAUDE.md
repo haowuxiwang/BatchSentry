@@ -124,7 +124,7 @@ PDF upload → output/{job_id}/filename.pdf
 
 ### Database Schema (`db/schema.sql`)
 
-- **`jobs`**: id, filename, status, pdf_path, total_pages, failed_pages, stage1_ms/stage2_ms/stage3_ms, ocr_progress (JSON), ocr_backend_used (dual-OCR audit), error_message, created_at, finished_at
+- **`jobs`**: id, filename, status, pdf_path, total_pages, md5 (duplicate-upload detection), failed_pages, stage1_ms/stage2_ms/stage3_ms, ocr_progress (JSON), ocr_backend_used (dual-OCR audit), error_message, created_at, finished_at
 - **`page_cache`**: (job_id, page) → raw_html + structured_json + analyzed_at
 - **`findings`**: id, job_id, page, type, severity, source, description, ocr_text, operator, status (`pending → confirmed | rejected | corrected`), reviewer_note, corrected_text, reviewed_at
 - **`audit_log`**: id, job_id, finding_id, action, detail, created_at
@@ -162,7 +162,7 @@ API routes emit business logs (upload/cancel/retry/archive/delete/finding update
 
 - **CORS**: only `127.0.0.1:8000`, `localhost:8000`, `127.0.0.1:58765`, `localhost:58765`. `file://` removed to prevent XSS via Electron renderer.
 - **CORS headers**: restricted to `Content-Type, X-Request-ID` (not `*`).
-- **Upload**: 8MB chunked streaming, `Path(file.filename).name` sanitization, 200MB hard limit, empty-file rejection, `%PDF-` magic bytes check.
+- **Upload**: 8MB chunked streaming, `Path(file.filename).name` sanitization, 200MB hard limit, empty-file rejection, `%PDF-` magic bytes check, MD5 content-hash duplicate rejection (409, `force=1` bypass).
 - **SQL**: all queries parameterized (`?` placeholders).
 - **Secrets**: `.env` never committed; Settings API masks keys (`sk-abcd...wxyz`).
 - **PDF preview**: `content_disposition_type="inline"` for iframe rendering.
@@ -202,7 +202,8 @@ The probe does NOT submit real OCR/LLM work — it just verifies auth + connecti
 - **SSRF protection**: `validate_external_url()` blocks base_url / OCR API URLs pointing to link-local (169.254/16), loopback (127/8), private (10/8, 192.168/16, 172.16/12), or unspecified (0.0.0.0) addresses.
 - **.env atomic write**: Settings POST uses a PID + UUID-suffixed tmp file + `os.replace` for atomic rename, preventing concurrent-write corruption.
 - **GMP audit trail**: every LLM call (per-page + cross-page + fallback) is recorded in `llm_call_audit` table with provider, protocol, model, prompt_version, token usage, latency, success/error — for traceability.
-- **JSON parsing resilience** (`llm/client.py:_parse_json`): handles markdown fences, leading text, both `{...}` and `[...]`, truncated JSON recovery.
+- **JSON parsing resilience** (`llm/client.py:_parse_json`): handles markdown fences, leading text, both `{...}` and `[...]`, truncated JSON recovery. Parse failures trigger a fix-hint retry (`chat_json`, up to 2 extra single-shot calls, no API-level backoff) — found by the 51-page real-file regression (page 19 returned ```json-fenced output that survived the API call but failed parsing).
+- **Upload dedup**: MD5 computed during chunked streaming (schema v3, `jobs.md5`); identical content → 409 with existing job hint. Dedup check + INSERT are inside `db_lock` (no TOCTOU race).
 - **HTML cleaning** (`page_analyzer.py`): strips `style=`/`width=`, simplifies img src, truncates to 6000 chars. Prevents token overflow.
 - **Rule + LLM hybrid**: rule-based checks (deterministic, no token cost) + LLM-based semantic anomalies. Both feed `findings` table with `source` field.
 - **Resume**: pipeline skips pages that already have `structured_json` in `page_cache`.

@@ -7,6 +7,7 @@ BatchSentry 是面向制药企业的批生产记录（BPR）审核工具，通�
 ## 核心能力
 
 - **多格式 PDF 解析**：PaddleOCR-VL / MinerU 双后端（主备 failover：主后端异常/0 页/缺页>20% 自动切换，`ocr_backend_used` 留痕），支持扫描件、电子件、混合件
+- **上传内容去重**：流式上传时计算 MD5，相同文件二次上传返回 409 并提示已有任务（`force=1` 可绕过，用于规则变更后的合法重分析）
 - **结构化提取**：LLM 提取工序步骤、参数矩阵、签名、时间、事件年份分组
 - **实时进度**：SSE 流式推送任务状态（上传页行内 OCR/分析计数 + 复核页按页热更 findings）
 - **跨页合规分析**：规则引擎（R1-R8）+ LLM fallback + LLM 语义检查三层判定
@@ -119,7 +120,7 @@ npm run dev
 $env:PBC_NO_FILE_LOG='1'
 python -m pytest tests/ --cov=. --cov-report=term --timeout=30
 
-# 当前状态：730 passed, 94.30% coverage（目标 ≥90%）
+# 当前状态：737 passed, 94.45% coverage（目标 ≥90%）
 ```
 
 ## 安全设计
