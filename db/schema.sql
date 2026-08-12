@@ -7,6 +7,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     finished_at TIMESTAMP,
     total_pages INTEGER,
+    md5 TEXT,                       -- MD5 content hash of uploaded PDF (duplicate-upload detection)
     failed_pages TEXT,              -- JSON array of page numbers that failed LLM analysis
     stage1_ms INTEGER,              -- OCR stage duration
     stage2_ms INTEGER,              -- per-page LLM analysis duration

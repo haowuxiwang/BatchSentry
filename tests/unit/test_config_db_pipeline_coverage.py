@@ -281,6 +281,34 @@ class TestDbClientEdgeCases:
             assert (await cursor.fetchone())[0] == SCHEMA_VERSION
 
     @pytest.mark.asyncio
+    async def test_migrate_v3_adds_md5_column(self, tmp_path):
+        """v2 库（user_version=2，无 jobs.md5）→ migrate 应新增 md5 列并升到 v3。"""
+        import aiosqlite
+        from db.client import migrate, SCHEMA_VERSION
+
+        db_path = str(tmp_path / "v2.db")
+        async with aiosqlite.connect(db_path) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("""
+                CREATE TABLE jobs (
+                    id TEXT PRIMARY KEY,
+                    filename TEXT,
+                    status TEXT,
+                    pdf_path TEXT,
+                    total_pages INTEGER
+                )
+            """)
+            await db.execute("PRAGMA user_version = 2")
+            await db.commit()
+
+            await migrate(db)
+            cursor = await db.execute("PRAGMA table_info(jobs)")
+            cols = {row["name"] for row in await cursor.fetchall()}
+            assert "md5" in cols
+            cursor = await db.execute("PRAGMA user_version")
+            assert (await cursor.fetchone())[0] == SCHEMA_VERSION
+
+    @pytest.mark.asyncio
     async def test_get_db_returns_existing_connection(self, tmp_path):
         """get_db 第二次调用应返回已存在的连接（_db is not None 分支）。"""
         import db.client as db_mod

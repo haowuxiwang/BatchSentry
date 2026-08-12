@@ -107,6 +107,97 @@ class TestUploadPdf:
         assert r.status_code == 400
 
 
+class TestUploadDedup:
+    """上传去重 — 相同内容（md5）二次上传应 409，force=1 可绕过。"""
+
+    @staticmethod
+    def _make_pdf(tmp_path, name: str, text: str):
+        import fitz
+        doc = fitz.open()
+        doc.new_page().insert_text((50, 50), text)
+        pdf_path = tmp_path / name
+        doc.save(str(pdf_path))
+        doc.close()
+        return pdf_path
+
+    @pytest.mark.asyncio
+    async def test_duplicate_upload_returns_409(self, client, tmp_path, test_db):
+        """相同内容二次上传：409 + 提示已有任务，不创建第二个 job、不启动 pipeline、
+        新上传的临时目录被清理。"""
+        pdf_path = self._make_pdf(tmp_path, "dup.pdf", "duplicate me")
+
+        with patch("api.jobs.launch_pipeline") as mock_pipe:
+            with open(pdf_path, "rb") as f:
+                r1 = await client.post(
+                    "/api/jobs", files={"file": ("dup.pdf", f, "application/pdf")}
+                )
+            with open(pdf_path, "rb") as f:
+                r2 = await client.post(
+                    "/api/jobs", files={"file": ("dup.pdf", f, "application/pdf")}
+                )
+
+        assert r1.status_code == 200
+        assert r2.status_code == 409
+        detail = r2.json()["detail"]
+        assert r1.json()["job_id"] in detail
+        assert mock_pipe.call_count == 1  # 去重后未再次调度 pipeline
+
+        # DB 中只有 1 个 job，且 md5 已写入
+        cursor = await test_db.execute("SELECT COUNT(*) FROM jobs WHERE md5 IS NOT NULL")
+        assert (await cursor.fetchone())[0] == 1
+
+        # 上传目录只有 1 个 job 目录（二次上传的孤儿目录已清理）
+        from config import config as _cfg
+        from pathlib import Path
+        out = Path(_cfg["app"].output_dir)
+        assert [d.name for d in out.iterdir() if d.is_dir()] == [r1.json()["job_id"]]
+
+    @pytest.mark.asyncio
+    async def test_duplicate_upload_force_creates_second_job(self, client, tmp_path, test_db):
+        """force=1 应绕过去重，创建第二个 job。"""
+        pdf_path = self._make_pdf(tmp_path, "force.pdf", "force me")
+
+        with patch("api.jobs.launch_pipeline") as mock_pipe:
+            with open(pdf_path, "rb") as f:
+                r1 = await client.post(
+                    "/api/jobs", files={"file": ("force.pdf", f, "application/pdf")}
+                )
+            with open(pdf_path, "rb") as f:
+                r2 = await client.post(
+                    "/api/jobs?force=1",
+                    files={"file": ("force.pdf", f, "application/pdf")},
+                )
+
+        assert r1.status_code == 200
+        assert r2.status_code == 200
+        assert r1.json()["job_id"] != r2.json()["job_id"]
+        assert mock_pipe.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_different_content_both_accepted(self, client, tmp_path, test_db):
+        """内容不同的文件都应正常接受。"""
+        pdf_a = self._make_pdf(tmp_path, "a.pdf", "content A")
+        pdf_b = self._make_pdf(tmp_path, "b.pdf", "content B")
+
+        with patch("api.jobs.launch_pipeline"):
+            with open(pdf_a, "rb") as f:
+                r1 = await client.post(
+                    "/api/jobs", files={"file": ("same.pdf", f, "application/pdf")}
+                )
+            with open(pdf_b, "rb") as f:
+                r2 = await client.post(
+                    "/api/jobs", files={"file": ("same.pdf", f, "application/pdf")}
+                )
+
+        assert r1.status_code == 200
+        assert r2.status_code == 200
+
+        cursor = await test_db.execute(
+            "SELECT COUNT(DISTINCT md5) FROM jobs WHERE md5 IS NOT NULL"
+        )
+        assert (await cursor.fetchone())[0] == 2
+
+
 class TestStatsOverview:
     """GET /api/jobs/stats/overview。"""
 

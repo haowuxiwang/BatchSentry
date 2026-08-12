@@ -1,4 +1,5 @@
 """Job management API — upload PDF, check status, cancel, retry."""
+import hashlib
 import json
 import logging
 import os
@@ -72,8 +73,15 @@ def _get_pdf_doc(job_id: str, pdf_path: str):
 @router.post("")
 async def create_job(
     file: UploadFile = File(...),
+    force: bool = False,
 ):
-    """Upload a PDF and start OCR + analysis pipeline."""
+    """Upload a PDF and start OCR + analysis pipeline.
+
+    Duplicate detection: the MD5 of the streamed content is stored in
+    jobs.md5; re-uploading identical content returns 409 unless force=1
+    (query param), which lets users re-analyze the same batch record
+    intentionally (e.g. after SOP/rule changes).
+    """
     if not file.filename or not file.filename.lower().endswith(".pdf"):
         raise HTTPException(400, "Only PDF files accepted")
 
@@ -135,6 +143,7 @@ async def create_job(
 
     # Stream to disk in chunks; enforce size limit without loading full file
     total_bytes = 0
+    file_md5 = hashlib.md5()
     try:
         with open(pdf_path, "wb") as f:
             while True:
@@ -147,6 +156,7 @@ async def create_job(
                     pdf_path.unlink(missing_ok=True)
                     raise HTTPException(400, "PDF too large (max 200MB)")
                 f.write(chunk)
+                file_md5.update(chunk)
     except HTTPException:
         raise
     except Exception as e:
@@ -154,6 +164,7 @@ async def create_job(
         # Don't leak internal paths/exception details to client
         logger.error(f"Upload write failed: {e}", exc_info=True)
         raise HTTPException(500, "Upload failed (disk write error)")
+    content_md5 = file_md5.hexdigest()
 
     # Magic bytes check: real PDFs start with %PDF-
     if total_bytes < 5:
@@ -191,19 +202,42 @@ async def create_job(
         logger.warning(f"[{job_id}] Failed to read PDF page count: {e}")
         pdf_page_count = 0
 
-    # INSERT 在 db_lock 内（与其他 DB 写入序列化）
+    # INSERT 在 db_lock 内（与去重检查 + 其他 DB 写入序列化，避免两个相同
+    # 上传并发都通过检查）。去重：内容 md5 相同 → 409 提示已有任务，不创建
+    # 重复 job（重复全流程 OCR/LLM 是纯浪费）。force=1 绕过（同一批记录在
+    # 规则/SOP 变更后重新分析的合法场景）。
     async with db_lock:
         try:
+            cursor = await db.execute(
+                "SELECT id, filename, status, created_at FROM jobs "
+                "WHERE md5 = ? ORDER BY created_at DESC LIMIT 1",
+                (content_md5,),
+            )
+            dup = await cursor.fetchone()
+            if dup and not force:
+                logger.info(
+                    f"[{job_id}] Upload rejected: duplicate content of job {dup['id']}"
+                )
+                shutil.rmtree(job_dir, ignore_errors=True)
+                raise HTTPException(
+                    409,
+                    f"该文件已上传过（任务 {dup['id']}「{dup['filename']}」，"
+                    f"状态 {dup['status']}）。点击历史记录即可查看；"
+                    f"确需重新分析请先删除旧任务。",
+                )
             await db.execute(
-                "INSERT INTO jobs (id, filename, status, pdf_path, total_pages) "
-                "VALUES (?, ?, 'pending', ?, ?)",
-                (job_id, safe_name, str(pdf_path), pdf_page_count or None),
+                "INSERT INTO jobs (id, filename, status, pdf_path, total_pages, md5) "
+                "VALUES (?, ?, 'pending', ?, ?, ?)",
+                (job_id, safe_name, str(pdf_path), pdf_page_count or None, content_md5),
             )
             await db.execute(
                 "INSERT INTO audit_log (job_id, action, detail) VALUES (?, 'pipeline_start', ?)",
                 (job_id, f"Uploaded {safe_name} ({total_bytes} bytes, {pdf_page_count} pages)"),
             )
             await db.commit()
+        except HTTPException:
+            # 去重 409 等已由业务分支 raise 的异常直接透传，不落入通用兜底
+            raise
         except Exception as e:
             # INSERT 失败时清理孤儿 PDF 文件 + job_dir，避免磁盘累积
             logger.error(f"[{job_id}] DB INSERT failed, cleaning up job_dir: {e}", exc_info=True)

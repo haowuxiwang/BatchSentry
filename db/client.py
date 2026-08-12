@@ -21,7 +21,7 @@ def _get_init_lock() -> asyncio.Lock:
     return _db_init_lock
 
 # Current schema migration level, persisted via PRAGMA user_version.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 async def get_db() -> aiosqlite.Connection:
@@ -66,6 +66,9 @@ async def migrate(db: aiosqlite.Connection):
 
     if current_version < 2:
         await _migrate_v2(db)
+
+    if current_version < 3:
+        await _migrate_v3(db)
 
     # PRAGMA user_version cannot be parameterized; SCHEMA_VERSION is an int
     # constant defined in this module, so f-string is safe.
@@ -138,6 +141,19 @@ async def _migrate_v2(db: aiosqlite.Connection):
             logger.info("Migration: added jobs.ocr_backend_used")
     except Exception as e:
         logger.warning(f"Migration skip jobs.ocr_backend_used: {e}")
+    await db.commit()
+
+
+async def _migrate_v3(db: aiosqlite.Connection):
+    """v3: jobs.md5 — 上传去重的内容摘要列。"""
+    try:
+        cursor = await db.execute("PRAGMA table_info(jobs)")
+        existing_cols = {row["name"] for row in await cursor.fetchall()}
+        if "md5" not in existing_cols:
+            await db.execute("ALTER TABLE jobs ADD COLUMN md5 TEXT")
+            logger.info("Migration: added jobs.md5")
+    except Exception as e:
+        logger.warning(f"Migration skip jobs.md5: {e}")
     await db.commit()
 
 
