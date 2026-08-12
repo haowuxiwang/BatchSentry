@@ -175,18 +175,53 @@ class LLMClient:
         )
         result = self._parse_json(raw)
 
-        # Log parse failures with context for production debugging
+        # Context tag for log correlation (reused by retry + final failure logs)
+        ctx_tag = ""
+        if audit_ctx:
+            parts = []
+            if audit_ctx.get("job_id"):
+                parts.append(f"job={audit_ctx['job_id'][:8]}")
+            if audit_ctx.get("page") is not None:
+                parts.append(f"page={audit_ctx['page']}")
+            if audit_ctx.get("stage"):
+                parts.append(f"stage={audit_ctx['stage']}")
+            ctx_tag = f" [{', '.join(parts)}]" if parts else ""
+
+        # robustness: JSON 解析失败重试 — LLM 偶发输出带 ```json 围栏、尾随
+        # 文本或非法转义字符，API 调用本身成功（audit 已记 success=1）但内容
+        # 不可用。附加"修正提示"后最多重试 2 次单发调用（retries=1，不叠加
+        # API 级重试与退避，控制成本）。51 页真实回归中第 19 页正是此类失败。
+        parse_attempt = 1
+        while (
+            isinstance(result, dict)
+            and result.get("_parse_error")
+            and parse_attempt < 3
+        ):
+            parse_attempt += 1
+            logger.warning(
+                f"JSON parse failed{ctx_tag} (attempt {parse_attempt - 1}), "
+                f"retrying with fix hint: response_length={len(raw)}, "
+                f"first_200={raw[:200]!r}"
+            )
+            raw = await self.chat(
+                system_prompt,
+                user_content
+                + (
+                    "\n\n[系统提示] 你上一次的输出无法解析为合法 JSON"
+                    "（可能包含 Markdown 代码块围栏、尾随文本或非法转义字符）。"
+                    "请重新输出：只输出一个合法 JSON 对象，不要 Markdown 代码块、"
+                    "不要注释、不要多余说明文字。"
+                ),
+                max_tokens=max_tokens,
+                temperature=temperature,
+                retries=1,
+                timeout=timeout,
+                audit_ctx=audit_ctx,
+            )
+            result = self._parse_json(raw)
+
+        # Log final parse failures with context for production debugging
         if isinstance(result, dict) and result.get("_parse_error"):
-            ctx_tag = ""
-            if audit_ctx:
-                parts = []
-                if audit_ctx.get("job_id"):
-                    parts.append(f"job={audit_ctx['job_id'][:8]}")
-                if audit_ctx.get("page") is not None:
-                    parts.append(f"page={audit_ctx['page']}")
-                if audit_ctx.get("stage"):
-                    parts.append(f"stage={audit_ctx['stage']}")
-                ctx_tag = f" [{', '.join(parts)}]" if parts else ""
             logger.warning(
                 f"JSON parse failed{ctx_tag}: "
                 f"response_length={len(raw)}, first_200={raw[:200]!r}"

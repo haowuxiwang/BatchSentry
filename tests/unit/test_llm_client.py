@@ -363,6 +363,64 @@ class TestParseJsonTruncatedRecovery:
         assert result.get("_parse_error") is True
 
 
+class TestChatJsonParseRetry:
+    """chat_json 解析失败重试 — 修正提示重试 + 全部失败后兜底。"""
+
+    @pytest.mark.asyncio
+    async def test_parse_failure_retries_with_fix_hint_and_recovers(self, test_db):
+        """首次输出不可解析，第二次（带修正提示）输出合法 JSON → 返回解析结果。"""
+        mock_cfg = _mock_config("deepseek")
+        with patch("llm.client.config", mock_cfg):
+            client = LLMClient(provider="deepseek")
+            client.adapter.chat = AsyncMock(side_effect=[
+                ChatResult(content="```json\n{invalid", model="m"),
+                ChatResult(content='{"page": 19}', model="m"),
+            ])
+            result = await client.chat_json("sys", "user")
+            assert result == {"page": 19}
+            assert client.adapter.chat.call_count == 2
+            # 第二次调用应携带修正提示
+            second_content = client.adapter.chat.call_args[1]["user_content"]
+            assert "无法解析为合法 JSON" in second_content
+            assert second_content.startswith("user")  # 原内容在前，提示追加在后
+
+    @pytest.mark.asyncio
+    async def test_parse_failure_all_attempts_fail_returns_parse_error(self, test_db):
+        """3 次（1 原始 + 2 修正重试）全部失败 → 仍返回 _parse_error，不抛异常。"""
+        mock_cfg = _mock_config("deepseek")
+        with patch("llm.client.config", mock_cfg):
+            client = LLMClient(provider="deepseek")
+            client.adapter.chat = AsyncMock(return_value=ChatResult(
+                content="```json\n{still invalid", model="m",
+            ))
+            result = await client.chat_json("sys", "user")
+            assert result.get("_parse_error") is True
+            assert client.adapter.chat.call_count == 3
+
+    @pytest.mark.asyncio
+    async def test_parse_retry_records_audit_rows(self, test_db):
+        """解析失败重试的每次 API 调用都应有审计记录（success=1）。"""
+        mock_cfg = _mock_config("deepseek")
+        with patch("llm.client.config", mock_cfg):
+            client = LLMClient(provider="deepseek")
+            client.adapter.chat = AsyncMock(side_effect=[
+                ChatResult(content="```json\n{invalid", model="m"),
+                ChatResult(content='{"ok": true}', model="m"),
+            ])
+            audit_ctx = {"job_id": "job-audit", "page": 7, "stage": "page_analysis"}
+            await test_db.execute(
+                "INSERT INTO jobs (id, filename, status) VALUES ('job-audit', 'a.pdf', 'pending')"
+            )
+            await test_db.commit()
+            result = await client.chat_json("sys", "user", audit_ctx=audit_ctx)
+            assert result == {"ok": True}
+            cursor = await test_db.execute(
+                "SELECT COUNT(*) FROM llm_call_audit WHERE job_id = ? AND success = 1",
+                ("job-audit",),
+            )
+            assert (await cursor.fetchone())[0] == 2
+
+
 class TestRecordLlmCall:
     """_record_llm_call — 审计记录写入 DB + 异常容错（lines 262-290）。"""
 
