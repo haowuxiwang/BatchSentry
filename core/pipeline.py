@@ -682,14 +682,14 @@ async def _run_pipeline_impl(job_id: str, pdf_path: str):
         # 写入 DB，此处跳过避免重复。只写入 rule/llm_cross/llm_fallback findings。
         #
         # 对抗审查(cr-1): retry 场景 — B4 指纹查重仅对确定性生成的 rule/
-        # llm_fallback 有效；llm_cross 的 description 由 LLM 自然语言生成
-        # （temperature=0.1），同一异常两次运行措辞几乎必然不同，无法指纹
-        # 判重 → 每次 partial_review/error 重试都会重复插入。方案：Stage 3
-        # 重算前删除本 job 待审（pending）的 LLM 生成型 findings，已人工
-        # 裁决（confirmed/rejected/corrected）的保留不动。
+        # llm_fallback 有效；llm_cross/user_rule 的 description 由 LLM 自然
+        # 语言生成（temperature=0.1），同一异常两次运行措辞几乎必然不同，
+        # 无法指纹判重 → 每次 partial_review/error 重试都会重复插入。方案：
+        # Stage 3 重算前删除本 job 待审（pending）的 LLM 生成型 findings
+        # （含 user_rule），已人工裁决（confirmed/rejected/corrected）的保留。
         cur = await db.execute(
             "DELETE FROM findings WHERE job_id = ? "
-            "AND source IN ('llm_cross', 'llm_fallback') AND status = 'pending'",
+            "AND source IN ('llm_cross', 'llm_fallback', 'user_rule') AND status = 'pending'",
             (job_id,),
         )
         await db.commit()

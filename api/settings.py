@@ -26,8 +26,9 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 from typing import Optional
 
-from config import config, update_config, _config_path
+from config import config, update_config, _config_path, load_user_rules
 from core.security import validate_external_url, is_local_request
+from db.client import get_db
 from llm.client import reset_llm_client
 
 logger = logging.getLogger(__name__)
@@ -484,6 +485,118 @@ async def update_settings(req: SettingsUpdate, request: Request):
         "message": "配置已保存并立即生效",
         "config_file": str(config_path),
         "providers": _providers_payload(),
+    }
+
+
+# ============================================================
+# S0: 用户自定义合规规则（注入跨页 LLM 分析）
+# ============================================================
+
+class UserRuleItem(BaseModel):
+    """单条用户合规规则。"""
+    id: Optional[str] = None
+    text: str
+    active: bool = True
+
+
+class UserRulesUpdate(BaseModel):
+    """全量替换用户规则列表请求。"""
+    rules: list[UserRuleItem] = []
+
+
+_USER_RULES_MAX = 100
+_USER_RULES_TEXT_MAX = 1000
+
+
+def _read_raw_config() -> dict:
+    """读取 config.json 原始内容（不存在则返回空 dict）。"""
+    config_path = _settings_config_path()
+    if not config_path.exists():
+        return {}
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        logger.warning(f"Failed to read {config_path}: {e}")
+        return {}
+
+
+def _write_raw_config(existing: dict) -> None:
+    """原子写入 config.json（临时文件 + replace，防并发半写）。"""
+    config_path = _settings_config_path()
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = config_path.parent / f"config.json.tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(existing, f, indent=2, ensure_ascii=False)
+        tmp_path.replace(config_path)
+    except Exception:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
+@router.get("/api/settings/rules")
+async def get_user_rules(request: Request):
+    """返回用户填写的合规规则（注入跨页 LLM 分析用）。"""
+    if not is_local_request(request):
+        raise HTTPException(403, "Forbidden (non-local request)")
+    return {"rules": load_user_rules()}
+
+
+@router.put("/api/settings/rules")
+async def update_user_rules(req: UserRulesUpdate, request: Request):
+    """全量替换用户合规规则。
+
+    校验：每条 text 非空且 ≤1000 字符，总数 ≤100。校验失败返回 400，
+    不写入任何内容。成功后写 audit_log（GMP 追溯规则变更）。
+    """
+    if not is_local_request(request):
+        raise HTTPException(403, "Forbidden (non-local request)")
+
+    errors: list[str] = []
+    cleaned: list[dict] = []
+    for i, r in enumerate(req.rules):
+        text = r.text.strip()
+        if not text:
+            errors.append(f"规则 #{i + 1}: 内容不能为空")
+            continue
+        if len(text) > _USER_RULES_TEXT_MAX:
+            errors.append(f"规则 #{i + 1}: 内容超过 {_USER_RULES_TEXT_MAX} 字符上限")
+            continue
+        cleaned.append({
+            "id": r.id or uuid.uuid4().hex[:12],
+            "text": text,
+            "active": bool(r.active),
+            "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        })
+    if len(cleaned) > _USER_RULES_MAX:
+        errors.append(f"规则总数超过 {_USER_RULES_MAX} 条上限")
+    if errors:
+        raise HTTPException(400, detail={"errors": errors})
+
+    existing = _read_raw_config()
+    existing["user_rules"] = cleaned
+    _write_raw_config(existing)
+
+    try:
+        db = await get_db()
+        await db.execute(
+            "INSERT INTO audit_log (job_id, action, detail) VALUES (?, ?, ?)",
+            ("system", "user_rules_update",
+             f"{len(cleaned)} rules (active={sum(1 for r in cleaned if r['active'])})"),
+        )
+        await db.commit()
+    except Exception as e:
+        logger.warning(f"Failed to write user_rules audit log: {e}")
+
+    logger.info(f"User rules updated: {len(cleaned)} rules persisted to {_settings_config_path()}")
+    return {
+        "ok": True,
+        "rules": cleaned,
+        "message": f"已保存 {len(cleaned)} 条合规规则，将注入下次跨页分析",
     }
 
 

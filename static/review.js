@@ -694,6 +694,7 @@
       llm_page: "LLM单页",
       llm_fallback: "LLM兜底",
       llm_cross: "LLM跨页",
+      user_rule: "用户规则",
     };
     const statusZh = {
       pending: "待复核",

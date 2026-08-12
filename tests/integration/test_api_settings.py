@@ -432,3 +432,103 @@ class TestOcrTokenClear:
 
         r3 = await settings_client.get("/api/settings")
         assert r3.json()["ocr"]["mineru"]["configured"] is False
+
+
+class TestUserRules:
+    """S0: 用户自定义合规规则 API（GET/PUT /api/settings/rules）。"""
+
+    @pytest.mark.asyncio
+    async def test_get_rules_empty_by_default(self, settings_client):
+        """未配置规则时返回空列表。"""
+        r = await settings_client.get("/api/settings/rules")
+        assert r.status_code == 200
+        assert r.json()["rules"] == []
+
+    @pytest.mark.asyncio
+    async def test_put_and_get_roundtrip(self, settings_client):
+        """PUT 保存规则后 GET 能完整回读（含 id/active/created_at）。"""
+        payload = {"rules": [
+            {"text": "产品 A 的中间体储存温度必须为 15-25°C", "active": True},
+            {"text": "关键工序必须双人复核签名", "active": False},
+        ]}
+        r = await settings_client.put("/api/settings/rules", json=payload)
+        assert r.status_code == 200
+        data = r.json()
+        assert data["ok"] is True
+        assert len(data["rules"]) == 2
+        assert data["rules"][0]["id"]  # 自动生成 id
+        assert data["rules"][0]["created_at"]
+
+        r2 = await settings_client.get("/api/settings/rules")
+        rules = r2.json()["rules"]
+        assert len(rules) == 2
+        assert rules[0]["text"] == "产品 A 的中间体储存温度必须为 15-25°C"
+        assert rules[0]["active"] is True
+        assert rules[1]["active"] is False
+
+    @pytest.mark.asyncio
+    async def test_put_rejects_empty_text(self, settings_client):
+        """空规则内容应返回 400 且不写入。"""
+        r = await settings_client.put("/api/settings/rules", json={
+            "rules": [{"text": "  ", "active": True}],
+        })
+        assert r.status_code == 400
+        r2 = await settings_client.get("/api/settings/rules")
+        assert r2.json()["rules"] == []
+
+    @pytest.mark.asyncio
+    async def test_put_rejects_oversized_text(self, settings_client):
+        """超过 1000 字符的规则应返回 400。"""
+        r = await settings_client.put("/api/settings/rules", json={
+            "rules": [{"text": "长" * 1001, "active": True}],
+        })
+        assert r.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_put_rejects_over_limit_count(self, settings_client):
+        """超过 100 条上限应返回 400。"""
+        r = await settings_client.put("/api/settings/rules", json={
+            "rules": [{"text": f"规则 {i}", "active": True} for i in range(101)],
+        })
+        assert r.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_put_persists_to_config_json(self, settings_client, tmp_path):
+        """规则应写入 config.json 文件（load_user_rules 可读取）。"""
+        await settings_client.put("/api/settings/rules", json={
+            "rules": [{"text": "批号必须全页一致", "active": True}],
+        })
+        import config
+        rules = config.load_user_rules()
+        assert len(rules) == 1
+        assert rules[0]["text"] == "批号必须全页一致"
+
+    @pytest.mark.asyncio
+    async def test_put_writes_audit_log(self, settings_client):
+        """规则变更应写入 audit_log（GMP 追溯）。"""
+        from db.client import get_db
+        await settings_client.put("/api/settings/rules", json={
+            "rules": [{"text": "规则 A", "active": True}],
+        })
+        db = await get_db()
+        cur = await db.execute(
+            "SELECT action, detail FROM audit_log WHERE action = 'user_rules_update'"
+        )
+        rows = await cur.fetchall()
+        assert len(rows) == 1
+        assert "1 rules" in rows[0][1]
+
+    @pytest.mark.asyncio
+    async def test_non_local_origin_rejected(self, tmp_path):
+        """非本地 Origin 的 PUT 应被拒绝（CSRF 防护）。"""
+        from main import app
+        from httpx import ASGITransport
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://127.0.0.1:8000",
+            headers={"Origin": "http://evil.example.com"},
+        ) as client:
+            r = await client.put("/api/settings/rules", json={
+                "rules": [{"text": "恶意规则", "active": True}],
+            })
+            assert r.status_code == 403

@@ -193,3 +193,63 @@ class TestSettingsConfigPath:
         path = _settings_config_path()
         assert "PBC" in str(path)
         assert path.name == "config.json"
+
+
+class TestLoadUserRules:
+    """load_user_rules：用户自定义合规规则读取（Phase 10）。"""
+
+    def _write(self, tmp_path, data: dict):
+        import json
+        cfg = tmp_path / "config.json"
+        cfg.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        return cfg
+
+    def test_no_config_file_returns_empty(self, tmp_path):
+        from config import load_user_rules
+        with patch("config._config_path", return_value=tmp_path / "nope.json"):
+            assert load_user_rules() == []
+
+    def test_no_rules_key_returns_empty(self, tmp_path):
+        from config import load_user_rules
+        self._write(tmp_path, {"LLM_PROVIDER": "deepseek"})
+        with patch("config._config_path", return_value=tmp_path / "config.json"):
+            assert load_user_rules() == []
+
+    def test_filters_invalid_entries(self, tmp_path):
+        from config import load_user_rules
+        self._write(tmp_path, {"user_rules": [
+            {"id": "r1", "text": " 有效规则 ", "active": True},
+            {"id": "r2", "text": "   ", "active": True},   # 空文本 → 过滤
+            {"text": 123, "active": True},                  # 非字符串 → 过滤
+            "not-a-dict",                                    # 非 dict → 过滤
+        ]})
+        with patch("config._config_path", return_value=tmp_path / "config.json"):
+            rules = load_user_rules()
+        assert len(rules) == 1
+        assert rules[0]["text"] == "有效规则"  # 首尾空白被去除
+
+    def test_active_defaults_true_and_id_generated(self, tmp_path):
+        from config import load_user_rules
+        self._write(tmp_path, {"user_rules": [
+            {"text": "无 id 无 active 的规则"},
+        ]})
+        with patch("config._config_path", return_value=tmp_path / "config.json"):
+            rules = load_user_rules()
+        assert len(rules) == 1
+        assert rules[0]["active"] is True
+        assert rules[0]["id"]
+
+    def test_corrupt_json_returns_empty(self, tmp_path):
+        from config import load_user_rules
+        cfg = tmp_path / "config.json"
+        cfg.write_text("{broken json", encoding="utf-8")
+        with patch("config._config_path", return_value=cfg):
+            assert load_user_rules() == []
+
+    def test_caps_at_max_rules(self, tmp_path):
+        from config import load_user_rules
+        self._write(tmp_path, {"user_rules": [
+            {"text": f"规则 {i}", "active": True} for i in range(120)
+        ]})
+        with patch("config._config_path", return_value=tmp_path / "config.json"):
+            assert len(load_user_rules()) == 100

@@ -9,7 +9,7 @@
     <link rel="stylesheet" href="/static/review.css?v=3">
     {# 中英文映射：DB 中 severity/source/status/confidence 为英文枚举，前端统一渲染为中文 #}
     {% set severity_zh = {'critical': '严重', 'warning': '警告', 'info': '信息'} %}
-    {% set source_zh = {'rule': '规则', 'llm_page': 'LLM单页', 'llm_fallback': 'LLM兜底', 'llm_cross': 'LLM跨页'} %}
+    {% set source_zh = {'rule': '规则', 'llm_page': 'LLM单页', 'llm_fallback': 'LLM兜底', 'llm_cross': 'LLM跨页', 'user_rule': '用户规则'} %}
     {% set status_zh = {'pending': '待复核', 'confirmed': '已确认', 'rejected': '已拒绝', 'corrected': '已修正', 'queued': '排队中', 'processing': '处理中', 'review': '可复核', 'partial_review': '部分可复核', 'error': '出错', 'cancelled': '已取消', 'cancelling': '取消中', 'ocr_running': 'OCR识别中', 'ocr_done': 'OCR完成', 'analyzing': '分析中', 'done': '已完成'} %}
     {% set confidence_zh = {'high': '高', 'medium': '中', 'low': '低'} %}
 </head>

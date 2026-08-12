@@ -491,12 +491,14 @@
         // setActiveProvider 已重新渲染 + 更新 badge，跳过下面的重复渲染
         // 但仍需填充 OCR 表单
         fillOcrForm();
+        await loadRules();
         return;
       }
     }
 
     renderProviders(providers, activeProvider);
     fillOcrForm();
+    await loadRules();
   }
 
   // OCR 表单填充（从 load() 抽出，auto-activate 路径也复用）
@@ -540,6 +542,160 @@
       b.classList.toggle("active", b.dataset.value === value);
     });
   }
+
+  // ============================================================
+  // 合规规则编辑器 — 用户自定义规则注入跨页 LLM 分析
+  // ============================================================
+  let rules = [];
+
+  const RULE_TEMPLATES = [
+    "产品 {产品名} 的中间体储存温度必须控制在 15-25°C",
+    "关键工序（如灭菌、灌装）必须双人复核签名",
+    "批号必须在所有页面保持一致，不得混批生产",
+    "每批产品必须附有放行检验报告（COA）",
+  ];
+
+  async function loadRules() {
+    try {
+      const r = await fetch("/api/settings/rules");
+      const data = await r.json();
+      rules = Array.isArray(data.rules) ? data.rules : [];
+      log("rules loaded", { count: rules.length });
+      renderRules();
+    } catch (err) {
+      log.err("load rules failed", err);
+    }
+  }
+
+  function renderRules() {
+    const listEl = document.getElementById("rules-list");
+    const countEl = document.getElementById("rules-count");
+    if (!listEl) return;
+    listEl.innerHTML = "";
+    if (countEl) countEl.textContent = `${rules.length} 条`;
+    if (rules.length === 0) {
+      const empty = document.createElement("p");
+      empty.className = "text-[12px] text-muted-foreground/50";
+      empty.textContent = "暂无自定义规则 — 跨页分析仅使用内置规则 R1-R8 与 LLM 语义检查";
+      listEl.appendChild(empty);
+      return;
+    }
+    rules.forEach((rule, idx) => {
+      const row = document.createElement("div");
+      row.className = "flex items-start gap-2";
+      row.dataset.ruleIndex = String(idx);
+
+      const checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.className = "mt-2 w-4 h-4 accent-foreground cursor-pointer";
+      checkbox.checked = !!rule.active;
+      checkbox.title = "启用/停用";
+      checkbox.addEventListener("change", () => {
+        rule.active = checkbox.checked;
+        ruleDirty();
+      });
+
+      const textarea = document.createElement("textarea");
+      textarea.rows = 2;
+      textarea.className =
+        "flex-1 resize-y rounded-md border border-border bg-background px-3 py-2 text-[13px] focus:outline-none focus:ring-2 focus:ring-foreground/40";
+      textarea.value = rule.text || "";
+      textarea.maxLength = 1000;
+      textarea.placeholder = "输入合规规则，例如：XX 产品中间体储存温度必须 15-25°C";
+      textarea.addEventListener("input", () => {
+        rule.text = textarea.value;
+        ruleDirty();
+      });
+
+      const del = document.createElement("button");
+      del.type = "button";
+      del.className =
+        "mt-1.5 shrink-0 px-2 py-0.5 text-[13px] text-muted-foreground hover:text-destructive transition-colors";
+      del.textContent = "×";
+      del.title = "删除此规则";
+      del.addEventListener("click", async () => {
+        const ok = await window.PBC.confirmDialog({
+          title: "删除此规则？",
+          message: "删除后下次跨页分析将不再检查该规则。",
+          confirmText: "删除",
+          cancelText: "取消",
+          danger: true,
+        });
+        if (!ok) return;
+        rules.splice(idx, 1);
+        renderRules();
+        ruleDirty();
+      });
+
+      row.appendChild(checkbox);
+      row.appendChild(textarea);
+      row.appendChild(del);
+      listEl.appendChild(row);
+    });
+  }
+
+  function ruleDirty() {
+    const msg = document.getElementById("rule-msg");
+    if (msg) msg.textContent = "有未保存的修改";
+  }
+
+  async function saveRules() {
+    const btn = document.getElementById("rule-save-btn");
+    const msg = document.getElementById("rule-msg");
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = "保存中…";
+    }
+    try {
+      const payload = {
+        rules: rules.map((r) => ({
+          id: r.id || undefined,
+          text: (r.text || "").trim(),
+          active: !!r.active,
+        })),
+      };
+      const r = await fetch("/api/settings/rules", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const data = await r.json();
+      if (r.ok && data.ok) {
+        rules = data.rules || [];
+        renderRules();
+        if (msg) msg.textContent = "✓ 已保存，将注入下次跨页分析";
+      } else {
+        const errs = data.detail && data.detail.errors ? data.detail.errors : [data.detail || "保存失败"];
+        if (msg) msg.textContent = `✗ ${errs.join("；")}`;
+      }
+    } catch (err) {
+      if (msg) msg.textContent = `✗ ${err.message}`;
+      log.err("save rules failed", err);
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = "保存规则";
+      }
+    }
+  }
+
+  document.getElementById("rule-add-btn")?.addEventListener("click", () => {
+    const text = RULE_TEMPLATES[rules.length % RULE_TEMPLATES.length];
+    rules.push({ id: undefined, text: "", active: true });
+    renderRules();
+    const listEl = document.getElementById("rules-list");
+    if (listEl && listEl.lastElementChild) {
+      const ta = listEl.lastElementChild.querySelector("textarea");
+      if (ta) {
+        ta.value = text;
+        ta.focus();
+        ta.selectionStart = ta.value.length;
+      }
+    }
+    ruleDirty();
+  });
+
+  document.getElementById("rule-save-btn")?.addEventListener("click", saveRules);
 
   // ============================================================
   // OCR backend segment switch

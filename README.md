@@ -18,6 +18,7 @@ BatchSentry 是面向制药企业的批生产记录（BPR）审核工具，通�
   - R6 完整性检查（completeness，缺操作/复核签名）
   - R7 批号一致性（batch_consistency，跨页批号漂移）
   - R8 低置信度参数（low_confidence，标记人工复核）
+- **用户自定义合规规则**：设置页填写工厂/产品专属约束（如「XX 产品中间体储存温度必须 15-25°C」），跨页分析时注入 LLM 逐条核对，生成 `user_rule` 类型问题；变更写入审计日志，`prompt_version` 携带规则内容 hash（GMP 可追溯）
 - **多 LLM 服务商**：DeepSeek / SiliconFlow（内置，可通过 config.json 动态注册更多），Anthropic 协议适配
 - **GMP 审计追踪**：所有状态转换、LLM 调用、人工复核操作均写入审计日志
 - **Electron 桌面应用**：Windows 便携版（解压即用），splash 启动、优雅关闭、卡死任务恢复
@@ -118,7 +119,7 @@ npm run dev
 $env:PBC_NO_FILE_LOG='1'
 python -m pytest tests/ --cov=. --cov-report=term --timeout=30
 
-# 当前状态：710 passed, 94.30% coverage（目标 ≥90%）
+# 当前状态：730 passed, 94.30% coverage（目标 ≥90%）
 ```
 
 ## 安全设计

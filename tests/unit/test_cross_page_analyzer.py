@@ -33,6 +33,8 @@ from core.cross_page_analyzer import (
     _check_batch_consistency,
     _check_low_confidence_params,
     _build_summary,
+    _user_rules_section,
+    _llm_based_check,
 )
 
 
@@ -1435,3 +1437,124 @@ class TestLowConfidenceParams:
         }]
         findings = _check_low_confidence_params(pages)
         assert findings == []
+
+
+# ===========================================================================
+# Phase 10: 用户自定义合规规则注入
+# ===========================================================================
+
+
+class TestUserRulesInjection:
+    """用户规则注入 LLM 提示词（_user_rules_section + _llm_based_check）。"""
+
+    def test_no_active_rules_returns_none_section(self, tmp_path):
+        import json
+        cfg = tmp_path / "config.json"
+        cfg.write_text(json.dumps({"user_rules": [
+            {"text": "停用规则", "active": False},
+        ]}), encoding="utf-8")
+        with patch("config._config_path", return_value=cfg):
+            section, rules_hash = _user_rules_section()
+        assert section == ""
+        assert rules_hash == "none"
+
+    def test_no_rules_returns_none_section(self, tmp_path):
+        import json
+        cfg = tmp_path / "config.json"
+        cfg.write_text(json.dumps({"LLM_PROVIDER": "deepseek"}), encoding="utf-8")
+        with patch("config._config_path", return_value=cfg):
+            section, rules_hash = _user_rules_section()
+        assert section == ""
+        assert rules_hash == "none"
+
+    def test_active_rules_produce_section_and_stable_hash(self, tmp_path):
+        import json
+        cfg = tmp_path / "config.json"
+        cfg.write_text(json.dumps({"user_rules": [
+            {"text": "中间体储存温度必须 15-25°C", "active": True},
+            {"text": "关键工序必须双人复核", "active": True},
+        ]}), encoding="utf-8")
+        with patch("config._config_path", return_value=cfg):
+            section, rules_hash = _user_rules_section()
+        assert "15-25°C" in section
+        assert "双人复核" in section
+        assert rules_hash != "none"
+        assert len(rules_hash) == 8
+        with patch("config._config_path", return_value=cfg):
+            _, rules_hash2 = _user_rules_section()
+        assert rules_hash2 == rules_hash  # 相同内容 → 相同 hash
+
+    def test_llm_based_check_injects_user_rules(self, tmp_path):
+        """启用规则时 prompt 应包含规则段，prompt_version 应带 rules hash。"""
+        import json
+        from core.cross_page_analyzer import _llm_based_check
+        cfg = tmp_path / "config.json"
+        cfg.write_text(json.dumps({"user_rules": [
+            {"text": "产品 X 储存温度必须 15-25°C", "active": True},
+        ]}), encoding="utf-8")
+
+        captured = {}
+
+        class FakeClient:
+            async def chat_json(self, system_prompt, user_content, **kwargs):
+                captured["system"] = system_prompt
+                captured["user"] = user_content
+                captured["audit"] = kwargs.get("audit_ctx", {})
+                return []
+
+        with patch("config._config_path", return_value=cfg), \
+             patch("core.cross_page_analyzer.get_llm_client",
+                   return_value=FakeClient()):
+            asyncio.run(_llm_based_check("摘要内容", job_id="job-1"))
+
+        assert "15-25°C" in captured["user"]
+        assert captured["user"].startswith("用户自定义合规规则")
+        assert captured["user"].endswith("摘要内容")
+        assert captured["audit"]["prompt_version"].startswith("semantic_v2+rules")
+
+    def test_llm_based_check_without_rules_uses_semantic_v2(self, tmp_path):
+        """无规则时 prompt_version 应为 semantic_v2。"""
+        import json
+        from core.cross_page_analyzer import _llm_based_check
+        cfg = tmp_path / "config.json"
+        cfg.write_text(json.dumps({}), encoding="utf-8")
+
+        captured = {}
+
+        class FakeClient:
+            async def chat_json(self, system_prompt, user_content, **kwargs):
+                captured["user"] = user_content
+                captured["audit"] = kwargs.get("audit_ctx", {})
+                return []
+
+        with patch("config._config_path", return_value=cfg), \
+             patch("core.cross_page_analyzer.get_llm_client",
+                   return_value=FakeClient()):
+            asyncio.run(_llm_based_check("摘要内容", job_id="job-1"))
+
+        assert captured["user"] == "摘要内容"
+        assert captured["audit"]["prompt_version"] == "semantic_v2"
+
+    def test_user_rule_findings_marked_with_user_rule_source(self, tmp_path):
+        """type=user_rule 的 finding 应标记 source=user_rule，其余保持 llm_cross。"""
+        import json
+        from core.cross_page_analyzer import _llm_based_check
+        cfg = tmp_path / "config.json"
+        cfg.write_text(json.dumps({}), encoding="utf-8")
+
+        class FakeClient:
+            async def chat_json(self, system_prompt, user_content, **kwargs):
+                return [
+                    {"page": 1, "type": "user_rule", "severity": "warning",
+                     "description": "储存温度 30°C 超出用户规则 15-25°C"},
+                    {"page": 2, "type": "signature_mismatch", "severity": "critical",
+                     "description": "签名不一致"},
+                ]
+
+        with patch("config._config_path", return_value=cfg), \
+             patch("core.cross_page_analyzer.get_llm_client",
+                   return_value=FakeClient()):
+            findings = asyncio.run(_llm_based_check("摘要", job_id="job-1"))
+
+        sources = {f["type"]: f["source"] for f in findings}
+        assert sources == {"user_rule": "user_rule", "signature_mismatch": "llm_cross"}

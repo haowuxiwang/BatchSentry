@@ -149,7 +149,9 @@ def _load_json_config() -> None:
             config_data = json.load(f)
         for key, value in config_data.items():
             # 不覆盖已有的 OS 环境变量（允许 OS 级别覆盖 JSON 配置）
-            if key not in os.environ:
+            # 非标量值（user_rules 列表等）不进入 os.environ，由
+            # load_user_rules() 等专用读取器直接从 JSON 文件获取
+            if key not in os.environ and isinstance(value, (str, int, float, bool)):
                 os.environ[key] = str(value)
         logger.info(f"Loaded {len(config_data)} config keys from {json_path}")
         return
@@ -163,7 +165,7 @@ def _load_json_config() -> None:
         with open(json_path, "r", encoding="utf-8") as f:
             config_data = json.load(f)
         for key, value in config_data.items():
-            if key not in os.environ:
+            if key not in os.environ and isinstance(value, (str, int, float, bool)):
                 os.environ[key] = str(value)
         logger.info(f"Loaded {len(config_data)} config keys from {json_path} (after migration)")
         return
@@ -176,6 +178,56 @@ def _load_json_config() -> None:
 
 # 加载配置到 os.environ
 _load_json_config()
+
+
+# ============================================================
+# User-defined compliance rules (Phase 10)
+# ============================================================
+
+_USER_RULES_KEY = "user_rules"
+_USER_RULES_MAX = 100
+_USER_RULES_TEXT_MAX = 1000
+
+
+def load_user_rules() -> list[dict]:
+    """读取用户在设置页填写的合规规则（config.json 的 user_rules 数组）。
+
+    规则结构: {"id": str, "text": str, "active": bool, "created_at": str}
+    过滤掉结构不合法或 text 为空的条目。active 缺省视为启用。
+    返回的列表用于跨页分析时注入 LLM prompt（工厂/产品专属合规约束）。
+    """
+    json_path = _config_path()
+    if not json_path.exists():
+        return []
+    try:
+        with open(json_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        rules = data.get(_USER_RULES_KEY, [])
+    except (json.JSONDecodeError, OSError, TypeError):
+        logger.warning(f"Failed to read user_rules from {json_path}")
+        return []
+    if not isinstance(rules, list):
+        return []
+    valid = []
+    for r in rules:
+        if not isinstance(r, dict):
+            continue
+        text = r.get("text")
+        if not isinstance(text, str) or not text.strip():
+            continue
+        valid.append({
+            "id": str(r.get("id", "")) or uuid_str(),
+            "text": text.strip(),
+            "active": bool(r.get("active", True)),
+            "created_at": str(r.get("created_at", "")),
+        })
+    return valid[: _USER_RULES_MAX]
+
+
+def uuid_str() -> str:
+    """生成短 UUID（规则 id 等使用）。"""
+    import uuid as _uuid
+    return _uuid.uuid4().hex[:12]
 
 
 # ============================================================

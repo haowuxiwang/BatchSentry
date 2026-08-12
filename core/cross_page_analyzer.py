@@ -1299,22 +1299,48 @@ async def _llm_fallback_check(llm_queue: list[dict], *, job_id: str = "") -> lis
 
 
 SYSTEM_PROMPT = """你是一个 GMP 批生产记录合规分析专家。
-给定一份批生产记录所有页的结构化数据摘要（已由规则层跑过 R1-R5，
+给定一份批生产记录所有页的结构化数据摘要（已由规则层跑过规则，
 请只关注规则层无法判定的语义异常，例如签名一致性、批次逻辑、跨页参数漂移等。
 
 输出 JSON 数组，每个 finding 包含：
-{"page":页码,"type":"signature_mismatch|param_out_of_spec|completeness","severity":"critical|warning|info","description":"问题描述","ocr_text":"原文摘录","operator":"涉及人员"}"""
+{"page":页码,"type":"signature_mismatch|param_out_of_spec|completeness|user_rule","severity":"critical|warning|info","description":"问题描述","ocr_text":"原文摘录","operator":"涉及人员"}
+
+type 为 "user_rule" 时表示命中用户自定义合规规则（按用户规则逐条核对）。"""
+
+
+def _user_rules_section() -> tuple[str, str]:
+    """构造用户自定义合规规则提示段 + 内容 hash。
+
+    返回 (section_text, rules_hash)：无启用规则时返回 ("", "none")。
+    hash 用于 llm_call_audit 的 prompt_version 留痕（GMP 可追溯）。
+    """
+    from config import load_user_rules
+    rules = [r for r in load_user_rules() if r.get("active")]
+    if not rules:
+        return "", "none"
+    lines = [f"- {r['text']}" for r in rules]
+    section = (
+        "用户自定义合规规则（必须逐条核对记录是否满足，"
+        "违反时输出 type=user_rule 的 finding，按影响定级）：\n"
+        + "\n".join(lines)
+    )
+    import hashlib
+    rules_hash = hashlib.md5(section.encode("utf-8")).hexdigest()[:8]
+    return section, rules_hash
 
 
 async def _llm_based_check(summary: str, *, job_id: str = "") -> list[dict]:
     if not summary.strip():
         return []
+    user_section, rules_hash = _user_rules_section()
+    prompt = f"{user_section}\n\n{summary}" if user_section else summary
+    prompt_version = f"semantic_v2+rules{rules_hash}" if rules_hash != "none" else "semantic_v2"
     client = get_llm_client()
     try:
         result = await client.chat_json(
-            SYSTEM_PROMPT, summary, max_tokens=4000, temperature=0.1, timeout=180.0,
+            SYSTEM_PROMPT, prompt, max_tokens=4000, temperature=0.1, timeout=180.0,
             audit_ctx={"job_id": job_id, "page": None, "stage": "cross_page_llm",
-                       "prompt_version": "semantic_v1"},
+                       "prompt_version": prompt_version},
         )
     except Exception as e:
         logger.warning(f"LLM semantic check failed: {e} — flagging for human review")
@@ -1353,7 +1379,8 @@ async def _llm_based_check(summary: str, *, job_id: str = "") -> list[dict]:
             continue
         f.setdefault("ocr_text", "")
         f.setdefault("operator", "")
-        f["source"] = "llm_cross"
+        # user_rule 类型的 finding 标记独立 source，便于复核页区分来源
+        f["source"] = "user_rule" if f.get("type") == "user_rule" else "llm_cross"
         valid.append(f)
     return valid
 
