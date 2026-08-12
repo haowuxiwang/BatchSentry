@@ -87,3 +87,15 @@ class TestUploadLLMGuard:
         # 应返回 200 + job_id（不是 400 拦截）
         assert r.status_code == 200
         assert "job_id" in r.json()
+
+        # 取消该上传启动的后台 pipeline task：test_db fixture 结束后 DB
+        # 连接会关闭，若 task 仍在运行会在 teardown 报
+        # "Cannot operate on a closed database"（异步竞态，非产品缺陷）。
+        import asyncio
+        from core import pipeline as pipeline_mod
+        for jid, task in list(pipeline_mod._pipeline_tasks.items()):
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
