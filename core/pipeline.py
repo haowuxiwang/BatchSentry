@@ -1106,6 +1106,11 @@ async def _run_sliced_stage1_2(
         f"[{job_id}] Stage 1 (sliced): OCR complete: {new_pages} new pages "
         f"(total={total_pages}) in {stage1_ms}ms"
     )
+    # 分片路径也记录实际后端（分片仅 MinerU 支持）— 与整单路径 :529 对齐，
+    # 保证 GMP 审计字段 ocr_backend_used 在所有路径下都有值
+    await db.execute(
+        "UPDATE jobs SET ocr_backend_used = ? WHERE id = ?", ("mineru", job_id)
+    )
     await _audit_log(db, job_id, "stage1_complete",
                      f"pages={total_pages} duration={stage1_ms}ms")
     await transition_status(db, job_id, "ocr_done", f"Stage 1 (sliced) complete: {total_pages} pages")

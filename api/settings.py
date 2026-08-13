@@ -120,6 +120,8 @@ async def get_settings():
     """返回当前配置（敏感字段脱敏）。"""
     cfg = config
     config_file = _settings_config_path()
+    # 单次读取飞书配置（此前每个字段各 load_feishu_config() 一次，共 9 次文件 IO）
+    feishu_cfg = load_feishu_config()
     return {
         "config_file": str(config_file),
         "config_exists": config_file.exists(),
@@ -166,15 +168,15 @@ async def get_settings():
             "port": cfg["app"].port,
         },
         "feishu": {
-            "enabled": bool(load_feishu_config().get("enabled", False)),
-            "mode": load_feishu_config().get("mode", "webhook"),
-            "webhook_url": _mask(load_feishu_config().get("webhook_url", "")),
-            "secret": _mask(load_feishu_config().get("secret", "")),
-            "app_id": load_feishu_config().get("app_id", ""),
-            "app_secret": _mask(load_feishu_config().get("app_secret", "")),
-            "open_id": load_feishu_config().get("open_id", ""),
-            "mobile": load_feishu_config().get("mobile", ""),
-            "events": load_feishu_config().get("events") or ["review", "partial_review", "error"],
+            "enabled": bool(feishu_cfg.get("enabled", False)),
+            "mode": feishu_cfg.get("mode", "webhook"),
+            "webhook_url": _mask(feishu_cfg.get("webhook_url", "")),
+            "secret": _mask(feishu_cfg.get("secret", "")),
+            "app_id": feishu_cfg.get("app_id", ""),
+            "app_secret": _mask(feishu_cfg.get("app_secret", "")),
+            "open_id": feishu_cfg.get("open_id", ""),
+            "mobile": feishu_cfg.get("mobile", ""),
+            "events": feishu_cfg.get("events") or ["review", "partial_review", "error"],
         },
     }
 
@@ -187,6 +189,7 @@ _PER_PROVIDER_FIELDS = ("protocol", "api_key", "base_url", "model")
 _STATIC_FIELDS = {
     "llm_provider": "LLM_PROVIDER",
     "llm_providers_add": "LLM_PROVIDERS",  # 追加到 LLM_PROVIDERS env var
+    "llm_providers_remove": "LLM_PROVIDERS",  # 从 LLM_PROVIDERS env var 差集移除
     "ocr_backend": "OCR_BACKEND",
     "ocr_slices": "OCR_SLICES",  # MinerU 分片 OCR（流式输出）页数/片
     "paddle_ocr_api_url": "PADDLE_OCR_API_URL",
@@ -225,6 +228,7 @@ class SettingsUpdate(BaseModel):
     """
     llm_provider: Optional[str] = None
     llm_providers_add: Optional[str] = None
+    llm_providers_remove: Optional[str] = None
     # 向后兼容字段（旧前端仍可使用）
     deepseek_api_key: Optional[str] = None
     deepseek_base_url: Optional[str] = None
@@ -339,6 +343,17 @@ def _build_env_updates(
             merged = sorted(existing_set | set(new_names))
             env_updates[env_key] = ",".join(merged)
             mem_updates[field] = ",".join(new_names)
+            continue
+        if field == "llm_providers_remove":
+            # P1-3: provider 移除持久化 — 与 add 对称的差集合并。
+            # 内置 provider（deepseek/siliconflow）不在 LLM_PROVIDERS 里，
+            # 差集对它们幂等无操作（刷新后按设计复活）。
+            remove_names = [n.strip().lower() for n in str(value).split(",") if n.strip()]
+            existing = os.getenv("LLM_PROVIDERS", "")
+            existing_set = {n.strip().lower() for n in existing.split(",") if n.strip()}
+            remaining = sorted(existing_set - set(remove_names))
+            env_updates[env_key] = ",".join(remaining)
+            mem_updates[field] = ",".join(remove_names)
             continue
         # bool 字段转 true/false
         if isinstance(value, bool):
@@ -518,8 +533,13 @@ async def update_settings(req: SettingsUpdate, request: Request):
     # 内存热更新：先 add 新 provider，再更新字段，再切 llm_provider
     if "llm_providers_add" in mem_updates:
         update_config({"llm_providers_add": mem_updates["llm_providers_add"]})
-    # 过滤掉 llm_providers_add（update_config 已处理）
-    per_field_updates = {k: v for k, v in mem_updates.items() if k != "llm_providers_add"}
+    if "llm_providers_remove" in mem_updates:
+        update_config({"llm_providers_remove": mem_updates["llm_providers_remove"]})
+    # 过滤掉 add/remove（update_config 已处理）
+    per_field_updates = {
+        k: v for k, v in mem_updates.items()
+        if k not in ("llm_providers_add", "llm_providers_remove")
+    }
     if per_field_updates:
         update_config(per_field_updates)
 
@@ -905,6 +925,9 @@ async def test_feishu(req: TestFeishuRequest, request: Request):
     # 掩码回填保护：掩码本身不是合法 URL，先拦截给出明确提示（避免先落入 URL 格式报错）
     if url == _mask(saved.get("webhook_url", "")):
         return {"ok": False, "reason": "填写的 URL 与掩码一致，请粘贴完整 webhook URL"}
+    # 与 app_secret 一致（:884）：secret 为掩码时拒绝 — 否则签名校验失败提示具有误导性
+    if secret and secret == _mask(saved.get("secret", "")):
+        return {"ok": False, "reason": "Secret 为掩码，请粘贴完整值"}
     ok, reason = validate_external_url(url, kind="Feishu webhook")
     if not ok:
         return {"ok": False, "reason": reason}

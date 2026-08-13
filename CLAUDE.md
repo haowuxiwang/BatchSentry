@@ -160,7 +160,7 @@ API routes emit business logs (upload/cancel/retry/archive/delete/finding update
 
 ### Security Posture
 
-- **CORS**: only `127.0.0.1:8000`, `localhost:8000`, `127.0.0.1:58765`, `localhost:58765`. `file://` removed to prevent XSS via Electron renderer.
+- **CORS**: only `127.0.0.1:8000` (dev uvicorn) and `127.0.0.1:58765` (Electron), per `main.py` (Phase 8 tightened). `localhost` hosts pass `is_local_request()` on the settings API but NOT the CORS allowlist — use `http://127.0.0.1:8000` in dev. `file://` removed to prevent XSS via Electron renderer.
 - **CORS headers**: restricted to `Content-Type, X-Request-ID` (not `*`).
 - **Upload**: 8MB chunked streaming, `Path(file.filename).name` sanitization, 200MB hard limit, empty-file rejection, `%PDF-` magic bytes check, MD5 content-hash duplicate rejection (409, `force=1` bypass).
 - **SQL**: all queries parameterized (`?` placeholders).

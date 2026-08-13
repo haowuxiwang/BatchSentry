@@ -556,6 +556,17 @@ def update_config(updates: dict):
             if name and name not in config["providers"]:
                 config["providers"][name] = ProviderConfig(name=name)
 
+    # Remove custom providers from the registry on the fly (Settings UI "remove
+    # provider"). Built-in providers (deepseek/siliconflow) stay untouched.
+    if "llm_providers_remove" in updates:
+        for raw_name in str(updates["llm_providers_remove"]).split(","):
+            name = raw_name.strip().lower()
+            if name and name in config["providers"] and name not in ("deepseek", "siliconflow"):
+                del config["providers"][name]
+                # Keep the "active provider" pointer valid: fall back to deepseek
+                if config["app"].llm_provider == name:
+                    config["app"].llm_provider = "deepseek"
+
     # Per-provider updates: walk every registered provider and check for
     # matching <provider>_{protocol,api_key,base_url,model} keys.
     for name, prov_cfg in config["providers"].items():

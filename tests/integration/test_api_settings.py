@@ -227,6 +227,43 @@ class TestDynamicProviders:
         assert "qwen" in names
 
     @pytest.mark.asyncio
+    async def test_remove_provider_persisted(self, settings_client):
+        """通过 llm_providers_remove 移除自定义 provider 应持久化。"""
+        # 先添加 kimi
+        r = await settings_client.post("/api/settings", json={
+            "llm_providers_add": "kimi",
+        })
+        assert r.status_code == 200
+        # 移除它
+        r = await settings_client.post("/api/settings", json={
+            "llm_providers_remove": "kimi",
+        })
+        assert r.status_code == 200, r.text
+        # GET 确认不在 providers list
+        r2 = await settings_client.get("/api/settings")
+        names = [p["name"] for p in r2.json()["llm"]["providers"]]
+        assert "kimi" not in names
+
+    @pytest.mark.asyncio
+    async def test_remove_builtin_provider_idempotent(self, settings_client):
+        """移除内置 provider（deepseek）应幂等无副作用。"""
+        r = await settings_client.post("/api/settings", json={
+            "llm_providers_remove": "deepseek",
+        })
+        assert r.status_code == 200, r.text
+        r2 = await settings_client.get("/api/settings")
+        names = [p["name"] for p in r2.json()["llm"]["providers"]]
+        assert "deepseek" in names
+
+    @pytest.mark.asyncio
+    async def test_remove_unknown_provider_no_error(self, settings_client):
+        """移除不存在的 provider 不应报错。"""
+        r = await settings_client.post("/api/settings", json={
+            "llm_providers_remove": "not-a-real-provider",
+        })
+        assert r.status_code == 200, r.text
+
+    @pytest.mark.asyncio
     async def test_switch_to_new_provider(self, settings_client):
         """添加 provider 后切换到它应立即生效。"""
         # 添加 + 配置 anthropic（不实际安装 SDK，只测配置写入）
@@ -676,6 +713,22 @@ class TestFeishuNotifySettings:
         masked = (await settings_client.get("/api/settings")).json()["feishu"]["webhook_url"]
         r = await settings_client.post("/api/settings/test_feishu", json={
             "webhook_url": masked,
+        })
+        assert r.status_code == 200
+        assert r.json()["ok"] is False
+        assert "掩码" in r.json()["reason"]
+
+    @pytest.mark.asyncio
+    async def test_test_feishu_masked_secret_rejected(self, settings_client):
+        """传掩码值作 secret → 拒绝（避免误导性签名校验失败提示）。"""
+        await settings_client.post("/api/settings", json={
+            "feishu_webhook_url": "https://open.feishu.cn/open-apis/bot/v2/hook/realtoken",
+            "feishu_secret": "sec-realsecret1234567890",
+        })
+        masked_secret = (await settings_client.get("/api/settings")).json()["feishu"]["secret"]
+        r = await settings_client.post("/api/settings/test_feishu", json={
+            "webhook_url": "https://open.feishu.cn/open-apis/bot/v2/hook/realtoken",
+            "secret": masked_secret,
         })
         assert r.status_code == 200
         assert r.json()["ok"] is False

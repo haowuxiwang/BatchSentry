@@ -453,7 +453,7 @@ app.whenReady().then(async () => {
       reused = await probeHealth(SERVER_PORT);
       if (reused) {
         setSplashStatus("检测到正在运行的 BatchSentry 服务，直接连接…");
-        log.warn("SERVER", `Port ${SERVER_PORT} occupied by a healthy backend, reusing it (orphan recovery)`);
+        console.warn(`SERVER: Port ${SERVER_PORT} occupied by a healthy backend, reusing it (orphan recovery)`);
       } else {
         const choice = dialog.showMessageBoxSync({
           type: "error",

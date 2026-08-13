@@ -37,6 +37,10 @@
   let current = {};
   let activeProvider = "";
   const pendingAdds = new Set();
+  // 会话内已移除的 provider — 与 pendingAdds 对称，保存时随
+  // llm_providers_remove 提交后端做差集合并（P1-3: 移除必须持久化，
+  // 否则刷新后 provider 复活，UI 承诺与实际不符）
+  const removedProviders = new Set();
 
   // HTML escape — XSS protection for user-controlled strings
   const esc = (s) =>
@@ -186,7 +190,15 @@
   // Provider 操作事件绑定 (事件委托)
   // ============================================================
   function bindProviderActions() {
-    const list = document.getElementById("llm-providers-list");
+    // 防重复绑定：renderProviders 每次调用（load / 切换 / 保存 Key /
+    // 添加 provider 后）都会走到这里，直接 addEventListener 会叠加 N 个
+    // handler → 第二次交互起按钮"点了没反应"或双请求。用克隆替换丢弃
+    // 旧节点上的 listener（子元素全部走委托、无直接绑定，克隆安全）。
+    let list = document.getElementById("llm-providers-list");
+    if (!list) return;
+    const fresh = list.cloneNode(true);
+    list.replaceWith(fresh);
+    list = fresh;
 
     // Use event delegation to handle all clicks via data-action
     list.addEventListener("click", async (e) => {
@@ -437,12 +449,13 @@
   }
 
   // ============================================================
-  // removeProvider — 从注册表移除 (仅前端, 保存通用设置时持久化)
+  // removeProvider — 标记移除（保存通用设置时经 llm_providers_remove 持久化；
+  // 若移除的是本次会话刚添加的 provider，须同时从 pendingAdds 撤销）
   // ============================================================
   async function removeProvider(name, row) {
     const ok = await window.PBC.confirmDialog({
       title: `确认移除 ${display(name)} 提供商？`,
-      message: "（配置文件将保留，仅从 UI 列表移除）",
+      message: "保存后将从注册表中移除该提供商。",
       confirmText: "确认",
       cancelText: "取消",
       danger: true,
@@ -450,6 +463,8 @@
     if (!ok) return;
     row.remove();
     current.llm.providers = (current.llm.providers || []).filter(p => p.name !== name);
+    removedProviders.add(name);
+    pendingAdds.delete(name); // 刚添加未保存即移除：撤销 pendingAdd，防止保存时复活
     if (activeProvider === name) {
       const firstRow = document.querySelector(".provider-row");
       if (firstRow) await setActiveProvider(firstRow.dataset.provider);
@@ -1203,6 +1218,8 @@
       body.llm_provider = activeProvider;
       if (pendingAdds.size > 0)
         body.llm_providers_add = Array.from(pendingAdds).join(",");
+      if (removedProviders.size > 0)
+        body.llm_providers_remove = Array.from(removedProviders).join(",");
 
       // OCR 通用设置
       const activeSegBtn = document.querySelector(
@@ -1238,6 +1255,7 @@
           showMsg("✓ " + data.message, "info");
           log("save ok", data);
           pendingAdds.clear();
+          removedProviders.clear();
           // 重新加载所有状态
           setTimeout(() => load(), 500);
         } else {
