@@ -20,20 +20,20 @@ import pytest_asyncio
 class TestConfigAppDataDir:
     """_app_data_dir 各平台分支。"""
 
-    def test_windows_uses_appdata(self, monkeypatch):
+    def test_windows_uses_appdata(self, monkeypatch, tmp_path):
         """Windows 应使用 %APPDATA%/PBC。"""
         monkeypatch.setattr(sys, "platform", "win32")
-        monkeypatch.setenv("APPDATA", str(Path.cwd() / "tmp_test_appdata_win"))
+        monkeypatch.setenv("APPDATA", str(tmp_path / "appdata_win"))
         from config import _app_data_dir
         result = _app_data_dir()
         assert "PBC" in str(result)
-        assert "tmp_test_appdata_win" in str(result)
+        assert "appdata_win" in str(result)
 
-    def test_macos_uses_library(self, monkeypatch):
+    def test_macos_uses_library(self, monkeypatch, tmp_path):
         """macOS 应使用 ~/Library/Application Support/PBC。"""
         monkeypatch.setattr(sys, "platform", "darwin")
         # 不能真的修改 Path.home()，用 mock
-        fake_home = Path.cwd() / "tmp_test_home_mac"
+        fake_home = tmp_path / "home_mac"
         fake_home.mkdir(exist_ok=True)
         with patch("pathlib.Path.home", return_value=fake_home):
             from config import _app_data_dir
@@ -41,14 +41,14 @@ class TestConfigAppDataDir:
             assert "Library" in str(result)
             assert "PBC" in str(result)
 
-    def test_linux_uses_xdg(self, monkeypatch):
+    def test_linux_uses_xdg(self, monkeypatch, tmp_path):
         """Linux 应使用 $XDG_DATA_HOME/PBC。"""
         monkeypatch.setattr(sys, "platform", "linux")
-        xdg_dir = Path.cwd() / "tmp_test_xdg"
+        xdg_dir = tmp_path / "xdg"
         monkeypatch.setenv("XDG_DATA_HOME", str(xdg_dir))
         from config import _app_data_dir
         result = _app_data_dir()
-        assert "tmp_test_xdg" in str(result)
+        assert "xdg" in str(result)
         assert "PBC" in str(result)
 
 

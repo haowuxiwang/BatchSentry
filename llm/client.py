@@ -114,6 +114,24 @@ class LLMClient:
                 return result.content
             except Exception as e:
                 last_error = e
+                # Timeout 类异常（asyncio.TimeoutError / httpx.ReadTimeout /
+                # openai.APITimeoutError）跳过完整重试：SDK 内部已有退避重试，
+                # 客户端再重试 3 次 × 240s 会让单个页面卡 12+ 分钟，整条
+                # pipeline 被拖死。直接失败 → 该页归入 failed_pages 转人工，
+                # 符合"快速失败、不阻塞主线"的容错原则。
+                if isinstance(e, TimeoutError) or "timeout" in type(e).__name__.lower():
+                    logger.warning(
+                        f"LLM call timed out{ctx_tag}: {type(e).__name__}: {e} "
+                        f"(skipping client-side retries)"
+                    )
+                    if audit_ctx is not None:
+                        await _record_llm_call(
+                            audit_ctx, self, last_result, last_latency_ms,
+                            success=False, error=str(last_error)[:200]
+                        )
+                    raise RuntimeError(
+                        f"LLM call timed out{ctx_tag}: {last_error}"
+                    )
                 # Distinguish retryable vs non-retryable errors
                 err_str = str(e).lower()
                 is_non_retryable = any(kw in err_str for kw in [

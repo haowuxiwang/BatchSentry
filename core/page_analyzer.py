@@ -269,7 +269,7 @@ async def analyze_page(html: str, page_num: int, *, job_id: str = "") -> dict:
         # Phase 1: raised from 180s to 300s — v3 prompt asks LLM to emit full
         # measurements matrix (72 cells), which takes longer than v2's
         # comma-string collapse. Verified by spike: v2 page9=79s, v3 needs 180s+.
-        timeout=300.0,
+        timeout=240.0,
         # Phase 7: GMP audit — record provider/model/prompt_version/tokens
         audit_ctx={
             "job_id": job_id,

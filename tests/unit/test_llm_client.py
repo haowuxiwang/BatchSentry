@@ -14,6 +14,7 @@ Phase 7 架构变更：
 """
 import pytest
 import json
+import asyncio
 from unittest.mock import patch, AsyncMock, MagicMock
 from dataclasses import dataclass
 
@@ -153,6 +154,23 @@ class TestChatMethod:
             ))
             result = await client.chat("system", "user")
             assert result == "LLM response text"
+
+    @pytest.mark.asyncio
+    async def test_chat_timeout_skips_retries(self):
+        """Timeout 类异常应跳过客户端重试直接失败（SDK 已内部重试）。
+
+        重试 3 次 × 240s 会让单页卡 12 分钟拖死 pipeline；快速失败让
+        failed_pages 机制接管，页面转人工复核。
+        """
+        mock_cfg = _mock_config("deepseek")
+        with patch("llm.client.config", mock_cfg):
+            client = LLMClient(provider="deepseek")
+            client.adapter.chat = AsyncMock(
+                side_effect=asyncio.TimeoutError("read timed out")
+            )
+            with pytest.raises(RuntimeError, match="timed out"):
+                await client.chat("system", "user", retries=3)
+            assert client.adapter.chat.call_count == 1  # 未重试
 
     @pytest.mark.asyncio
     async def test_chat_retries_on_failure(self):

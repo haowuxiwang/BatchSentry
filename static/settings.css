@@ -1,10 +1,94 @@
 /* ============================================================
-   Settings page — Notion 风格 (v2 优化版)
-   - 统一按钮系统: 12px 字体 + 一致的 padding/height
-   - 卡片化 provider 行: 圆角 + 柔和阴影 + hover 上浮
-   - 信息层级清晰: 标题 > 正文 > 辅助文字
-   - 微动效: hover/active/focus 即时反馈
+   Settings page — Notion 风格 (v3 Sidebar 重构版)
+   - 左侧 sidebar 导航: 参考 GitHub/Notion/Linear
+   - 4 个扁平 section: LLM / OCR / Rules / Feishu
+   - Active 状态: 浅蓝背景 + font-weight 500 (GitHub 模式)
+   - 响应式: 桌面 sidebar → 移动端横排 tabs
    ============================================================ */
+
+/* ─── Sidebar Layout ─── */
+.settings-layout {
+  display: flex;
+  gap: 2rem;
+  align-items: flex-start;
+}
+
+/* ─── Desktop Sidebar — 参考 GitHub/Notion (240px) ─── */
+.settings-nav {
+  width: 240px;
+  flex-shrink: 0;
+  padding: 0 12px;
+  position: sticky;
+  top: 2.5rem;
+}
+.settings-nav-link {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 400;
+  color: hsl(var(--muted-foreground));
+  min-height: 36px;
+  text-decoration: none;
+  transition: background 150ms ease, color 150ms ease;
+  user-select: none;
+}
+.settings-nav-link:hover {
+  background: hsl(var(--muted) / 0.4);
+  color: hsl(var(--foreground));
+}
+.settings-nav-link.active {
+  background: hsl(214 100% 97%);
+  color: hsl(214 100% 40%);
+  font-weight: 500;
+}
+
+/* ─── Mobile Horizontal Tabs — 参考 GitHub Primer ─── */
+.settings-nav-mobile {
+  display: none;
+  width: 100%;
+  border-bottom: 1px solid hsl(var(--border));
+  gap: 0;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+.settings-nav-mobile::-webkit-scrollbar {
+  display: none;
+}
+.settings-nav-mobile .settings-nav-link {
+  border-radius: 0;
+  border-bottom: 2px solid transparent;
+  white-space: nowrap;
+  min-height: 44px;
+  padding: 10px 16px;
+  font-size: 13px;
+}
+.settings-nav-mobile .settings-nav-link.active {
+  background: transparent;
+  border-bottom-color: hsl(214 100% 40%);
+}
+
+/* ─── Content Area ─── */
+.settings-panels {
+  flex: 1;
+  min-width: 0;
+}
+
+/* ─── 响应式: 窄屏 sidebar → 横排 tabs ─── */
+@media (max-width: 768px) {
+  .settings-layout {
+    flex-direction: column;
+    gap: 0;
+  }
+  .settings-nav {
+    display: none !important;
+  }
+  .settings-nav-mobile {
+    display: flex !important;
+  }
+}
 html,
 body {
   background: hsl(var(--background));

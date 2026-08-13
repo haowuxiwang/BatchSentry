@@ -184,12 +184,12 @@ class TestSettingsConfigPath:
             path = _settings_config_path()
             assert path.name == "config.json"
 
-    def test_settings_config_path_frozen_mode_windows(self, monkeypatch):
+    def test_settings_config_path_frozen_mode_windows(self, monkeypatch, tmp_path):
         """Frozen 模式应返回 %APPDATA%/PBC/config.json。"""
         from api.settings import _settings_config_path
         monkeypatch.setattr(sys, "frozen", True, raising=False)
         monkeypatch.setattr(sys, "platform", "win32")
-        monkeypatch.setenv("APPDATA", str(Path.cwd() / "tmp_test_appdata"))
+        monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
         path = _settings_config_path()
         assert "PBC" in str(path)
         assert path.name == "config.json"

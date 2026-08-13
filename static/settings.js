@@ -457,6 +457,136 @@
   }
 
   // ============================================================
+  // Section 导航 — 参考 GitHub/Notion sidebar 模式
+  // ============================================================
+  function initSectionNav() {
+    const navs = document.querySelectorAll(".settings-nav, .settings-nav-mobile");
+    const sections = document.querySelectorAll("[data-section]");
+    if (!navs.length || !sections.length) return;
+
+    navs.forEach((nav) => {
+      nav.addEventListener("click", (e) => {
+        const link = e.target.closest("[data-target]");
+        if (!link) return;
+        e.preventDefault();
+        const target = link.dataset.target;
+        sections.forEach((s) =>
+          s.classList.toggle("hidden", s.dataset.section !== target),
+        );
+        navs.forEach((n) =>
+          n.querySelectorAll(".settings-nav-link").forEach((l) =>
+            l.classList.toggle("active", l.dataset.target === target),
+          ),
+        );
+        history.replaceState(null, "", "#" + target);
+      });
+    });
+
+    // 初始: 显示 URL hash 对应的 section，否则默认 llm
+    const hash = location.hash.slice(1);
+    const initial =
+      hash && document.querySelector('[data-section="' + hash + '"]')
+        ? hash
+        : "llm";
+    sections.forEach((s) =>
+      s.classList.toggle("hidden", s.dataset.section !== initial),
+    );
+    navs.forEach((n) =>
+      n.querySelectorAll(".settings-nav-link").forEach((l) =>
+        l.classList.toggle("active", l.dataset.target === initial),
+      ),
+    );
+    log("section nav initialized", { initial });
+  }
+
+  // ============================================================
+  // OCR 独立保存 — 与飞书/规则保持一致的 per-section save
+  // ============================================================
+  async function saveOcrConfig() {
+    const btn = document.getElementById("ocr-save-btn");
+    const msg = document.getElementById("ocr-msg");
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = "保存中…";
+    }
+    try {
+      const body = { llm_provider: activeProvider };
+
+      // OCR 后端
+      const activeSegBtn = document.querySelector(
+        "#ocr-backend-seg button.active",
+      );
+      if (!activeSegBtn) {
+        if (msg) msg.textContent = "✗ 请先选择 OCR 后端";
+        return;
+      }
+      body.ocr_backend = activeSegBtn.dataset.value;
+
+      // PaddleOCR
+      const paddleToken = document.getElementById("paddle_ocr_token");
+      if (paddleToken && paddleToken.value.trim()) {
+        body.paddle_ocr_token = paddleToken.value.trim();
+      }
+      const paddleUrl = document.getElementById("paddle_ocr_api_url");
+      if (paddleUrl) body.paddle_ocr_api_url = paddleUrl.value;
+      const paddleModel = document.getElementById("paddle_ocr_model");
+      if (paddleModel) body.paddle_ocr_model = paddleModel.value;
+
+      // MinerU
+      const mineruToken = document.getElementById("mineru_token");
+      if (mineruToken && mineruToken.value.trim()) {
+        body.mineru_token = mineruToken.value.trim();
+      }
+      const mineruVersion = document.getElementById("mineru_model_version");
+      if (mineruVersion) body.mineru_model_version = mineruVersion.value;
+      const mineruLang = document.getElementById("mineru_language");
+      if (mineruLang) body.mineru_language = mineruLang.value;
+      body.mineru_enable_formula = document.getElementById(
+        "mineru_enable_formula",
+      ).checked;
+      body.mineru_enable_table = document.getElementById(
+        "mineru_enable_table",
+      ).checked;
+      const slicesEl = document.getElementById("ocr_slices");
+      if (slicesEl) {
+        const n = parseInt(slicesEl.value, 10);
+        body.ocr_slices = Number.isFinite(n) && n >= 1 ? n : 1;
+      }
+
+      log("saving OCR config", Object.keys(body));
+      const r = await fetch("/api/settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await r.json();
+      if (r.ok && data.ok) {
+        if (msg) msg.textContent = "✓ OCR 设置已保存";
+        await load();
+      } else {
+        const errMsg =
+          data.detail?.errors?.join("; ") ||
+          data.detail ||
+          data.message ||
+          "保存失败";
+        if (msg) msg.textContent = "✗ " + errMsg;
+      }
+    } catch (err) {
+      if (msg) msg.textContent = "✗ " + err.message;
+      log.err("OCR save failed", err);
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = "保存 OCR 设置";
+      }
+    }
+  }
+
+  document
+    .getElementById("ocr-save-btn")
+    ?.addEventListener("click", saveOcrConfig);
+
+  // ============================================================
   // 加载设置 — 初始渲染
   // ============================================================
   async function load() {
@@ -493,6 +623,7 @@
         fillOcrForm();
         fillFeishuForm();
         await loadRules();
+        initSectionNav();
         return;
       }
     }
@@ -501,6 +632,7 @@
     fillOcrForm();
     fillFeishuForm();
     await loadRules();
+    initSectionNav();
   }
 
   // OCR 表单填充（从 load() 抽出，auto-activate 路径也复用）

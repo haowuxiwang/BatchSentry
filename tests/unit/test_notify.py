@@ -161,6 +161,29 @@ class TestPostSync:
             ok, detail = _post_sync("u", {"msg_type": "text"}, "")
         assert ok
 
+    def test_429_honors_ratelimit_reset_header(self):
+        """429 响应头 x-ogw-ratelimit-reset → 以它为等待时长（官方推荐）。"""
+        resp_429 = mock.MagicMock(status_code=429)
+        resp_429.headers = {"x-ogw-ratelimit-reset": "30"}
+        resp_ok = mock.MagicMock(status_code=200)
+        resp_ok.json.return_value = {"code": 0, "msg": "success"}
+        with mock.patch("core.notify.requests.post", side_effect=[resp_429, resp_ok]) as m, \
+                mock.patch("core.notify.time.sleep") as sleep:
+            ok, _ = _post_sync("u", {"msg_type": "text"}, "")
+        assert ok
+        assert sleep.call_args[0][0] == 30  # reset header wins over backoff
+
+    def test_429_without_reset_header_uses_backoff(self):
+        resp_429 = mock.MagicMock(status_code=429)
+        resp_429.headers = {}
+        resp_ok = mock.MagicMock(status_code=200)
+        resp_ok.json.return_value = {"code": 0, "msg": "success"}
+        with mock.patch("core.notify.requests.post", side_effect=[resp_429, resp_ok]) as m, \
+                mock.patch("core.notify.time.sleep") as sleep:
+            ok, _ = _post_sync("u", {"msg_type": "text"}, "")
+        assert ok
+        assert sleep.call_args[0][0] == 1.0  # fallback to first backoff step
+
     def test_signature_attached_when_secret_set(self):
         captured = {}
 
@@ -269,6 +292,50 @@ class TestNotifyJob:
                 mock.patch("db.client.get_db", side_effect=RuntimeError("db down")):
             # 不应抛出异常
             asyncio.run(notify_job("job-x", "review"))
+
+    def test_dedup_skips_second_notification(self, tmp_path):
+        """同 (job_id, status) 已有成功记录 → 第二次不发（webhook 无幂等键）。"""
+        import aiosqlite
+        from db.client import SCHEMA_VERSION, init_schema, migrate
+        import db.client as db_mod
+
+        db_path = tmp_path / "t_dedup.db"
+        cfg = tmp_path / "config.json"
+        cfg.write_text(json.dumps({
+            "feishu_enabled": True,
+            "feishu_webhook_url": "https://open.feishu.cn/hook/abc",
+            "feishu_events": "review",
+        }), encoding="utf-8")
+
+        async def run():
+            async with aiosqlite.connect(db_path) as conn:
+                conn.row_factory = aiosqlite.Row
+                await init_schema(conn)
+                await migrate(conn)
+                await conn.execute(
+                    "INSERT INTO jobs (id, filename, status, total_pages) "
+                    "VALUES ('job-x', 'f.pdf', 'review', 2)"
+                )
+                await conn.commit()
+                orig = db_mod._db
+                db_mod._db = conn
+                resp = mock.MagicMock(status_code=200)
+                resp.json.return_value = {"code": 0, "msg": "success"}
+                try:
+                    with mock.patch("config._config_path", return_value=cfg), \
+                            mock.patch("core.notify.requests.post", return_value=resp) as m:
+                        await notify_job("job-x", "review")
+                        await notify_job("job-x", "review")
+                    assert m.call_count == 1  # 第二次被 audit_log 去重拦截
+                    cur = await conn.execute(
+                        "SELECT COUNT(*) AS c FROM audit_log WHERE action = 'feishu_notify'"
+                    )
+                    row = await cur.fetchone()
+                    assert row["c"] == 1
+                finally:
+                    db_mod._db = orig
+
+        asyncio.run(run())
 
 
 # ===========================================================================
@@ -462,6 +529,118 @@ class TestPostAppBot:
         assert ok
         payload = m.call_args_list[2].kwargs["json"]
         assert payload["receive_id"] == "ou_999"
+
+    def test_uuid_deterministic_same_text(self):
+        """同一文本 → 相同 uuid（防超时重试双发）；不同文本 → 不同 uuid。"""
+        import core.notify as notify_mod
+        notify_mod._token_cache = {"token": "", "fetched_at": 0.0, "app_id": "", "app_secret": ""}
+        notify_mod._open_id_cache = {"open_id": "", "mobile": "", "resolved_at": 0.0, "app_id": ""}
+
+        def resp_ok():
+            r = mock.MagicMock(status_code=200)
+            r.json.return_value = {"code": 0, "msg": "ok"}
+            return r
+
+        with mock.patch("core.notify.requests.post",
+                        side_effect=[resp_ok(), resp_ok()]) as m:
+            tok_resp = mock.MagicMock(status_code=200)
+            tok_resp.json.return_value = {"code": 0, "tenant_access_token": "t", "expire": 7200}
+            # 第一次：token + msg
+            notify_mod._token_cache = {"token": "", "fetched_at": 0.0, "app_id": "", "app_secret": ""}
+            with mock.patch("core.notify.requests.post",
+                            side_effect=[tok_resp, resp_ok()]) as m1:
+                notify_mod._post_app_bot_sync("cli_x", "s", "ou_1", "", "hello")
+            uuid1 = m1.call_args_list[1].kwargs["json"]["uuid"]
+            # 第二次（同文本，token 缓存已就绪）：仅 msg
+            with mock.patch("core.notify.requests.post", side_effect=[resp_ok()]) as m2:
+                notify_mod._post_app_bot_sync("cli_x", "s", "ou_1", "", "hello")
+            uuid2 = m2.call_args_list[0].kwargs["json"]["uuid"]
+            # 第三次（不同文本）：仅 msg
+            with mock.patch("core.notify.requests.post", side_effect=[resp_ok()]) as m3:
+                notify_mod._post_app_bot_sync("cli_x", "s", "ou_1", "", "hello world")
+            uuid3 = m3.call_args_list[0].kwargs["json"]["uuid"]
+        assert uuid1 == uuid2
+        assert uuid1 != uuid3
+        assert len(uuid1) <= 48
+
+    def test_content_uses_json_dumps(self):
+        """content 由 json.dumps 生成（不再手写转义）。"""
+        import core.notify as notify_mod
+        notify_mod._token_cache = {"token": "", "fetched_at": 0.0, "app_id": "", "app_secret": ""}
+        notify_mod._open_id_cache = {"open_id": "", "mobile": "", "resolved_at": 0.0, "app_id": ""}
+        tok_resp = mock.MagicMock(status_code=200)
+        tok_resp.json.return_value = {"code": 0, "tenant_access_token": "t", "expire": 7200}
+        msg_resp = mock.MagicMock(status_code=200)
+        msg_resp.json.return_value = {"code": 0, "msg": "ok"}
+        with mock.patch("core.notify.requests.post", side_effect=[tok_resp, msg_resp]) as m:
+            ok, _ = notify_mod._post_app_bot_sync("cli_x", "s", "ou_1", "", '含"引号"和\\反斜杠\n换行')
+        assert ok
+        payload = m.call_args_list[1].kwargs["json"]
+        assert payload["content"].startswith('{"text":')  # json.dumps 签名
+        parsed = json.loads(payload["content"])
+        assert parsed["text"] == '含"引号"和\\反斜杠\n换行'
+
+    def test_99991663_self_heals_token(self):
+        """99991663（token 失效窗口）→ 清缓存重拉 token → 单次重试成功。"""
+        import core.notify as notify_mod
+        notify_mod._token_cache = {"token": "", "fetched_at": 0.0, "app_id": "", "app_secret": ""}
+        notify_mod._open_id_cache = {"open_id": "", "mobile": "", "resolved_at": 0.0, "app_id": ""}
+        tok1 = mock.MagicMock(status_code=200)
+        tok1.json.return_value = {"code": 0, "tenant_access_token": "t-old", "expire": 7200}
+        invalid = mock.MagicMock(status_code=200)
+        invalid.json.return_value = {"code": 99991663, "msg": "token invalid"}
+        tok2 = mock.MagicMock(status_code=200)
+        tok2.json.return_value = {"code": 0, "tenant_access_token": "t-new", "expire": 7200}
+        ok_resp = mock.MagicMock(status_code=200)
+        ok_resp.json.return_value = {"code": 0, "msg": "ok"}
+        with mock.patch("core.notify.requests.post",
+                        side_effect=[tok1, invalid, tok2, ok_resp]) as m, \
+                mock.patch("core.notify.time.sleep"):
+            ok, detail = notify_mod._post_app_bot_sync("cli_x", "s", "ou_1", "", "hi")
+        assert ok, detail
+        assert m.call_count == 4  # token + msg(99991663) + token-refetch + msg(ok)
+        # 第二次发送使用新 token
+        headers2 = m.call_args_list[3].kwargs["headers"]
+        assert headers2["Authorization"] == "Bearer t-new"
+
+    def test_99991663_self_heal_fails_gracefully(self):
+        """自愈时 token 重拉失败 → 返回失败而非死循环。"""
+        import core.notify as notify_mod
+        notify_mod._token_cache = {"token": "", "fetched_at": 0.0, "app_id": "", "app_secret": ""}
+        notify_mod._open_id_cache = {"open_id": "", "mobile": "", "resolved_at": 0.0, "app_id": ""}
+        tok1 = mock.MagicMock(status_code=200)
+        tok1.json.return_value = {"code": 0, "tenant_access_token": "t-old", "expire": 7200}
+        invalid = mock.MagicMock(status_code=200)
+        invalid.json.return_value = {"code": 99991663, "msg": "token invalid"}
+        tok_fail = mock.MagicMock(status_code=500)
+        with mock.patch("core.notify.requests.post",
+                        side_effect=[tok1, invalid, tok_fail]) as m, \
+                mock.patch("core.notify.time.sleep"):
+            ok, detail = notify_mod._post_app_bot_sync("cli_x", "s", "ou_1", "", "hi")
+        assert not ok
+        assert "http 500" in detail
+        assert m.call_count == 3
+
+    def test_99991663_not_retried_twice(self):
+        """99991663 只自愈一次——二次出现仍失败（防无限循环）。"""
+        import core.notify as notify_mod
+        notify_mod._token_cache = {"token": "", "fetched_at": 0.0, "app_id": "", "app_secret": ""}
+        notify_mod._open_id_cache = {"open_id": "", "mobile": "", "resolved_at": 0.0, "app_id": ""}
+        tok1 = mock.MagicMock(status_code=200)
+        tok1.json.return_value = {"code": 0, "tenant_access_token": "t-old", "expire": 7200}
+        invalid1 = mock.MagicMock(status_code=200)
+        invalid1.json.return_value = {"code": 99991663, "msg": "token invalid"}
+        tok2 = mock.MagicMock(status_code=200)
+        tok2.json.return_value = {"code": 0, "tenant_access_token": "t-new", "expire": 7200}
+        invalid2 = mock.MagicMock(status_code=200)
+        invalid2.json.return_value = {"code": 99991663, "msg": "token invalid"}
+        with mock.patch("core.notify.requests.post",
+                        side_effect=[tok1, invalid1, tok2, invalid2]) as m, \
+                mock.patch("core.notify.time.sleep"):
+            ok, detail = notify_mod._post_app_bot_sync("cli_x", "s", "ou_1", "", "hi")
+        assert not ok
+        assert "99991663" in detail
+        assert m.call_count == 4  # 不再有第三次 token 重拉
 
 
 class TestNotifyJobAppBot:

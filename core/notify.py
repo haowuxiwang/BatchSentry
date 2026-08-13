@@ -23,7 +23,13 @@ Design rules:
     9499 payload too large, 230006 bot disabled, 230013 out of availability,
     ...) are NOT retried.
   * Retries (exponential backoff, max 3) apply only to transport errors and
-    HTTP 5xx / 429; a token-bucket (5/s) guards against burst limits.
+    HTTP 5xx / 429; 429 honors the `x-ogw-ratelimit-reset` response header
+    when present. A token-bucket (5/s) guards against burst limits.
+  * app_bot 99991663 (cached token invalidated) self-heals: drop the token
+    cache, refetch, retry once — no exponential backoff.
+  * Dedup: app_bot uses a deterministic `uuid` (same content → same key, so
+    retries after timeouts cannot double-deliver); webhook dedups via
+    audit_log (a prior successful record for the same job_id+status skips).
   * Every send attempt is recorded in audit_log (action=feishu_notify) for
     GMP traceability.
 
@@ -35,6 +41,7 @@ import asyncio
 import base64
 import hashlib
 import hmac
+import json
 import logging
 import time
 
@@ -72,6 +79,33 @@ _open_id_cache: dict = {"open_id": "", "mobile": "", "resolved_at": 0.0, "app_id
 
 _last_send_ts = 0.0
 _send_lock = asyncio.Lock()
+
+
+def _ratelimit_sleep(resp, attempt: int) -> float:
+    """Sleep honoring the Feishu `x-ogw-ratelimit-reset` header if present.
+
+    Official guidance: 429 responses carry the reset time in seconds; when
+    absent, fall back to the fixed exponential backoff schedule.
+    """
+    reset = resp.headers.get("x-ogw-ratelimit-reset", "")
+    try:
+        reset_seconds = float(reset)
+    except (TypeError, ValueError):
+        reset_seconds = 0.0
+    delay = max(reset_seconds, _BACKOFF_SECONDS[attempt])
+    time.sleep(delay)
+    return delay
+
+
+def _idempotency_uuid(text: str) -> str:
+    """Deterministic idempotency key for im/v1/messages `uuid`.
+
+    Same logical message (same text) always maps to the same uuid, so retries
+    after a timeout cannot double-deliver — Feishu dedups identical uuids
+    within 1 hour (content change → hash change → new uuid).
+    """
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    return base64.urlsafe_b64encode(digest.encode("utf-8")).decode()[:48]
 
 
 def sign_payload(secret: str, timestamp: int) -> str:
@@ -133,6 +167,19 @@ def build_text_message(
     return payload
 
 
+def _already_notified(job_id: str, status: str, db):
+    """Async dedup guard for the webhook channel (has no idempotency key).
+
+    Terminal events fire at most once per (job_id, status); a prior successful
+    audit record means we already delivered this notification.
+    """
+    return db.execute(
+        "SELECT 1 FROM audit_log WHERE job_id = ? AND action = 'feishu_notify' "
+        "AND detail LIKE ? LIMIT 1",
+        (job_id, f"%status={status} ok=True%"),
+    )
+
+
 def _should_notify(status: str, feishu_cfg: dict) -> bool:
     """Notify only when enabled, channel configured, and status whitelisted."""
     if not feishu_cfg.get("enabled"):
@@ -178,7 +225,7 @@ def _post_sync(url: str, payload: dict, secret: str, timeout: float = 5.0) -> tu
         if resp.status_code in _RETRYABLE_STATUS:
             last_err = f"http {resp.status_code}"
             if attempt < _MAX_RETRIES:
-                time.sleep(_BACKOFF_SECONDS[attempt])
+                time.sleep(_ratelimit_sleep(resp, attempt))
             continue
         try:
             body = resp.json()
@@ -307,8 +354,8 @@ def _post_app_bot_sync(
     ok, token = _get_tenant_access_token_sync(app_id, app_secret, timeout)
     if not ok:
         return False, token
-    # content must be an escaped JSON *string*; string concat, NOT .format()
-    content = '{"text":' + '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"' + "}"
+    # content must be an escaped JSON *string*; json.dumps is safer than hand-rolled escaping
+    content = json.dumps({"text": text}, ensure_ascii=False)
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {token}",
@@ -317,14 +364,14 @@ def _post_app_bot_sync(
         "receive_id": open_id,
         "msg_type": "text",
         "content": content,
-        "uuid": base64.urlsafe_b64encode(
-            f"{int(time.time())}-{hashlib.md5(text.encode('utf-8')).hexdigest()[:12]}".encode()
-        ).decode()[:48],
+        "uuid": _idempotency_uuid(text),
     }
     url = _API_BASE + "/im/v1/messages?receive_id_type=open_id"
     last_err = ""
+    refreshed_token = False
     for attempt in range(_MAX_RETRIES + 1):
         try:
+            headers["Authorization"] = f"Bearer {token}"
             resp = requests.post(url, json=payload, headers=headers, timeout=timeout)
         except requests.RequestException as e:
             last_err = f"transport: {type(e).__name__}"
@@ -334,7 +381,7 @@ def _post_app_bot_sync(
         if resp.status_code in _RETRYABLE_STATUS:
             last_err = f"http {resp.status_code}"
             if attempt < _MAX_RETRIES:
-                time.sleep(_BACKOFF_SECONDS[attempt])
+                _ratelimit_sleep(resp, attempt)
             continue
         try:
             body = resp.json()
@@ -344,6 +391,17 @@ def _post_app_bot_sync(
             return False, f"http {resp.status_code}, non-JSON body"
         if resp.status_code == 200 and code == 0:
             return True, "ok"
+        # 99991663 = cached tenant_access_token invalidated (expiry window).
+        # Self-heal: drop the cache, refetch, retry once — no exponential backoff.
+        if code == 99991663 and not refreshed_token:
+            global _token_cache
+            _token_cache["token"] = ""
+            refreshed_token = True
+            ok, token = _get_tenant_access_token_sync(app_id, app_secret, timeout)
+            if not ok:
+                return False, token
+            last_err = f"code={code} token refreshed, retried"
+            continue
         hint = app_bot_error_zh(code)
         if hint:
             return False, f"code={code} {hint}"
@@ -366,6 +424,12 @@ async def notify_job(job_id: str, status: str) -> None:
         # Job stats snapshot for the message
         from db.client import get_db
         db = await get_db()
+        # Dedup: a prior successful notification for this (job_id, status)
+        # means we already delivered it (webhook has no idempotency key).
+        dup_cursor = await _already_notified(job_id, status, db)
+        if await dup_cursor.fetchone():
+            logger.info(f"[{job_id}] Feishu notify skipped (already notified, status={status})")
+            return
         cursor = await db.execute(
             "SELECT filename, total_pages, error_message FROM jobs WHERE id = ?",
             (job_id,),

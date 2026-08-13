@@ -21,7 +21,7 @@ def _get_init_lock() -> asyncio.Lock:
     return _db_init_lock
 
 # Current schema migration level, persisted via PRAGMA user_version.
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 async def get_db() -> aiosqlite.Connection:
@@ -72,6 +72,9 @@ async def migrate(db: aiosqlite.Connection):
 
     if current_version < 4:
         await _migrate_v4(db)
+
+    if current_version < 5:
+        await _migrate_v5(db)
 
     # PRAGMA user_version cannot be parameterized; SCHEMA_VERSION is an int
     # constant defined in this module, so f-string is safe.
@@ -175,8 +178,38 @@ async def _migrate_v4(db: aiosqlite.Connection):
     await db.commit()
 
 
+async def _migrate_v5(db: aiosqlite.Connection):
+    """v5: findings 去重 UNIQUE 索引 — retry 防重复插入 + 批量写入性能。
+
+    旧代码先查后插无索引保护，重复运行 Stage 3 可能产生完全相同的行
+    （rule 确定性生成）。UNIQUE 索引让 INSERT OR IGNORE 原子去重，
+    同时避免重复行残留在历史库中（先删后建）。
+    """
+    try:
+        # 1) 清掉历史重复行（保留每指纹的最小 id）
+        await db.execute("""
+            DELETE FROM findings
+            WHERE id NOT IN (
+                SELECT MIN(id) FROM findings
+                GROUP BY job_id, source, page, type, description
+            )
+        """)
+        # 2) 建 UNIQUE 索引（重复行已清，可安全创建）
+        await db.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_findings_dedup
+            ON findings(job_id, source, page, type, description)
+        """)
+        logger.info("Migration: findings dedup UNIQUE index ready")
+    except Exception as e:
+        logger.warning(f"Migration skip findings dedup index: {e}")
+    await db.commit()
+
+
 async def close_db():
-    global _db
+    global _db, _db_init_lock
     if _db:
         await _db.close()
         _db = None
+    # 重置初始化锁：asyncio.Lock 绑定事件循环，跨 loop 复用会在 acquire 时报错。
+    # 单例连接关闭后必须一并重置，否则测试/重启场景出现潜伏 flake。
+    _db_init_lock = None

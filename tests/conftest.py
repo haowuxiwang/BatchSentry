@@ -98,6 +98,8 @@ async def test_db(tmp_path):
         if db_mod._db:
             await db_mod._db.close()
         db_mod._db = orig_db_global
+        # 重置初始化锁（asyncio.Lock 绑定事件循环，不重置会在跨 loop 复用时报错）
+        db_mod._db_init_lock = None
         _cfg["app"].database_path = orig_db_path
         _cfg["app"].output_dir = orig_output_dir
         _cfg["providers"]["deepseek"].api_key = orig_deepseek_key

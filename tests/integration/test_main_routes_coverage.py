@@ -9,6 +9,7 @@
 """
 import pytest
 import pytest_asyncio
+import shutil
 from httpx import AsyncClient, ASGITransport
 from pathlib import Path
 
@@ -189,10 +190,34 @@ class TestRequestIdMiddleware:
     async def test_static_files_skip_log(self, client_with_full_job):
         """静态文件请求应正常返回（中间件 skip_log 分支）。"""
         c, _ = client_with_full_job
-        # static/app.css 应存在并返回 200
+        # static/app.css 必须存在并返回 200（打包前的前置校验）
         r = await c.get("/static/app.css")
-        # 静态文件可能 200 或 404（取决于文件是否存在），但不应抛异常
-        assert r.status_code in (200, 404)
+        assert r.status_code == 200
+
+
+class TestStaticAssetsSyntax:
+    """前端资产语法验证 — node --check 捕获 JS 语法错误。
+
+    PyInstaller 打包不编译 JS，静态文件里的语法错误直到 Electron 运行时
+    才暴露（白屏 + 控制台报错）。此测试在 CI 阶段即拦截。
+    """
+
+    @pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+    def test_js_files_pass_node_check(self):
+        """所有 static/*.js 与 electron/*.js 必须通过 node --check。"""
+        import subprocess
+        static_dir = Path(__file__).parent.parent.parent / "static"
+        electron_dir = Path(__file__).parent.parent.parent / "electron"
+        js_files = list(static_dir.glob("*.js")) + list(electron_dir.glob("*.js"))
+        assert js_files, "no JS files found to validate"
+        for js in js_files:
+            result = subprocess.run(
+                ["node", "--check", str(js)],
+                capture_output=True, text=True,
+            )
+            assert result.returncode == 0, (
+                f"JS syntax error in {js.name}:\n{result.stderr}"
+            )
 
 
 class TestLifespanLogging:

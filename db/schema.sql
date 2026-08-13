@@ -80,6 +80,8 @@ CREATE TABLE IF NOT EXISTS llm_call_audit (
 CREATE INDEX IF NOT EXISTS idx_findings_job ON findings(job_id);
 CREATE INDEX IF NOT EXISTS idx_findings_job_page ON findings(job_id, page);
 CREATE INDEX IF NOT EXISTS idx_findings_job_status ON findings(job_id, status);
+-- v5: 去重索引 — retry 防重复插入 + INSERT OR IGNORE 原子去重
+CREATE UNIQUE INDEX IF NOT EXISTS idx_findings_dedup ON findings(job_id, source, page, type, description);
 CREATE INDEX IF NOT EXISTS idx_page_cache_job ON page_cache(job_id);
 CREATE INDEX IF NOT EXISTS idx_audit_log_job ON audit_log(job_id);
 CREATE INDEX IF NOT EXISTS idx_llm_audit_job ON llm_call_audit(job_id);

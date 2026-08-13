@@ -696,6 +696,11 @@ async def _run_pipeline_impl(job_id: str, pdf_path: str):
         severity_counts = {"critical": 0, "warning": 0, "info": 0}
         skipped_llm_page = 0
         inserted = 0
+        # 批量写入：rule/llm_cross 是确定性生成，内存指纹去重 + INSERT OR IGNORE
+        # 双保险（idx_findings_dedup UNIQUE 索引兜底，v5）。避免逐条 select-then-
+        # insert 的 2×N 次 DB 往返（51 页真实文件 400+ findings → 1000+ await）。
+        dedup_seen: set[tuple] = set()
+        batch_rows: list[tuple] = []
         for f in findings:
             sev = f.get("severity", "info")
             severity_counts[sev] = severity_counts.get(sev, 0) + 1
@@ -703,28 +708,31 @@ async def _run_pipeline_impl(job_id: str, pdf_path: str):
             if f.get("source") == "llm_page":
                 skipped_llm_page += 1
                 continue
-            # robustness-B4: retry 会重新执行 Stage 3，rule/cross 发现是确定性
-            # 生成的，重复 INSERT 会污染审计数据（同一描述翻倍）。先查后插：
-            # 按 (job_id, source, page, type, description) 指纹判重，已存在则跳过。
-            cur = await db.execute(
-                "SELECT 1 FROM findings WHERE job_id = ? AND source = ? AND page = ? "
-                "AND type = ? AND description = ? LIMIT 1",
-                (job_id, f.get("source", "rule"), f["page"], f["type"], f["description"]),
+            # robustness-B4: retry 会重新执行 Stage 3，确定性生成的 findings
+            # 按 (job_id, source, page, type, description) 指纹去重。
+            fingerprint = (
+                job_id, f.get("source", "rule"), f["page"], f["type"], f["description"],
             )
-            if await cur.fetchone():
+            if fingerprint in dedup_seen:
                 logger.debug(
                     f"[{job_id}] findings dup skipped (page={f['page']} "
                     f"source={f.get('source')} type={f['type']})"
                 )
                 continue
-            await db.execute(
-                "INSERT INTO findings (job_id, page, type, severity, description, ocr_text, operator, source, user_rule_id) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (job_id, f["page"], f["type"], f["severity"], f["description"],
-                 f.get("ocr_text"), f.get("operator"), f.get("source", "rule"),
-                 f.get("rule_id") if f.get("source") == "user_rule" else None),
-            )
+            dedup_seen.add(fingerprint)
+            batch_rows.append((
+                job_id, f["page"], f["type"], f["severity"], f["description"],
+                f.get("ocr_text"), f.get("operator"), f.get("source", "rule"),
+                f.get("rule_id") if f.get("source") == "user_rule" else None,
+            ))
             inserted += 1
+        if batch_rows:
+            await db.executemany(
+                "INSERT OR IGNORE INTO findings "
+                "(job_id, page, type, severity, description, ocr_text, operator, source, user_rule_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                batch_rows,
+            )
         await db.commit()  # Flush findings before status transition (prevent ghost findings)
         logger.info(
             f"[{job_id}] DB: findings inserted ({inserted} new + {skipped_llm_page} "
@@ -907,29 +915,26 @@ async def _analyze_one(
                     "WHERE job_id = ? AND page = ?",
                     (payload, job_id, page_num),
                 )
-                # 流式输出：立即把该页 LLM 产生的 findings 写入 findings 表
+                # 流式输出：立即把该页 LLM 产生的 findings 写入 findings 表。
+                # 对抗审查(cr-3): llm_page 路径同样依赖 idx_findings_dedup UNIQUE
+                # 索引（v5）做原子去重，防御"部分提交残留 + retry"组合路径下的重复行。
+                llm_page_rows = []
                 for f in page_findings:
                     if not isinstance(f, dict):
                         continue
                     if not {"type", "severity", "description"}.issubset(f.keys()):
                         continue
-                    # 对抗审查(cr-3): llm_page 路径补 B4 同款指纹查重 —
-                    # 防御"部分提交残留 + retry"组合路径下的重复行。
-                    dup_cur = await db.execute(
-                        "SELECT 1 FROM findings WHERE job_id = ? AND source = 'llm_page' "
-                        "AND page = ? AND type = ? AND description = ? LIMIT 1",
-                        (job_id, page_num, f.get("type", "info"),
-                         f.get("description", "")),
-                    )
-                    if await dup_cur.fetchone():
-                        continue
-                    await db.execute(
-                        "INSERT INTO findings (job_id, page, type, severity, "
-                        "description, ocr_text, operator, source) "
+                    llm_page_rows.append((
+                        job_id, page_num, f.get("type", "info"),
+                        f.get("severity", "info"), f.get("description", ""),
+                        f.get("ocr_text", ""), f.get("operator", ""),
+                    ))
+                if llm_page_rows:
+                    await db.executemany(
+                        "INSERT OR IGNORE INTO findings "
+                        "(job_id, page, type, severity, description, ocr_text, operator, source) "
                         "VALUES (?, ?, ?, ?, ?, ?, ?, 'llm_page')",
-                        (job_id, page_num, f.get("type", "info"),
-                         f.get("severity", "info"), f.get("description", ""),
-                         f.get("ocr_text", ""), f.get("operator", "")),
+                        llm_page_rows,
                     )
                 await db.commit()
                 logger.info(

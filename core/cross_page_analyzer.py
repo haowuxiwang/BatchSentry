@@ -494,8 +494,12 @@ async def analyze_cross_page(page_structures: list[dict], job_id: str = "") -> l
     rule_findings.extend(llm_fallback_findings)
 
     # LLM semantic check (catches what rules missed)
+    # 用户规则每 job 只读一次 config.json，避免 _user_rules_section /
+    # enabled_rule_ids 各读一遍（每次文件 IO + JSON 解析，51 页大文件时浪费）。
+    from config import load_user_rules
+    user_rules = [r for r in load_user_rules() if r.get("active")]
     summary = _build_summary(pages)
-    llm_findings = await _llm_based_check(summary, job_id=job_id)
+    llm_findings = await _llm_based_check(summary, job_id=job_id, user_rules=user_rules)
 
     all_findings = rule_findings + llm_findings
     logger.info(
@@ -1309,14 +1313,16 @@ type 为 "user_rule" 时表示命中用户自定义合规规则（按用户规�
 且 rule_id 必须填写命中的那条规则的 ID（取自下方规则清单中的 [规则ID: xxx]，逐字照抄；未命中用户规则时该字段填 null）。"""
 
 
-def _user_rules_section() -> tuple[str, str]:
+def _user_rules_section(rules: list[dict] | None = None) -> tuple[str, str]:
     """构造用户自定义合规规则提示段 + 内容 hash。
 
     返回 (section_text, rules_hash)：无启用规则时返回 ("", "none")。
     hash 用于 llm_call_audit 的 prompt_version 留痕（GMP 可追溯）。
+    传入预加载的启用规则列表可避免每 job 重复读 config.json（性能）。
     """
-    from config import load_user_rules
-    rules = [r for r in load_user_rules() if r.get("active")]
+    if rules is None:
+        from config import load_user_rules
+        rules = [r for r in load_user_rules() if r.get("active")]
     if not rules:
         return "", "none"
     lines = [f"- [规则ID: {r['id']}] {r['text']}" for r in rules]
@@ -1330,10 +1336,15 @@ def _user_rules_section() -> tuple[str, str]:
     return section, rules_hash
 
 
-async def _llm_based_check(summary: str, *, job_id: str = "") -> list[dict]:
+async def _llm_based_check(summary: str, *, job_id: str = "",
+                           user_rules: list[dict] | None = None) -> list[dict]:
     if not summary.strip():
         return []
-    user_section, rules_hash = _user_rules_section()
+    # 每次 job 只读一次 config.json（analyze_cross_page 预加载后传入）
+    if user_rules is None:
+        from config import load_user_rules
+        user_rules = [r for r in load_user_rules() if r.get("active")]
+    user_section, rules_hash = _user_rules_section(user_rules)
     prompt = f"{user_section}\n\n{summary}" if user_section else summary
     prompt_version = f"semantic_v2+rules{rules_hash}" if rules_hash != "none" else "semantic_v2"
     client = get_llm_client()
@@ -1375,8 +1386,7 @@ async def _llm_based_check(summary: str, *, job_id: str = "") -> list[dict]:
     valid = []
     required = {"page", "type", "severity", "description"}
     # 启用规则 id 集合：user_rule finding 的 rule_id 只接受集合内的 id
-    from config import load_user_rules
-    enabled_rule_ids = {r["id"] for r in load_user_rules() if r.get("active")}
+    enabled_rule_ids = {r["id"] for r in user_rules}
     for f in findings:
         if not isinstance(f, dict) or not required.issubset(f.keys()):
             logger.warning(f"Skipping invalid finding (missing fields): {f}")
