@@ -253,6 +253,76 @@ class TestDbClientEdgeCases:
             assert (await cursor.fetchone())[0] == SCHEMA_VERSION
 
     @pytest.mark.asyncio
+    async def test_init_schema_survives_legacy_duplicate_findings(self, tmp_path):
+        """旧库（user_version=4）含重复 findings → init_schema+migrate 不应崩溃。
+
+        回归：schema.sql 无条件 CREATE UNIQUE INDEX idx_findings_dedup，若 v5
+        清重逻辑（_migrate_v5）被 init_schema 抢先执行顺序挡住，重复行会让
+        建索引抛 IntegrityError 直接启动失败（真实故障：dev 库 37 组重复
+        行 + Application startup failed）。修复后应先预去重、建索引、升版。"""
+        import aiosqlite
+        from db.client import init_schema, migrate, SCHEMA_VERSION
+
+        db_path = str(tmp_path / "legacy_dup.db")
+        async with aiosqlite.connect(db_path) as db:
+            db.row_factory = aiosqlite.Row
+            # v4 结构 findings 表（无 dedup 索引、user_version=4）
+            await db.execute("""
+                CREATE TABLE findings (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    job_id TEXT NOT NULL,
+                    page INTEGER,
+                    type TEXT,
+                    severity TEXT,
+                    source TEXT DEFAULT 'rule',
+                    description TEXT,
+                    ocr_text TEXT,
+                    operator TEXT,
+                    status TEXT,
+                    reviewer_note TEXT,
+                    corrected_text TEXT,
+                    reviewed_at TEXT,
+                    user_rule_id TEXT
+                )
+            """)
+            # 同一指纹三行重复（v5 前并发插入残留）
+            for _ in range(3):
+                await db.execute("""
+                    INSERT INTO findings
+                        (job_id, page, type, severity, source, description, status)
+                    VALUES ('job-x', 1, 'completeness', 'warning', 'rule',
+                            '第1页 参数 无规格', 'pending')
+                """)
+            await db.execute("PRAGMA user_version = 4")
+            await db.commit()
+
+            # 修复前：init_schema 在此抛 IntegrityError → 模拟真实启动崩溃
+            await init_schema(db)
+            await migrate(db)
+
+            cursor = await db.execute("PRAGMA user_version")
+            assert (await cursor.fetchone())[0] == SCHEMA_VERSION
+            # 重复行已清理（保留最小 id）
+            cursor = await db.execute(
+                "SELECT COUNT(*) FROM findings WHERE job_id = 'job-x'"
+            )
+            assert (await cursor.fetchone())[0] == 1
+            cursor = await db.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type='index' AND name='idx_findings_dedup'"
+            )
+            assert await cursor.fetchone() is not None
+            # 索引真的生效（再插同指纹 → 被 UNIQUE 拒绝）
+            with pytest.raises(Exception):
+                await db.execute("""
+                    INSERT INTO findings
+                        (job_id, page, type, severity, source, description, status)
+                    VALUES ('job-x', 1, 'completeness', 'warning', 'rule',
+                            '第1页 参数 无规格', 'pending')
+                """)
+                await db.commit()
+
+    @pytest.mark.asyncio
     async def test_migrate_upgrades_legacy_v0_database(self, tmp_path):
         """v0 老库（无版本号、缺 jobs 新列）→ migrate 补列并写入版本号。"""
         import aiosqlite

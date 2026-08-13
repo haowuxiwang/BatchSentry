@@ -42,6 +42,30 @@ async def get_db() -> aiosqlite.Connection:
 
 
 async def init_schema(db: aiosqlite.Connection):
+    # Pre-clean: legacy DBs (user_version < 5) may contain duplicate findings
+    # rows written by pre-v5 code (no dedup index then). schema.sql creates the
+    # v5 UNIQUE index unconditionally — on a dirty legacy DB that CREATE would
+    # fail hard and abort startup (IntegrityError), never reaching the graceful
+    # dedupe inside _migrate_v5. Dedupe here first (keep MIN(id) per group) so
+    # schema.sql can always complete; idempotent + tolerant for fresh DBs.
+    cursor = await db.execute("PRAGMA user_version")
+    row = await cursor.fetchone()
+    if (int(row[0]) if row else 0) < 5:
+        try:
+            probe = await db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='findings'"
+            )
+            if await probe.fetchone():
+                await db.execute("""
+                    DELETE FROM findings
+                    WHERE id NOT IN (
+                        SELECT MIN(id) FROM findings
+                        GROUP BY job_id, source, page, type, description
+                    )
+                """)
+                logger.info("Migration: pre-deduped legacy findings before v5 unique index")
+        except Exception as e:
+            logger.warning(f"Migration: pre-dedup skipped: {e}")
     schema_path = Path(__file__).parent / "schema.sql"
     schema = schema_path.read_text(encoding="utf-8")
     await db.executescript(schema)
