@@ -755,8 +755,15 @@ class TestOcrFailover:
             "SELECT status, ocr_backend_used FROM jobs WHERE id = ?", (job_id,)
         )
         row = await cursor.fetchone()
-        assert row["status"] == "review"
+        # P1-4: 备后端 25/30 页（缺 5 页 ≤ max(5,20%)）— failover 成功但缺页
+        # 显式暴露：failed_pages=[26..30] → partial_review 而非静默 review
+        assert row["status"] == "partial_review"
         assert row["ocr_backend_used"] == "paddle"
+        cursor = await pipeline_db.execute(
+            "SELECT failed_pages FROM jobs WHERE id = ?", (job_id,)
+        )
+        import json as _json
+        assert _json.loads((await cursor.fetchone())["failed_pages"]) == [26, 27, 28, 29, 30]
 
     @pytest.mark.asyncio
     async def test_single_backend_chain_no_fallback(self, pipeline_db, tmp_path):
@@ -865,7 +872,8 @@ class TestRobustnessChecks:
 
     @pytest.mark.asyncio
     async def test_ocr_pagemismatch_minor_continues(self, pipeline_db, tmp_path):
-        """A1: 轻微页数差异（≤5 页或 20%）→ 不阻断，写入 stage1_pagemismatch 审计。"""
+        """A1 + P1-4: 轻微页数差异（≤5 页或 20%）→ 不阻断 pipeline，但缺页
+        显式暴露：页码并入 failed_pages → partial_review（用户可见）。"""
         job_id = await _insert_job(pipeline_db, status="pending")
         pdf_path = str(tmp_path / "fake.pdf")
         Path(pdf_path).write_bytes(b"%PDF-1.4 fake")
@@ -884,12 +892,18 @@ class TestRobustnessChecks:
             await run_pipeline(job_id, pdf_path)
 
         cursor = await pipeline_db.execute("SELECT status FROM jobs WHERE id = ?", (job_id,))
-        assert (await cursor.fetchone())["status"] == "review"
+        assert (await cursor.fetchone())["status"] == "partial_review"
         cursor = await pipeline_db.execute(
             "SELECT 1 FROM audit_log WHERE job_id = ? AND action = 'stage1_pagemismatch'",
             (job_id,),
         )
         assert await cursor.fetchone() is not None
+        # P1-4: 缺失页码 3/4 写入 failed_pages（复核页横幅可见）
+        cursor = await pipeline_db.execute(
+            "SELECT failed_pages FROM jobs WHERE id = ?", (job_id,)
+        )
+        import json as _json
+        assert _json.loads((await cursor.fetchone())["failed_pages"]) == [3, 4]
 
     @pytest.mark.asyncio
     async def test_discarded_count_injects_ocr_warning(self, pipeline_db, tmp_path):
@@ -1238,6 +1252,71 @@ class TestSlicedPipeline:
 
         cursor = await pipeline_db.execute("SELECT status FROM jobs WHERE id = ?", (job_id,))
         assert (await cursor.fetchone())["status"] == "error"
+
+    @pytest.mark.asyncio
+    async def test_sliced_partial_failure_degrades_to_partial_review(self, pipeline_db, tmp_path):
+        """P1-1: 单片 OCR 失败（此前已有片成功产出）→ 不整单 error：
+        已产出页照常分析，缺失页并入 failed_pages → partial_review（用户可见）。
+        P1-4 (sliced): 缺页补记走 stage1_pagemismatch 审计 + failed_pages。"""
+        from core import pipeline as pipeline_mod
+
+        pipeline_mod.db_lock = asyncio.Lock()
+
+        job_id = await _insert_job(pipeline_db, status="pending")
+        pdf_path = str(tmp_path / "fake.pdf")
+        Path(pdf_path).write_bytes(b"%PDF-1.4 fake")
+
+        def fake_run_sliced_partial(pdf_path, slice_pages, on_batch, progress_cb, job_id=None):
+            # 第 1 片成功回调（total=3），随后整体抛异常（第 2/3 片失败）
+            on_batch(1, [{"markdown": {"text": "page 1"}, "page_count": 1}], 3)
+            raise RuntimeError("slice 2 OCR crashed")
+
+        fake_page_result = {
+            "steps": [],
+            "findings": [],
+            "overall_confidence": "high",
+        }
+
+        orig_backend = pipeline_mod.config["app"].ocr_backend
+        orig_slices = pipeline_mod.config["app"].ocr_slices
+        orig_timeout = pipeline_mod._SLICE_QUEUE_TIMEOUT
+        pipeline_mod.config["app"].ocr_backend = "mineru"
+        pipeline_mod.config["app"].ocr_slices = 2
+        pipeline_mod._SLICE_QUEUE_TIMEOUT = 0.05
+        try:
+            with patch(
+                "core.mineru_client.run_ocr_sliced", side_effect=fake_run_sliced_partial
+            ), patch(
+                "core.pipeline.analyze_page", new=AsyncMock(return_value=fake_page_result)
+            ), patch(
+                "core.pipeline.analyze_cross_page", new=AsyncMock(return_value=[])
+            ):
+                await run_pipeline(job_id, pdf_path)
+        finally:
+            pipeline_mod.config["app"].ocr_backend = orig_backend
+            pipeline_mod.config["app"].ocr_slices = orig_slices
+            pipeline_mod._SLICE_QUEUE_TIMEOUT = orig_timeout
+
+        # 不整单 error：已产出页完成分析 → partial_review（缺页 2/3 显式暴露）
+        cursor = await pipeline_db.execute("SELECT status FROM jobs WHERE id = ?", (job_id,))
+        assert (await cursor.fetchone())["status"] == "partial_review"
+        cursor = await pipeline_db.execute(
+            "SELECT failed_pages FROM jobs WHERE id = ?", (job_id,)
+        )
+        import json as _json
+        assert _json.loads((await cursor.fetchone())["failed_pages"]) == [2, 3]
+        # 缺页审计可见
+        cursor = await pipeline_db.execute(
+            "SELECT 1 FROM audit_log WHERE job_id = ? AND action = 'stage1_pagemismatch'",
+            (job_id,),
+        )
+        assert await cursor.fetchone() is not None
+        # 已产出页 1 正常分析并落库
+        cursor = await pipeline_db.execute(
+            "SELECT structured_json FROM page_cache WHERE job_id = ? AND page = 1",
+            (job_id,),
+        )
+        assert (await cursor.fetchone())["structured_json"] is not None
 
     @pytest.mark.asyncio
     async def test_sliced_zero_pages_sets_job_to_error(self, pipeline_db, tmp_path):

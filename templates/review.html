@@ -180,15 +180,16 @@
             </div>
             {% endif %}
 
-            {# robustness-B5: partial_review 状态横幅 — 列出失败/解析失败页码，
-               此前 failed_pages 被 main.py 解析但从未渲染，用户无法得知哪几页失败。 #}
+            {# robustness-B5: partial_review 状态横幅 — 列出失败/解析失败/缺页页码，
+               此前 failed_pages 被 main.py 解析但从未渲染，用户无法得知哪几页失败。
+               P1-4: OCR 缺页页码也并入 failed_pages，横幅同时覆盖缺页场景。 #}
             {% if status == 'partial_review' and failed_pages %}
             <div id="partial-review-banner" class="sticky top-0 z-20 rounded-md border-l-2 border-warning bg-card px-3 py-3 flex items-start gap-2">
                 <span class="w-1.5 h-1.5 rounded-full bg-warning shrink-0 mt-1.5"></span>
                 <div class="flex-1 min-w-0">
-                    <div class="text-[12px] font-semibold text-foreground mb-1">部分页面分析失败</div>
+                    <div class="text-[12px] font-semibold text-foreground mb-1">部分页面分析不完整</div>
                     <p class="text-[12px] text-muted-foreground leading-relaxed break-words">
-                        以下页面分析的 LLM/JSON 解析失败，成果可能不完整，请以 PDF 原图为准：
+                        以下页面未能完成分析（OCR 缺页或 LLM/JSON 解析失败），成果可能不完整，请以 PDF 原图为准：
                         <span class="font-mono">{{ failed_pages | join('、') }} 页</span>
                     </p>
                     <p class="text-[11px] text-muted-foreground/70 mt-1.5">可为整体任务点击右下角"重试"补分析失败页面（已分析的页面不会重复消耗）。</p>

@@ -1147,19 +1147,27 @@ class TestMinerURunOcrSliced:
     @patch('core.mineru_client.download_result')
     @patch('core.mineru_client.poll_job')
     @patch('core.mineru_client.submit_pdf')
-    def test_slice_error_propagates_and_cleans_up(
+    def test_slice_error_is_contained_and_cleans_up(
         self, mock_submit, mock_poll, mock_download, mock_cleanup, real_pdf, mineru_cfg
     ):
-        """单片失败向上抛异常，且 finally 清理切片。"""
+        """P1-1: 单片失败不再上抛（整单 error）— 记录并继续等待其余片，
+        成功片照常回调 on_batch，finally 清理切片。"""
         self._mock_chain(mock_submit, mock_poll, mock_download)
         mock_download.side_effect = [
             RuntimeError("download boom"),
             [{"markdown": {"text": "s2p1"}, "page_count": 1}],
         ]
+        batches = []
 
-        with pytest.raises(RuntimeError, match="download boom"):
-            mineru_client.run_ocr_sliced(real_pdf, 2)
+        results = mineru_client.run_ocr_sliced(
+            real_pdf,
+            2,
+            on_batch=lambda start, pages: batches.append((start, pages)),
+        )
 
+        # 失败片不阻塞：正常片（start=3）仍回调并返回（page_count 已重映射为全局 3）
+        assert [b[0] for b in batches] == [3]
+        assert results[1] == (3, [{"markdown": {"text": "s2p1"}, "page_count": 3}])
         mock_cleanup.assert_called_once()
         mock_poll.assert_called()
         mock_submit.assert_called()

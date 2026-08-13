@@ -1210,10 +1210,7 @@
       }
 
       log("saving general settings", Object.keys(body));
-      const btn = document.getElementById("save-btn");
-      const original = btn.textContent;
-      btn.disabled = true;
-      btn.textContent = "保存中…";
+      showMsg("保存中…", "info");
       try {
         const r = await fetch("/api/settings", {
           method: "POST",
@@ -1238,9 +1235,6 @@
       } catch (err) {
         showMsg(`✗ ${err.message}`, "err");
         log.err("save failed", err);
-      } finally {
-        btn.disabled = false;
-        btn.textContent = original;
       }
     });
 

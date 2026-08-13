@@ -515,6 +515,44 @@ async def analyze_cross_page(page_structures: list[dict], job_id: str = "") -> l
 # ---------------------------------------------------------------------------
 
 
+def _only_dicts(lst) -> list[dict]:
+    """Keep only dict elements — Stage 3 rules call .get() on every element,
+    so non-dict entries (type-polluted LLM output) would crash the whole job.
+    P1-2 second line of defense (page_analyzer._sanitize_page_result is the
+    source-side filter; this covers legacy page_cache rows written before it)."""
+    return [x for x in lst if isinstance(x, dict)]
+
+
+def _sanitize_year_groups(eyg):
+    """Keep only year-group entries that are lists of int/parseable-int values.
+
+    R2 (_check_year_contradiction) calls int(y) directly; a non-numeric string
+    like "2022年" would raise ValueError and kill Stage 3. Non-conformant
+    entries are emptied (fail-closed: lose the signal, never crash the job).
+    """
+    if not isinstance(eyg, dict):
+        return {}
+    clean = {}
+    for k, v in eyg.items():
+        if not isinstance(v, list):
+            clean[k] = []
+            continue
+        years = []
+        for y in v:
+            if isinstance(y, bool):
+                continue
+            if isinstance(y, int):
+                years.append(y)
+            elif isinstance(y, str):
+                try:
+                    int(y)
+                except ValueError:
+                    continue
+                years.append(y)
+        clean[k] = years
+    return clean
+
+
 def _normalize_pages(page_structures: list[dict]) -> list[dict]:
     """Flatten raw DB rows into a uniform dict per page for rules."""
     out = []
@@ -522,13 +560,24 @@ def _normalize_pages(page_structures: list[dict]) -> list[dict]:
         data = ps.get("data") if isinstance(ps, dict) else None
         if not data or data.get("_parse_error"):
             continue
+        # P1-2 兜底: 过滤 steps/findings 顶层非 dict 元素；对每个 step 再
+        # 过滤 parameters/measurements/signatures 子元素（规则层对每个
+        # 元素直接调 .get()，字符串元素会 AttributeError 崩掉整个 Stage 3）。
+        steps = []
+        for s in data.get("steps", []) or []:
+            if not isinstance(s, dict):
+                continue
+            for field in ("parameters", "measurements", "signatures"):
+                if field in s and isinstance(s[field], list):
+                    s[field] = [x for x in s[field] if isinstance(x, dict)]
+            steps.append(s)
         out.append({
             "page": ps.get("page"),
             "data": data,
             "page_info": data.get("page_info", {}) or {},
-            "steps": data.get("steps", []) or [],
-            "findings": data.get("findings", []) or [],
-            "event_year_groups": data.get("event_year_groups") or {},
+            "steps": steps,
+            "findings": _only_dicts(data.get("findings", []) or []),
+            "event_year_groups": _sanitize_year_groups(data.get("event_year_groups")),
         })
     return out
 
@@ -1260,10 +1309,19 @@ async def _llm_fallback_check(llm_queue: list[dict], *, job_id: str = "") -> lis
     if isinstance(result, dict) and result.get("_parse_error"):
         logger.warning(f"LLM fallback: JSON parse failure — flagging {len(llm_queue)} params for human review")
         return _flag_llm_queue_for_review(llm_queue, reason="LLM 返回 JSON 解析失败")
-    items = result if isinstance(result, list) else result.get("items", [])
+    items = result if isinstance(result, list) else (
+        result.get("items", []) if isinstance(result, dict) else []
+    )
     findings = []
     for item in items:
-        idx = int(item.get("index", 0)) - 1
+        # P1-2: type-polluted fallback output must not crash Stage 3
+        if not isinstance(item, dict):
+            logger.warning(f"LLM fallback: skipping non-dict item: {item}")
+            continue
+        try:
+            idx = int(item.get("index", 0)) - 1
+        except (TypeError, ValueError):
+            idx = -1
         if idx < 0 or idx >= len(llm_queue):
             continue
         q = llm_queue[idx]
@@ -1382,7 +1440,13 @@ async def _llm_based_check(summary: str, *, job_id: str = "",
             "operator": "",
             "source": "rule",
         }]
-    findings = result if isinstance(result, list) else result.get("findings", [])
+    if isinstance(result, list):
+        findings = result
+    elif isinstance(result, dict):
+        findings = result.get("findings", [])
+    else:
+        findings = []
+        logger.warning(f"Cross-page LLM analysis: unexpected result type {type(result).__name__}, no findings")
     valid = []
     required = {"page", "type", "severity", "description"}
     # 启用规则 id 集合：user_rule finding 的 rule_id 只接受集合内的 id

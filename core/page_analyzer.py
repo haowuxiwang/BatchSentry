@@ -178,6 +178,76 @@ def _validate_page_result(data: dict) -> list[str]:
     return errors
 
 
+def _sanitize_page_result(data: dict) -> dict:
+    """P1-2: deep type-sanitize LLM output — drop non-dict / non-int elements.
+
+    The LLM occasionally emits "structurally valid but type-polluted" output
+    (steps:["foo"], parameters:[str], event_year_groups:{draft:["2022年"]}).
+    Stage 3 rule layer calls .get()/int() directly on those elements; without
+    sanitation an AttributeError/ValueError escapes and kills the whole job
+    (error instead of partial_review). Here we fail-closed: drop illegal
+    elements rather than crash. Runs after _validate_page_result so page_cache
+    only ever stores clean data; _normalize_pages in cross_page_analyzer keeps
+    a shallow filter as a second line of defense for legacy rows.
+    """
+    def _only_dicts(lst):
+        return [x for x in lst if isinstance(x, dict)]
+
+    def _only_intable(lst):
+        out = []
+        for y in lst:
+            if isinstance(y, bool):
+                continue
+            if isinstance(y, int):
+                out.append(y)
+            elif isinstance(y, str):
+                try:
+                    int(y)
+                except ValueError:
+                    continue
+                out.append(y)
+        return out
+
+    if "steps" in data:
+        if not isinstance(data["steps"], list):
+            data["steps"] = []
+        else:
+            data["steps"] = _only_dicts(data["steps"])
+        for step in data["steps"]:
+            for field in ("parameters", "measurements", "signatures"):
+                if field in step and step[field] is not None:
+                    if not isinstance(step[field], list):
+                        step[field] = []
+                    else:
+                        step[field] = _only_dicts(step[field])
+            for m in step.get("measurements", []):
+                vals = m.get("values")
+                if vals is None:
+                    continue
+                if not isinstance(vals, dict):
+                    m["values"] = {}
+                else:
+                    for k in [k for k, v in vals.items() if not isinstance(v, dict)]:
+                        del vals[k]
+    if "event_year_groups" in data and data["event_year_groups"] is not None:
+        eyg = data["event_year_groups"]
+        if not isinstance(eyg, dict):
+            data["event_year_groups"] = {}
+        else:
+            for k in eyg.keys():
+                v = eyg[k]
+                if not isinstance(v, list):
+                    eyg[k] = []
+                else:
+                    eyg[k] = _only_intable(v)
+    if "findings" in data and data["findings"] is not None:
+        if not isinstance(data["findings"], list):
+            data["findings"] = []
+        else:
+            data["findings"] = _only_dicts(data["findings"])
+    return data
+
+
 async def analyze_page(html: str, page_num: int, *, job_id: str = "") -> dict:
     """Analyze a single page's HTML table and return structured data.
 
@@ -307,6 +377,9 @@ async def analyze_page(html: str, page_num: int, *, job_id: str = "") -> dict:
     errors = _validate_page_result(result)
     if errors:
         logger.warning(f"Page {page_num}: schema validation issues: {errors}")
+    # P1-2: deep sanitize before persisting — rule layer must never touch
+    # type-polluted elements (would crash the whole Stage 3)
+    _sanitize_page_result(result)
 
     result["page_number"] = page_num
     result["_prompt_version"] = CURRENT_PROMPT_VERSION

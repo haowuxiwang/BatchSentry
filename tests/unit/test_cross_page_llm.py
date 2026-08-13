@@ -187,7 +187,39 @@ class TestLLMFallbackCheck:
         assert "外观" in f["description"]
         assert "应澄清" in f["description"]
         assert "人工确认" in f["description"]
-        assert "JSON 解析失败" in f["description"]
+
+    @pytest.mark.asyncio
+    async def test_polluted_items_do_not_crash(self, mock_llm):
+        """P1-2: fallback 返回类型污染（items 含非 dict、index 非数字、
+        result 非 list/dict）→ 跳过非法项，不抛异常。"""
+        llm_queue = [
+            {"page": 1, "step_no": 1, "name": "外观", "spec": "应澄清",
+             "actual": "澄清", "unit": "", "kind": "param"},
+            {"page": 2, "step_no": 1, "name": "pH", "spec": "5-9",
+             "actual": "11", "unit": "", "kind": "param"},
+        ]
+        mock_llm.chat_json.return_value = [
+            "garbage-item",
+            {"index": "1", "in_spec": False, "reason": "浑浊"},
+            {"index": "not-a-number", "in_spec": False, "reason": "bogus"},
+            {"index": 99, "in_spec": False, "reason": "out of range"},
+        ]
+        findings = await _llm_fallback_check(llm_queue)
+        # 只有 index=1 的合法项生效；非 dict / index 非法项被跳过
+        assert len(findings) == 1
+        assert findings[0]["page"] == 1
+        assert findings[0]["type"] == "param_out_of_spec"
+
+    @pytest.mark.asyncio
+    async def test_polluted_result_object_returns_no_findings(self, mock_llm):
+        """P1-2: fallback 返回非 list/dict（如字符串）→ 空 findings，不崩溃。"""
+        llm_queue = [
+            {"page": 1, "step_no": 1, "name": "外观", "spec": "应澄清",
+             "actual": "澄清", "unit": "", "kind": "param"},
+        ]
+        mock_llm.chat_json.return_value = "not-json-at-all"
+        findings = await _llm_fallback_check(llm_queue)
+        assert findings == []
 
     @pytest.mark.asyncio
     async def test_dict_result_with_items_key(self, mock_llm):

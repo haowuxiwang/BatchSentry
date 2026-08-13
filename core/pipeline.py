@@ -538,7 +538,10 @@ async def _run_pipeline_impl(job_id: str, pdf_path: str):
                 f"pages={len(pages)} duration={stage1_ms}ms backend={used_backend}",
             )
 
-            # 轻微页数差异（缺 ≤5 页且 ≤20%）→ 审计日志可见，不阻断
+            # 轻微页数差异（缺 ≤5 页且 ≤20%）→ 不阻断，但必须显式暴露：
+            # P1-4 修复 — 缺失页码并入 failed_pages，job 以 partial_review 收尾，
+            # 复核页横幅列出缺失页码，规则层虽无法分析缺页但用户可见，
+            # 不再是"静默通过"（GMP 合规工具的核心要求）。
             pdf_total = _pdf_page_count(pdf_path)
             if pdf_total is not None and len(pages) != pdf_total:
                 missing = pdf_total - len(pages)
@@ -548,6 +551,10 @@ async def _run_pipeline_impl(job_id: str, pdf_path: str):
                 )
                 logger.warning(f"[{job_id}] {warn_msg}")
                 await _audit_log(db, job_id, "stage1_pagemismatch", warn_msg)
+                missing_pages = list(range(len(pages) + 1, pdf_total + 1))
+                for pn in missing_pages:
+                    if pn not in failed_pages:
+                        failed_pages.append(pn)
 
             # Check cancellation
             if await _is_cancelled(job_id):
@@ -1029,26 +1036,38 @@ async def _run_sliced_stage1_2(
             if ocr_task.done():
                 exc = ocr_task.exception()
                 if exc is not None:
-                    raise exc
+                    # P1-1 修复：单片 OCR 失败不再整单 error — 已产出的片
+                    # 照常分析（analysis_tasks 已入队），缺失页由下方
+                    # stage1_complete 前的缺页补记并入 failed_pages，job
+                    # 以 partial_review 收尾，用户可见而非静默炸单。
+                    logger.warning(
+                        f"[{job_id}] Sliced OCR failed mid-way: {exc} — "
+                        f"continuing with {seen_max} produced pages"
+                    )
+                    await _audit_log(db, job_id, "stage1_slice_failed", str(exc)[:500])
                 break
             continue
         total_pages = total
         seen_max = max(seen_max, start_page + len(pages) - 1)
         # 该片页面落库（INSERT OR IGNORE 兼容 resume）
-        for i, page in enumerate(pages):
-            page_num = start_page + i
-            if page_num in existing:
-                continue
-            raw_html = _sanitize_ocr_text(page.get("markdown", {}).get("text", ""))
+        # P1-3 修复：落库 + commit 整体持 db_lock — 否则与 _analyze_one 的
+        # rollback() 竞争：分析失败回滚会撤销本循环尚未提交的 INSERT，
+        # 随后本循环的 commit 提交空事务 → 该片 raw_html 永久丢失。
+        async with db_lock:
+            for i, page in enumerate(pages):
+                page_num = start_page + i
+                if page_num in existing:
+                    continue
+                raw_html = _sanitize_ocr_text(page.get("markdown", {}).get("text", ""))
+                await db.execute(
+                    "INSERT OR IGNORE INTO page_cache (job_id, page, raw_html) VALUES (?, ?, ?)",
+                    (job_id, page_num, raw_html),
+                )
+                new_pages += 1
             await db.execute(
-                "INSERT OR IGNORE INTO page_cache (job_id, page, raw_html) VALUES (?, ?, ?)",
-                (job_id, page_num, raw_html),
+                "UPDATE jobs SET total_pages = ? WHERE id = ?", (seen_max, job_id)
             )
-            new_pages += 1
-        await db.execute(
-            "UPDATE jobs SET total_pages = ? WHERE id = ?", (seen_max, job_id)
-        )
-        await db.commit()
+            await db.commit()
         logger.info(
             f"[{job_id}] Stage 1 (sliced): slice start={start_page} pages={len(pages)} "
             f"persisted ({new_pages} new)"
@@ -1070,6 +1089,19 @@ async def _run_sliced_stage1_2(
             return 0, 0, failed_pages, total_pages
 
     stage1_ms = int((time.time() - stage1_start) * 1000)
+    # P1-4 (sliced)：缺页显式暴露 — OCR 声明 total 页但实际只产出到 seen_max
+    # （单片失败/片内缺页），缺失页码并入 failed_pages 降级 partial_review
+    if total_pages and seen_max < total_pages:
+        missing_pages = list(range(seen_max + 1, total_pages + 1))
+        for pn in missing_pages:
+            if pn not in failed_pages:
+                failed_pages.append(pn)
+        logger.warning(
+            f"[{job_id}] Sliced OCR pages missing: {missing_pages} "
+            f"(total={total_pages}, produced up to {seen_max})"
+        )
+        await _audit_log(db, job_id, "stage1_pagemismatch",
+                         f"sliced: produced {seen_max}/{total_pages} pages")
     logger.info(
         f"[{job_id}] Stage 1 (sliced): OCR complete: {new_pages} new pages "
         f"(total={total_pages}) in {stage1_ms}ms"

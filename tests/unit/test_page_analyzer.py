@@ -353,3 +353,78 @@ class TestSparsePageShortCircuit:
             result = await analyze_page(long_text, page_num=7)
 
         assert result.get("_ocr_sparse") is not True
+
+
+class TestSanitizePageResult:
+    """P1-2: _sanitize_page_result 深层类型消毒 — LLM 类型污染输出不崩 Stage 3。"""
+
+    def _polluted(self):
+        return {
+            "page_info": {"title": "污染页"},
+            "steps": [
+                "not-a-dict-step",
+                {
+                    "step_no": 1,
+                    "parameters": ["温度", {"name": "pH", "spec_range": "5-9", "value": "7"}],
+                    "measurements": [
+                        {"time": "10:00", "values": {"温度": {"actual": "25"}, "压力": "非dict"}},
+                        "garbage-measurement",
+                    ],
+                    "signatures": ["签名串", {"role": "operator", "name": "张三", "sign_time": "10:30"}],
+                },
+            ],
+            "event_year_groups": {
+                "draft": ["2022年", 2021, "not-a-year"],
+                "production": "not-a-list",
+            },
+            "findings": ["bad-finding", {"type": "x", "severity": "warning", "description": "ok"}],
+        }
+
+    def test_non_dict_steps_parameters_measurements_signatures_removed(self):
+        from core.page_analyzer import _sanitize_page_result
+
+        data = self._polluted()
+        _sanitize_page_result(data)
+
+        assert data["steps"] == [{"step_no": 1, "parameters": [{"name": "pH", "spec_range": "5-9", "value": "7"}], "measurements": [{"time": "10:00", "values": {"温度": {"actual": "25"}}}], "signatures": [{"role": "operator", "name": "张三", "sign_time": "10:30"}]}]
+        assert len(data["findings"]) == 1
+
+    def test_year_groups_non_numeric_dropped(self):
+        from core.page_analyzer import _sanitize_page_result
+
+        data = self._polluted()
+        _sanitize_page_result(data)
+
+        assert data["event_year_groups"] == {"draft": [2021], "production": []}
+
+    def test_values_dict_non_dict_cells_removed(self):
+        from core.page_analyzer import _sanitize_page_result
+
+        data = self._polluted()
+        _sanitize_page_result(data)
+
+        step = data["steps"][0]
+        assert step["measurements"][0]["values"] == {"温度": {"actual": "25"}}
+
+    def test_steps_not_list_becomes_empty(self):
+        from core.page_analyzer import _sanitize_page_result
+
+        data = {"page_info": {"title": "x"}, "steps": "oops"}
+        _sanitize_page_result(data)
+        assert data["steps"] == []
+
+    @pytest.mark.asyncio
+    async def test_analyze_page_sanitizes_polluted_llm_output(self):
+        """analyze_page 返回的已是消毒后数据（page_cache 只存干净结构）。"""
+        from unittest.mock import MagicMock as _MM
+
+        polluted = self._polluted()
+        polluted["page_number"] = 1
+        mock_client = MagicMock()
+        mock_client.chat_json = AsyncMock(return_value=polluted)
+        with patch("core.page_analyzer.get_llm_client", return_value=mock_client):
+            result = await analyze_page("<table><tr><td>X</td></tr></table>", page_num=1)
+
+        assert result["steps"] == [{"step_no": 1, "parameters": [{"name": "pH", "spec_range": "5-9", "value": "7"}], "measurements": [{"time": "10:00", "values": {"温度": {"actual": "25"}}}], "signatures": [{"role": "operator", "name": "张三", "sign_time": "10:30"}]}]
+        assert result["event_year_groups"] == {"draft": [2021], "production": []}
+        assert len(result["findings"]) == 1

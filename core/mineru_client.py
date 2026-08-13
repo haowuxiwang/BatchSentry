@@ -667,7 +667,17 @@ def run_ocr_sliced(
             # as_completed：一片完成立即回调（不等待全部片）
             for fut in as_completed(futures):
                 idx = futures[fut]
-                start_page, pages = fut.result()  # 失败直接上抛
+                try:
+                    start_page, pages = fut.result()
+                except Exception as e:
+                    # P1-1 修复：单片失败不再让整份分片 OCR 上抛（整单 error）。
+                    # 记录并继续等待其余片 — 缺失页由 pipeline 端缺页补记
+                    # 并入 failed_pages，job 降级 partial_review 而非 error。
+                    logger.warning(
+                        f"[{job_id}] Slice {idx + 1} OCR failed: {e} — "
+                        f"continuing with remaining slices"
+                    )
+                    continue
                 results[idx] = (start_page, pages)
                 if on_batch:
                     on_batch(start_page, pages)

@@ -583,6 +583,51 @@ class TestNormalizePages:
     def test_empty_list_returns_empty(self):
         assert _normalize_pages([]) == []
 
+    def test_type_polluted_rows_filtered(self):
+        """P1-2 兜底: 老 page_cache 脏数据（steps/findings 含非 dict、
+        event_year_groups 含非数字）→ 归一化时过滤，规则层不接触非法元素。"""
+        pages = [{
+            "page": 1,
+            "data": {
+                "page_info": {"title": "x"},
+                "steps": ["garbage", {"step_no": 1, "parameters": ["温度"]}],
+                "findings": ["bad"],
+                "event_year_groups": {"draft": ["2022年", 2021], "production": "oops"},
+            },
+        }]
+        result = _normalize_pages(pages)
+        assert len(result) == 1
+        assert result[0]["steps"] == [{"step_no": 1, "parameters": []}]
+        assert result[0]["findings"] == []
+        # 非数字年份剔除；非 list 的 event 分组置空（键保留）
+        assert result[0]["event_year_groups"] == {"draft": [2021], "production": []}
+
+    def test_analyze_cross_page_survives_type_pollution(self):
+        """P1-2 端到端: analyze_cross_page 面对类型污染输入不抛异常、
+        不整单失败 — 规则层产生零 findings 而非崩溃。"""
+        from unittest.mock import MagicMock
+
+        polluted = [
+            {"page": 1, "data": {
+                "page_info": {"title": "污染页"},
+                "steps": [
+                    "garbage-step",
+                    {"step_no": 1, "start_time": "2024-01-01 09:00",
+                     "end_time": "2024-01-01 08:00",  # 时间反转本应触发 R1-a
+                     "parameters": ["温度"], "signatures": ["签名"]},
+                ],
+                "event_year_groups": {"draft": ["2022年"], "review": 2021},
+                "findings": ["bad"],
+            }},
+        ]
+        mock_client = MagicMock()
+        mock_client.chat_json = AsyncMock(return_value=[])
+        with patch('core.cross_page_analyzer.get_llm_client', return_value=mock_client):
+            findings = asyncio.run(analyze_cross_page(polluted, job_id="test"))
+        assert isinstance(findings, list)
+        # 消毒后 steps 只剩合法 dict → R1-a 正常判定/或跳过；不崩溃是核心断言
+        assert all(isinstance(f, dict) for f in findings)
+
 
 # ===========================================================================
 # _collect_per_page_findings 过滤

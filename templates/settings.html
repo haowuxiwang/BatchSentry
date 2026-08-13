@@ -471,17 +471,23 @@
 
           <!-- 底部全局消息 -->
           <div class="flex items-center gap-3">
+            <button
+              type="submit"
+              class="inline-flex items-center gap-1.5 rounded-full border border-border px-4 py-1.5 text-[13px] font-medium text-foreground transition-colors hover:bg-accent focus-ring"
+            >
+              保存全部设置
+            </button>
             <span id="save-msg" class="text-[12px]"></span>
           </div>
           <p class="text-[11px] text-muted-foreground/70">
             每个 LLM 提供商的 API Key 请在对应卡片中独立保存（即时生效，首次保存会自动设为当前）。
-            "测试连接"会并行检测 OCR + 所有已配置的 LLM 提供商。
+            "测试连接"会并行检测 OCR + 所有已配置的 LLM 提供商。协议 / 模型 / Base URL 修改请使用底部"保存全部设置"。
           </p>
         </div>
       </form>
     </div>
 
     <script src="/static/confirm-dialog.js?v=1" defer></script>
-    <script src="/static/settings.js?v=11" defer></script>
+    <script src="/static/settings.js?v=12" defer></script>
   </body>
 </html>
