@@ -590,7 +590,23 @@
   // 加载设置 — 初始渲染
   // ============================================================
   async function load() {
-    const r = await fetch("/api/settings");
+    let r;
+    try {
+      r = await fetch("/api/settings");
+    } catch (err) {
+      // 网络层失败：整页留白且无提示是坏体验 — 显式错误态 + 重试指引
+      log.err("settings load failed (network)", err);
+      showMsg(
+        "设置加载失败：无法连接后端服务。请确认应用正在运行，然后刷新页面。",
+        "err",
+      );
+      return;
+    }
+    if (!r.ok) {
+      log.err("settings load failed", r.status);
+      showMsg(`设置加载失败（HTTP ${r.status}），请刷新重试。`, "err");
+      return;
+    }
     current = await r.json();
     log("settings loaded", current);
 

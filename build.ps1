@@ -48,6 +48,21 @@ function Write-Fail($msg) {
     exit 1
 }
 
+# PS 5.1 坑: $ErrorActionPreference="Stop" 时 native stderr（Browserslist 过时
+# 警告、PyInstaller INFO 日志等）会抛 NativeCommandError 中断脚本，且
+# `2>&1 | Out-Null` 重定向仍受 preference 影响挡不住。标准解法：调用期间
+# 临时降级 EAP，成败只看 $LASTEXITCODE。
+function Invoke-Native {
+    param([scriptblock]$Command)
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        & $Command 2>&1 | Out-Null
+    } finally {
+        $ErrorActionPreference = $prevEAP
+    }
+}
+
 # ── Pre-flight: verify required tools are on PATH ────────────────────
 Write-Step "Pre-flight checks"
 
@@ -88,7 +103,7 @@ if (-not $SkipCSS) {
     # Ensure npm packages are installed
     if (-not (Test-Path "node_modules")) {
         Write-Host "  Installing npm dependencies..."
-        & npm install 2>&1 | Out-Null
+        Invoke-Native { & npm install }
         if ($LASTEXITCODE -ne 0) {
             Write-Fail "npm install failed (exit code $LASTEXITCODE)"
         }
@@ -98,12 +113,13 @@ if (-not $SkipCSS) {
     # (works on any machine without hardcoded paths).
     $npx = Get-Command npx -ErrorAction SilentlyContinue
     if ($npx) {
-        & npx tailwindcss build -i static/input.css -o static/app.css --minify
+        Invoke-Native { & npx tailwindcss build -i static/input.css -o static/app.css --minify }
     } elseif (Test-Path "node_modules\npm\bin\npx-cli.js") {
-        & node node_modules\npm\bin\npx-cli.js tailwindcss build -i static/input.css -o static/app.css --minify
+        Invoke-Native { & node node_modules\npm\bin\npx-cli.js tailwindcss build -i static/input.css -o static/app.css --minify }
     } else {
         Write-Fail "npx not found on PATH and node_modules\\npm\\bin\\npx-cli.js missing. Run 'npm install' first."
     }
+    if ($LASTEXITCODE -ne 0) { Write-Fail "tailwindcss build failed (exit code $LASTEXITCODE)" }
 
     if (Test-Path "static/app.css") {
         $size = (Get-Item "static/app.css").Length / 1KB
@@ -123,10 +139,11 @@ if (-not $SkipPyInstaller) {
     $pyi = Get-Command pyinstaller -ErrorAction SilentlyContinue
     if (-not $pyi) {
         Write-Host "  Installing pyinstaller..."
-        & python -m pip install pyinstaller 2>&1 | Out-Null
+        Invoke-Native { & python -m pip install pyinstaller }
     }
 
-    & python -m PyInstaller pbc-server.spec --noconfirm --clean
+    # PyInstaller 的 INFO 日志走 stderr — Invoke-Native 处理 EAP 降级。
+    Invoke-Native { & python -m PyInstaller pbc-server.spec --noconfirm --clean }
     if ($LASTEXITCODE -ne 0) {
         Write-Fail "PyInstaller build failed"
     }
@@ -188,13 +205,14 @@ if (-not $SkipElectron) {
     # Ensure electron + electron-builder are installed
     if (-not (Test-Path "node_modules/electron") -or -not (Test-Path "node_modules/electron-builder")) {
         Write-Host "  Installing electron + electron-builder..."
-        & npm install 2>&1 | Out-Null
+        Invoke-Native { & npm install }
         if ($LASTEXITCODE -ne 0) {
             Write-Fail "npm install failed (exit code $LASTEXITCODE)"
         }
     }
 
-    & npx electron-builder --win --x64
+    # electron-builder 的进度/警告输出走 stderr — Invoke-Native 处理 EAP 降级。
+    Invoke-Native { & npx electron-builder --win --x64 }
     if ($LASTEXITCODE -ne 0) {
         Write-Fail "electron-builder failed"
     }

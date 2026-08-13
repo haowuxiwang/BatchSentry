@@ -98,6 +98,18 @@
         es.onmessage = (e) => {
           try {
             const d = JSON.parse(e.data);
+            // 应用级错误帧（服务端发 type=error 的 message 帧 — 见
+            // jobs.py stream_job_progress）：job 不存在/已被删除是终态，
+            // 停止重试并提示，而不是像网络抖动那样无限重连。
+            if (d.type === "error") {
+              log.err("SSE job error", d);
+              es.close();
+              if (pollTimer) clearInterval(pollTimer);
+              txt.textContent = "任务不存在或已被删除";
+              const barEl = document.getElementById("progress-bar-container");
+              if (barEl) barEl.classList.add("opacity-60");
+              return;
+            }
             const total = d.total_pages || 0;
             // OCR 完成后 total_pages 从 0 → 51，同步标题栏（不重置 iframe）
             if (total > 0 && total !== totalPages) {

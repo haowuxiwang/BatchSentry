@@ -176,9 +176,8 @@ class TestGetJobStatus:
 class TestGetPageData:
     """GET /api/jobs/{id}/pages/{page} — 单页数据。
 
-    注：此路由由 api/review.py 的 get_page 端点处理（review_router 先注册），
-    返回 {job_id, page, raw_html, structured}。
-    api/jobs.py 的 get_page_data 端点因路径冲突未被命中（设计如此）。
+    此路由由 api/review.py 的 get_page 端点处理（review_router 先注册），
+    返回 {job_id, page, raw_html, structured}。jobs.py 的同路径死端点已删除。
     """
 
     @pytest.mark.asyncio
@@ -391,15 +390,15 @@ class TestStatsOverviewEdgeCases:
 
 
 class TestJobsModuleDirectFunctions:
-    """直接调用 api/jobs.py 中未被路由命中的函数（路径冲突屏蔽的端点）。
+    """直接调用 api/review.py 的 get_page — 单页数据唯一端点。
 
-    api/jobs.py 的 get_page_data 因 review_router 先注册而未被路由命中。
-    这里直接调用函数以覆盖其内部逻辑。
+    jobs.py 的 get_page_data 死端点（路径冲突被 review_router 屏蔽）已
+    合并删除；此处直接调用 review.get_page 覆盖其 JSON 容错分支。
     """
 
     @pytest.mark.asyncio
-    async def test_get_page_data_direct_call(self, test_db):
-        """直接调用 get_page_data 覆盖 page_confidence / parse_error 分支。"""
+    async def test_get_page_direct_call(self, test_db):
+        """直接调用 get_page — structured 返回完整 JSON。"""
         await test_db.execute(
             "INSERT INTO jobs (id, filename, pdf_path, status, total_pages) "
             "VALUES (?, ?, ?, ?, ?)",
@@ -417,15 +416,15 @@ class TestJobsModuleDirectFunctions:
         )
         await test_db.commit()
 
-        from api.jobs import get_page_data
-        result = await get_page_data("direct-job", 1)
+        from api.review import get_page
+        result = await get_page("direct-job", 1)
         assert result["page"] == 1
         assert result["raw_html"] == "<p>html</p>"
-        assert result["page_confidence"] == "high"
-        assert result["page_parse_error"] is False
+        assert result["structured"]["overall_confidence"] == "high"
+        assert result["structured"]["_parse_error"] is False
 
     @pytest.mark.asyncio
-    async def test_get_page_data_with_parse_error(self, test_db):
+    async def test_get_page_with_parse_error(self, test_db):
         """structured_json 含 _parse_error=true 时应反映。"""
         await test_db.execute(
             "INSERT INTO jobs (id, filename, pdf_path, status) "
@@ -444,14 +443,14 @@ class TestJobsModuleDirectFunctions:
         )
         await test_db.commit()
 
-        from api.jobs import get_page_data
-        result = await get_page_data("direct-job-2", 1)
-        assert result["page_parse_error"] is True
-        assert result["page_confidence"] == "low"
+        from api.review import get_page
+        result = await get_page("direct-job-2", 1)
+        assert result["structured"]["_parse_error"] is True
+        assert result["structured"]["overall_confidence"] == "low"
 
     @pytest.mark.asyncio
-    async def test_get_page_data_invalid_json(self, test_db):
-        """structured_json 为非法 JSON 时 page_confidence 应为空字符串。"""
+    async def test_get_page_invalid_json(self, test_db):
+        """structured_json 为非法 JSON 时 structured 应降级为 None。"""
         await test_db.execute(
             "INSERT INTO jobs (id, filename, pdf_path, status) "
             "VALUES (?, ?, ?, ?)",
@@ -464,25 +463,24 @@ class TestJobsModuleDirectFunctions:
         )
         await test_db.commit()
 
-        from api.jobs import get_page_data
-        result = await get_page_data("direct-job-3", 1)
-        # 非法 JSON 应被 try/except 捕获，page_confidence 保持空
-        assert result["page_confidence"] == ""
-        assert result["page_parse_error"] is False
+        from api.review import get_page
+        result = await get_page("direct-job-3", 1)
+        # 非法 JSON 应被 try/except 捕获，structured 为 None（前端回退空对象）
+        assert result["structured"] is None
 
     @pytest.mark.asyncio
-    async def test_get_page_data_nonexistent_returns_404(self, test_db):
+    async def test_get_page_nonexistent_returns_404(self, test_db):
         """page 不存在应抛 HTTPException 404。"""
         from fastapi import HTTPException
-        from api.jobs import get_page_data
+        from api.review import get_page
 
         with pytest.raises(HTTPException) as exc_info:
-            await get_page_data("no-such-job", 1)
+            await get_page("no-such-job", 1)
         assert exc_info.value.status_code == 404
 
     @pytest.mark.asyncio
-    async def test_get_page_data_null_structured_json(self, test_db):
-        """structured_json 为 NULL 时 page_confidence 应为空。"""
+    async def test_get_page_null_structured_json(self, test_db):
+        """structured_json 为 NULL 时 structured 应为 None。"""
         await test_db.execute(
             "INSERT INTO jobs (id, filename, pdf_path, status) "
             "VALUES (?, ?, ?, ?)",
@@ -495,10 +493,9 @@ class TestJobsModuleDirectFunctions:
         )
         await test_db.commit()
 
-        from api.jobs import get_page_data
-        result = await get_page_data("direct-job-4", 1)
-        assert result["page_confidence"] == ""
-        assert result["page_parse_error"] is False
+        from api.review import get_page
+        result = await get_page("direct-job-4", 1)
+        assert result["structured"] is None
 
 
 class TestConcurrencyGuard:
@@ -730,15 +727,22 @@ class TestStreamJobProgress:
 
     @pytest.mark.asyncio
     async def test_stream_missing_job_sends_error_event(self, client):
-        """不存在的 job 应推送 error 事件后关闭。"""
+        """不存在的 job 应推送 type=error 的 message 帧后关闭。
+
+        协议细节：SSE 规范中 `event: error` 是保留类型，浏览器收到会立即
+        断开且不暴露 data（前端无法区分 job 缺失与网络抖动），所以错误
+        通过普通 message 帧的 type 字段传达。
+        """
         body = ""
         async with client.stream("GET", "/api/jobs/no-such-job/stream") as resp:
             async for chunk in resp.aiter_text():
                 body += chunk
-                if "event: error" in body:
+                if '"type": "error"' in body:
                     break
-        assert "event: error" in body
-        assert "Job not found" in body
+        assert '"type": "error"' in body
+        assert '"message": "Job not found"' in body
+        # 不得使用保留类型 event: error（浏览器强制断连语义）
+        assert "event: error" not in body
 
     @pytest.mark.asyncio
     async def test_stream_events_carry_id_and_retry(self, client, test_db):
@@ -901,3 +905,44 @@ class TestDeleteJobEdgeCases:
         r = await client.delete("/api/jobs/ghost-job?keep_pdf=false")
         assert r.status_code == 200
         assert r.json()["deleted"] is True
+
+
+class TestCorsPreflight:
+    """CORS 预检 — allow_methods 必须覆盖前端全部 fetch 方法（含 PUT）。"""
+
+    @pytest.mark.asyncio
+    async def test_preflight_allows_put(self, client):
+        """PUT 预检（/api/settings/rules）应被允许 — settings.js:990。"""
+        r = await client.request(
+            "OPTIONS",
+            "/api/settings/rules",
+            headers={
+                "Origin": "http://127.0.0.1:58765",
+                "Access-Control-Request-Method": "PUT",
+                "Access-Control-Request-Headers": "content-type",
+            },
+        )
+        assert r.status_code == 200
+        allow = r.headers.get("access-control-allow-methods", "")
+        assert "PUT" in allow
+        assert "GET" in allow and "POST" in allow and "DELETE" in allow
+
+    @pytest.mark.asyncio
+    async def test_preflight_rejects_disallowed_origin(self, client):
+        """非白名单 Origin 的预检不应得到 allow-origin 头。"""
+        r = await client.request(
+            "OPTIONS",
+            "/api/jobs",
+            headers={
+                "Origin": "http://evil.example.com",
+                "Access-Control-Request-Method": "GET",
+            },
+        )
+        assert "access-control-allow-origin" not in r.headers
+
+    @pytest.mark.asyncio
+    async def test_actual_request_echoes_allow_origin(self, client):
+        """白名单 Origin 的实际 GET 响应应回显 allow-origin。"""
+        r = await client.get("/health", headers={"Origin": "http://127.0.0.1:58765"})
+        assert r.status_code == 200
+        assert r.headers.get("access-control-allow-origin") == "http://127.0.0.1:58765"

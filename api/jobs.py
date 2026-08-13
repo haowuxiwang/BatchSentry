@@ -559,8 +559,11 @@ async def stream_job_progress(job_id: str, request: Request):
             progress = await _get_job_progress(db, job_id)
             if progress is None:
                 seq += 1
-                yield (f"id: {seq}\nevent: error\n"
-                       f"data: {json.dumps({'message': 'Job not found'})}\n\n")
+                # 注意：不能用 `event: error` 帧 — SSE 规范中 error 是保留事件
+                # 类型，浏览器收到后立即断开连接且不暴露 data，前端无法区分
+                # "job 不存在" 与网络抖动。改用普通 message 帧携带 type 字段。
+                yield (f"id: {seq}\n"
+                       f"data: {json.dumps({'type': 'error', 'message': 'Job not found'}, ensure_ascii=False)}\n\n")
                 return
 
             payload = json.dumps(progress, ensure_ascii=False)
@@ -598,41 +601,6 @@ async def cancel_job(job_id: str):
         logger.warning(f"[{job_id}] Cancel blocked: {e}")
         raise HTTPException(400, str(e))
     return {"ok": True, "status": "cancelling"}
-
-
-@router.get("/{job_id}/pages/{page}")
-async def get_page_data(job_id: str, page: int):
-    """获取单页数据（AJAX 用）— raw_html + structured_json。
-
-    前端翻页时通过此 API 获取数据，避免整页刷新。
-    """
-    db = await get_db()
-    cursor = await db.execute(
-        "SELECT raw_html, structured_json FROM page_cache WHERE job_id = ? AND page = ?",
-        (job_id, page),
-    )
-    row = await cursor.fetchone()
-    if not row:
-        raise HTTPException(404, f"Page {page} not found")
-
-    # 提取 page_confidence + parse_error
-    page_confidence = ""
-    page_parse_error = False
-    if row["structured_json"]:
-        import json as _json
-        try:
-            data = _json.loads(row["structured_json"])
-            page_parse_error = bool(data.get("_parse_error"))
-            page_confidence = data.get("overall_confidence") or ""
-        except _json.JSONDecodeError:
-            pass
-
-    return {
-        "page": page,
-        "raw_html": row["raw_html"] or "",
-        "page_confidence": page_confidence,
-        "page_parse_error": page_parse_error,
-    }
 
 
 @router.post("/{job_id}/retry")

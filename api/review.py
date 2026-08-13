@@ -210,7 +210,12 @@ async def get_llm_audit_log(job_id: str, limit: int = 100):
 
 @router.get("/jobs/{job_id}/pages/{page}")
 async def get_page(job_id: str, page: int):
-    """Get raw OCR HTML and structured data for a page."""
+    """Get raw OCR HTML and structured data for a page.
+
+    全项目唯一单页数据端点（jobs.py 曾有一个路径冲突的 get_page_data
+    死端点，已合并删除）。structured 返回完整 JSON，前端自行提取
+    overall_confidence / _parse_error（review.js updatePageLevelUI）。
+    """
     db = await get_db()
     cursor = await db.execute(
         "SELECT raw_html, structured_json FROM page_cache WHERE job_id = ? AND page = ?",

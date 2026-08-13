@@ -13,3 +13,12 @@ html, body {
 ::-webkit-scrollbar-thumb:hover { background: hsl(var(--muted-foreground)); }
 
 .lucide { width: 14px; height: 14px; display: inline-block; vertical-align: -2px; }
+
+/* 3 列复核布局（页码导航 | PDF | 发现）— 响应式降级：
+   默认 180px / 1fr / 440px；窗口收窄时优先压缩左右列保证 PDF 可读，
+   极窄时左列改为窄条 + 右列叠加在 PDF 上方可关闭（桌面场景兜底）。 */
+.review-grid { grid-template-columns: 180px 1fr 440px; }
+@media (max-width: 1200px) { .review-grid { grid-template-columns: 150px 1fr 380px; } }
+@media (max-width: 1000px) { .review-grid { grid-template-columns: 120px 1fr 340px; } }
+@media (max-width: 860px) { .review-grid { grid-template-columns: 96px 1fr 300px; } }
+@media (max-width: 700px) { .review-grid { grid-template-columns: 1fr; } }

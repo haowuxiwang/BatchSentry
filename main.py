@@ -91,7 +91,7 @@ app.add_middleware(
         "http://127.0.0.1:8000",   # dev server (uvicorn)
         "http://127.0.0.1:58765",  # Electron default port
     ],
-    allow_methods=["GET", "POST", "DELETE"],
+    allow_methods=["GET", "POST", "PUT", "DELETE"],  # PUT: /api/settings/rules
     allow_headers=["Content-Type", "X-Request-ID"],
     allow_credentials=False,
 )
