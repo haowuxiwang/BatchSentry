@@ -132,12 +132,12 @@
                     PDF 原图 · 第 <span id="page-num" class="text-foreground font-mono">{{ page }}</span> / <span id="page-total" class="text-foreground font-mono">{{ total_pages if total_pages else '?' }}</span> 页
                 </h2>
                 <div class="flex items-center gap-2">
-                    <button onclick="goPage({{ page - 1 }})" {% if page <= 1 %}disabled{% endif %}
+                    <button id="btn-prev-page" onclick="navPage(-1)" {% if page <= 1 %}disabled{% endif %}
                             class="btn-press focus-ring inline-flex items-center justify-center h-8 w-8 rounded-md border border-border bg-card hover:bg-accent disabled:opacity-40 disabled:pointer-events-none">
                         <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor" class="w-4 h-4"><path stroke-linecap="round" stroke-linejoin="round" d="M15.75 19.5L8.25 12l7.5-7.5"/></svg>
                     </button>
                     <span id="page-counter" class="text-sm text-muted-foreground font-mono tabular-nums w-16 text-center">{{ page }} / {{ total_pages if total_pages else '?' }}</span>
-                    <button onclick="goPage({{ page + 1 }})" {% if page >= total_pages %}disabled{% endif %}
+                    <button id="btn-next-page" onclick="navPage(1)" {% if page >= total_pages %}disabled{% endif %}
                             class="btn-press focus-ring inline-flex items-center justify-center h-8 w-8 rounded-md border border-border bg-card hover:bg-accent disabled:opacity-40 disabled:pointer-events-none">
                         <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor" class="w-4 h-4"><path stroke-linecap="round" stroke-linejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5"/></svg>
                     </button>

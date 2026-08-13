@@ -245,6 +245,23 @@ def _sanitize_page_result(data: dict) -> dict:
             data["findings"] = []
         else:
             data["findings"] = _only_dicts(data["findings"])
+    # scalar fields — rule layer calls .get()/.lower()/[:40] on these;
+    # truthy non-str values (page_info:"摘要页", overall_confidence:5,
+    # operation:123) would crash Stage 3. fail-closed: coerce to str / {}.
+    if "page_info" in data and data["page_info"] is not None and not isinstance(data["page_info"], dict):
+        data["page_info"] = {}
+    if "overall_confidence" in data and data["overall_confidence"] is not None and not isinstance(data["overall_confidence"], str):
+        data["overall_confidence"] = str(data["overall_confidence"])
+    for step in data.get("steps", []):
+        for field in ("operation", "operator", "reviewer", "start_time", "end_time"):
+            v = step.get(field)
+            if v is not None and not isinstance(v, str):
+                step[field] = str(v)
+        for sig in step.get("signatures", []):
+            for field in ("role", "name"):
+                v = sig.get(field)
+                if v is not None and not isinstance(v, str):
+                    sig[field] = str(v)
     return data
 
 

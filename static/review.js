@@ -111,18 +111,7 @@
               const navTotalEl = document.getElementById("page-nav-total");
               if (navTotalEl) navTotalEl.textContent = label;
               // 同步翻页按钮状态（totalPages 已知后允许翻页）
-              document
-                .querySelectorAll('[onclick^="goPage"]')
-                .forEach((btn) => {
-                  const match = btn
-                    .getAttribute("onclick")
-                    .match(/goPage\((\d+)\)/);
-                  if (match) {
-                    const target = parseInt(match[1]);
-                    btn.disabled =
-                      target < 1 || target > totalPages;
-                  }
-                });
+              syncNavButtons();
             }
             // 流式：OCR 完成后若仍在占位态（total_pages=0 时进入页面），
             // 重建页码导航；随后每页圆点随 findings 实时点亮
@@ -463,14 +452,8 @@
       };
       render();
     }
-    // 更新翻页按钮 disabled 状态
-    document.querySelectorAll('[onclick^="goPage"]').forEach((btn) => {
-      const match = btn.getAttribute("onclick").match(/goPage\((\d+)\)/);
-      if (match) {
-        const target = parseInt(match[1]);
-        btn.disabled = target < 1 || target > totalPages;
-      }
-    });
+    // 更新翻页按钮 disabled 状态（prev/next 箭头 — 页码导航各自管理 active 态）
+    syncNavButtons();
   }
 
   // AJAX 加载页面数据（findings + OCR + measurements + banners）
@@ -479,7 +462,7 @@
     showPageLoading();
     // 翻页期间禁用所有翻页按钮，防止重复点击
     document
-      .querySelectorAll('[onclick^="goPage"]')
+      .querySelectorAll('[onclick^="goPage"], [onclick^="navPage"]')
       .forEach((b) => (b.disabled = true));
     try {
       const r = await fetch(`/api/jobs/${jobId}/pages/${targetPage}`);
@@ -796,6 +779,20 @@
     loadPageData(p);
   }
 
+  // 箭头翻页：onclick 只携带固定 delta（-1/+1），目标页永远从 currentPage
+  // 实时计算 — 避免服务端渲染的 {{ page ± 1 }} 死值在 AJAX 翻页后失效/错跳
+  function navPage(delta) {
+    goPage(currentPage + delta);
+  }
+
+  // prev/next 箭头按钮 disabled 状态：与 currentPage/totalPages 实时同步
+  function syncNavButtons() {
+    const prev = document.getElementById("btn-prev-page");
+    const next = document.getElementById("btn-next-page");
+    if (prev) prev.disabled = currentPage <= 1;
+    if (next) next.disabled = currentPage >= totalPages;
+  }
+
   // === 上下文操作: 取消 / 重试 ===
   async function cancelJob(e) {
     const ok = await window.PBC.confirmDialog({
@@ -1025,6 +1022,7 @@
 
   // 暴露到全局（onclick 处理器需要）
   window.goPage = goPage;
+  window.navPage = navPage;
   window.cancelJob = cancelJob;
   window.retryJob = retryJob;
   window.toggleOcr = toggleOcr;

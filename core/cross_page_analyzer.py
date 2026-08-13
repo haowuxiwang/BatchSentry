@@ -570,7 +570,25 @@ def _normalize_pages(page_structures: list[dict]) -> list[dict]:
             for field in ("parameters", "measurements", "signatures"):
                 if field in s and isinstance(s[field], list):
                     s[field] = [x for x in s[field] if isinstance(x, dict)]
+            # P1-2 兜底(标量): 规则层对 step 标量字段 .lower()/[:40] 切片，
+            # truthy 非 str（如 operation:123）会 TypeError 崩掉 Stage 3。
+            for field in ("operation", "operator", "reviewer", "start_time", "end_time"):
+                v = s.get(field)
+                if v is not None and not isinstance(v, str):
+                    s[field] = str(v)
+            for sig in s.get("signatures", []) or []:
+                for field in ("role", "name"):
+                    v = sig.get(field)
+                    if v is not None and not isinstance(v, str):
+                        sig[field] = str(v)
             steps.append(s)
+        # P1-2 兜底(标量): page_info 非 dict → {}；overall_confidence 非 str → str()
+        page_info = data.get("page_info")
+        if page_info is not None and not isinstance(page_info, dict):
+            data["page_info"] = {}
+        if "overall_confidence" in data and data["overall_confidence"] is not None \
+                and not isinstance(data["overall_confidence"], str):
+            data["overall_confidence"] = str(data["overall_confidence"])
         out.append({
             "page": ps.get("page"),
             "data": data,

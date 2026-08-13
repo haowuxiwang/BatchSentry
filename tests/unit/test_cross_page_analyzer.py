@@ -628,6 +628,45 @@ class TestNormalizePages:
         # 消毒后 steps 只剩合法 dict → R1-a 正常判定/或跳过；不崩溃是核心断言
         assert all(isinstance(f, dict) for f in findings)
 
+    def test_analyze_cross_page_survives_scalar_pollution(self):
+        """P1-2 端到端(标量): page_info 非 dict / overall_confidence 非 str /
+        operation 非 str / signature role 非 str — 规则层直接触碰这些字段
+        （时间反转、批量一致性、完整性、低置信度检查），消毒后不抛异常。"""
+        from unittest.mock import MagicMock
+
+        polluted = [
+            {"page": 1, "data": {
+                "page_info": "摘要页",
+                "overall_confidence": 5,
+                "steps": [
+                    {
+                        "step_no": 1,
+                        "operation": 123,
+                        "start_time": "2024-01-01 09:00",
+                        "end_time": "2024-01-01 10:00",
+                        "signatures": [{"role": 7, "name": None}],
+                        "parameters": [],
+                        "measurements": [],
+                    },
+                ],
+            }},
+            {"page": 2, "data": {
+                "page_info": "续页",
+                "steps": [
+                    {"step_no": 1, "operation": "复核", "parameters": [],
+                     "measurements": [], "signatures": []},
+                ],
+            }},
+        ]
+        mock_client = MagicMock()
+        mock_client.chat_json = AsyncMock(return_value=[])
+        with patch('core.cross_page_analyzer.get_llm_client', return_value=mock_client):
+            findings = asyncio.run(analyze_cross_page(polluted, job_id="test"))
+        assert isinstance(findings, list)
+        assert all(isinstance(f, dict) for f in findings)
+        # 消毒路径: page_info 被置空 → 批量一致性检查跳过而非崩溃
+        assert not any(f.get("source") == "rule" and f.get("description", "").startswith("批量") for f in findings)
+
 
 # ===========================================================================
 # _collect_per_page_findings 过滤

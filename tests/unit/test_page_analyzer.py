@@ -413,6 +413,40 @@ class TestSanitizePageResult:
         _sanitize_page_result(data)
         assert data["steps"] == []
 
+    def test_scalar_pollution_coerced_not_crash(self):
+        """标量污染: page_info 非 dict / overall_confidence 非 str / step 标量
+        非 str → fail-closed 转义，规则层 .get()/.lower()/[:40] 不再抛异常。"""
+        from core.page_analyzer import _sanitize_page_result
+
+        data = {
+            "page_info": "摘要页",
+            "overall_confidence": 5,
+            "steps": [
+                {
+                    "step_no": 1,
+                    "operation": 123,
+                    "operator": None,
+                    "reviewer": True,
+                    "start_time": 100,
+                    "end_time": 0,
+                    "signatures": [{"role": 7, "name": None}],
+                }
+            ],
+        }
+        _sanitize_page_result(data)
+
+        assert data["page_info"] == {}
+        assert data["overall_confidence"] == "5"
+        step = data["steps"][0]
+        assert step["operation"] == "123"
+        assert step["operator"] is None
+        assert step["reviewer"] == "True"
+        assert step["start_time"] == "100"
+        assert step["end_time"] == "0"
+        sig = step["signatures"][0]
+        assert sig["role"] == "7"
+        assert sig["name"] is None
+
     @pytest.mark.asyncio
     async def test_analyze_page_sanitizes_polluted_llm_output(self):
         """analyze_page 返回的已是消毒后数据（page_cache 只存干净结构）。"""
