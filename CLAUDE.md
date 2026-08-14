@@ -42,7 +42,7 @@ npx tailwindcss -i ./static/input.css -o ./static/app.css --minify
 # API docs (Swagger): http://127.0.0.1:8000/docs
 ```
 
-Test coverage target: ≥90%. Current: 90.58% (870 tests, see `tests/` with unit + integration suites).
+Test coverage target: ≥90%. Current: 90.40% (871 tests, see `tests/` with unit + integration suites).
 
 ---
 
