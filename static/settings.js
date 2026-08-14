@@ -1049,14 +1049,13 @@
     rules.push({ id: undefined, text: "", active: true });
     renderRules();
     const listEl = document.getElementById("rules-list");
-    if (listEl && listEl.lastElementChild) {
-      const ta = listEl.lastElementChild.querySelector("textarea");
-      if (ta) {
-        ta.value = text;
-        ta.dispatchEvent(new Event("input", { bubbles: true }));
-        ta.focus();
-        ta.selectionStart = ta.value.length;
-      }
+    const rows = listEl ? listEl.querySelectorAll("[data-rule-index]") : [];
+    const ta = rows.length ? rows[rows.length - 1].querySelector("textarea") : null;
+    if (ta) {
+      ta.value = text;
+      ta.dispatchEvent(new Event("input", { bubbles: true }));
+      ta.focus();
+      ta.selectionStart = ta.value.length;
     }
     ruleDirty();
   });
