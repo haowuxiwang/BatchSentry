@@ -57,7 +57,11 @@ def _pdf_render_zoom(page) -> float:
 
 
 def _get_pdf_doc(job_id: str, pdf_path: str):
-    """取 job 的 fitz Document 句柄（带缓存），缓存过期/超容量时淘汰。"""
+    """Return a cached fitz.Document for the job, opening + caching if needed.
+
+    TTL/容量淘汰时 close 句柄；Windows 上未关闭的 fitz 句柄会锁住 PDF
+    文件（delete_job 的 rmtree 会因此失败），删除前须 _invalidate_pdf_doc。
+    """
     now = time.time()
     stale = [k for k, (_, ts) in _pdf_doc_cache.items() if now - ts > _PDF_CACHE_TTL]
     for k in stale:
@@ -80,6 +84,21 @@ def _get_pdf_doc(job_id: str, pdf_path: str):
         _pdf_doc_cache.pop(oldest, None)
     _pdf_doc_cache[job_id] = (doc, now)
     return doc
+
+
+def _invalidate_pdf_doc(job_id: str):
+    """Close + drop the cached fitz handle for a job (releases the file lock).
+
+    Windows 上未 close 的 fitz Document 保持对 PDF 文件的独占锁，
+    使 delete_job 的 shutil.rmtree 抛 WinError 32（文件被占用），
+    任务删除后 output 目录残留。删除前必须先失效缓存。
+    """
+    entry = _pdf_doc_cache.pop(job_id, None)
+    if entry:
+        try:
+            entry[0].close()
+        except Exception:
+            pass
 
 
 @router.post("")
@@ -802,6 +821,9 @@ async def delete_job(job_id: str, keep_pdf: bool = False):
 
     # 删除 PDF 文件
     if not keep_pdf and pdf_path:
+        # 先失效渲染缓存：fitz 句柄在 Windows 上锁住 PDF，rmtree 会
+        # WinError 32 失败导致 output 目录残留（E2E 实测复现）。
+        _invalidate_pdf_doc(job_id)
         pdf = Path(pdf_path)
         # Security: validate job_dir is inside output_dir to prevent
         # rmtree on arbitrary paths if pdf_path was tampered with.

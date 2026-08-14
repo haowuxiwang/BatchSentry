@@ -312,6 +312,32 @@ class TestDeleteJobKeepPdfBranches:
         from pathlib import Path
         assert not Path(pdf_path).exists()
 
+    @pytest.mark.asyncio
+    async def test_delete_after_page_render_releases_fitz_lock(self, client_with_job):
+        """渲染过的页面（fitz 句柄缓存）不阻塞 delete 的文件清理。
+
+        回归：Windows 上 _pdf_doc_cache 未 close 的句柄锁住 PDF，
+        rmtree 抛 WinError 32 → job 删除后 output 目录残留（E2E 实测）。
+        delete_job 应先 _invalidate_pdf_doc 再删文件。
+        """
+        import api.jobs as jobs_mod
+
+        c, pdf_path = client_with_job
+        # 触发渲染缓存（fitz 打开 PDF 持有句柄）
+        r = await c.get("/api/jobs/coverage-job/page/1")
+        assert r.status_code == 200
+        assert jobs_mod._pdf_doc_cache.get("coverage-job") is not None
+        # 删除不应返回 warning（文件必须真正被删掉）
+        r = await c.delete("/api/jobs/coverage-job")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["deleted"] is True
+        assert "warning" not in body
+        from pathlib import Path
+        assert not Path(pdf_path).exists()
+        # 缓存项已被失效移除
+        assert "coverage-job" not in jobs_mod._pdf_doc_cache
+
 
 class TestUploadSecurity:
     """POST /api/jobs — 文件名安全 + 大文件保护。"""

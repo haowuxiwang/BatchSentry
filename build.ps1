@@ -149,8 +149,10 @@ if (-not $SkipPyInstaller) {
     }
 
     if (Test-Path "dist/pbc-server/pbc-server.exe") {
-        $size = (Get-Item "dist/pbc-server").Length / 1MB
-        Write-OK ("dist/pbc-server/ built ({0:N1} MB)" -f $size)
+        # Get-Item 对目录返回 Length=0 — 统计 exe 实际大小（含 _internal 需递归）
+        $total = (Get-ChildItem "dist/pbc-server" -Recurse -File |
+            Measure-Object -Property Length -Sum).Sum / 1MB
+        Write-OK ("dist/pbc-server/ built ({0:N1} MB)" -f $total)
     } else {
         Write-Fail "dist/pbc-server/pbc-server.exe not found"
     }
@@ -158,20 +160,29 @@ if (-not $SkipPyInstaller) {
     # ── 2.5 冒烟测试（robustness-F1）───────────────────────────
     # 启动刚构建的 exe，轮询 /health，通过后再继续打包。exe 启动即崩
     # 时在此暴露（此前会产出无法运行的 Electron 包）。
+    # 即便 58765 已有响应（开发实例/旧 exe 占用），也要验证"新 exe 本身
+    # 可启动"——直接 spawn 并轮询，成功后停掉，不依赖端口空闲。
     Write-Step "Smoke test: 启动 pbc-server.exe 验证 /health"
     $proc = $null
     $smokeOk = $false
+    $skipSmoke = $false
     try {
-        # 端口可能已被开发中运行的实例占用：若 /health 已响应则视为通过
-        try {
-            $resp = Invoke-WebRequest -Uri "http://127.0.0.1:58765/health" -TimeoutSec 2 -UseBasicParsing
-            if ($resp.StatusCode -eq 200) {
-                Write-OK "  /health already responds (existing instance) — skip spawn"
-                $smokeOk = $true
+        # 端口占用分类：pbc-server.exe（旧产物）→ 停掉后换新验证；
+        # 其他进程（dev uvicorn 等）→ 不动，警告并跳过（避免误杀开发环境）。
+        $holder = (netstat -ano | Select-String ":58765\s" | Select-String "LISTENING" |
+            Select-Object -First 1)
+        if ($holder) {
+            $holderPid = [int](($holder.ToString().Trim() -split "\s+")[-1])
+            $holderName = (Get-Process -Id $holderPid -ErrorAction SilentlyContinue).ProcessName
+            if ($holderName -eq "pbc-server") {
+                Stop-Process -Id $holderPid -Force -ErrorAction SilentlyContinue
+                Start-Sleep -Seconds 1
+            } else {
+                Write-Warning "  58765 被非 pbc-server 进程占用 ($holderName, PID $holderPid) — 跳过 smoke，请手动验证新 exe"
+                $skipSmoke = $true
             }
-        } catch { }
-
-        if (-not $smokeOk) {
+        }
+        if (-not $skipSmoke) {
             $proc = Start-Process -FilePath "dist/pbc-server/pbc-server.exe" -PassThru -WindowStyle Hidden
             for ($i = 0; $i -lt 30; $i++) {
                 Start-Sleep -Milliseconds 1000
