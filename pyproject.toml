@@ -1,0 +1,10 @@
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+# F-class only (pyflakes: unused imports/vars, undefined names — real defects).
+# E/W (PEP8 style) intentionally not enforced: legacy codebase never followed
+# them; enforcing would flood the diff with formatting churn.
+select = ["F"]
+ignore = []

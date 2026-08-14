@@ -15,9 +15,13 @@ import asyncio
 import json
 import logging
 import time
+from typing import TYPE_CHECKING
 
 from config import config
 from llm.adapters import get_adapter
+
+if TYPE_CHECKING:
+    from llm.adapters.base import ChatResult
 
 logger = logging.getLogger(__name__)
 

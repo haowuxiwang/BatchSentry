@@ -5,7 +5,6 @@ Covers:
 - validate_external_url: empty / bad scheme / require_https / blocked host
 - is_local_request: localhost host / non-local host / Origin allow-list
 """
-import pytest
 from unittest.mock import MagicMock
 
 from core.security import (

@@ -144,7 +144,6 @@ def download_result(poll_response: dict) -> list[dict]:
       - markdown.text (HTML table string)
       - prunedResult.parsing_res_list (block-level structure)
     """
-    cfg = config["paddle_ocr"]
     result_url_obj = poll_response.get("data", {}).get("resultUrl") or poll_response.get("resultUrl")
     json_url = None
     if isinstance(result_url_obj, dict):

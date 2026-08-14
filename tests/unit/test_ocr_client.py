@@ -3,8 +3,7 @@
 使用 mock 避免真实 HTTP 调用。
 """
 import pytest
-from unittest.mock import patch, AsyncMock, MagicMock
-from pathlib import Path
+from unittest.mock import patch
 
 from core import mineru_client
 from core import ocr_client

@@ -1572,7 +1572,6 @@ class TestUserRulesInjection:
     def test_llm_based_check_injects_user_rules(self, tmp_path):
         """启用规则时 prompt 应包含规则段，prompt_version 应带 rules hash。"""
         import json
-        from core.cross_page_analyzer import _llm_based_check
         cfg = tmp_path / "config.json"
         cfg.write_text(json.dumps({"user_rules": [
             {"text": "产品 X 储存温度必须 15-25°C", "active": True},
@@ -1601,7 +1600,6 @@ class TestUserRulesInjection:
     def test_llm_based_check_without_rules_uses_semantic_v2(self, tmp_path):
         """无规则时 prompt_version 应为 semantic_v2。"""
         import json
-        from core.cross_page_analyzer import _llm_based_check
         cfg = tmp_path / "config.json"
         cfg.write_text(json.dumps({}), encoding="utf-8")
 
@@ -1624,7 +1622,6 @@ class TestUserRulesInjection:
     def test_user_rule_findings_marked_with_user_rule_source(self, tmp_path):
         """type=user_rule 的 finding 应标记 source=user_rule，其余保持 llm_cross。"""
         import json
-        from core.cross_page_analyzer import _llm_based_check
         cfg = tmp_path / "config.json"
         cfg.write_text(json.dumps({}), encoding="utf-8")
 
@@ -1648,7 +1645,6 @@ class TestUserRulesInjection:
     def test_user_rule_findings_carry_valid_rule_id(self, tmp_path):
         """rule_id 只在启用规则集合内保留；幻觉/缺失 id 一律置 None（防伪）。"""
         import json
-        from core.cross_page_analyzer import _llm_based_check
         cfg = tmp_path / "config.json"
         cfg.write_text(json.dumps({"user_rules": [
             {"id": "abc123", "text": "储存温度必须 15-25°C", "active": True},

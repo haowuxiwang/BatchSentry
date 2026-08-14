@@ -5,10 +5,7 @@
 - POST /api/settings 更新配置 + 内存同步
 - 供应商切换 bug 修复验证
 """
-import os
-import shutil
 import unittest.mock
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest

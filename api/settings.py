@@ -17,7 +17,6 @@ import json
 import logging
 import os
 import re
-import sys
 import time
 import uuid
 from pathlib import Path
@@ -404,7 +403,7 @@ def _build_env_updates(
             if not _validate_provider_name(prov_name):
                 errors.append(f"invalid provider name in field: {field}")
                 continue
-            if not str(value).lower() in ("true", "1"):
+            if str(value).lower() not in ("true", "1"):
                 continue  # 仅接受 truthy 值
             env_key = f"{prov_name.upper()}_API_KEY"
             env_updates[env_key] = ""
@@ -835,7 +834,7 @@ async def test_provider(req: TestProviderRequest, request: Request):
         elif any(kw in err_str for kw in ["403", "forbidden"]):
             reason = "访问被拒绝（可能 Key 无此模型权限）"
         elif any(kw in err_str for kw in ["timeout", "timed out"]):
-            reason = f"请求超时（8s）"
+            reason = "请求超时（8s）"
         elif any(kw in err_str for kw in ["connection", "dns", "resolve"]):
             reason = "无法连接到 Base URL"
         else:

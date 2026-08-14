@@ -9,16 +9,13 @@ job 删除时缓存项自然淘汰。
 """
 import asyncio
 import html
-import json
 import logging
 from datetime import datetime
-from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import PlainTextResponse
 
 from db.client import get_db
-from models.schemas import FindingStatus
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["report"])
@@ -152,18 +149,18 @@ def _generate_markdown(job: dict, findings: list[dict], total_pages: int) -> str
         return html.escape(str(text), quote=False)
 
     lines = [
-        f"# GMP 批生产记录合规检查报告",
-        f"",
+        "# GMP 批生产记录合规检查报告",
+        "",
         f"- **文件名**: {esc(job['filename'])}",
         f"- **总页数**: {total_pages}",
         f"- **生成时间**: {now}",
         f"- **Job ID**: {job['id']}",
         f"- **总 Findings**: {len(findings)}",
-        f"",
-        f"---",
-        f"",
-        f"## Findings 列表",
-        f"",
+        "",
+        "---",
+        "",
+        "## Findings 列表",
+        "",
     ]
 
     # Group by severity

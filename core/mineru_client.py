@@ -115,14 +115,14 @@ def submit_pdf(pdf_path: str) -> tuple[str, str]:
     logger.info(f"[MinerU] 上传链接获取成功, batch_id={batch_id}")
 
     # Step 2: PUT 上传文件（注意：上传时不要设置 Content-Type）
-    logger.info(f"[MinerU] 上传文件到 OSS...")
+    logger.info("[MinerU] 上传文件到 OSS...")
     with open(pdf_path, "rb") as f:
         upload_resp = requests.put(upload_url, data=f, timeout=300)
     if upload_resp.status_code != 200:
         raise RuntimeError(
             f"文件上传失败 HTTP {upload_resp.status_code}: {upload_resp.text[:300]}"
         )
-    logger.info(f"[MinerU] 文件上传完成, 等待系统自动提交解析任务...")
+    logger.info("[MinerU] 文件上传完成, 等待系统自动提交解析任务...")
 
     return batch_id, pdf_name
 
@@ -187,7 +187,7 @@ def poll_job(batch_id: str, progress_callback=None) -> dict:
         data = j.get("data", {})
         extract_result = data.get("extract_result", [])
         if not extract_result:
-            logger.info(f"[MinerU] 批次处理中, 等待任务创建...")
+            logger.info("[MinerU] 批次处理中, 等待任务创建...")
             time.sleep(POLL_INTERVAL)
             continue
 

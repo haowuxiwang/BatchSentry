@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import ipaddress
 import logging
-import os
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)

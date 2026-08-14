@@ -14,11 +14,8 @@
 """
 import os
 import sys
-import tempfile
-import sqlite3
 import logging
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import pytest_asyncio

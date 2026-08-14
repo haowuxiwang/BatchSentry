@@ -14,7 +14,7 @@ import pytest
 import pytest_asyncio
 from pathlib import Path
 from httpx import AsyncClient, ASGITransport
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 
 @pytest_asyncio.fixture
@@ -835,7 +835,6 @@ class TestArchiveKeepPdfFalse:
     @pytest.mark.asyncio
     async def test_archive_skips_cleanup_when_pdf_outside_output(self, client, test_db, tmp_path):
         """pdf_path 在 output_dir 外时路径校验失败，跳过清理（lines 397-398）。"""
-        from pathlib import Path
         outside_pdf = tmp_path / "outside.pdf"
         outside_pdf.write_bytes(b"%PDF-1.4 test")
         await test_db.execute(
@@ -856,7 +855,6 @@ class TestDeleteJobEdgeCases:
     @pytest.mark.asyncio
     async def test_delete_refuses_path_outside_output_dir(self, client, test_db, tmp_path):
         """pdf_path 在 output_dir 外时 DELETE keep_pdf=false 应返回 400（lines 454-459）。"""
-        from pathlib import Path
         outside_pdf = tmp_path / "evil.pdf"
         outside_pdf.write_bytes(b"%PDF-1.4")
         await test_db.execute(

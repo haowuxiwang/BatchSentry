@@ -5,7 +5,6 @@
     python e2e_test.py --upload-only  # 仅上传，立即返回
     python e2e_test.py --poll JOB_ID   # 仅轮询指定 job
 """
-import json
 import sys
 import time
 import requests
@@ -149,7 +148,7 @@ def verify(job_data: dict):
         print(f"  By type:     {by_type}")
 
         # 打印前 5 条 findings 摘要
-        print(f"\n  Sample findings (first 5):")
+        print("\n  Sample findings (first 5):")
         for f in findings[:5]:
             page = f.get("page", "?")
             sev = f.get("severity", "?")

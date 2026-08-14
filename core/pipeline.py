@@ -196,7 +196,7 @@ async def _transition_status_unlocked(db, job_id: str, new_status: str, detail: 
     await db.execute("UPDATE jobs SET status = ? WHERE id = ?", (new_status, job_id))
     await db.execute(
         "INSERT INTO audit_log (job_id, action, detail) VALUES (?, ?, ?)",
-        (job_id, f"status_transition", f"{current} → {new_status}: {detail}" if detail else f"{current} → {new_status}"),
+        (job_id, "status_transition", f"{current} → {new_status}: {detail}" if detail else f"{current} → {new_status}"),
     )
     await db.commit()
     logger.info(f"[{job_id}] Status: {current} → {new_status}" + (f" ({detail})" if detail else ""))

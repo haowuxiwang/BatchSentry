@@ -13,10 +13,8 @@ Phase 7 架构变更：
 - 测试改为 mock adapter.chat() 而非 SDK 内部方法
 """
 import pytest
-import json
 import asyncio
 from unittest.mock import patch, AsyncMock, MagicMock
-from dataclasses import dataclass
 
 from llm.client import LLMClient, get_llm_client, reset_llm_client
 from config import ProviderConfig

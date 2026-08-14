@@ -7,7 +7,6 @@ Covers:
 - probe_all: parallel aggregation
 - /api/health/downstream endpoint
 """
-import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest

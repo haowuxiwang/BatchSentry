@@ -6,21 +6,13 @@
 - _mask 脱敏函数
 - _settings_config_path 路径解析（dev/frozen 模式，JSON 配置文件）
 """
-import os
 import sys
-from unittest.mock import patch, MagicMock
-from pathlib import Path
+from unittest.mock import patch
 
-import pytest
 
 from config import (
     load_config,
     update_config,
-    DeepSeekConfig,
-    SiliconFlowConfig,
-    PaddleOCRConfig,
-    MinerUConfig,
-    AppConfig,
 )
 
 

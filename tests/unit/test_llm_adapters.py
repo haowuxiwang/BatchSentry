@@ -10,9 +10,8 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from config import ProviderConfig
-from llm.adapters import get_adapter, LLMAdapter, ChatResult
+from llm.adapters import get_adapter, ChatResult
 from llm.adapters.openai_adapter import OpenAIAdapter
-from llm.adapters.base import LLMAdapter as BaseLLMAdapter
 
 
 def _make_cfg(name="deepseek", protocol="openai", **kw):

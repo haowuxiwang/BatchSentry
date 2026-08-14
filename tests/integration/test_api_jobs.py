@@ -14,7 +14,7 @@
 """
 import pytest
 import pytest_asyncio
-from unittest.mock import AsyncMock, patch, MagicMock
+from unittest.mock import patch
 from httpx import AsyncClient
 
 
@@ -182,7 +182,6 @@ class TestCancelRetry:
     @pytest.mark.asyncio
     async def test_retry_respects_concurrency_limit(self, client_with_data, test_db):
         """并发上限已满时 retry 应返回 409（与 upload 一致）。"""
-        from unittest.mock import patch
         from api.jobs import _ACTIVE_STATUSES
 
         # 造一个 active job 占满上限（limit=1 时当前 job 改为 error 后不再活跃，

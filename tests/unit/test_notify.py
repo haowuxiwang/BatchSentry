@@ -11,9 +11,7 @@ All network calls are mocked — no real webhook is ever contacted.
 import asyncio
 import json
 import unittest.mock as mock
-from pathlib import Path
 
-import pytest
 
 from core.notify import (
     build_text_message,
@@ -156,7 +154,7 @@ class TestPostSync:
         resp_429 = mock.MagicMock(status_code=429)
         resp_ok = mock.MagicMock(status_code=200)
         resp_ok.json.return_value = {"code": 0, "msg": "success"}
-        with mock.patch("core.notify.requests.post", side_effect=[resp_429, resp_ok]) as m, \
+        with mock.patch("core.notify.requests.post", side_effect=[resp_429, resp_ok]), \
                 mock.patch("core.notify.time.sleep"):
             ok, detail = _post_sync("u", {"msg_type": "text"}, "")
         assert ok
@@ -167,7 +165,7 @@ class TestPostSync:
         resp_429.headers = {"x-ogw-ratelimit-reset": "30"}
         resp_ok = mock.MagicMock(status_code=200)
         resp_ok.json.return_value = {"code": 0, "msg": "success"}
-        with mock.patch("core.notify.requests.post", side_effect=[resp_429, resp_ok]) as m, \
+        with mock.patch("core.notify.requests.post", side_effect=[resp_429, resp_ok]), \
                 mock.patch("core.notify.time.sleep") as sleep:
             ok, _ = _post_sync("u", {"msg_type": "text"}, "")
         assert ok
@@ -178,7 +176,7 @@ class TestPostSync:
         resp_429.headers = {}
         resp_ok = mock.MagicMock(status_code=200)
         resp_ok.json.return_value = {"code": 0, "msg": "success"}
-        with mock.patch("core.notify.requests.post", side_effect=[resp_429, resp_ok]) as m, \
+        with mock.patch("core.notify.requests.post", side_effect=[resp_429, resp_ok]), \
                 mock.patch("core.notify.time.sleep") as sleep:
             ok, _ = _post_sync("u", {"msg_type": "text"}, "")
         assert ok
@@ -231,8 +229,7 @@ class TestNotifyJob:
     def test_success_flow_writes_audit_log(self, tmp_path):
         """配置正确 + 发送成功 → audit_log 出现 feishu_notify（GMP 留痕）。"""
         import aiosqlite
-        from db.client import SCHEMA_VERSION, init_schema, migrate
-        from config import config as _cfg
+        from db.client import init_schema, migrate
 
         db_path = tmp_path / "t.db"
         cfg = tmp_path / "config.json"
@@ -296,7 +293,7 @@ class TestNotifyJob:
     def test_dedup_skips_second_notification(self, tmp_path):
         """同 (job_id, status) 已有成功记录 → 第二次不发（webhook 无幂等键）。"""
         import aiosqlite
-        from db.client import SCHEMA_VERSION, init_schema, migrate
+        from db.client import init_schema, migrate
         import db.client as db_mod
 
         db_path = tmp_path / "t_dedup.db"
@@ -542,7 +539,7 @@ class TestPostAppBot:
             return r
 
         with mock.patch("core.notify.requests.post",
-                        side_effect=[resp_ok(), resp_ok()]) as m:
+                        side_effect=[resp_ok(), resp_ok()]):
             tok_resp = mock.MagicMock(status_code=200)
             tok_resp.json.return_value = {"code": 0, "tenant_access_token": "t", "expire": 7200}
             # 第一次：token + msg

@@ -450,7 +450,6 @@ class TestSanitizePageResult:
     @pytest.mark.asyncio
     async def test_analyze_page_sanitizes_polluted_llm_output(self):
         """analyze_page 返回的已是消毒后数据（page_cache 只存干净结构）。"""
-        from unittest.mock import MagicMock as _MM
 
         polluted = self._polluted()
         polluted["page_number"] = 1

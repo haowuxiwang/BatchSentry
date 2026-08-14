@@ -14,7 +14,7 @@ from fastapi.responses import HTMLResponse, FileResponse
 from markupsafe import Markup
 
 from config import config
-from db.client import get_db, close_db, init_schema
+from db.client import get_db, close_db
 from logging_config import setup_logging, generate_request_id, request_id_var
 from core.pipeline import recover_stuck_jobs
 

@@ -7,8 +7,6 @@
 """
 import pytest
 import logging
-import os
-from unittest.mock import patch
 
 from logging_config import (
     setup_logging,

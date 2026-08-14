@@ -13,10 +13,8 @@
 前置条件：构建产物存在（跳过条件）。
 """
 import os
-import shutil
 import socket
 import subprocess
-import sys
 import time
 from pathlib import Path
 

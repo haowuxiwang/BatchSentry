@@ -19,7 +19,6 @@ import html
 import logging
 import math
 import re
-from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional

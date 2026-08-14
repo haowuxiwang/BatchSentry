@@ -5,10 +5,9 @@
 - db/client.py: migrate 异常路径、close_db when None
 - core/pipeline.py: mineru 后端分支、_audit_log 异常、_is_cancelled、page 失败处理
 """
-import os
 import sys
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 import pytest_asyncio
@@ -413,7 +412,6 @@ class TestDbClientEdgeCases:
         """v4 库再跑 migrate 应干净跳过（幂等）。"""
         import aiosqlite
         from db.client import migrate, SCHEMA_VERSION
-        from db.client import get_db
 
         db_path = str(tmp_path / "v4.db")
         async with aiosqlite.connect(db_path) as db:
@@ -558,7 +556,7 @@ class TestPipelineEdgeCases:
     async def test_pipeline_handles_page_analysis_failure(self, pipeline_db, tmp_path):
         """单页 LLM 分析失败应记录 failed_pages 但 pipeline 继续。"""
         from core.pipeline import run_pipeline
-        from unittest.mock import patch, AsyncMock
+        from unittest.mock import patch
 
         job_id = "page-fail-job"
         await pipeline_db.execute(
@@ -601,7 +599,7 @@ class TestPipelineEdgeCases:
     async def test_pipeline_skips_already_analyzed_pages(self, pipeline_db, tmp_path):
         """已有 structured_json 的页应被跳过（resume 分支）。"""
         from core.pipeline import run_pipeline
-        from unittest.mock import patch, AsyncMock
+        from unittest.mock import patch
 
         job_id = "resume-job"
         await pipeline_db.execute(
@@ -653,8 +651,8 @@ class TestPipelineEdgeCases:
     @pytest.mark.asyncio
     async def test_pipeline_cancellation_mid_stage2(self, pipeline_db, tmp_path):
         """Stage 2 中途取消（_is_cancelled 返回 True）应提前退出。"""
-        from core.pipeline import run_pipeline, _is_cancelled
-        from unittest.mock import patch, AsyncMock
+        from core.pipeline import run_pipeline
+        from unittest.mock import patch
 
         job_id = "cancel-mid-job"
         await pipeline_db.execute(
@@ -700,7 +698,7 @@ class TestPipelineEdgeCases:
     ):
         """Stage 3 应跳过 _parse_error 的页。"""
         from core.pipeline import run_pipeline
-        from unittest.mock import patch, AsyncMock
+        from unittest.mock import patch
 
         job_id = "parse-err-job"
         await pipeline_db.execute(
@@ -743,7 +741,7 @@ class TestPipelineEdgeCases:
     ):
         """Stage 3 遇到非法 structured_json 应记录 warning 并跳过。"""
         from core.pipeline import run_pipeline
-        from unittest.mock import patch, AsyncMock
+        from unittest.mock import patch
 
         job_id = "bad-json-job"
         await pipeline_db.execute(
@@ -774,9 +772,6 @@ class TestPipelineEdgeCases:
             await run_pipeline(job_id, pdf_path)
 
         # 状态应为 review
-        cursor = await pipeline_db.execute(
-            "SELECT status FROM jobs WHERE id = ?", (job_id,)
-        )
         # 由于 analyze_page mock 覆盖了 structured_json，最终状态取决于实际运行
         # 此测试主要验证不抛异常
 
