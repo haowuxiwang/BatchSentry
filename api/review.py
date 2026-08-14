@@ -116,6 +116,17 @@ async def update_finding(
         logger.warning(f"[{job_id}] Invalid status update: finding={finding_id} status={status}")
         raise HTTPException(400, f"Invalid status: {status}. Must be one of {valid_statuses}")
 
+    # GMP 数据卫生（对抗审查）：复核意见/修正文本无上限会推高 DB 体积，
+    # 且多 MB 表单文本经 aiosqlite 单连接无缓冲写入易卡顿。上限 2000 字符。
+    _MAX_NOTE_LEN = 2000
+    for label, val in (("reviewer_note", reviewer_note), ("corrected_text", corrected_text)):
+        if val is not None and len(val) > _MAX_NOTE_LEN:
+            raise HTTPException(
+                400,
+                f"{label} exceeds {_MAX_NOTE_LEN} chars "
+                f"(got {len(val)}, truncated to {val[:_MAX_NOTE_LEN]!r}...)",
+            )
+
     # Check finding exists
     cursor = await db.execute(
         "SELECT id, status FROM findings WHERE id = ? AND job_id = ?", (finding_id, job_id)

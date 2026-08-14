@@ -419,9 +419,19 @@
         const timer = setInterval(async () => {
           try {
             const row = findJobRow(jid);
-            if (!row) return;
+            if (!row) {
+              // 行已被移除（归档/删除）：清掉定时器，避免永久泄漏
+              clearInterval(timer);
+              pollTimers.delete(jid);
+              return;
+            }
             const r = await fetch(`/api/jobs/${encodeURIComponent(jid)}`);
-            if (!r.ok) return;
+            if (!r.ok) {
+              // 404（job 被删除）或 5xx：终态无条件退出轮询
+              clearInterval(timer);
+              pollTimers.delete(jid);
+              return;
+            }
             const d = await r.json();
             updateJobRowLive(row, d);
             if (TERMINAL_STATUSES.includes(d.status)) {

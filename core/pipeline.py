@@ -872,12 +872,14 @@ async def _run_pipeline_impl(job_id: str, pdf_path: str):
         # cancelling（非终态）。此处检查当前状态：cancelling → cancelled（合法
         # 终态），否则 → error，确保 job 进入终态。
         logger.warning(f"[{job_id}] Invalid transition at pipeline end: {e}")
+        final_recovery_status = None
         try:
             cur = await db.execute("SELECT status FROM jobs WHERE id = ?", (job_id,))
             cur_row = await cur.fetchone()
             cur_status = cur_row["status"] if cur_row else None
             if cur_status == "cancelling":
                 await transition_status(db, job_id, "cancelled", "cancelled during stage 3")
+                final_recovery_status = "cancelled"
             else:
                 # 其他非预期状态 → error（直接 UPDATE，与 recover_stuck_jobs 同模式）
                 await db.execute(
@@ -886,12 +888,22 @@ async def _run_pipeline_impl(job_id: str, pdf_path: str):
                     (f"Pipeline failed: invalid transition {e}", job_id),
                 )
                 await db.commit()
+                final_recovery_status = "error"
         except Exception as recover_err:
             # 恢复失败也不抛出，避免异常逃逸导致 job 卡死；记日志供排查
             logger.error(
                 f"[{job_id}] Recovery after InvalidTransition failed: {recover_err}",
                 exc_info=True,
             )
+        # 与正常 error 终态一致地发终态通知（对抗审查：此前该恢复路径
+        # 静默无通知，GMP 任务失败用户不知道）
+        if final_recovery_status:
+            try:
+                from core.notify import notify_job
+
+                await notify_job(job_id, final_recovery_status)
+            except Exception:
+                pass  # notify_job 自身已兜底，此处双保险防异常逃逸
     except Exception as e:
         logger.error(f"[{job_id}] Pipeline failed: {e}", exc_info=True)
         await _audit_log(db, job_id, "pipeline_error", str(e)[:200])
@@ -1166,6 +1178,13 @@ async def _run_sliced_stage1_2(
                 )
             )
         if await _is_cancelled(job_id):
+            # 取消已排队的分析任务：否则孤儿协程继续跑 LLM（最长 240s）
+            # 并写入已取消的 job（对抗审查 — retry 后新旧 pipeline 对同一
+            # 页写入互相竞争，应用退出时还抛 "Task was destroyed"）。
+            for t in analysis_tasks:
+                t.cancel()
+            if analysis_tasks:
+                await asyncio.gather(*analysis_tasks, return_exceptions=True)
             return 0, 0, failed_pages, total_pages
 
     stage1_ms = int((time.time() - stage1_start) * 1000)
@@ -1196,6 +1215,11 @@ async def _run_sliced_stage1_2(
     await transition_status(db, job_id, "ocr_done", f"Stage 1 (sliced) complete: {total_pages} pages")
     await db.commit()
     if await _is_cancelled(job_id):
+        # 与片内取消分支一致：先取消并等待已排队分析任务再退出
+        for t in analysis_tasks:
+            t.cancel()
+        if analysis_tasks:
+            await asyncio.gather(*analysis_tasks, return_exceptions=True)
         return stage1_ms, 0, failed_pages, total_pages
 
     # Stage 2 收尾：等待所有已排队的分析任务（含最后一片刚入队的）

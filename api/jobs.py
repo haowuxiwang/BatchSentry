@@ -330,14 +330,22 @@ async def list_jobs(page: int = 1, page_size: int = 20):
 
 
 async def _live_jobs_snapshot(db) -> list[dict]:
-    """收集所有活跃任务的进度快照（/api/jobs/live 推送体）。
+    """收集所有活跃任务 + 最近终态任务的进度快照（/api/jobs/live 推送体）。
+
+    活跃任务之外，终态 job（review/error/cancelled 等，近 10 分钟内）也
+    继续推送：upload 页的行状态/按钮要等收到终态快照才会切换到"可复核"，
+    只推活跃任务会让任务行永远卡在"分析中"、归档/删除按钮永不启用
+    （对抗审查发现，需刷新页面才恢复）。archived 排除（归档区单独渲染）。
 
     抽成纯函数便于单测（httpx ASGITransport 无法交付永不结束的
     SSE 流——它要等 app 完成后才返回 Response）。
     """
     placeholders = ",".join("?" * len(_ACTIVE_STATUSES))
     cursor = await db.execute(
-        f"SELECT id FROM jobs WHERE status IN ({placeholders})",
+        f"SELECT id FROM jobs WHERE status IN ({placeholders}) "
+        "OR (status NOT IN ('archived') "
+        "AND finished_at IS NOT NULL "
+        "AND finished_at > datetime('now', '-10 minutes'))",
         _ACTIVE_STATUSES,
     )
     rows = await cursor.fetchall()

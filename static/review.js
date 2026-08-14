@@ -18,6 +18,10 @@
   const ctx = window.__PBC__ || {};
   const jobId = ctx.job_id || "";
   let currentPage = ctx.page || 1;
+  // 代际守卫：loadPageData / refreshCurrentPageFindings 的并发守卫_token。
+  // 快速翻页时旧请求晚返回会覆盖新页内容（对抗审查发现）——响应落地前
+  // 校验 token 与当前页，不匹配则丢弃。
+  let pageLoadToken = 0;
   // total_pages=0 表示 OCR 尚未完成（真实页数未知），显示 "?" 而非 1
   let totalPages = ctx.total_pages || 0;
   const pageFindingCounts = ctx.page_finding_counts || {};
@@ -462,6 +466,7 @@
 
   // AJAX 加载页面数据（findings + OCR + measurements + banners）
   async function loadPageData(targetPage) {
+    const token = ++pageLoadToken;
     log("loadPageData", { target: targetPage });
     showPageLoading();
     // 翻页期间禁用所有翻页按钮，防止重复点击
@@ -472,6 +477,7 @@
       const r = await fetch(`/api/jobs/${jobId}/pages/${targetPage}`);
       if (!r.ok) throw new Error("HTTP " + r.status);
       const pageData = await r.json();
+      if (token !== pageLoadToken) return; // 已翻到新页，丢弃过期响应
 
       // 加载该页的 findings
       const fr = await fetch(`/api/jobs/${jobId}/findings?page=${targetPage}`);
@@ -483,6 +489,7 @@
         `/api/jobs/${jobId}/pages/${targetPage}/measurements`,
       );
       const measurementsData = mr.ok ? await mr.json() : { measurements: [] };
+      if (token !== pageLoadToken) return; // 再校验一次（measurements 慢响应）
 
       // 更新 URL（不刷新页面）
       history.pushState(
@@ -523,8 +530,10 @@
       window.location.href = `/jobs/${jobId}/review?page=${targetPage}`;
     } finally {
       hidePageLoading();
-      // 恢复翻页按钮状态
-      updatePdfDisplay(currentPage);
+      // 恢复翻页按钮状态（仅当前代际，避免旧请求恢复已禁用状态）
+      if (token === pageLoadToken) {
+        updatePdfDisplay(currentPage);
+      }
     }
   }
 
@@ -532,26 +541,31 @@
   // 在 SSE 收到 pages_analyzed 变化时调用，让用户在 Stage 2 进行中
   // 就能看到已分析页的 findings 实时更新。
   async function refreshCurrentPageFindings() {
+    const token = pageLoadToken;
+    const page = currentPage;
     try {
       const [pageRes, findingsRes] = await Promise.all([
-        fetch(`/api/jobs/${jobId}/pages/${currentPage}`),
-        fetch(`/api/jobs/${jobId}/findings?page=${currentPage}`),
+        fetch(`/api/jobs/${jobId}/pages/${page}`),
+        fetch(`/api/jobs/${jobId}/findings?page=${page}`),
       ]);
       if (!pageRes.ok || !findingsRes.ok) return;
       const pageData = await pageRes.json();
       const findingsData = await findingsRes.json();
+      // 代际守卫：期间用户已翻页则丢弃（旧页数据渲染到新页会误导复核）
+      if (token !== pageLoadToken || page !== currentPage) return;
       const findings = findingsData.findings || [];
 
       // 重新渲染 findings 列表
       renderFindings(findings);
       // 更新页面级 UI（置信度/critical banner 等）
       const mr = await fetch(
-        `/api/jobs/${jobId}/pages/${currentPage}/measurements`,
+        `/api/jobs/${jobId}/pages/${page}/measurements`,
       );
       const measurementsData = mr.ok ? await mr.json() : { measurements: [] };
+      if (token !== pageLoadToken || page !== currentPage) return;
       updatePageLevelUI(pageData, findings, measurementsData);
       log("refreshCurrentPageFindings — updated", {
-        page: currentPage,
+        page,
         findings: findings.length,
       });
     } catch (err) {

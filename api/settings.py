@@ -326,6 +326,22 @@ def _build_env_updates(
             if not _validate_provider_name(name):
                 errors.append(f"invalid llm_provider name: {value!r}")
                 continue
+            # 对抗审查：llm_provider 必须指向已注册 provider（内置注册表
+            # 或本次同批 llm_providers_add 新增）。此前未注册名字直接落盘，
+            # LLMClient 静默回退 deepseek（llm/client.py）— UI 徽章显示
+            # GLM 实际跑 deepseek，GMP 场景"你以为的模型不是实际模型"。
+            registered = set(config["providers"].keys())
+            add_names = {
+                n.strip().lower()
+                for n in str(req.llm_providers_add or "").split(",")
+                if n.strip()
+            }
+            if name not in registered and name not in add_names:
+                errors.append(
+                    f"llm_provider {name!r} is not a registered provider "
+                    f"(registered: {sorted(registered)})"
+                )
+                continue
             env_updates[env_key] = name
             mem_updates[field] = name
             continue
@@ -468,13 +484,19 @@ async def update_settings(req: SettingsUpdate, request: Request):
     env_updates, mem_updates, errors = _build_env_updates(req)
 
     # Phase 7 security: validate URLs to prevent SSRF
-    # paddle_ocr_api_url and any <provider>_base_url must be external
+    # paddle_ocr_api_url and any <provider>_base_url must be external.
+    # 空串 = 用户意图清空/恢复默认（MinerU 单后端或全新安装默认态），
+    # 不做 URL 校验 — 与下方 *_BASE_URL 空串放行策略一致（对抗审查：
+    # 此前空 Paddle URL 使整份 OCR 设置每次都 400 保存失败）。
     url_fields_to_check = {
         "PADDLE_OCR_API_URL": "PaddleOCR API URL",
     }
     for env_key, label in url_fields_to_check.items():
         if env_key in env_updates:
-            ok, reason = validate_external_url(env_updates[env_key], kind=label)
+            value = env_updates[env_key]
+            if not value or not value.strip():
+                continue
+            ok, reason = validate_external_url(value, kind=label)
             if not ok:
                 errors.append(reason)
     # Check all provider base_url fields
@@ -487,6 +509,15 @@ async def update_settings(req: SettingsUpdate, request: Request):
                 continue
             label = f"{env_key.removesuffix('_BASE_URL').lower()} base_url"
             ok, reason = validate_external_url(value, kind=label)
+            if not ok:
+                errors.append(reason)
+    # 飞书 webhook：保存路径与 test_feishu 一致地做 SSRF 校验 — notify 会
+    # 以服务端身份 POST 到该 URL，私网地址（如 127.0.0.1 的蜜罐）被禁
+    # （对抗审查：此前保存绕过校验、仅测试时校验，行为不一致）。
+    if "feishu_webhook_url" in env_updates:
+        wh_url = env_updates["feishu_webhook_url"]
+        if wh_url and wh_url.strip():
+            ok, reason = validate_external_url(wh_url, kind="feishu webhook URL")
             if not ok:
                 errors.append(reason)
 

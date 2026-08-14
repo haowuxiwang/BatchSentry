@@ -333,6 +333,13 @@
         llm_provider: activeProvider,
         [`${providerName}_api_key`]: keyValue,
       };
+      // 若该 provider 是本次会话刚添加、尚未保存注册表的（pendingAdds），
+      // 必须同批提交 llm_providers_add — 否则后端写 Key 时注册表里没有它，
+      // 随后的自动激活 404 "not in registry"，刷新后 provider 消失
+      // （对抗审查：此前"保存此 Key"对新 provider 必然失败）。
+      if (pendingAdds.has(providerName)) {
+        body.llm_providers_add = providerName;
+      }
       const r = await fetch("/api/settings", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -340,6 +347,7 @@
       });
       const data = await r.json();
       if (r.ok && data.ok) {
+        pendingAdds.delete(providerName); // 已注册成功，后续保存不再带 add
         // Auto-activate (业界做法 — OpenAI/Anthropic/Linear):
         // 若当前 active provider 未配置 Key，保存新 provider 的 Key 后自动切到它。
         // 根除"配置了 SiliconFlow 但测试报 deepseek 未配置 Key"的死亡陷阱。
@@ -1182,6 +1190,10 @@
     current.llm.providers = current.llm.providers || [];
     current.llm.providers.push(newProv);
     pendingAdds.add(name);
+    // 对称性修复（对抗审查）：移除后重新添加同一 provider 时，若不清掉
+    // removedProviders 里的名字，保存时 add+remove 同批提交相互抵消，
+    // provider 会静默消失（等于没添加）。
+    removedProviders.delete(name);
     renderProviders(current.llm.providers, activeProvider);
     // Reset form
     select.value = "";
