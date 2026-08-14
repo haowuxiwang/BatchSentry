@@ -432,16 +432,16 @@ class TestReviewPageInvalidJson:
 
 
 class TestGetJobPageImage:
-    """GET /api/jobs/{id}/page/{n} — PyMuPDF 渲染 PNG 预览端点。"""
+    """GET /api/jobs/{id}/page/{n} — PyMuPDF 渲染 JPEG 预览端点。"""
 
     @pytest.mark.asyncio
     async def test_page_image_success(self, client_with_full_job):
-        """正常渲染：返回 PNG 字节流。"""
+        """正常渲染：返回 JPEG 字节流（质量 82，替代低效 PNG）。"""
         c, _ = client_with_full_job
         r = await c.get("/api/jobs/full-job/page/1")
         assert r.status_code == 200
-        assert r.headers["content-type"] == "image/png"
-        assert r.content.startswith(b"\x89PNG")
+        assert r.headers["content-type"] == "image/jpeg"
+        assert r.content.startswith(b"\xff\xd8\xff")
 
     @pytest.mark.asyncio
     async def test_page_image_out_of_range_404(self, client_with_full_job):

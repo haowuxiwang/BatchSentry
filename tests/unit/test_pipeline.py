@@ -1468,3 +1468,145 @@ class TestSlicedPipeline:
             "SELECT count(*) AS n FROM findings WHERE job_id = ?", (job_id,)
         )
         assert (await cursor.fetchone())["n"] == 0
+
+
+# ─── 3. 空页自动重试（Stage 1 抗挫折，MinerU 大文件丢页）───────────
+
+
+class TestStage1EmptyPageRetry:
+    """MinnerU 大 PDF 丢页 → 空页切片重跑恢复 / 仍空保留 / 小文件跳过。"""
+
+    async def _run(self, pipeline_db, tmp_path, pages: list[dict], fake_retry=None):
+        """公共驱动：mineru 后端 + 给定 OCR 页列表，返回 (job_id, retry_calls)。"""
+        from core import pipeline as pipeline_mod
+
+        orig_backend = pipeline_mod.config["app"].ocr_backend
+        pipeline_mod.config["app"].ocr_backend = "mineru"
+        calls = []
+        try:
+            job_id = await _insert_job(pipeline_db, status="pending")
+            pdf_path = str(tmp_path / "fake.pdf")
+            Path(pdf_path).write_bytes(b"%PDF-1.4 fake")
+
+            def fake_ocr(pdf_path, progress_cb=None, job_id=None):
+                return pages
+
+            with patch(
+                "core.pipeline._get_ocr_backend", return_value=fake_ocr
+            ), patch(
+                "core.pipeline.analyze_page",
+                new=AsyncMock(
+                    return_value={
+                        "steps": [],
+                        "findings": [],
+                        "overall_confidence": "high",
+                    }
+                ),
+            ), patch(
+                "core.pipeline.analyze_cross_page", new=AsyncMock(return_value=[])
+            ):
+                if fake_retry is not None:
+                    def _recording_retry(*a, **kw):
+                        calls.append((list(kw.get("page_nums", a[1])), kw.get("batch_size", a[2] if len(a) > 2 else 3)))
+                        return fake_retry(*a, **kw)
+
+                    with patch(
+                        "core.mineru_client.run_ocr_pages", side_effect=_recording_retry
+                    ):
+                        await run_pipeline(job_id, pdf_path)
+                else:
+                    await run_pipeline(job_id, pdf_path)
+            return job_id, calls
+        finally:
+            pipeline_mod.config["app"].ocr_backend = orig_backend
+
+    @pytest.mark.asyncio
+    async def test_empty_page_recovered_via_slice_retry(self, pipeline_db, tmp_path):
+        """空页切片重跑返回完整文本 → page_cache 更新 + recovered 审计。"""
+        pages = [
+            {"markdown": {"text": f"page {i} content " + "x" * 200}}
+            for i in range(1, 13)
+        ]
+        pages[4]["markdown"]["text"] = ""  # p5 空 → 触发重试
+
+        def fake_retry(pdf_path, page_nums, batch_size=3, job_id=""):
+            return [(pno, f"recovered content p{pno} " + "y" * 200) for pno in page_nums]
+
+        job_id, calls = await self._run(
+            pipeline_db, tmp_path, pages, fake_retry=fake_retry
+        )
+
+        # p5 已被切片重跑结果替换
+        cursor = await pipeline_db.execute(
+            "SELECT raw_html FROM page_cache WHERE job_id = ? AND page = 5",
+            (job_id,),
+        )
+        row = await cursor.fetchone()
+        assert row and "recovered content p5" in row["raw_html"] and "y" * 200 in row["raw_html"]
+        assert calls[0][1] == 3  # 首轮 3 页批
+        # recovered 审计
+        cursor = await pipeline_db.execute(
+            "SELECT detail FROM audit_log WHERE job_id = ? AND action = 'stage1_empty_recovered'",
+            (job_id,),
+        )
+        assert await cursor.fetchone() is not None
+        # ocr_backend_used 审计（GMP 追溯）
+        cursor = await pipeline_db.execute(
+            "SELECT ocr_backend_used FROM jobs WHERE id = ?", (job_id,)
+        )
+        assert (await cursor.fetchone())["ocr_backend_used"] == "mineru"
+
+    @pytest.mark.asyncio
+    async def test_empty_page_retry_still_empty_keeps_original(self, pipeline_db, tmp_path):
+        """两轮重试后仍空（服务端识别不了）→ 保留原空内容，继续走流程。"""
+        pages = [
+            {"markdown": {"text": f"page {i} content " + "x" * 200}}
+            for i in range(1, 13)
+        ]
+        pages[4]["markdown"]["text"] = ""  # p5 空
+        pages[9]["markdown"]["text"] = "  "  # p10 空白 → 也触发
+
+        def fake_retry(pdf_path, page_nums, batch_size=3, job_id=""):
+            # 两轮都返回空（模拟服务端真识别不了）
+            return [(pno, "") for pno in page_nums]
+
+        job_id, calls = await self._run(
+            pipeline_db, tmp_path, pages, fake_retry=fake_retry
+        )
+
+        # 两轮重试都发生了（3 页批 → 单页批）
+        assert calls[0][1] == 3
+        assert calls[1][1] == 1
+        # 原空内容保留（空字符串，未产生虚假恢复）
+        cursor = await pipeline_db.execute(
+            "SELECT raw_html FROM page_cache WHERE job_id = ? AND page = 5",
+            (job_id,),
+        )
+        assert (await cursor.fetchone())["raw_html"] == ""
+        # 无 recovered 审计
+        cursor = await pipeline_db.execute(
+            "SELECT 1 FROM audit_log WHERE job_id = ? AND action = 'stage1_empty_recovered'",
+            (job_id,),
+        )
+        assert await cursor.fetchone() is None
+        # 仍成功到 review（空页有 _ocr_empty 提示配套，不阻断流程）
+        cursor = await pipeline_db.execute("SELECT status FROM jobs WHERE id = ?", (job_id,))
+        assert (await cursor.fetchone())["status"] == "review"
+
+    @pytest.mark.asyncio
+    async def test_small_file_skips_empty_retry(self, pipeline_db, tmp_path):
+        """<10 页的小文件不触发切片重试（避免多余开销）。"""
+        pages = [
+            {"markdown": {"text": f"page {i} content " + "x" * 200}}
+            for i in range(1, 5)
+        ]
+        pages[1]["markdown"]["text"] = ""  # p2 空 — 但文件太小不重试
+
+        job_id, calls = await self._run(pipeline_db, tmp_path, pages)
+
+        assert calls == []
+        cursor = await pipeline_db.execute(
+            "SELECT raw_html FROM page_cache WHERE job_id = ? AND page = 2",
+            (job_id,),
+        )
+        assert (await cursor.fetchone())["raw_html"] == ""

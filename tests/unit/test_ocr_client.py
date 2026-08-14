@@ -231,6 +231,13 @@ class TestRunOCRPAGES:
         out = mineru_client.run_ocr_pages(pdf, [1, 99, 2], batch_size=3)
         assert out == [(1, "ONLY"), (99, ""), (2, "")]
 
+    @patch("core.mineru_client.run_ocr")
+    def test_all_pages_out_of_range_skips_submission(self, mock_ocr):
+        pdf = self._make_pdf(2)
+        out = mineru_client.run_ocr_pages(pdf, [99, 100], batch_size=2)
+        assert out == [(99, ""), (100, "")]
+        mock_ocr.assert_not_called()
+
 
 class TestPaddleOCRClient:
     """PaddleOCR 客户端（模块级函数）。"""
