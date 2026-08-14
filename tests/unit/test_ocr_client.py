@@ -2,6 +2,7 @@
 
 使用 mock 避免真实 HTTP 调用。
 """
+import io
 import json
 import pytest
 from unittest import mock
@@ -179,6 +180,56 @@ class TestMinerUClient:
 
         assert len(pages) == 1
         assert "完整段落内容 ABC" in pages[0]["markdown"]["text"]
+
+
+class TestRunOCRPAGES:
+    """run_ocr_pages — 空页小切片重跑（大文件丢页修复）。"""
+
+    def _make_pdf(self, pages=3):
+        import fitz
+        import tempfile as _tf
+
+        buf = io.BytesIO()
+        doc = fitz.open()
+        for i in range(pages):
+            doc.new_page().insert_text((50, 50), f"page {i + 1}")
+        doc.save(buf)
+        doc.close()
+        buf.seek(0)
+        p = _tf.NamedTemporaryFile(delete=False, suffix=".pdf")
+        p.write(buf.read())
+        p.close()
+        return p.name
+
+    @patch("core.mineru_client.run_ocr")
+    def test_maps_slice_pages_back_to_requested_numbers(self, mock_ocr):
+        pdf = self._make_pdf(3)
+        mock_ocr.return_value = [
+            {"markdown": {"text": "AAA"}},
+            {"markdown": {"text": "BBB"}},
+            {"markdown": {"text": "CCC"}},
+        ]
+        out = mineru_client.run_ocr_pages(pdf, [1, 2, 3], batch_size=3)
+        assert out == [(1, "AAA"), (2, "BBB"), (3, "CCC")]
+        mock_ocr.assert_called_once()
+        import os
+
+        os.unlink(pdf)
+
+    @patch("core.mineru_client.run_ocr")
+    def test_batches_multiple_calls(self, mock_ocr):
+        pdf = self._make_pdf(5)
+        mock_ocr.return_value = [{"markdown": {"text": "X"}}]
+        out = mineru_client.run_ocr_pages(pdf, [1, 5], batch_size=1)
+        assert mock_ocr.call_count == 2
+        assert out == [(1, "X"), (5, "X")]
+
+    @patch("core.mineru_client.run_ocr")
+    def test_out_of_range_page_keeps_empty_text(self, mock_ocr):
+        pdf = self._make_pdf(2)
+        mock_ocr.return_value = [{"markdown": {"text": "ONLY"}}]
+        out = mineru_client.run_ocr_pages(pdf, [1, 99, 2], batch_size=3)
+        assert out == [(1, "ONLY"), (99, ""), (2, "")]
 
 
 class TestPaddleOCRClient:

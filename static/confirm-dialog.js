@@ -17,6 +17,23 @@
 
   window.PBC = window.PBC || {};
 
+  // focus trap：Tab 键焦点循环限制在弹窗内（APG dialog pattern）
+  function trapTab(modal, e) {
+    const focusables = modal.querySelectorAll(
+      'button, input, [href], [tabindex]:not([tabindex="-1"])',
+    );
+    if (!focusables.length) return;
+    const first = focusables[0];
+    const last = focusables[focusables.length - 1];
+    if (e.shiftKey && document.activeElement === first) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && document.activeElement === last) {
+      e.preventDefault();
+      first.focus();
+    }
+  }
+
   // === Toast 提示（替代原生 alert() 的轻量方案）===
   function showToast(msg, type = "info") {
     let container = document.getElementById("toast-container");
@@ -79,6 +96,11 @@
       const overlay = document.createElement("div");
       overlay.className =
         "fixed inset-0 z-[60] flex items-center justify-center px-4";
+      // a11y (APG dialog pattern + AntD/shadcn Dialog 规范):
+      // role=dialog + aria-modal + aria-labelledby/describedby。
+      overlay.setAttribute("role", "dialog");
+      overlay.setAttribute("aria-modal", "true");
+      overlay.setAttribute("aria-labelledby", "confirm-dialog-title");
       overlay.style.cssText =
         "background: hsl(222 47% 11% / 0.32); backdrop-filter: blur(2px); animation: fade-in-up 0.15s ease-out both;";
 
@@ -91,6 +113,7 @@
       const body = document.createElement("div");
       body.className = "px-5 py-4";
       const titleEl = document.createElement("div");
+      titleEl.id = "confirm-dialog-title";
       titleEl.className = "text-[14px] font-medium";
       titleEl.textContent = title;
       body.appendChild(titleEl);
@@ -109,10 +132,12 @@
       }
       if (message) {
         const msgEl = document.createElement("div");
+        msgEl.id = "confirm-dialog-desc";
         msgEl.className =
           "text-[12px] text-muted-foreground mt-1.5 whitespace-pre-line leading-relaxed";
         msgEl.textContent = message;
         body.appendChild(msgEl);
+        overlay.setAttribute("aria-describedby", "confirm-dialog-desc");
       }
       modal.appendChild(body);
 
@@ -162,6 +187,8 @@
           }
           e.preventDefault();
           settle(danger ? false : true);
+        } else if (e.key === "Tab") {
+          trapTab(modal, e);
         }
       };
       document.addEventListener("keydown", onKey);
@@ -207,6 +234,10 @@
       const overlay = document.createElement("div");
       overlay.className =
         "fixed inset-0 z-[60] flex items-center justify-center px-4";
+      // a11y (APG dialog pattern + AntD/shadcn Dialog 规范)
+      overlay.setAttribute("role", "dialog");
+      overlay.setAttribute("aria-modal", "true");
+      overlay.setAttribute("aria-labelledby", "prompt-dialog-title");
       overlay.style.cssText =
         "background: hsl(222 47% 11% / 0.32); backdrop-filter: blur(2px); animation: fade-in-up 0.15s ease-out both;";
 
@@ -219,15 +250,18 @@
       const body = document.createElement("div");
       body.className = "px-5 py-4";
       const titleEl = document.createElement("div");
+      titleEl.id = "prompt-dialog-title";
       titleEl.className = "text-[14px] font-medium";
       titleEl.textContent = title;
       body.appendChild(titleEl);
       if (message) {
         const msgEl = document.createElement("div");
+        msgEl.id = "prompt-dialog-desc";
         msgEl.className =
           "text-[12px] text-muted-foreground mt-1.5 whitespace-pre-line leading-relaxed";
         msgEl.textContent = message;
         body.appendChild(msgEl);
+        overlay.setAttribute("aria-describedby", "prompt-dialog-desc");
       }
       // 输入框 — 使用与 settings.css .input 等价的 Tailwind utility 类，
       // 避免依赖 settings.css（review.html 不引入 settings.css）
@@ -274,6 +308,8 @@
         } else if (e.key === "Enter") {
           e.preventDefault();
           settle(input.value);
+        } else if (e.key === "Tab") {
+          trapTab(modal, e);
         }
       };
       document.addEventListener("keydown", onKey);

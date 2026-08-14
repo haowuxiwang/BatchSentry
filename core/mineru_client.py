@@ -669,6 +669,62 @@ def cleanup_slices(slices: list[tuple[int, str]]) -> None:
         shutil.rmtree(d, ignore_errors=True)
 
 
+def run_ocr_pages(
+    pdf_path: str,
+    page_nums: list[int],
+    batch_size: int = 3,
+    job_id: str = "",
+) -> list[tuple[int, str]]:
+    """对指定页号做小批量切片重跑 OCR（OCR 完整性抗挫折）。
+
+    背景：MinerU 服务端处理超大 PDF（百 MB 级、数十页）时存在丢页缺陷 —
+    同一页在大文件里输出空内容、切成小 PDF 后完整识别（51 页实测丢 6 页，
+    6 页/单页切片全部完整）。整册重跑成本高且不可控，小切片逐页重跑
+    是确定性修复路径。
+
+    Args:
+        pdf_path: 源 PDF 路径
+        page_nums: 需要重跑的 1-based 页号列表
+        batch_size: 每批页数（每批一个独立 MinerU 任务，3 页 ~15-40s）
+        job_id: 日志前缀（透传 run_ocr）
+
+    Returns:
+        [(page_num, markdown_text), ...]，保持 page_nums 顺序；
+        重跑后仍为空（服务端也识别不了）时返回原空文本。
+    """
+    import fitz  # PyMuPDF — 切片 & 合并
+
+    results: list[tuple[int, str]] = []
+    tmp_dir = Path(tempfile.mkdtemp(prefix="pbc_retry_"))
+    try:
+        src_doc = fitz.open(pdf_path)
+        try:
+            for start in range(0, len(page_nums), batch_size):
+                batch = page_nums[start : start + batch_size]
+                pdoc = fitz.open()
+                try:
+                    for pno in batch:
+                        if 1 <= pno <= src_doc.page_count:
+                            pdoc.insert_pdf(src_doc, from_page=pno - 1, to_page=pno - 1)
+                    if pdoc.page_count == 0:
+                        for pno in batch:
+                            results.append((pno, ""))
+                        continue
+                    tmp = tmp_dir / f"slice_{batch[0]}_{batch[-1]}.pdf"
+                    pdoc.save(tmp)
+                finally:
+                    pdoc.close()
+                pages = run_ocr(str(tmp), job_id=job_id)
+                for i, pno in enumerate(batch):
+                    text = pages[i].get("markdown", {}).get("text", "") if i < len(pages) else ""
+                    results.append((pno, text or ""))
+        finally:
+            src_doc.close()
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+    return results
+
+
 def run_ocr_sliced(
     pdf_path: str,
     slice_pages: int,

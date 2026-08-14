@@ -587,6 +587,86 @@ async def _run_pipeline_impl(job_id: str, pdf_path: str):
                 "UPDATE jobs SET total_pages = ? WHERE id = ?",
                 (len(pages), job_id),
             )
+
+            # 空页自动重试（OCR 完整性抗挫折）：
+            # MinerU 服务端处理超大 PDF（百 MB 级）存在丢页缺陷 — 同一页
+            # 在大文件里输出空、小切片后完整识别（51 页实测丢 6 页，单页
+            # 切片 1111-1702 字符全部完整）。对空页做小批量切片重跑并替换
+            # page_cache，重跑仍空则保留原样（服务端也识别不了，走既有
+            # _ocr_empty 提示路径）。只对 mineru 且页数 >= 10 的文件触发，
+            # 避免小文件多余开销；sliced 路径（OCR_SLICES>1）本身就按片跑。
+            if used_backend == "mineru" and len(pages) >= 10:
+                retry_targets = [
+                    i + 1
+                    for i, pg in enumerate(pages)
+                    if len((pg.get("markdown") or {}).get("text", "").strip()) < 100
+                ]
+                if retry_targets:
+                    logger.warning(
+                        f"[{job_id}] {len(retry_targets)} empty pages detected — "
+                        f"retrying as small slices: p{retry_targets}"
+                    )
+                    await _audit_log(
+                        db, job_id, "stage1_empty_pages",
+                        f"pages={retry_targets} — retrying with per-page slices",
+                    )
+                    try:
+                        from core.mineru_client import run_ocr_pages
+
+                        recovered = []
+                        still_empty = list(retry_targets)
+                        # 两轮重试：首轮 3 页小批（快）；未恢复页第二轮单页批
+                        # （服务端丢页有随机性，单页批成功率最高 — 实测
+                        # 3 页批 4/6 恢复、单页批全部恢复过）。
+                        for attempt, batch_size in enumerate((3, 1)):
+                            if not still_empty:
+                                break
+                            logger.info(
+                                f"[{job_id}] Empty-page retry round {attempt + 1} "
+                                f"(batch_size={batch_size}): p{still_empty}"
+                            )
+                            retried = await asyncio.to_thread(
+                                run_ocr_pages,
+                                pdf_path,
+                                still_empty,
+                                job_id=job_id,
+                                batch_size=batch_size,
+                            )
+                            still_empty = []
+                            for pno, md in retried:
+                                if md and len(md.strip()) > 100:
+                                    clean = _sanitize_ocr_text(md.strip())
+                                    await db.execute(
+                                        "UPDATE page_cache SET raw_html = ? "
+                                        "WHERE job_id = ? AND page = ?",
+                                        (clean, job_id, pno),
+                                    )
+                                    recovered.append(pno)
+                                else:
+                                    still_empty.append(pno)
+                            await db.commit()
+                            if not still_empty:
+                                break
+                        if recovered:
+                            logger.info(
+                                f"[{job_id}] Empty-page retry: recovered "
+                                f"{len(recovered)}/{len(retry_targets)} pages: "
+                                f"p{recovered}"
+                            )
+                            await _audit_log(
+                                db, job_id, "stage1_empty_recovered",
+                                f"recovered_pages={recovered}",
+                            )
+                        if still_empty:
+                            logger.warning(
+                                f"[{job_id}] Empty-page retry: still empty "
+                                f"after 2 rounds — p{still_empty} truly "
+                                f"unrecognizable by the OCR backend"
+                            )
+                    except Exception as retry_err:
+                        logger.error(
+                            f"[{job_id}] Empty-page retry failed: {retry_err}"
+                        )
             await transition_status(db, job_id, "ocr_done", f"Stage 1 complete: {len(pages)} pages")
             await db.commit()
             logger.info(

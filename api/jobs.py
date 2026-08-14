@@ -367,12 +367,17 @@ async def stream_all_live_jobs(request: Request):
 
 @router.get("/{job_id}/page/{page_num}")
 async def get_job_page_image(job_id: str, page_num: int):
-    """Render a PDF page to PNG for inline preview.
+    """Render a PDF page to JPEG for inline preview.
 
     替代浏览器原生 PDF viewer（iframe）：新版 Chromium/Electron 的 PDF
     viewer 忽略 toolbar=0 参数，自带打印/下载/更多操作按钮且缩放不可控。
-    PyMuPDF 渲染 PNG 后以 <img> 展示 — 无浏览器工具栏、缩放 fit-width
+    PyMuPDF 渲染后以 <img> 展示 — 无浏览器工具栏、缩放 fit-width
     由 CSS 控制、页码与渲染页严格对应。
+
+    输出格式 JPEG（质量 82）：扫描件是照片类内容（白底 + 密集文字），
+    PNG 无损压缩单页仍 3-6MB（2000px @ 300dpi），弱机上 <img> 解码 +
+    本地传输要数秒，用户感知"正在渲染第 N 页"卡住。JPEG 体积降低
+    5-10 倍（单页 ~300-800KB），视觉上白底文档无可见差异。
 
     Security: pdf_path 校验同 serve_pdf（必须在 output_dir 内，防路径穿越）。
     page_num 1-based；越界返回 404。文档句柄缓存 _pdf_doc_cache 避免
@@ -403,23 +408,23 @@ async def get_job_page_image(job_id: str, page_num: int):
         raise HTTPException(404, f"Page out of range (1-{doc.page_count})")
     # 渲染在线程池执行：大扫描页 get_pixmap 需秒级，同步执行会阻塞整个
     # 事件循环（所有 API/SSE 请求排队，前端"正在渲染"卡住）。尺寸由
-    # _pdf_render_zoom 限制（≤2000px 宽，体积 ~10x 下降，解码更快）。
+    # _pdf_render_zoom 限制（≤2000px 宽），输出 JPEG 体积再降 5-10x。
     def _render_sync() -> bytes:
         page = doc.load_page(page_num - 1)
         zoom = _pdf_render_zoom(page)
         pix = page.get_pixmap(
             matrix=fitz.Matrix(zoom, zoom), alpha=False, colorspace=fitz.csRGB
         )
-        return pix.tobytes("png")
+        return pix.tobytes("jpeg", jpg_quality=82)
 
     try:
-        png = await asyncio.to_thread(_render_sync)
+        jpeg = await asyncio.to_thread(_render_sync)
     except Exception as e:
         logger.error(f"[{job_id}] Page render failed (p{page_num}): {e}")
         raise HTTPException(500, "Page render failed")
     return Response(
-        content=png,
-        media_type="image/png",
+        content=jpeg,
+        media_type="image/jpeg",
         # 注：Cache-Control 由 main.py 全局中间件统一设置（非 /static/ 一律 no-cache）
     )
 
