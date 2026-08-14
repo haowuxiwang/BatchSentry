@@ -406,8 +406,19 @@ async def analyze_page(html: str, page_num: int, *, job_id: str = "") -> dict:
     return result
 
 
+# HTML 截断上限 — 超长表格页（大矩阵/多表页）防 token 溢出；截断带显式标记
+_MAX_HTML_CHARS = 12000
+
+
 def _clean_html(html: str) -> str:
-    """Reduce HTML token noise: strip style attributes, class names, etc."""
+    """Reduce HTML token noise: strip style attributes, class names, etc.
+
+    截断策略（OCR 完整性）：上限 MAX_HTML_CHARS（12000 字符 ≈ 6-10K tokens，
+    主流模型上下文安全）。截断时对齐表格边界并在末尾追加显式标记 — LLM
+    看到 [HTML 已截断] 会知道信息不完整，不会把残缺内容当完整内容分析
+    （静默截断是"OCR 缺内容"另一常见根因）。
+    """
+    orig_len = len(html)
     # Remove style='...' and style="..."
     cleaned = re.sub(r"""\s*style=['"][^'"]*['"]""", "", html)
     # Remove width='...' and width="..."
@@ -416,4 +427,13 @@ def _clean_html(html: str) -> str:
     cleaned = re.sub(r"""(src=["'])[^"']*/([^/"']+)(["'>])""", r"\1\2\3", cleaned)
     # Collapse excessive whitespace
     cleaned = re.sub(r"\s+", " ", cleaned)
-    return cleaned[:6000]  # Truncate to prevent token overflow
+    if len(cleaned) <= _MAX_HTML_CHARS:
+        return cleaned
+    # 截断并对齐最近表格边界（避免把 <tr> 从中间切断）
+    cut = cleaned[:_MAX_HTML_CHARS]
+    boundary = cut.rfind("</table>")
+    if boundary > _MAX_HTML_CHARS * 0.6:
+        cut = cut[: boundary + len("</table>")]
+    cut += f"\n[HTML 已截断：原文 {orig_len} 字符，超过上限 {_MAX_HTML_CHARS}，"
+    cut += "本页信息可能不完整]"
+    return cut

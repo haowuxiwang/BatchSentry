@@ -2,7 +2,9 @@
 
 使用 mock 避免真实 HTTP 调用。
 """
+import json
 import pytest
+from unittest import mock
 from unittest.mock import patch
 
 from core import mineru_client
@@ -93,6 +95,90 @@ class TestMinerUClient:
         # 测试 _block_to_markdown
         md = mineru_client._block_to_markdown(blocks[0])
         assert "第1页" in md
+
+    def test_block_to_markdown_unknown_type_keeps_content(self):
+        """未知块类型不应静默丢内容 — 递归兜底提取全部字符串字段。"""
+        block = {
+            "type": "figure_caption",  # 服务端可能引入的新类型
+            "content": {
+                "caption_content": [
+                    {"type": "text", "content": "图 1 设备布局示意"},
+                    {"type": "text", "content": "（含楼层标注）"},
+                ]
+            },
+        }
+        md = mineru_client._block_to_markdown(block)
+        assert "图 1 设备布局示意" in md
+        assert "（含楼层标注）" in md
+
+    def test_table_html_multi_field_fallback(self):
+        """表格 HTML 提取应支持 v2 content.table_html 字段（格式漂移防护）。"""
+        block = {"type": "table", "content": {"table_html": "<table><tr><td>设备</td></tr></table>"}}
+        html = mineru_client._table_html(block)
+        assert "<table>" in html
+
+    def test_download_result_falls_back_to_full_md_when_content_list_mostly_missing(self):
+        """content_list 解析丢失大部分内容时（<50% of full.md），应回退 full.md
+        拆分 — 防止静默输出残缺页（OCR 鲁棒性，回归 51 页真实文件）。"""
+        import io, zipfile
+        from unittest.mock import patch as _patch
+
+        # 构造 zip：content_list 只有 1 页空内容，full.md 有完整 2 页（\f 分隔）
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr(
+                "x_content_list_v2.json",
+                json.dumps([
+                    [{"type": "page_footer", "content": {"page_footer_content": "页脚噪音"}}],
+                    [{"type": "page_footer", "content": {"page_footer_content": "页脚噪音"}}],
+                ]),
+            )
+            zf.writestr(
+                "x_full.md",
+                "## 第一页\n\n批号 112701 含量测定\n\n\f\n## 第二页\n\n中间体储存温度 15-25°C\n",
+            )
+        zip_bytes = buf.getvalue()
+
+        task_result = {"full_zip_url": "http://mock/result.zip"}
+        with _patch("core.mineru_client.requests.get") as mock_get:
+            resp = mock.MagicMock()
+            resp.status_code = 200
+            resp.content = zip_bytes
+            mock_get.return_value = resp
+            pages = mineru_client.download_result(task_result)
+
+        # 回退 full.md → 2 页，内容完整
+        assert len(pages) == 2, f"expected 2 pages, got {len(pages)}"
+        joined = "\n".join(p["markdown"]["text"] for p in pages)
+        assert "批号 112701" in joined
+        assert "中间体储存温度 15-25°C" in joined
+
+    def test_download_result_keeps_content_list_when_complete(self):
+        """content_list 内容完整时（>=50% full.md）不应触发回退。"""
+        import io, zipfile
+        from unittest.mock import patch as _patch
+
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr(
+                "x_content_list_v2.json",
+                json.dumps([
+                    [{"type": "paragraph", "content": {"paragraph_content": [{"type": "text", "content": "完整段落内容 ABC"}]}}],
+                ]),
+            )
+            zf.writestr("x_full.md", "完整段落内容 ABC\n")
+        zip_bytes = buf.getvalue()
+
+        task_result = {"full_zip_url": "http://mock/result2.zip"}
+        with _patch("core.mineru_client.requests.get") as mock_get:
+            resp = mock.MagicMock()
+            resp.status_code = 200
+            resp.content = zip_bytes
+            mock_get.return_value = resp
+            pages = mineru_client.download_result(task_result)
+
+        assert len(pages) == 1
+        assert "完整段落内容 ABC" in pages[0]["markdown"]["text"]
 
 
 class TestPaddleOCRClient:
