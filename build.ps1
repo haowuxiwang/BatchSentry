@@ -199,7 +199,11 @@ if (-not $SkipPyInstaller) {
     } finally {
         if ($proc -and -not $proc.HasExited) {
             Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
-            & taskkill /PID $proc.Id /T /F 2>&1 | Out-Null
+            # EAP=Stop 下 taskkill 找不到 PID（Stop-Process 已杀）会把 stderr
+            # 变终止错误，中断整个构建 — 必须 try/catch 包住
+            try {
+                & taskkill /PID $proc.Id /T /F 2>&1 | Out-Null
+            } catch { }
         }
     }
     if (-not $smokeOk) {
