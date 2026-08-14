@@ -1593,7 +1593,8 @@ class TestUserRulesInjection:
             asyncio.run(_llm_based_check("摘要内容", job_id="job-1"))
 
         assert "15-25°C" in captured["user"]
-        assert captured["user"].startswith("用户自定义合规规则")
+        assert "<USER_RULES>" in captured["user"]
+        assert captured["user"].startswith("<USER_RULES>")
         assert captured["user"].endswith("摘要内容")
         assert captured["audit"]["prompt_version"].startswith("semantic_v2+rules")
 

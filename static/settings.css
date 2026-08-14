@@ -77,16 +77,22 @@
 }
 
 /* ─── 响应式: 窄屏 sidebar → 横排 tabs ─── */
-@media (max-width: 768px) {
-  .settings-layout {
-    flex-direction: column;
-    gap: 0;
+/* 桌面端: sidebar显示, tabs隐藏 */
+@media (min-width: 768px) {
+  .settings-nav {
+    display: flex;
   }
+  .settings-nav-mobile {
+    display: none !important;
+  }
+}
+/* 移动端: sidebar隐藏, tabs显示 */
+@media (max-width: 767px) {
   .settings-nav {
     display: none !important;
   }
   .settings-nav-mobile {
-    display: flex !important;
+    display: flex;
   }
 }
 html,

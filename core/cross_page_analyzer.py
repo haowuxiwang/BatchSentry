@@ -1403,9 +1403,11 @@ def _user_rules_section(rules: list[dict] | None = None) -> tuple[str, str]:
         return "", "none"
     lines = [f"- [规则ID: {r['id']}] {r['text']}" for r in rules]
     section = (
+        "<USER_RULES>\n"
         "用户自定义合规规则（必须逐条核对记录是否满足，"
         "违反时输出 type=user_rule 的 finding，按影响定级，rule_id 照抄对应规则 ID）：\n"
         + "\n".join(lines)
+        + "\n</USER_RULES>"
     )
     import hashlib
     rules_hash = hashlib.md5(section.encode("utf-8")).hexdigest()[:8]

@@ -147,7 +147,9 @@ async def request_id_middleware(request: Request, call_next):
     排除 /static/ 和 /health 以减少噪声。
     """
     import time as _time
-    req_id = request.headers.get("X-Request-ID") or generate_request_id()
+    import re as _re
+    raw_id = request.headers.get("X-Request-ID") or ""
+    req_id = raw_id if _re.fullmatch(r"[a-zA-Z0-9_\-]{8,64}", raw_id) else generate_request_id()
     token = request_id_var.set(req_id)
     path = request.url.path
     # 静态文件和健康检查不打 access log（减少噪声）

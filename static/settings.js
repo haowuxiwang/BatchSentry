@@ -1051,6 +1051,7 @@
       const ta = listEl.lastElementChild.querySelector("textarea");
       if (ta) {
         ta.value = text;
+        ta.dispatchEvent(new Event("input", { bubbles: true }));
         ta.focus();
         ta.selectionStart = ta.value.length;
       }
