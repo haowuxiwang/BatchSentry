@@ -92,13 +92,14 @@
     });
   }
 
-  function uploadFile(file) {
+  function uploadFile(file, force = false) {
     log("uploadFile() called", {
       name: file.name,
       size: file.size,
       sizeMB: (file.size / 1024 / 1024).toFixed(2),
       type: file.type,
       lastModified: new Date(file.lastModified).toISOString(),
+      force,
     });
     if (!file.name.toLowerCase().endsWith(".pdf")) {
       log.warn("uploadFile — rejected (not .pdf)", file.name);
@@ -154,7 +155,7 @@
     }
 
     const xhr = new XMLHttpRequest();
-    xhr.open("POST", "/api/jobs");
+    xhr.open("POST", `/api/jobs${force ? "?force=1" : ""}`);
 
     // 上传进度（大文件反馈关键）
     xhr.upload.addEventListener("progress", (e) => {
@@ -210,6 +211,34 @@
           const body = JSON.parse(xhr.responseText || "{}");
           if (body && body.detail) detail = `: ${String(body.detail)}`;
         } catch (_) { /* 非 JSON 响应（网关/代理错误），忽略 */ }
+        // 409 去重命中时（非 force 重试），提供"仍要重新上传"路径 —
+        // 无需删除旧任务（删除不可恢复，连审计日志一起），直接 force 重传。
+        // 旧任务保留在历史记录中，便于对比复核。
+        if (xhr.status === 409 && !force && /已上传过/.test(detail)) {
+          const match = detail.match(/任务 (\S+?)「(.+?)」，状态 ([^）\s]+)/);
+          const jobId = match ? match[1] : "";
+          const oldName = match ? match[2] : file.name;
+          const oldStatus = match ? match[3] : "";
+          confirmDialog({
+            title: "该文件已上传过",
+            message:
+              `历史任务「${oldName}」（状态: ${oldStatus}）包含此文件。\n\n` +
+              "重新上传会创建新任务并重新完整分析（旧任务保留，可对比）。",
+            confirmText: "仍要重新上传",
+            cancelText: "取消",
+            statusBadge: { text: oldStatus, dotClass: statusDotClass(oldStatus) },
+          }).then((ok) => {
+            if (!ok) {
+              setStatus("已取消 — 可在历史记录中查看原任务", "info");
+              if (progressBar) progressBar.classList.add("hidden");
+              if (dropZone) dropZone.style.pointerEvents = "";
+              return;
+            }
+            log("uploadFile — force re-upload confirmed", { jobId });
+            uploadFile(file, true);
+          });
+          return;
+        }
         setStatus(`上传失败: HTTP ${xhr.status}${detail}`, "err");
         if (progressBar) progressBar.classList.add("hidden");
         if (dropZone) dropZone.style.pointerEvents = "";

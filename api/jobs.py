@@ -215,7 +215,8 @@ async def create_job(
         try:
             cursor = await db.execute(
                 "SELECT id, filename, status, created_at FROM jobs "
-                "WHERE md5 = ? ORDER BY created_at DESC LIMIT 1",
+                "WHERE md5 = ? AND status != 'archived' "
+                "ORDER BY created_at DESC LIMIT 1",
                 (content_md5,),
             )
             dup = await cursor.fetchone()
@@ -228,7 +229,7 @@ async def create_job(
                     409,
                     f"该文件已上传过（任务 {dup['id']}「{dup['filename']}」，"
                     f"状态 {dup['status']}）。点击历史记录即可查看；"
-                    f"确需重新分析请先删除旧任务。",
+                    f"确需重新分析请先删除旧任务或重新上传（将创建新任务）。",
                 )
             await db.execute(
                 "INSERT INTO jobs (id, filename, status, pdf_path, total_pages, md5) "
@@ -727,7 +728,6 @@ async def delete_job(job_id: str, keep_pdf: bool = False):
     Args:
         keep_pdf: True 时保留 PDF 原文件（用于审计），False 时一并删除
     """
-    import json as _json
     import shutil
 
     db = await get_db()

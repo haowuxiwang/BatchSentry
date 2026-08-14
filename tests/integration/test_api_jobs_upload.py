@@ -197,6 +197,47 @@ class TestUploadDedup:
         )
         assert (await cursor.fetchone())[0] == 2
 
+    @pytest.mark.asyncio
+    async def test_archived_job_does_not_block_reupload(self, client, tmp_path, test_db):
+        """归档任务（软删除）不应拦截相同 md5 的重传 — 归档不占用内容指纹，
+        用户归档旧任务后可直接重新上传分析（回归：发布前审查发现归档任务
+        仍触发 409「已上传过」，用户删除旧任务后才允许重传，体验与审计冲突）。
+        """
+        pdf_path = self._make_pdf(tmp_path, "arch.pdf", "archived content")
+
+        with patch("api.jobs.launch_pipeline"):
+            with open(pdf_path, "rb") as f:
+                r1 = await client.post(
+                    "/api/jobs", files={"file": ("arch.pdf", f, "application/pdf")}
+                )
+            job_id = r1.json()["job_id"]
+
+            # 归档第一个任务
+            ar = await client.post(f"/api/jobs/{job_id}/archive")
+            assert ar.status_code == 200
+
+            # 同内容再次上传：不再 409，直接创建新任务
+            with open(pdf_path, "rb") as f:
+                r2 = await client.post(
+                    "/api/jobs", files={"file": ("arch.pdf", f, "application/pdf")}
+                )
+            with open(pdf_path, "rb") as f:
+                r3 = await client.post(
+                    "/api/jobs", files={"file": ("arch.pdf", f, "application/pdf")}
+                )
+
+        assert r1.status_code == 200
+        assert r2.status_code == 200
+        assert r2.json()["job_id"] != job_id
+        # 新任务创建后再传同文件，仍被去重拦截（非归档任务）
+        assert r3.status_code == 409
+
+        # 归档任务保留在表中，新任务已创建
+        cursor = await test_db.execute(
+            "SELECT COUNT(*) FROM jobs WHERE md5 IS NOT NULL"
+        )
+        assert (await cursor.fetchone())[0] == 2
+
 
 class TestStatsOverview:
     """GET /api/jobs/stats/overview。"""
