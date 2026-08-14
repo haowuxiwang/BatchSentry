@@ -496,22 +496,27 @@ def _block_to_markdown(block: dict) -> str:
     # 其他类型：尽力提取（不静默丢内容 — 服务端可能引入新块类型）
     extracted = _content_text(block) or (block.get("text") or "").strip()
     if not extracted:
-        # 兜底：递归捞取块内全部字符串字段（格式漂移时保底）
+        # 兜底：递归捞取块内全部字符串内容字段（格式漂移时保底）。
+        # 跳过元数据键（type/bbox/score 等机器字段），否则最小块
+        # {"type": "text"} 会被捞出 "text" 当作正文。
+        _META_KEYS = ("type", "bbox", "poly", "score", "conf", "idx", "id", "page_", "line_")
         parts = []
 
-        def _collect(obj):
+        def _collect_str(obj):
             if isinstance(obj, str):
                 s = obj.strip()
                 if s and s not in _SENTENCE_END and len(s) > 1:
                     parts.append(s)
             elif isinstance(obj, dict):
-                for v in obj.values():
-                    _collect(v)
+                for k, v in obj.items():
+                    if k.startswith(_META_KEYS):
+                        continue
+                    _collect_str(v)
             elif isinstance(obj, list):
                 for item in obj:
-                    _collect(item)
+                    _collect_str(item)
 
-        _collect(block)
+        _collect_str(block)
         extracted = " ".join(parts).strip()
     return extracted
 
