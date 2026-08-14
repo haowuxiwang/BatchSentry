@@ -479,39 +479,41 @@
     const sections = document.querySelectorAll("[data-section]");
     if (!navs.length || !sections.length) return;
 
+    function applyNav(target) {
+      sections.forEach((s) =>
+        s.classList.toggle("hidden", s.dataset.section !== target),
+      );
+      navs.forEach((n) =>
+        n.querySelectorAll(".settings-nav-link").forEach((l) =>
+          l.classList.toggle("active", l.dataset.target === target),
+        ),
+      );
+    }
+
+    function hashTarget() {
+      const hash = location.hash.slice(1);
+      return hash && document.querySelector('[data-section="' + hash + '"]')
+        ? hash
+        : "llm";
+    }
+
     navs.forEach((nav) => {
       nav.addEventListener("click", (e) => {
         const link = e.target.closest("[data-target]");
         if (!link) return;
-        e.preventDefault();
-        const target = link.dataset.target;
-        sections.forEach((s) =>
-          s.classList.toggle("hidden", s.dataset.section !== target),
-        );
-        navs.forEach((n) =>
-          n.querySelectorAll(".settings-nav-link").forEach((l) =>
-            l.classList.toggle("active", l.dataset.target === target),
-          ),
-        );
-        history.replaceState(null, "", "#" + target);
+        // 不 preventDefault：<a href="#ocr"> 默认行为更新 hash、
+        // 写入历史栈并触发 hashchange，使后退/前进/收藏链接均可用。
+        // 此处同步切换避免等待 hashchange 的闪烁。
+        applyNav(link.dataset.target);
       });
     });
 
+    // URL hash 变化（点击/后退/前进/直达）统一应用
+    window.addEventListener("hashchange", () => applyNav(hashTarget()));
+
     // 初始: 显示 URL hash 对应的 section，否则默认 llm
-    const hash = location.hash.slice(1);
-    const initial =
-      hash && document.querySelector('[data-section="' + hash + '"]')
-        ? hash
-        : "llm";
-    sections.forEach((s) =>
-      s.classList.toggle("hidden", s.dataset.section !== initial),
-    );
-    navs.forEach((n) =>
-      n.querySelectorAll(".settings-nav-link").forEach((l) =>
-        l.classList.toggle("active", l.dataset.target === initial),
-      ),
-    );
-    log("section nav initialized", { initial });
+    applyNav(hashTarget());
+    log("section nav initialized", { initial: hashTarget() });
   }
 
   // ============================================================
