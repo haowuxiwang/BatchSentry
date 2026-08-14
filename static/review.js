@@ -44,10 +44,13 @@
     const pdfImg = document.getElementById("pdf-page-img");
     const pdfLoading = document.getElementById("pdf-loading");
     if (pdfImg && pdfLoading) {
+      // onload/onerror 只注册一次 — 反复赋值会互相覆盖（翻页时第二次
+      // updatePdfDisplay 命中缓存分支曾把 onload 置 null，图片加载完成后
+      // 无回调 → "正在渲染第 N 页" 永久显示）。加载完成/失败统一隐藏遮挡。
       pdfImg.onload = () => pdfLoading.classList.add("is-loaded");
       pdfImg.onerror = () => {
         pdfLoading.classList.add("is-loaded");
-        log.err("PDF initial render failed");
+        log.err("PDF page render failed");
       };
       updatePdfDisplay(currentPage);
       // 兜底：6s 后强制隐藏（渲染失败/极慢时不永久遮挡）
@@ -443,26 +446,15 @@
     const img = document.getElementById("pdf-page-img");
     const loading = document.getElementById("pdf-loading");
     if (img) {
-      const render = () => {
-        img.src = `/api/jobs/${jobId}/page/${targetPage}`;
-        if (loading) {
-          loading.classList.remove("is-loaded");
-          loading.querySelector("p").textContent = `正在渲染第 ${targetPage} 页 ...`;
-        }
-      };
-      // 已缓存同一 URL 时不重复触发 loading（浏览器会从缓存加载）
+      // 已缓存同一 URL（浏览器缓存/当前已加载）时不重复请求、不重置 loading
       if (img.src.endsWith(`/page/${targetPage}`)) {
-        img.onload = null;
         return;
       }
-      img.onload = () => {
-        if (loading) loading.classList.add("is-loaded");
-      };
-      img.onerror = () => {
-        if (loading) loading.classList.add("is-loaded");
-        log.err("PDF page render failed", targetPage);
-      };
-      render();
+      img.src = `/api/jobs/${jobId}/page/${targetPage}`;
+      if (loading) {
+        loading.classList.remove("is-loaded");
+        loading.querySelector("p").textContent = `正在渲染第 ${targetPage} 页 ...`;
+      }
     }
     // 更新翻页按钮 disabled 状态（prev/next 箭头 — 页码导航各自管理 active 态）
     syncNavButtons();

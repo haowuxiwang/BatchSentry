@@ -40,9 +40,20 @@ _ACTIVE_STATUSES = ("pending", "ocr_running", "ocr_done", "analyzing", "cancelli
 # PDF 文档句柄缓存（fitz Document）— 页码 PNG 渲染用，避免每次翻页重新
 # 打开大 PDF（200MB 文件打开需数秒）。简单容量 + TTL 淘汰。
 _pdf_doc_cache: dict[str, tuple] = {}  # job_id -> (fitz.Document, last_ts)
-_PDF_CACHE_MAX = 4
-_PDF_CACHE_TTL = 600.0  # 秒
+_PDF_CACHE_MAX = 6
+_PDF_CACHE_TTL = 1800.0  # 秒 — 大 PDF（百 MB 级）重开成本高，拉长 TTL
+# 渲染输出上限：批记录扫描件常为 300dpi+（单页 27MP），按 72dpi 基准
+# zoom=1.5 输出 4500x6000px/9-18MB PNG，浏览器解码慢且每翻页重传。
+# 限制输出宽度 ≤2000px（CSS fit-width 实际显示 ~1000px，2000px 足够清晰），
+# 体积下降 ~10 倍。zoom 取 min(1.5, 2000/page_width_pt)。
 _PDF_RENDER_ZOOM = 1.5  # ~108 dpi，批记录扫描件清晰度/体积平衡
+_PDF_RENDER_MAX_W = 2000  # 输出最大宽度（px）
+
+
+def _pdf_render_zoom(page) -> float:
+    """按页面物理宽度自适应渲染缩放，输出宽度不超过 _PDF_RENDER_MAX_W。"""
+    w_pt = max(page.rect.width, 1.0)
+    return min(_PDF_RENDER_ZOOM, _PDF_RENDER_MAX_W / w_pt)
 
 
 def _get_pdf_doc(job_id: str, pdf_path: str):
@@ -390,10 +401,19 @@ async def get_job_page_image(job_id: str, page_num: int):
         raise HTTPException(500, "PDF cannot be rendered")
     if page_num < 1 or page_num > doc.page_count:
         raise HTTPException(404, f"Page out of range (1-{doc.page_count})")
-    try:
+    # 渲染在线程池执行：大扫描页 get_pixmap 需秒级，同步执行会阻塞整个
+    # 事件循环（所有 API/SSE 请求排队，前端"正在渲染"卡住）。尺寸由
+    # _pdf_render_zoom 限制（≤2000px 宽，体积 ~10x 下降，解码更快）。
+    def _render_sync() -> bytes:
         page = doc.load_page(page_num - 1)
-        pix = page.get_pixmap(matrix=fitz.Matrix(_PDF_RENDER_ZOOM, _PDF_RENDER_ZOOM), alpha=False)
-        png = pix.tobytes("png")
+        zoom = _pdf_render_zoom(page)
+        pix = page.get_pixmap(
+            matrix=fitz.Matrix(zoom, zoom), alpha=False, colorspace=fitz.csRGB
+        )
+        return pix.tobytes("png")
+
+    try:
+        png = await asyncio.to_thread(_render_sync)
     except Exception as e:
         logger.error(f"[{job_id}] Page render failed (p{page_num}): {e}")
         raise HTTPException(500, "Page render failed")

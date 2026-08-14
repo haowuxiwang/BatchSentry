@@ -258,6 +258,21 @@ def download_result(task_result: dict) -> list[dict]:
 
         if content_list_name:
             pages = _split_pages_by_content_list(zf, content_list_name)
+            # 完整性对照（OCR 鲁棒性）：content_list 结构化解析若丢失大部分
+            # 内容（格式漂移/未知块类型/服务端降级），静默输出残缺页会让
+            # 下游 LLM 拿到残缺信息。用 full.md（MinerU 官方合并文本）做
+            # 兜底对照：逐页文本总量 < full.md 总量 50% 时回退 full.md 拆分。
+            full_md_name = next((n for n in names if n.endswith("full.md")), None)
+            if full_md_name:
+                full_md = zf.read(full_md_name).decode("utf-8", errors="replace")
+                extracted_total = sum(len(p["markdown"]["text"]) for p in pages)
+                if len(full_md.strip()) > 0 and extracted_total < len(full_md) * 0.5:
+                    logger.warning(
+                        f"[MinerU] content_list 提取不完整 "
+                        f"({extracted_total} < {len(full_md) * 0.5:.0f} chars of full.md), "
+                        f"回退 full.md 拆分 — 防止静默丢失页面内容"
+                    )
+                    pages = _split_pages_by_separator(full_md)
         elif full_md_name:
             # 降级：content_list 不存在时，按分页符拆分 full.md
             logger.warning(
@@ -478,21 +493,54 @@ def _block_to_markdown(block: dict) -> str:
     if btype in ("page_aside_text", "aside_text"):
         return _content_text(block) or (block.get("text") or "").strip()
 
-    # 其他类型：尝试取 text 字段
-    return _content_text(block) or (block.get("text") or "").strip()
+    # 其他类型：尽力提取（不静默丢内容 — 服务端可能引入新块类型）
+    extracted = _content_text(block) or (block.get("text") or "").strip()
+    if not extracted:
+        # 兜底：递归捞取块内全部字符串字段（格式漂移时保底）
+        parts = []
+
+        def _collect(obj):
+            if isinstance(obj, str):
+                s = obj.strip()
+                if s and s not in _SENTENCE_END and len(s) > 1:
+                    parts.append(s)
+            elif isinstance(obj, dict):
+                for v in obj.values():
+                    _collect(v)
+            elif isinstance(obj, list):
+                for item in obj:
+                    _collect(item)
+
+        _collect(block)
+        extracted = " ".join(parts).strip()
+    return extracted
 
 
 def _table_html(block: dict) -> str:
-    """提取表格 HTML：v2 在 content.html，v1 在 table_body 字段。"""
+    """提取表格 HTML：v2 在 content.html，v1 在 table_body 字段。
+
+    多路兜底（格式漂移防护）：content.html → content.table_html →
+    content.table_body → content.table_markdown → 顶层 table_body /
+    markdown / html 字段。
+    """
     content = block.get("content")
-    if isinstance(content, dict) and content.get("html"):
-        return content["html"]
+    if isinstance(content, dict):
+        for key in ("html", "table_html", "table_body", "table_markdown"):
+            val = content.get(key)
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+        for key, val in content.items():
+            if isinstance(val, str) and val.strip() and ("<tr" in val or "<td" in val):
+                return val.strip()
     body = block.get("table_body")
     if isinstance(body, str) and body.strip():
         return body.strip()
     md = block.get("markdown")
     if isinstance(md, str) and md.strip():
         return md.strip()
+    html = block.get("html")
+    if isinstance(html, str) and html.strip():
+        return html.strip()
     return ""
 
 
