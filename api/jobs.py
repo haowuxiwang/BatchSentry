@@ -1,4 +1,5 @@
 """Job management API — upload PDF, check status, cancel, retry."""
+import asyncio
 import hashlib
 import json
 import logging
@@ -191,11 +192,15 @@ async def create_job(
     # 上传后立即读取 PDF 总页数 — OCR/分析期间 review 页面就能显示正确的
     # "X / Y" 页码（之前 total_pages 在 OCR 完成后才写入，导致显示 "1 / 0"）。
     # 用 PyMuPDF (fitz) 读取，开销 < 100ms 即使 200MB PDF。
+    # 线程池执行避免阻塞事件循环（损坏/超大 PDF 的 xref 修复可能秒级）。
+    def _count_pdf_pages_sync(path: str) -> int:
+        import fitz  # PyMuPDF
+        with fitz.open(path) as doc:
+            return doc.page_count
+
     pdf_page_count = 0
     try:
-        import fitz  # PyMuPDF
-        with fitz.open(str(pdf_path)) as doc:
-            pdf_page_count = doc.page_count
+        pdf_page_count = await asyncio.to_thread(_count_pdf_pages_sync, str(pdf_path))
         logger.info(f"[{job_id}] PDF page count: {pdf_page_count}")
     except Exception as e:
         # 读页数失败不阻断上传 — pipeline 仍会在 OCR 完成后设置 total_pages
@@ -611,6 +616,22 @@ async def retry_job(job_id: str):
     job = await cursor.fetchone()
     if not job:
         raise HTTPException(404, "Job not found")
+
+    # Concurrency guard: retry must respect MAX_CONCURRENT_JOBS like upload.
+    # Without this, mass-retrying failed jobs spawns unbounded pipelines,
+    # defeating the memory protection (OCR results held in RAM per job).
+    db_active = await get_db()
+    async with db_lock:
+        cursor = await db_active.execute(
+            f"SELECT COUNT(*) FROM jobs WHERE status IN ({','.join('?' * len(_ACTIVE_STATUSES))})",
+            _ACTIVE_STATUSES,
+        )
+        active_count = (await cursor.fetchone())[0]
+        if active_count >= _MAX_CONCURRENT_JOBS:
+            raise HTTPException(
+                409,
+                f"已有 {active_count} 个任务在处理中，上限为 {_MAX_CONCURRENT_JOBS}。请等待完成或取消后再试。",
+            )
 
     if not job["pdf_path"] or not Path(job["pdf_path"]).exists():
         raise HTTPException(400, "PDF file not found on disk")

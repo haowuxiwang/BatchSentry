@@ -138,17 +138,24 @@ def poll_job(batch_id: str, progress_callback=None) -> dict:
     """
     start = time.time()
     url = f"{_API_BASE}/extract-results/batch/{batch_id}"
+    consecutive_errors = 0
 
     while (time.time() - start) < POLL_TIMEOUT:
         try:
             resp = requests.get(url, headers=_headers(), timeout=30)
         except requests.RequestException as e:
+            consecutive_errors += 1
             logger.warning(f"[MinerU] 轮询请求异常, 重试: {e}")
+            if consecutive_errors >= 5:
+                raise RuntimeError(f"MinerU poll failed: 5 consecutive network errors: {e}")
             time.sleep(POLL_INTERVAL)
             continue
 
         if resp.status_code != 200:
+            consecutive_errors += 1
             logger.warning(f"[MinerU] 轮询 HTTP {resp.status_code}, 重试...")
+            if consecutive_errors >= 5:
+                raise RuntimeError(f"MinerU poll failed: 5 consecutive HTTP {resp.status_code}")
             time.sleep(POLL_INTERVAL)
             continue
 
@@ -158,16 +165,24 @@ def poll_job(batch_id: str, progress_callback=None) -> dict:
         try:
             j = resp.json()
         except (ValueError, json.JSONDecodeError) as e:
+            consecutive_errors += 1
             logger.warning(
                 f"[MinerU] 轮询返回非 JSON 响应 (status={resp.status_code}): "
                 f"{resp.text[:200]} (parse_err: {e})"
             )
+            if consecutive_errors >= 5:
+                raise RuntimeError("MinerU poll failed: 5 consecutive non-JSON responses")
             time.sleep(POLL_INTERVAL)
             continue
         if j.get("code") != 0:
+            consecutive_errors += 1
             logger.warning(f"[MinerU] 轮询返回错误码: {j.get('msg')}")
+            if consecutive_errors >= 5:
+                raise RuntimeError(f"MinerU poll failed: 5 consecutive error codes: {j.get('msg')}")
             time.sleep(POLL_INTERVAL)
             continue
+
+        consecutive_errors = 0
 
         data = j.get("data", {})
         extract_result = data.get("extract_result", [])

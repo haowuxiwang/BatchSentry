@@ -179,6 +179,25 @@ class TestCancelRetry:
         # 应返回 200（pending）或 400（如果 PDF 不存在）
         assert r.status_code in (200, 400)
 
+    @pytest.mark.asyncio
+    async def test_retry_respects_concurrency_limit(self, client_with_data, test_db):
+        """并发上限已满时 retry 应返回 409（与 upload 一致）。"""
+        from unittest.mock import patch
+        from api.jobs import _ACTIVE_STATUSES
+
+        # 造一个 active job 占满上限（limit=1 时当前 job 改为 error 后不再活跃，
+        # 需要另一个活跃 job 占位）
+        await test_db.execute("INSERT OR REPLACE INTO jobs (id, filename, status, total_pages) "
+                              "VALUES ('busy-job', 'busy.pdf', 'ocr_running', 5)")
+        await test_db.commit()
+        await test_db.execute("UPDATE jobs SET status = 'error' WHERE id = 'test-job-api'")
+        await test_db.commit()
+
+        with patch("api.jobs._MAX_CONCURRENT_JOBS", 1), \
+             patch("api.jobs._ACTIVE_STATUSES", _ACTIVE_STATUSES):
+            r = await client_with_data.post("/api/jobs/test-job-api/retry")
+        assert r.status_code == 409
+
 
 class TestHealthEndpoint:
     """健康检查。"""

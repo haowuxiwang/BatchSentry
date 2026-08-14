@@ -409,7 +409,7 @@ async def _run_ocr_with_failover(db, job_id: str, pdf_path: str, progress_cb) ->
             failures.append(f"{name}: 0 pages returned")
             logger.error(f"[{job_id}] OCR attempt returned 0 pages (backend={name})")
             continue
-        pdf_total = _pdf_page_count(pdf_path)
+        pdf_total = await asyncio.to_thread(_pdf_page_count, pdf_path)
         if pdf_total is not None and len(pages) != pdf_total:
             missing = pdf_total - len(pages)
             if missing > max(5, int(pdf_total * 0.2)):
@@ -542,7 +542,7 @@ async def _run_pipeline_impl(job_id: str, pdf_path: str):
             # P1-4 修复 — 缺失页码并入 failed_pages，job 以 partial_review 收尾，
             # 复核页横幅列出缺失页码，规则层虽无法分析缺页但用户可见，
             # 不再是"静默通过"（GMP 合规工具的核心要求）。
-            pdf_total = _pdf_page_count(pdf_path)
+            pdf_total = await asyncio.to_thread(_pdf_page_count, pdf_path)
             if pdf_total is not None and len(pages) != pdf_total:
                 missing = pdf_total - len(pages)
                 warn_msg = (

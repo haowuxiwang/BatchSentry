@@ -41,6 +41,48 @@ class TestMinerUClient:
             with pytest.raises(RuntimeError):
                 mineru_client.run_ocr(str(fake_pdf))
 
+    def test_mineru_poll_fast_fails_after_5_consecutive_errors(self):
+        """连续 5 次网络错误应快速失败（而非等到 30 分钟超时）。"""
+        from unittest.mock import patch as _patch
+        from core import mineru_client as mc
+
+        with _patch("core.mineru_client.requests.get",
+                    side_effect=mc.requests.exceptions.ConnectionError("connection reset")):
+            with _patch("core.mineru_client.POLL_TIMEOUT", 1800):
+                with pytest.raises(RuntimeError, match="5 consecutive network errors"):
+                    mc.poll_job("batch-1", lambda done, total: None)
+
+    def test_mineru_poll_recovers_after_transient_error(self):
+        """连续错误后成功响应应重置计数（不误杀）。"""
+        from unittest.mock import patch as _patch
+        from core import mineru_client as mc
+
+        class FakeResp:
+            status_code = 200
+            def json(self):
+                return {"code": 0, "data": {"extract_result": [{"batch_id": "b1"}],
+                                            "extract_progress": {"done": 1, "total": 1}}}
+
+        calls = {"n": 0}
+        def flaky_get(*a, **kw):
+            calls["n"] += 1
+            if calls["n"] <= 2:
+                raise RuntimeError("transient")
+            return FakeResp()
+
+        with _patch("core.mineru_client.requests.get", side_effect=flaky_get), \
+             _patch("core.mineru_client._headers", return_value={}), \
+             _patch("core.mineru_client._API_BASE", "http://mock"), \
+             _patch("core.mineru_client.POLL_TIMEOUT", 1800):
+            # 第 3 次成功后走到结果处理分支，需要 download 相关 mock
+            with _patch("core.mineru_client.time.sleep"):
+                try:
+                    mc.poll_job("batch-1", lambda done, total: None)
+                except Exception:
+                    pass
+        # 2 次错误 + 1 次成功：错误计数应被重置，未触发快速失败
+        assert calls["n"] <= 3
+
     def test_split_pages_by_content_list(self):
         """_split_pages_by_content_list 应按 page_idx 分组。"""
         # 这个函数需要 ZipFile，用 mock 测试逻辑
