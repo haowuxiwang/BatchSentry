@@ -203,7 +203,7 @@
                         type="password"
                         name="paddle_ocr_token"
                         id="paddle_ocr_token"
-                        placeholder="token"
+                        placeholder="访问令牌（可选）"
                         autocomplete="new-password"
                       />
                       <button
@@ -255,7 +255,9 @@
                       <select class="input" name="mineru_model_version" id="mineru_model_version">
                         <option value="vlm">vlm（推荐）</option>
                         <option value="pipeline">pipeline（默认）</option>
+                        <option value="MinerU-HTML">MinerU-HTML（HTML 结构输出）</option>
                       </select>
+                      <p class="field-hint">pipeline=通用解析（默认）；vlm=精度更高（推荐）；MinerU-HTML=HTML 结构输出，左侧 OCR 原文以 HTML 表格展示，适合批记录。</p>
                     </div>
                     <div>
                       <label class="field-label">语言</label>
@@ -318,6 +320,7 @@
                 <p class="text-[11px] text-muted-foreground mt-0.5">
                   用户自定义规则注入跨页 LLM 分析
                   <span class="ml-1.5 px-1.5 py-0.5 rounded bg-muted text-[10px] font-normal" id="rules-count">0 条</span>
+                  <span id="rule-last-saved" class="ml-1.5 px-1.5 py-0.5 rounded bg-muted text-[10px] font-normal"></span>
                 </p>
               </div>
               <div class="p-5 flex flex-col gap-3">
@@ -327,6 +330,19 @@
                 </p>
                 <div id="rules-list" class="flex flex-col gap-2"></div>
                 <div class="flex items-center gap-2 pt-2">
+                  <div id="rule-template-wrap" class="relative">
+                    <button
+                      type="button"
+                      id="rule-template-btn"
+                      class="btn-press focus-ring inline-flex items-center px-3 py-1.5 text-[12px] text-foreground border border-border rounded-md hover:bg-muted/40 transition-colors"
+                    >
+                      模板库
+                    </button>
+                    <div
+                      id="rule-template-panel"
+                      class="hidden absolute left-0 top-full mt-1 w-[420px] max-h-72 overflow-y-auto bg-card border border-border rounded-lg shadow-lg z-20 p-1"
+                    ></div>
+                  </div>
                   <button
                     type="button"
                     id="rule-add-btn"
@@ -373,7 +389,7 @@
                 </div>
                 <div class="feishu-app-bot flex flex-col gap-2">
                   <div class="flex flex-col gap-1">
-                    <label class="text-[12px] text-muted-foreground" for="feishu-app-id">App ID</label>
+                    <label class="text-[12px] text-muted-foreground" for="feishu-app-id">应用 ID（App ID）</label>
                     <input
                       type="text"
                       id="feishu-app-id"
@@ -382,7 +398,7 @@
                     />
                   </div>
                   <div class="flex flex-col gap-1">
-                    <label class="text-[12px] text-muted-foreground" for="feishu-app-secret">App Secret</label>
+                    <label class="text-[12px] text-muted-foreground" for="feishu-app-secret">应用密钥（App Secret）</label>
                     <input
                       type="password"
                       id="feishu-app-secret"
@@ -422,7 +438,7 @@
                 </div>
                 <div class="feishu-webhook flex flex-col gap-2">
                   <div class="flex flex-col gap-1">
-                    <label class="text-[12px] text-muted-foreground" for="feishu-url">Webhook URL</label>
+                    <label class="text-[12px] text-muted-foreground" for="feishu-url">Webhook 地址</label>
                     <input
                       type="text"
                       id="feishu-url"

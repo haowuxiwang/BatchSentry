@@ -129,7 +129,7 @@
       return;
     }
     const mb = (file.size / 1024 / 1024).toFixed(1);
-    setStatus(`上传中 ${file.name} (${mb} MB)...`, "info");
+    setStatus(`上传中 ${file.name}（${mb} MB）…`, "info");
     const fd = new FormData();
     fd.append("file", file);
     log("uploadFile — XHR POST /api/jobs", {
@@ -183,7 +183,7 @@
           log("uploadFile — success response", data);
           if (data.job_id) {
             if (progressBar) progressBar.classList.add("hidden");
-            setStatus(`Job 已创建 ${data.job_id}，1.5s 后跳转复核页...`, "ok");
+            setStatus(`任务已创建 ${data.job_id}，1.5s 后跳转复核页…`, "ok");
             const target = `/jobs/${data.job_id}/review`;
             log("uploadFile — scheduling redirect", { target, delayMs: 1500 });
             setTimeout(() => {

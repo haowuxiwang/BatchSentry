@@ -3,7 +3,7 @@
    ------------------------------------------------------------
    设计原则:
    1. 已配置 provider = 脱敏只读展示 + 操作按钮 (更换/测试/移除/设为当前)
-   2. 未配置 provider = 空白 input + "保存此 Key" 即时保存
+   2. 未配置 provider = 空白 input + "保存此密钥" 即时保存
    3. active provider 切换 = 立即持久化 (不等底部保存)
    4. 单独 provider 测试连接 = 不混淆 active 状态
    5. 底部"保存通用设置" = 仅 OCR backend / 选项等通用字段
@@ -124,18 +124,18 @@
           </div>
         </div>
         <div class="mt-3">
-          <label class="field-label">Base URL</label>
+          <label class="field-label">接口地址（Base URL）</label>
           <input class="input" name="${esc(prov.name)}_base_url" value="${esc(prov.base_url)}" />
         </div>
         <div class="mt-3">
-          <label class="field-label">当前 API Key</label>
+          <label class="field-label">当前 API 密钥</label>
           <div class="key-display">${esc(prov.api_key)} <span class="muted">(已保存)</span></div>
           <div class="mt-2 key-replace-section hidden">
-            <label class="field-label">输入新 Key 覆盖原值</label>
-            <input class="input" type="password" name="${esc(prov.name)}_api_key" placeholder="粘贴新的 API Key..." autocomplete="new-password" />
+            <label class="field-label">输入新密钥覆盖原值</label>
+            <input class="input" type="password" name="${esc(prov.name)}_api_key" placeholder="粘贴新的 API 密钥..." autocomplete="new-password" />
             <div class="mt-2 flex gap-2">
-              <button type="button" class="save-key-btn btn-primary-small" data-provider="${esc(prov.name)}">保存此 Key</button>
-              <button type="button" class="clear-key-btn btn-danger-small" data-provider="${esc(prov.name)}" title="清除已保存的 API Key">移除 Key</button>
+              <button type="button" class="save-key-btn btn-primary-small" data-provider="${esc(prov.name)}">保存此密钥</button>
+              <button type="button" class="clear-key-btn btn-danger-small" data-provider="${esc(prov.name)}" title="清除已保存的 API 密钥">移除密钥</button>
               <button type="button" class="cancel-replace-btn btn-text">取消</button>
             </div>
           </div>
@@ -158,14 +158,14 @@
         </div>
       </div>
       <div class="mt-3">
-        <label class="field-label">Base URL</label>
+        <label class="field-label">接口地址（Base URL）</label>
         <input class="input" name="${esc(prov.name)}_base_url" value="${esc(prov.base_url)}" />
       </div>
       <div class="mt-3">
-        <label class="field-label">API Key <span class="muted">— 粘贴 ${esc(display(prov.name))} 的密钥</span></label>
+        <label class="field-label">API 密钥 <span class="muted">— 粘贴 ${esc(display(prov.name))} 的密钥</span></label>
         <input class="input" type="password" name="${esc(prov.name)}_api_key" placeholder="sk-..." autocomplete="new-password" />
         <div class="mt-2">
-          <button type="button" class="save-key-btn btn-primary-small" data-provider="${esc(prov.name)}">保存此 Key</button>
+          <button type="button" class="save-key-btn btn-primary-small" data-provider="${esc(prov.name)}">保存此密钥</button>
         </div>
       </div>
     `;
@@ -226,7 +226,7 @@
       }
     });
 
-    // Per-provider "保存此 Key" + "移除 Key" + "取消"
+    // Per-provider "保存此密钥" + "移除密钥" + "取消"
     list.addEventListener("click", async (e) => {
       const saveBtn = e.target.closest(".save-key-btn");
       const clearBtn = e.target.closest(".clear-key-btn");
@@ -301,7 +301,7 @@
       if (replaceSection) replaceSection.classList.remove("hidden");
     } else {
       body.classList.add("hidden");
-      btn.textContent = row.querySelector(".key-display") ? "更换 Key" : "展开";
+      btn.textContent = row.querySelector(".key-display") ? "更换密钥" : "展开";
       if (replaceSection) replaceSection.classList.add("hidden");
     }
   }
@@ -314,12 +314,12 @@
     if (!input) return;
     const keyValue = input.value.trim();
     if (!keyValue) {
-      showMsg("请输入 API Key", "warn");
+      showMsg("请输入 API 密钥", "warn");
       input.focus();
       return;
     }
     if (keyValue === "__CLEAR__") {
-      showMsg("Key 不能为 __CLEAR__ 保留字", "err");
+      showMsg("密钥不能为 __CLEAR__ 保留字", "err");
       return;
     }
 
@@ -336,7 +336,7 @@
       // 若该 provider 是本次会话刚添加、尚未保存注册表的（pendingAdds），
       // 必须同批提交 llm_providers_add — 否则后端写 Key 时注册表里没有它，
       // 随后的自动激活 404 "not in registry"，刷新后 provider 消失
-      // （对抗审查：此前"保存此 Key"对新 provider 必然失败）。
+      // （对抗审查：此前"保存此密钥"对新 provider 必然失败）。
       if (pendingAdds.has(providerName)) {
         body.llm_providers_add = providerName;
       }
@@ -357,13 +357,13 @@
         const activeUnconfigured = !(activeProv && activeProv.configured);
         if (providerName !== activeProvider && activeUnconfigured) {
           showMsg(
-            `✓ ${display(providerName)} 的 Key 已保存，并自动设为当前提供商`,
+            `✓ ${display(providerName)} 的密钥已保存，并自动设为当前提供商`,
             "info",
           );
           await setActiveProvider(providerName, { silent: true });
         } else {
           showMsg(
-            `✓ ${display(providerName)} 的 Key 已保存并立即生效`,
+            `✓ ${display(providerName)} 的密钥已保存并立即生效`,
             "info",
           );
           // 用后端返回的 providers 列表刷新（避免 stale configured 标志）
@@ -390,7 +390,7 @@
   // ============================================================
   async function clearProviderKey(providerName, row) {
     const ok = await window.PBC.confirmDialog({
-      title: `确认清除 ${display(providerName)} 的 API Key？`,
+      title: `确认清除 ${display(providerName)} 的 API 密钥？`,
       message: "Key 将从配置文件中删除，立即生效。",
       confirmText: "确认清除",
       cancelText: "取消",
@@ -410,7 +410,7 @@
       });
       const data = await r.json();
       if (r.ok && data.ok) {
-        showMsg(`✓ ${display(providerName)} 的 Key 已清除`, "info");
+        showMsg(`✓ ${display(providerName)} 的密钥已清除`, "info");
         await load();
       } else {
         showMsg(`✗ 清除失败: ${data.detail || data.message}`, "err");
@@ -440,12 +440,12 @@
       const data = await r.json().catch(() => ({}));
       if (r.ok && data.ok) {
         const latency = data.latency_ms ? ` ${data.latency_ms}ms` : "";
-        resultEl.innerHTML = `<span class="badge-ok">✓ 连通正常${latency} · 模型: ${esc(data.model || "")}</span>`;
+        resultEl.innerHTML = `<span class="badge-ok">✓ 连通正常${latency} · 模型：${esc(data.model || "")}</span>`;
       } else {
         // 非 200 (如 403 Forbidden) 或 ok=false — 优先显示后端 reason，其次 detail
         const reason = data.reason || data.detail || `HTTP ${r.status}`;
         if (reason.includes("not configured") || reason.includes("API key")) {
-          resultEl.innerHTML = `<span class="badge-no">✗ 未配置 API Key — 请点击"更换 Key"或"展开"输入</span>`;
+          resultEl.innerHTML = `<span class="badge-no">✗ 未配置 API 密钥 — 请点击"更换 Key"或"展开"输入</span>`;
         } else {
           resultEl.innerHTML = `<span class="badge-no">✗ ${esc(reason)}</span>`;
         }
@@ -922,22 +922,93 @@
     "每批产品必须附有放行检验报告（COA）",
   ];
 
+  // 模板库 — 按 GMP 检查域分组的内置合规规则模板（Ⅰ-2：一键添加）
+  const RULE_TEMPLATE_LIBRARY = [
+    {
+      group: "温湿度",
+      items: [
+        "产品 {产品名} 的中间体储存温度必须控制在 15-25°C",
+        "冷库储存产品温度必须控制在 2-8°C，不得冷冻",
+        "生产车间湿度必须控制在 45%-65% RH",
+      ],
+    },
+    {
+      group: "批号",
+      items: [
+        "批号必须在所有页面保持一致，不得混批生产",
+        "批号格式必须为 YYMMDD-序号（如 240801-01）",
+      ],
+    },
+    {
+      group: "签名复核",
+      items: [
+        "关键工序（灭菌、灌装、称量）必须双人复核签名",
+        "批生产记录每页必须有操作人签名和日期",
+      ],
+    },
+    {
+      group: "检验放行",
+      items: [
+        "每批产品必须附有放行检验报告（COA）",
+        "检验不合格的批次不得放行，须执行偏差处理",
+      ],
+    },
+    {
+      group: "称量物料",
+      items: [
+        "称量记录必须与实际投料量一致，误差不得超过 0.5%",
+        "关键原辅料必须具有入库检验合格标识",
+      ],
+    },
+    {
+      group: "时间过程",
+      items: [
+        "工艺参数必须符合处方要求，不得擅自变更",
+        "设备清洁后必须填写清洁记录并经复核人确认",
+      ],
+    },
+  ];
+
+  let ruleLastSaved = null;
+
   async function loadRules() {
     try {
       const r = await fetch("/api/settings/rules");
       const data = await r.json();
       rules = Array.isArray(data.rules) ? data.rules : [];
       ruleHits = data.hits && typeof data.hits === "object" ? data.hits : {};
-      log("rules loaded", { count: rules.length });
+      ruleLastSaved = data.last_saved_at || null;
+      log("rules loaded", { count: rules.length, lastSaved: ruleLastSaved });
       renderRules();
     } catch (err) {
       log.err("load rules failed", err);
     }
   }
 
+  function renderRuleSavedBadge() {
+    const el = document.getElementById("rule-last-saved");
+    if (!el) return;
+    if (!ruleLastSaved || ruleLastSaved === "刚刚") {
+      el.textContent =
+        ruleLastSaved === "刚刚" ? "刚刚已保存，将注入下次跨页分析" : "从未成功保存 — 规则不会生效";
+      el.className =
+        "ml-1.5 px-1.5 py-0.5 rounded bg-destructive/10 text-[10px] font-normal" +
+        (ruleLastSaved === "刚刚" ? " text-foreground" : " text-destructive");
+    } else {
+      el.textContent = `上次保存 ${ruleLastSaved}  · 命中 ${rules.reduce(
+        (n, r) => n + (ruleHits[r.id] || 0),
+        0
+      )} 次`;
+      el.className =
+        "ml-1.5 px-1.5 py-0.5 rounded bg-muted text-muted-foreground text-[10px] font-normal";
+    }
+    void el;
+  }
+
   function renderRules() {
     const listEl = document.getElementById("rules-list");
     const countEl = document.getElementById("rules-count");
+    renderRuleSavedBadge();
     if (!listEl) return;
     listEl.innerHTML = "";
     if (countEl) countEl.textContent = `${rules.length} 条`;
@@ -952,6 +1023,10 @@
       const row = document.createElement("div");
       row.className = "flex items-start gap-2";
       row.dataset.ruleIndex = String(idx);
+
+      const num = document.createElement("span");
+      num.className = "mt-2.5 w-5 shrink-0 text-right text-[11px] text-muted-foreground/60";
+      num.textContent = `${idx + 1}`;
 
       const checkbox = document.createElement("input");
       checkbox.type = "checkbox";
@@ -975,6 +1050,14 @@
         ruleDirty();
       });
 
+      const hit = ruleHits[rule.id] || 0;
+      const badge = document.createElement("span");
+      badge.className =
+        "mt-2 shrink-0 px-1.5 py-0.5 rounded text-[10px] " +
+        (hit > 0 ? "bg-foreground text-background" : "bg-muted text-muted-foreground/60");
+      badge.textContent = hit > 0 ? `命中 ${hit}` : "0 命中";
+      badge.title = `历史命中 ${hit} 次（GMP 溯源：findings.user_rule_id）`;
+
       const del = document.createElement("button");
       del.type = "button";
       del.className =
@@ -995,15 +1078,12 @@
         ruleDirty();
       });
 
+      row.appendChild(num);
       row.appendChild(checkbox);
       row.appendChild(textarea);
+      row.appendChild(badge);
       row.appendChild(del);
-      const hit = document.createElement("div");
-      hit.className =
-        "pl-6 text-[11px] text-muted-foreground/60";
-      hit.textContent = `历史命中 ${ruleHits[rule.id] ?? 0} 次`;
       listEl.appendChild(row);
-      listEl.appendChild(hit);
     });
   }
 
@@ -1035,6 +1115,7 @@
       const data = await r.json();
       if (r.ok && data.ok) {
         rules = data.rules || [];
+        ruleLastSaved = "刚刚";
         renderRules();
         if (msg) msg.textContent = "✓ 已保存，将注入下次跨页分析";
       } else {
@@ -1066,6 +1147,56 @@
       ta.selectionStart = ta.value.length;
     }
     ruleDirty();
+  });
+
+  // 模板库 dropdown — 分组展示内置合规规则模板，点选一键添加
+  function renderTemplatePanel() {
+    const panel = document.getElementById("rule-template-panel");
+    if (!panel) return;
+    panel.innerHTML = "";
+    RULE_TEMPLATE_LIBRARY.forEach((section) => {
+      const group = document.createElement("div");
+      group.className =
+        "px-2 pt-2 pb-1 text-[10px] font-medium text-muted-foreground/60 uppercase tracking-wide";
+      group.textContent = section.group;
+      panel.appendChild(group);
+      section.items.forEach((text) => {
+        const item = document.createElement("button");
+        item.type = "button";
+        item.className =
+          "text-left w-full px-2 py-1.5 text-[12px] leading-snug rounded-md hover:bg-muted/60 transition-colors";
+        item.textContent = text;
+        item.addEventListener("click", () => {
+          rules.push({ id: undefined, text, active: true });
+          renderRules();
+          toggleTemplatePanel(false);
+          ruleDirty();
+        });
+        panel.appendChild(item);
+      });
+    });
+  }
+
+  function toggleTemplatePanel(force) {
+    const panel = document.getElementById("rule-template-panel");
+    if (!panel) return;
+    const show = force === undefined ? panel.classList.contains("hidden") : force;
+    panel.classList.toggle("hidden", !show);
+    if (show) renderTemplatePanel();
+  }
+
+  document.getElementById("rule-template-btn")?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    toggleTemplatePanel();
+  });
+
+  document.addEventListener("click", (e) => {
+    const wrap = document.getElementById("rule-template-wrap");
+    if (wrap && !wrap.contains(e.target)) toggleTemplatePanel(false);
+  });
+
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") toggleTemplatePanel(false);
   });
 
   document.getElementById("rule-save-btn")?.addEventListener("click", saveRules);
@@ -1206,7 +1337,7 @@
 
   // ============================================================
   // S7: 底部"保存通用设置" — 仅保存 OCR backend / enable_* 等通用字段
-  // (per-provider Key 已由"保存此 Key"按钮即时保存)
+  // (per-provider Key 已由"保存此密钥"按钮即时保存)
   // ============================================================
   document
     .getElementById("settings-form")
@@ -1355,7 +1486,7 @@
           } else {
             const reason = data.reason || data.detail || "失败";
             if (reason.includes("not configured") || reason.includes("API key")) {
-              parts.push(`○ ${display(name)}:未配置${tag}`);
+              parts.push(`○ ${display(name)}：未配置${tag}`);
             } else {
               parts.push(`✗ ${display(name)}:${reason}${tag}`);
             }

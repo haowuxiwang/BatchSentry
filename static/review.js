@@ -85,7 +85,7 @@
 
       bar.classList.remove("hidden");
       bar.classList.add("inline-flex");
-      txt.textContent = "连接中...";
+      txt.textContent = "连接中…";
 
       let retryCount = 0;
       const MAX_RETRIES = 3;
@@ -457,7 +457,7 @@
       img.src = `/api/jobs/${jobId}/page/${targetPage}`;
       if (loading) {
         loading.classList.remove("is-loaded");
-        loading.querySelector("p").textContent = `正在渲染第 ${targetPage} 页 ...`;
+        loading.querySelector("p").textContent = `正在渲染第 ${targetPage} 页 …`;
       }
     }
     // 更新翻页按钮 disabled 状态（prev/next 箭头 — 页码导航各自管理 active 态）
