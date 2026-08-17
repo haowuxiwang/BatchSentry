@@ -215,6 +215,18 @@ async def _transition_status_unlocked(db, job_id: str, new_status: str, detail: 
             f"[{job_id}] Blocked invalid transition: {current} → {new_status} "
             f"(allowed: {allowed})"
         )
+        # 对抗审查 cr-17：被拒转换也写审计 — GMP 追溯要求记录"尝试过但
+        # 被拒绝的状态变更"（如对终态 job 重复 cancel/retry），仅日志
+        # 不足以防异常路径静态可追踪。
+        try:
+            await db.execute(
+                "INSERT INTO audit_log (job_id, action, detail) "
+                "VALUES (?, 'status_transition_blocked', ?)",
+                (job_id, f"{current} → {new_status} (allowed: {allowed|set()})"),
+            )
+            await db.commit()
+        except Exception as audit_err:
+            logger.warning(f"[{job_id}] Audit log write failed: {audit_err}")
         raise InvalidTransitionError(
             f"Cannot transition from '{current}' to '{new_status}'. "
             f"Allowed: {allowed}"
@@ -405,7 +417,7 @@ async def _run_ocr_with_failover(db, job_id: str, pdf_path: str, progress_cb) ->
     - used_backend: 实际成功执行的后端名（"paddle"/"mineru"）
     - failures: 失败记录列表（每个元素描述一个后端的失败原因）
 
-    失败判定：异常 / 0 页 / 严重页数缺失（缺 >20% 或 >5 页）。
+    失败判定：异常 / 0 页 / 严重页数缺失（缺 >10% 且 >2 页）。
     任一失败 → 切下一个后端整单重试；全部失败时 failures 非空。
     仅整份路径使用；分片路径（MinerU + OCR_SLICES>1）保持原逻辑。
     """
@@ -439,7 +451,10 @@ async def _run_ocr_with_failover(db, job_id: str, pdf_path: str, progress_cb) ->
         pdf_total = await asyncio.to_thread(_pdf_page_count, pdf_path)
         if pdf_total is not None and len(pages) != pdf_total:
             missing = pdf_total - len(pages)
-            if missing > max(5, int(pdf_total * 0.2)):
+            # 对抗审查 cr-17：阈值从 max(5, 20%) 收紧到 max(2, 10%) —
+            # MinerU 服务端丢页缺陷对中小文件同样发生（丢 2-4 页
+            # 时旧阈值不触发 failover，静默输出残缺页）。
+            if missing > max(2, int(pdf_total * 0.1)):
                 failures.append(f"{name}: page mismatch ({len(pages)}/{pdf_total})")
                 logger.error(
                     f"[{job_id}] OCR page count mismatch (backend={name}): {failures[-1]}"
@@ -659,12 +674,39 @@ async def _run_pipeline_impl(job_id: str, pdf_path: str):
             # page_cache，重跑仍空则保留原样（服务端也识别不了，走既有
             # _ocr_empty 提示路径）。只对 mineru 且页数 >= 10 的文件触发，
             # 避免小文件多余开销；sliced 路径（OCR_SLICES>1）本身就按片跑。
-            if used_backend == "mineru" and len(pages) >= 10:
-                retry_targets = [
-                    i + 1
-                    for i, pg in enumerate(pages)
-                    if len((pg.get("markdown") or {}).get("text", "").strip()) < 100
-                ]
+            # F5d 覆盖面修复：原实现只检查本次 OCR 新返回的 pages 且要求
+            # used_backend=="mineru" — retry 复用缓存（F3, used_backend=
+            # "cached"）时空页检测被跳过，丢页缺陷时期遗留的历史空页永远
+            # 不会被恢复（真实 51pages job 6 页空页实证，用户复核只见
+            # "## 第 N 页" 标题）。改为对 page_cache 统一检出空页，后端
+            # 判定兼容 cached（回查 jobs.ocr_backend_used 保留的上次真实后端）。
+            self_heal_backend = used_backend
+            if self_heal_backend == "cached":
+                cursor = await db.execute(
+                    "SELECT ocr_backend_used FROM jobs WHERE id = ?", (job_id,)
+                )
+                row = await cursor.fetchone()
+                self_heal_backend = row["ocr_backend_used"] if row else ""
+            if self_heal_backend == "mineru":
+                # 空页判定增强（对抗审查 cr-17）：仅看 raw_html 长度会漏判
+                # "标签多、文字少"的页（如 <table><tr><td></td></tr></table>
+                # 无文字模板 >100 字符）。去 HTML 标签后按真实文本长度判定。
+                # 小文件（<10 页）也启用自愈 — 单页切片重跑仅一次调用
+                # （~5s），收益大于小文件直接静默空页的成本。
+                cursor = await db.execute(
+                    "SELECT page, raw_html FROM page_cache WHERE job_id = ? "
+                    "ORDER BY page",
+                    (job_id,),
+                )
+                retry_targets = []
+                for r in await cursor.fetchall():
+                    html = r["raw_html"] or ""
+                    if len(html) < 100:
+                        retry_targets.append(r["page"])
+                        continue
+                    stripped = re.sub(r"<[^>]+>", "", html).strip()
+                    if len(stripped) < 100:
+                        retry_targets.append(r["page"])
                 if retry_targets:
                     logger.warning(
                         f"[{job_id}] {len(retry_targets)} empty pages detected — "
@@ -711,7 +753,8 @@ async def _run_pipeline_impl(job_id: str, pdf_path: str):
                                 if md and len(md.strip()) > 100:
                                     clean = _sanitize_ocr_text(md.strip())
                                     await db.execute(
-                                        "UPDATE page_cache SET raw_html = ? "
+                                        "UPDATE page_cache SET raw_html = ?, "
+                                        "structured_json = NULL, analyzed_at = NULL "
                                         "WHERE job_id = ? AND page = ?",
                                         (clean, job_id, pno),
                                     )
@@ -786,11 +829,27 @@ async def _run_pipeline_impl(job_id: str, pdf_path: str):
 
             # Run all page analyses concurrently
             tasks = [
-                _analyze_one(db, job_id, pn, pg, sem, failed_pages,
-                             state_lock, completed, total_pages)
+                asyncio.create_task(
+                    _analyze_one(db, job_id, pn, pg, sem, failed_pages,
+                                 state_lock, completed, total_pages)
+                )
                 for pn, pg in todo
             ]
-            await asyncio.gather(*tasks)
+            # 取消时中止 in-flight 分析任务：与 sliced 路径（1275-1283）对齐 —
+            # 否则取消后孤儿协程继续跑 LLM（单页最长 240s），应用退出时抛
+            # "Task was destroyed"（对抗审查同款问题，整份路径此前未修）。
+            # 结构化并发原则：任务不得游离于父作用域之外无观察者地运行。
+            while tasks:
+                done, pending = await asyncio.wait(
+                    tasks, return_when=asyncio.FIRST_COMPLETED
+                )
+                tasks = list(pending)
+                if await _is_cancelled(job_id):
+                    for t in tasks:
+                        t.cancel()
+                    if tasks:
+                        await asyncio.gather(*tasks, return_exceptions=True)
+                    break
 
             stage2_ms = int((time.time() - stage2_start) * 1000)
             logger.info(

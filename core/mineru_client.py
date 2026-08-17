@@ -17,6 +17,8 @@ MinerU 输出 Markdown + 结构化 JSON，对表格/公式的识别精度更高�
 import io
 import json
 import logging
+import os
+import re
 import shutil
 import tempfile
 import time
@@ -41,7 +43,9 @@ logger.addFilter(JobIdFilter())
 POLL_INTERVAL = 5  # 秒
 POLL_TIMEOUT = 1800  # 30 分钟（批记录 PDF 较大，MinerU 解析耗时较长）
 
-_API_BASE = "https://mineru.net/api/v4"
+# MinerU API 入口 — 默认官方地址；私有化部署/代理场景可用
+# MINERU_BASE_URL 覆盖（对抗审查 cr-17：此前硬编码无法配置）。
+_API_BASE = os.getenv("MINERU_BASE_URL", "https://mineru.net/api/v4").rstrip("/")
 
 
 def _headers() -> dict:
@@ -236,7 +240,10 @@ def download_result(task_result: dict) -> list[dict]:
     if not zip_url:
         raise RuntimeError(f"[MinerU] 结果中无 full_zip_url: {task_result}")
 
-    logger.info(f"[MinerU] 下载结果 zip: {zip_url[:80]}...")
+    # 对抗审查（cr-16）：zip_url 是签名 CDN 地址，query 可能带签名 token —
+    # 日志只记 pathname（pipeline.log 可查排障）。
+    from urllib.parse import urlsplit
+    logger.info(f"[MinerU] 下载结果 zip: {urlsplit(zip_url).path[:80]}...")
     resp = requests.get(zip_url, timeout=300, verify=True)
     if resp.status_code != 200:
         raise RuntimeError(f"[MinerU] 下载 zip 失败 HTTP {resp.status_code}")
@@ -387,9 +394,9 @@ def _compose_page_markdown(page_num: int, blocks: list[dict]) -> tuple[str, int]
         被 MinerU 丢弃的块数，供上游生成"OCR 不完整"警告。
     """
     if not blocks:
-        return f"## 第 {page_num} 页\n\n（此页无文本内容）", 0
+        return f"<!-- 第 {page_num} 页 -->\n\n（此页无文本内容）", 0
 
-    parts: list[str] = [f"## 第 {page_num} 页"]
+    parts: list[str] = [f"<!-- 第 {page_num} 页 -->"]
     current_paragraph: list[str] = []
     discarded_count = 0
 
@@ -454,9 +461,20 @@ def _block_to_markdown(block: dict) -> str:
     """
     btype = block.get("type", "text")
 
-    # 噪音过滤：页脚/页码块直接丢弃
+    # 页脚/页码块：选择性保留（对抗审查 cr-17）— 批记录页脚常含
+    # 文件编号（如"文件编号：SOP-001-R3"）、版本号、公司名等跨页规则
+    # 数据基础。纯数字/页码/百分比（"2/24"、"15.60%"）是重复噪音丢弃；
+    # 含文字（汉字/字母）的页脚保留为普通文本行，供跨页一致性分析。
     if btype in ("footer", "page_footer", "page_number"):
-        return ""
+        txt = _content_text(block) or (block.get("text") or "").strip()
+        if not txt:
+            return ""
+        compact = txt.replace(" ", "").replace("\u00a0", "")
+        if re.fullmatch(r"[\d./%\u00b0\-()]{1,20}", compact):
+            return ""  # 纯数字/符号噪音
+        if re.fullmatch(r"第\s*\d+\s*页", txt) or re.fullmatch(r"\d+\s*/\s*\d+", txt):
+            return ""  # "第 2 页" / "2/24" 页码模式
+        return txt  # 含文字的页脚保留
 
     # 低置信度丢弃块：MinerU 因置信度过低丢弃的内容（type="discarded" 或
     # discard 标记），不放入正文——否则 LLM 会把残缺片段当正常文本分析。

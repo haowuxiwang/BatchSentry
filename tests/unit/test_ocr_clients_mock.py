@@ -714,11 +714,11 @@ class TestMinerUDownload:
 
         assert len(pages) == 2
         # 第1页：标题 + 段落合并（"第1页文本" 和 "继续" 无句末标点，合并为一行）
-        assert pages[0]["markdown"]["text"] == "## 第 1 页\n第1页文本 继续"
+        assert pages[0]["markdown"]["text"] == "<!-- 第 1 页 -->\n第1页文本 继续"
         assert pages[0]["page_count"] == 1
         assert pages[0]["_source"] == "mineru"
         # 第2页：标题 + 文本 + 表格（前后空行分隔）
-        assert pages[1]["markdown"]["text"] == "## 第 2 页\n第2页文本\n\n| 列1 | 列2 |"
+        assert pages[1]["markdown"]["text"] == "<!-- 第 2 页 -->\n第2页文本\n\n| 列1 | 列2 |"
         assert pages[1]["page_count"] == 2
         assert pages[1]["_source"] == "mineru"
 
@@ -791,11 +791,27 @@ class TestMinerUDownload:
         assert mineru_client._content_text({"content": 42}) == ""
 
     def test_block_noise_filters(self):
-        """page_footer / page_number / footer 噪音块返回空（LLM 无需看到页码页脚）。"""
+        """纯数字/页码/百分比页脚噪音块返回空（LLM 无需看到页码页脚）。"""
         for btype in ("footer", "page_footer", "page_number"):
             assert mineru_client._block_to_markdown(
                 {"type": btype, "text": "15.60%"}
             ) == "", f"{btype} 应被过滤"
+            assert mineru_client._block_to_markdown(
+                {"type": btype, "text": "2/24"}
+            ) == "", f"{btype} 页码应被过滤"
+            assert mineru_client._block_to_markdown(
+                {"type": btype, "text": "第 2 页"}
+            ) == "", f"{btype} 第X页应被过滤"
+
+    def test_block_footer_with_text_kept(self):
+        """含文字的页脚保留（文件编号/版本号是跨页规则数据基础）。"""
+        for btype in ("footer", "page_footer"):
+            assert mineru_client._block_to_markdown(
+                {"type": btype, "text": "文件编号：SOP-001-R3"}
+            ) == "文件编号：SOP-001-R3", f"{btype} 含文字页脚应保留"
+        assert mineru_client._block_to_markdown(
+            {"type": "footer", "text": "版本号：01"}
+        ) == "版本号：01"
 
     def test_block_header_page_header_title(self):
         """页眉和标题块输出为 markdown 标题（含起草/审核日期信息）。"""

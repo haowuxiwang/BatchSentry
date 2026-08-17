@@ -478,6 +478,75 @@ class TestPipelineCancellation:
         )
         assert (await cursor.fetchone())["c"] == 0
 
+    @pytest.mark.asyncio
+    async def test_stage2_cancel_kills_inflight_page_tasks(
+        self, pipeline_db, tmp_path
+    ):
+        """Stage 2 中途取消应取消 in-flight 页面分析任务（整份路径）。
+
+        与 sliced 路径（test_sliced_cancel_inside_ocr_loop）对齐：取消时
+        剩余任务必须被 cancel，否则孤儿协程继续跑 LLM（单页最长 240s）、
+        应用退出时抛 "Task was destroyed"（结构化并发：无观察者任务）。
+        """
+        job_id = "cancel-stage2-inflight"
+        await _insert_job(pipeline_db, job_id=job_id)
+        pdf_path = str(tmp_path / "fake.pdf")
+        Path(pdf_path).write_bytes(b"%PDF-1.4 fake")
+
+        # 真实页文本远大于 100 字符 — 避免被空页判定（<100 字符）命中而
+        # 意外触发小文件自愈路径，改变取消检查调用序（对抗审查 cr-17 后
+        # <10 页也启用自愈；此测试只验证 stage2 取消语义，应构造非空页）。
+        fake_pages = [
+            {"markdown": {"text": "slow page " + "工序一内容" * 30}},
+            {"markdown": {"text": "fast page " + "工序二内容" * 30}},
+        ]
+
+        captured = {}
+
+        async def slow_page(html, page_num, *, job_id=""):
+            # 慢页：捕获当前任务后挂起 300s（模拟慢 LLM 调用）
+            captured["slow_task"] = asyncio.current_task()
+            await asyncio.sleep(300)
+
+        async def fast_page(html, page_num, *, job_id=""):
+            return {"steps": [], "findings": [], "overall_confidence": "high"}
+
+        async def analyze_side(html, page_num, **kw):
+            if "slow" in html:
+                return await slow_page(html, page_num, **kw)
+            return await fast_page(html, page_num, **kw)
+
+        calls = {"n": 0}
+
+        async def fake_cancelled(jid):
+            calls["n"] += 1
+            # 调用序：1=Stage1 后检查, 2/3=两页 _analyze_one 入口,
+            # 4=Stage 2 while 循环（fast 页完成后）→ 触发取消
+            return calls["n"] >= 4
+
+        with patch(
+            "core.pipeline._get_ocr_backend",
+            return_value=lambda p, cb: fake_pages,
+        ), patch(
+            "core.pipeline.analyze_page", new=AsyncMock(side_effect=analyze_side)
+        ), patch(
+            "core.pipeline.analyze_cross_page", new=AsyncMock(return_value=[])
+        ), patch(
+            "core.pipeline._is_cancelled", side_effect=fake_cancelled
+        ):
+            # 取消路径应快速返回（不等 300s），5s 内完成即证明 in-flight 任务被取消
+            await asyncio.wait_for(run_pipeline(job_id, pdf_path), timeout=5)
+
+        # 慢页任务必须被取消（不是自然结束）
+        slow = captured.get("slow_task")
+        assert slow is not None, "slow page task should have been created"
+        assert slow.cancelled(), "in-flight page task must be cancelled on cancel"
+
+        # Stage 3 不应执行
+        # （analyze_cross_page mock 调用检查在 patch 作用域外无法断言，
+        #   用 find_status 验证 job 停在非终态前的状态即可 — 这里验证快速返回 + 任务取消已足够）
+
+
 
 # ─── 6. 启动恢复 + 优雅关闭测试 ──────────────────────────────
 
@@ -755,15 +824,11 @@ class TestOcrFailover:
             "SELECT status, ocr_backend_used FROM jobs WHERE id = ?", (job_id,)
         )
         row = await cursor.fetchone()
-        # P1-4: 备后端 25/30 页（缺 5 页 ≤ max(5,20%)）— failover 成功但缺页
-        # 显式暴露：failed_pages=[26..30] → partial_review 而非静默 review
-        assert row["status"] == "partial_review"
-        assert row["ocr_backend_used"] == "paddle"
-        cursor = await pipeline_db.execute(
-            "SELECT failed_pages FROM jobs WHERE id = ?", (job_id,)
-        )
-        import json as _json
-        assert _json.loads((await cursor.fetchone())["failed_pages"]) == [26, 27, 28, 29, 30]
+        # cr-17: 阈值收紧为 max(2, 10%) — 备后端 25/30（缺 5 页 > max(2,3)）
+        # 也判严重缺失 → 双后端均失败 → error（比静默接受残缺页更诚实）。
+        # 缺 1-2 页的轻微差异仍容忍（partial_review，见下一测试）。
+        assert row["status"] == "error"
+        assert row["ocr_backend_used"] is None
 
     @pytest.mark.asyncio
     async def test_single_backend_chain_no_fallback(self, pipeline_db, tmp_path):
@@ -1767,3 +1832,84 @@ class TestStage1EmptyPageRetry:
             (job_id,),
         )
         assert (await cursor.fetchone())["raw_html"] == ""
+
+    @pytest.mark.asyncio
+    async def test_empty_page_selfheal_runs_on_cached_reuse(self, pipeline_db, tmp_path):
+        """F5d: retry 复用缓存（F3 路径）时历史空页仍触发切片重跑恢复。
+
+        回归背景：空页自愈原实现要求 used_backend=="mineru"，而缓存复用
+        路径 used_backend="cached" → 丢页缺陷时期遗留的历史空页（真实
+        51pages job 6 页）永远不会被恢复。修复后应回查 jobs.ocr_backend_used
+        并按 page_cache 统一检出短页重跑。
+        """
+        from core import pipeline as pipeline_mod
+
+        orig_backend = pipeline_mod.config["app"].ocr_backend
+        pipeline_mod.config["app"].ocr_backend = "mineru"
+        try:
+            # 预置带历史空页的 job：12 页缓存齐（触发 F3 复用），
+            # p5 只有 '## 第 5 页' 8 字符（真实 MinerU 空页样子）
+            job_id = await _insert_job(pipeline_db, status="pending")
+            pdf_path = str(tmp_path / "fake.pdf")
+            Path(pdf_path).write_bytes(b"%PDF-1.4 fake")
+            await pipeline_db.execute(
+                "UPDATE jobs SET total_pages = 12, ocr_backend_used = 'mineru' WHERE id = ?",
+                (job_id,),
+            )
+            for i in range(1, 13):
+                text = "## 第 %d 页" % i if i == 5 else "page %d content " % i + "x" * 200
+                await pipeline_db.execute(
+                    "INSERT INTO page_cache (job_id, page, raw_html) VALUES (?, ?, ?)",
+                    (job_id, i, text),
+                )
+            await pipeline_db.commit()
+
+            calls = []
+
+            def fake_retry(pdf_path, page_nums, batch_size=3, job_id=""):
+                calls.append((list(page_nums), batch_size))
+                return [
+                    (pno, f"recovered content p{pno} " + "y" * 200) for pno in page_nums
+                ]
+
+            with patch(
+                "core.pipeline._get_ocr_backend",
+                new=AsyncMock(side_effect=AssertionError("reuse path must not re-OCR")),
+            ), patch(
+                "core.mineru_client.run_ocr_pages", side_effect=fake_retry
+            ), patch(
+                "core.pipeline.analyze_page",
+                new=AsyncMock(
+                    return_value={
+                        "steps": [],
+                        "findings": [],
+                        "overall_confidence": "high",
+                    }
+                ),
+            ), patch(
+                "core.pipeline.analyze_cross_page", new=AsyncMock(return_value=[])
+            ):
+                await run_pipeline(job_id, pdf_path)
+
+            # 触发过切片重跑（batch=3 复用路径也检测到 p5 空页）
+            assert calls, "empty-page self-heal should run on cached-reuse path"
+            # p5 已恢复
+            cursor = await pipeline_db.execute(
+                "SELECT raw_html FROM page_cache WHERE job_id = ? AND page = 5",
+                (job_id,),
+            )
+            row = await cursor.fetchone()
+            assert row and "recovered content p5" in row["raw_html"]
+            # recovered 审计存在
+            cursor = await pipeline_db.execute(
+                "SELECT 1 FROM audit_log WHERE job_id = ? AND action = 'stage1_empty_recovered'",
+                (job_id,),
+            )
+            assert await cursor.fetchone() is not None
+            # ocr_backend_used 未被 "cached" 污染（GMP 溯源保留 mineru）
+            cursor = await pipeline_db.execute(
+                "SELECT ocr_backend_used FROM jobs WHERE id = ?", (job_id,)
+            )
+            assert (await cursor.fetchone())["ocr_backend_used"] == "mineru"
+        finally:
+            pipeline_mod.config["app"].ocr_backend = orig_backend

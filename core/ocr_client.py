@@ -171,7 +171,10 @@ def download_result(poll_response: dict) -> list[dict]:
     if not json_url:
         raise RuntimeError(f"No result URL in poll response: {poll_response}")
 
-    logger.info(f"Downloading OCR result from {json_url}...")
+    # 对抗审查（cr-16）：resultUrl 是服务端签名 CDN 地址，query 可能带
+    # 签名 token — 日志只记 pathname，不落完整 URL（pipeline.log 可查排障）。
+    from urllib.parse import urlsplit
+    logger.info(f"Downloading OCR result from {urlsplit(json_url).path}...")
     resp = requests.get(json_url, timeout=180, verify=True)
     if resp.status_code != 200:
         raise RuntimeError(f"Download failed HTTP {resp.status_code}")

@@ -124,19 +124,21 @@ class TestMinerUClient:
         import io, zipfile
         from unittest.mock import patch as _patch
 
-        # 构造 zip：content_list 只有 1 页空内容，full.md 有完整 2 页（\f 分隔）
+        # 构造 zip：content_list 只有 2 页空内容（纯数字页脚 — 无文字，
+        # 对抗审查 cr-17 后仍被过滤），full.md 有完整 2 页（\f 分隔）
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w") as zf:
             zf.writestr(
                 "x_content_list_v2.json",
                 json.dumps([
-                    [{"type": "page_footer", "content": {"page_footer_content": "页脚噪音"}}],
-                    [{"type": "page_footer", "content": {"page_footer_content": "页脚噪音"}}],
+                    [{"type": "page_footer", "text": "2/24"}],
+                    [{"type": "page_footer", "text": "2/24"}],
                 ]),
             )
             zf.writestr(
                 "x_full.md",
-                "## 第一页\n\n批号 112701 含量测定\n\n\f\n## 第二页\n\n中间体储存温度 15-25°C\n",
+                "## 第一页\n\n批号 112701 含量测定\n\n称量记录：\n实际投入 25.00 kg\n理论回收率 98.5%\n\n"
+                "\f\n## 第二页\n\n中间体储存温度 15-25°C\n\n干燥失重 ≤0.5%\n颗粒含量 99.2%\n",
             )
         zip_bytes = buf.getvalue()
 
