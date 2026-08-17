@@ -6,7 +6,7 @@ BatchSentry 是面向制药企业的批生产记录（BPR）审核工具，通�
 
 ## 核心能力
 
-- **多格式 PDF 解析**：PaddleOCR-VL / MinerU 双后端（主备 failover：主后端异常/0 页/缺页>20% 自动切换，`ocr_backend_used` 留痕），支持扫描件、电子件、混合件
+- **多格式 PDF 解析**：PaddleOCR-VL / MinerU 双后端（主备 failover：主后端异常/0 页/缺页 >10% 且 >2 页自动切换，`ocr_backend_used` 留痕），支持扫描件、电子件、混合件
 - **上传内容去重**：流式上传时计算 MD5，相同文件二次上传返回 409 并提示已有任务（`force=1` 可绕过，用于规则变更后的合法重分析）
 - **结构化提取**：LLM 提取工序步骤、参数矩阵、签名、时间、事件年份分组
 - **实时进度**：SSE 流式推送任务状态（上传页行内 OCR/分析计数 + 复核页按页热更 findings）
@@ -26,6 +26,8 @@ BatchSentry 是面向制药企业的批生产记录（BPR）审核工具，通�
 - **Electron 桌面应用**：Windows 便携版（解压即用），splash 启动、优雅关闭、卡死任务恢复
 
 ## 技术架构
+
+> 深度架构说明（为什么这样构建、成败案例、改动指南）见 [ARCHITECTURE.md](./ARCHITECTURE.md)。
 
 ```
 ┌─────────────────────────────────────────────────────┐
@@ -121,13 +123,13 @@ npm run dev
 $env:PBC_NO_FILE_LOG='1'
 python -m pytest tests/ --cov=. --cov-report=term --timeout=30
 
-# 当前状态：871 passed, 90.40% coverage（目标 ≥90%）
+# 当前状态：928 passed, 90.19% coverage（目标 ≥90%）
 ```
 
 ## 安全设计
 
 - **CSP**：`default-src 'self'`，禁止外部资源加载
-- **CORS**：仅允许 `127.0.0.1:8000/58765`，移除 `file://`
+- **CORS**：仅允许 `127.0.0.1:8000/58765` 与 `localhost:8000/58765`（与本地访问守卫口径一致），移除 `file://`
 - **XSS 防御**：Jinja2 autoescape + DOMParser 解析 OCR 文本 + JS esc 转义
 - **路径遍历**：`Path(filename).name` 清洗 + `relative_to` 校验
 - **PDF 校验**：magic bytes 检查 `%PDF-` 文件头
@@ -148,6 +150,7 @@ python -m pytest tests/ --cov=. --cov-report=term --timeout=30
 │   ├── cross_page_analyzer.py  # 跨页规则 + LLM fallback
 │   ├── ocr_client.py       # PaddleOCR 客户端
 │   ├── mineru_client.py    # MinerU 客户端
+│   ├── notify.py           # 飞书任务完成通知
 │   ├── security.py         # 本地访问校验
 │   └── health.py           # 健康检查（含下游探测）
 ├── llm/                     # LLM 适配层

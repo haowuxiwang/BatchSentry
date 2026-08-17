@@ -10,7 +10,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 用户上传 PDF 批生产记录 → OCR 识别 → LLM 结构化提取 → 规则+LLM 跨页合规分析 → 人工复核界面 → 导出报告。
 
-**Current phase**: Phase 12 (Feishu job notifications) + 2 rounds of adversarial review (22 fixes incl. sliced-OCR callback arity P0, poll non-JSON retry, report cache correctness), v0.1.0, local single-user deployment via PyInstaller exe + Electron wrapper.
+**Current phase**: Phase 12 (Feishu job notifications) + 2 rounds of adversarial review (22 fixes incl. sliced-OCR callback arity P0, poll non-JSON retry, report cache correctness; round 2: cr-13 upload CSRF guard, cr-17 config precedence JSON-wins, MinerU footer selective retention, failover threshold max(2,10%), empty-page tag-strip detection + small-file self-heal, page-mark HTML comments, MINERU_BASE_URL), v0.1.0, local single-user deployment via PyInstaller exe + Electron wrapper.
+
+**Test status**: 928 passed, 90.19% coverage (target ≥90%). Note: test_config/test_health share the process-global config singleton — both now restore original values (order-independent).
 
 ---
 
@@ -42,7 +44,7 @@ npx tailwindcss -i ./static/input.css -o ./static/app.css --minify
 # API docs (Swagger): http://127.0.0.1:8000/docs
 ```
 
-Test coverage target: ≥90%. Current: 90.40% (871 tests, see `tests/` with unit + integration suites).
+Test coverage target: ≥90%. Current: 90.19% (928 tests, see `tests/` with unit + integration suites).
 
 ---
 
