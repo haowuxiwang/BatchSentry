@@ -69,6 +69,13 @@ def _is_blocked_host(host: str) -> bool:
     if not host:
         return True
     host = host.lower().strip("[]")
+    # localhost 字面量是 loopback 最常用别名，IP 字面量拦截之外的常见绕过
+    # （对抗审查：此前仅拦 IP 字面量，http://localhost:8080 保存时放行，
+    # 后续 ocr_client 携带 token 以服务端身份请求本机服务）。
+    # 只拦字面量不做 DNS 解析 — 保持既有威胁模型（防 IP 字面量/别名，
+    # 不防 DNS rebinding）。
+    if host == "localhost" or host.endswith(".localhost"):
+        return True
     # Bare hostname check (fast path for IPv4 strings)
     for prefix in _BLOCKED_PREFIXES:
         if host.startswith(prefix):

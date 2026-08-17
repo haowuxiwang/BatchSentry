@@ -115,8 +115,15 @@ def _is_real_api_key(key: str) -> bool:
 
 
 @router.get("/api/settings")
-async def get_settings():
-    """返回当前配置（敏感字段脱敏）。"""
+async def get_settings(request: Request):
+    """返回当前配置（敏感字段脱敏）。
+
+    对抗审查（cr-15）：GET 是简单请求（无 preflight），此前无守卫 —
+    任意网页可跨站读取本机配置（含 config 绝对路径、provider base_url、
+    飞书接收人）。与 POST /api/settings 的守卫对齐。
+    """
+    if not is_local_request(request):
+        raise HTTPException(403, "Forbidden (non-local request)")
     cfg = config
     config_file = _settings_config_path()
     # 单次读取飞书配置（此前每个字段各 load_feishu_config() 一次，共 9 次文件 IO）
@@ -375,10 +382,13 @@ def _build_env_updates(
             env_updates[env_key] = "true" if value else "false"
         else:
             str_val = str(value)
-            # S6: OCR token 清除支持 — paddle_ocr_token / mineru_token
-            # 收到 "__CLEAR__" 标记时写入空字符串（清除已保存的 token）
-            # 这与 per-provider api_key 的 _clear_key 机制保持一致
-            if str_val == "__CLEAR__" and field in ("paddle_ocr_token", "mineru_token"):
+            # __CLEAR__ 兼容路径：OCR token + 飞书凭据类字段
+            # （对抗审查：此前仅 OCR token 可清空，飞书 webhook/secret/
+            # app_secret 只能覆盖不能清除 — GMP 撤销凭据语义下能力不对称）
+            if str_val == "__CLEAR__" and field in (
+                "paddle_ocr_token", "mineru_token",
+                "feishu_webhook_url", "feishu_secret", "feishu_app_secret",
+            ):
                 env_updates[env_key] = ""
                 mem_updates[field] = ""
                 continue
@@ -534,7 +544,7 @@ async def update_settings(req: SettingsUpdate, request: Request):
     existing_config: dict[str, str] = {}
     if config_path.exists():
         try:
-            with open(config_path, "r", encoding="utf-8") as f:
+            with open(config_path, "r", encoding="utf-8-sig") as f:
                 existing_config = json.load(f)
         except (json.JSONDecodeError, OSError) as e:
             logger.warning(f"Failed to read existing config.json: {e}, starting fresh")
@@ -576,6 +586,20 @@ async def update_settings(req: SettingsUpdate, request: Request):
     # 重建 LLM 单例，确保下次调用用新配置
     reset_llm_client()
 
+    # 对抗审查：设置保存此前无 audit_log（GMP 追溯缺口 — 配置变更与
+    # 复核操作同为质量体系事件，无记录则无法回答"配置何时被谁改过"）。
+    # detail 只记字段名列表，不记录任何值（密钥类字段尤其不能落库）。
+    try:
+        db = await get_db()
+        await db.execute(
+            "INSERT INTO audit_log (job_id, action, detail) VALUES (?, ?, ?)",
+            ("system", "settings_update",
+             "fields=" + ",".join(sorted(env_updates.keys()))),
+        )
+        await db.commit()
+    except Exception as e:
+        logger.warning(f"Failed to write settings_update audit log: {e}")
+
     logger.info(
         f"Settings updated and applied live: {list(env_updates.keys())} -> {config_path}"
     )
@@ -615,7 +639,7 @@ def _read_raw_config() -> dict:
     if not config_path.exists():
         return {}
     try:
-        with open(config_path, "r", encoding="utf-8") as f:
+        with open(config_path, "r", encoding="utf-8-sig") as f:
             return json.load(f)
     except (json.JSONDecodeError, OSError) as e:
         logger.warning(f"Failed to read {config_path}: {e}")
@@ -644,6 +668,9 @@ async def get_user_rules(request: Request):
     """返回用户填写的合规规则 + 各规则历史命中数（source='user_rule' 按 id 统计）。
 
     hits: {rule_id: 命中次数}，未回填 id 的历史命中归入空串键（GMP 溯源辅助）。
+    last_saved_at: 最近一次成功保存时间（audit_log user_rules_update），
+    None 表示从未保存成功 — 前端据此提示用户（防呆：规则不生效时一眼可判
+    是"没保存"还是"没命中"）。
     """
     if not is_local_request(request):
         raise HTTPException(403, "Forbidden (non-local request)")
@@ -657,10 +684,18 @@ async def get_user_rules(request: Request):
         hits = {}
         for row in await cursor.fetchall():
             hits[str(row["user_rule_id"])] = row["cnt"]
+        cursor = await db.execute(
+            "SELECT created_at FROM audit_log "
+            "WHERE action = 'user_rules_update' "
+            "ORDER BY id DESC LIMIT 1"
+        )
+        row = await cursor.fetchone()
+        last_saved_at = row["created_at"] if row else None
     except Exception as e:
         logger.warning(f"Failed to gather user-rule hit stats: {e}")
         hits = {}
-    return {"rules": load_user_rules(), "hits": hits}
+        last_saved_at = None
+    return {"rules": load_user_rules(), "hits": hits, "last_saved_at": last_saved_at}
 
 
 @router.put("/api/settings/rules")
@@ -692,6 +727,18 @@ async def update_user_rules(req: UserRulesUpdate, request: Request):
     if len(cleaned) > _USER_RULES_MAX:
         errors.append(f"规则总数超过 {_USER_RULES_MAX} 条上限")
     if errors:
+        # 校验失败也写 audit_log（GMP：规则变更事件需留痕，否则用户保存
+        # 失败无任何记录 — 真实故障：用户误以为规则已生效但 config 从未
+        # 更新，8-13 后无一条 user_rules_update 记录即为实证）。
+        try:
+            db = await get_db()
+            await db.execute(
+                "INSERT INTO audit_log (job_id, action, detail) VALUES (?, ?, ?)",
+                ("system", "user_rules_update_failed", "; ".join(errors)[:500]),
+            )
+            await db.commit()
+        except Exception as e:
+            logger.warning(f"Failed to write user_rules failure audit log: {e}")
         raise HTTPException(400, detail={"errors": errors})
 
     existing = _read_raw_config()
@@ -733,7 +780,7 @@ def _persist_config_field(env_key: str, value: str) -> None:
     existing_config: dict[str, str] = {}
     if config_path.exists():
         try:
-            with open(config_path, "r", encoding="utf-8") as f:
+            with open(config_path, "r", encoding="utf-8-sig") as f:
                 existing_config = json.load(f)
         except (json.JSONDecodeError, OSError):
             existing_config = {}
@@ -779,6 +826,18 @@ async def set_active_provider(req: SetActiveRequest, request: Request):
     update_config({"llm_provider": name})
     # 3. 重建 LLM 单例
     reset_llm_client()
+
+    # 对抗审查：provider 切换写 audit_log（GMP 追溯 — LLM 后端变更影响
+    # 审计链，须留痕）。只记名称，不记任何凭据。
+    try:
+        db = await get_db()
+        await db.execute(
+            "INSERT INTO audit_log (job_id, action, detail) VALUES (?, ?, ?)",
+            ("system", "provider_switch", f"active_provider={name}"),
+        )
+        await db.commit()
+    except Exception as e:
+        logger.warning(f"Failed to write provider_switch audit log: {e}")
 
     logger.info(f"Active provider switched to {name!r} (live)")
     return {

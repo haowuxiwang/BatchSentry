@@ -97,3 +97,9 @@ spike/phase2/
 
 cov.xml
 
+
+# Spike ad-hoc experiments (one-shot scripts + run logs)
+spike/*.py
+spike/*.log
+spike/*.json
+spike/*.md

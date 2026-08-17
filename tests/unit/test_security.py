@@ -50,6 +50,16 @@ class TestIsBlockedHost:
         assert _is_blocked_host("api.deepseek.com") is False
         assert _is_blocked_host("example.com") is False
 
+    def test_localhost_literal_blocked(self):
+        """对抗审查：localhost 字面量是 loopback 最常用别名，此前只拦 IP
+        字面量漏掉它 — "http://localhost:8080/scan" 保存时被放行，后续
+        OCR 客户端会携带 token 以服务端身份请求本机服务（SSRF 纵深）。"""
+        assert _is_blocked_host("localhost") is True
+        assert _is_blocked_host("LOCALHOST") is True
+        # .localhost 是保留 TLD（RFC 6761），浏览器/解析器按 loopback 处理
+        assert _is_blocked_host("foo.localhost") is True
+        assert _is_blocked_host("localhost.localdomain") is False  # 字面量外不猜
+
     def test_public_ipv4_allowed(self):
         assert _is_blocked_host("8.8.8.8") is False
         assert _is_blocked_host("1.2.3.4") is False
@@ -122,6 +132,17 @@ class TestValidateExternalUrl:
         assert ok is False
         assert "内部地址" in reason
         assert "127.0.0.1" in reason
+
+    def test_localhost_literal_rejected(self):
+        """对抗审查回归：localhost 字面量 URL 必须被拒（此前放行）。"""
+        ok, _ = validate_external_url(
+            "http://localhost:8080/scan", kind="OCR URL"
+        )
+        assert ok is False
+        ok, _ = validate_external_url(
+            "http://foo.localhost:8080/scan", kind="base_url"
+        )
+        assert ok is False
 
     def test_blocked_link_local_rejected(self):
         """SSRF protection: 169.254.169.254 (cloud metadata) blocked."""

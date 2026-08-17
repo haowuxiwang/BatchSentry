@@ -85,11 +85,18 @@ app = FastAPI(
 # Phase 8 adversarial review: tightened CORS — only 127.0.0.1 variants.
 # Removed localhost:* to align with project constraint (127.0.0.1 only).
 # Electron renderer loads http://127.0.0.1:58765/, dev server uses 8000.
+# 对抗审查（cr-17）：守卫 is_local_request 放行 localhost（任意端口），
+# 但 CORS 只认 127.0.0.1 — 浏览器用 http://localhost:8000 打开设置页时
+# 所有 fetch 读不到响应（无 ACAO 头）、POST 全被 preflight 拦截，设置页
+# 在 localhost 下完全不可用。补 localhost 同端口白名单，与守卫口径一致
+# （恶意页面 Origin 不会命中白名单，安全性不变）。
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://127.0.0.1:8000",   # dev server (uvicorn)
         "http://127.0.0.1:58765",  # Electron default port
+        "http://localhost:8000",   # dev server via localhost alias
+        "http://localhost:58765",  # Electron via localhost alias
     ],
     allow_methods=["GET", "POST", "PUT", "DELETE"],  # PUT: /api/settings/rules
     allow_headers=["Content-Type", "X-Request-ID"],
@@ -297,12 +304,18 @@ async def shutdown_endpoint(request: Request):
 
 
 @app.get("/api/health/downstream")
-async def health_downstream():
+async def health_downstream(request: Request):
     """Probe configured OCR + LLM services for reachability.
 
     Used by Settings page 'Test connection' button and pre-flight checks.
     Does NOT submit real OCR/LLM work — just verifies auth + connectivity.
     """
+    # 对抗审查：该端点是简单 GET（无 preflight），此前无任何守卫，任意
+    # 网页可跨站循环触发，每次真实消耗本地 LLM/OCR API 配额（1-token
+    # ping + OPTIONS 探测）— 与 /api/settings/* 的守卫对齐。
+    from core.security import is_local_request
+    if not is_local_request(request):
+        raise HTTPException(403, "Forbidden (non-local request)")
     from core.health import probe_all
     import logging
     logger = logging.getLogger("main.health")

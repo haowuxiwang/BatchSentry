@@ -26,6 +26,34 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# 密钥脱敏，防止 SDK 异常消息把鉴权头/URL 里的密钥带回日志与
+# llm_call_audit.error（对抗审查：此前错误串原样落库，密钥可能随异常
+# 消息泄露到 error.log / audit 表）。
+#
+# 覆盖四类凭据模式（对抗审查 cr-14 扩展）：
+#   1. sk- 前缀密钥（DeepSeek/SiliconFlow/OpenAI 风格）
+#   2. 32 位 hex 访问令牌（PaddleOCR token 格式，如 26f37846...）
+#   3. cli_ 前缀应用 ID（飞书 app_id）
+#   4. Bearer 授权头值（Anthropic x-api-key 报错回显场景）
+_MASK_PATTERNS = None
+
+
+def _mask_secrets(text: str) -> str:
+    """Redact API keys / tokens appearing in error strings before logging/audit."""
+    global _MASK_PATTERNS
+    if _MASK_PATTERNS is None:
+        import re
+        _MASK_PATTERNS = [
+            (re.compile(r"sk-[A-Za-z0-9_-]{8,}"), "sk-***"),
+            (re.compile(r"(?<![0-9a-fA-F])[0-9a-fA-F]{32}(?![0-9a-fA-F])"), "***"),
+            (re.compile(r"cli_[A-Za-z0-9_-]{8,}"), "cli_***"),
+            (re.compile(r"Bearer\s+[A-Za-z0-9._-]{8,}", re.IGNORECASE), "Bearer ***"),
+        ]
+    for regex, repl in _MASK_PATTERNS:
+        text = regex.sub(repl, text)
+    return text
+
+
 class LLMClient:
     """Unified LLM client that routes through protocol adapters."""
 
@@ -131,10 +159,12 @@ class LLMClient:
                     if audit_ctx is not None:
                         await _record_llm_call(
                             audit_ctx, self, last_result, last_latency_ms,
-                            success=False, error=str(last_error)[:200]
+                            success=False,
+                            error=_mask_secrets(str(last_error))[:200],
                         )
                     raise RuntimeError(
-                        f"LLM call timed out{ctx_tag}: {last_error}"
+                        f"LLM call timed out{ctx_tag}: "
+                        f"{_mask_secrets(str(last_error))}"
                     )
                 # Distinguish retryable vs non-retryable errors
                 err_str = str(e).lower()
@@ -146,20 +176,22 @@ class LLMClient:
                 if is_non_retryable:
                     logger.error(
                         f"LLM call failed (non-retryable){ctx_tag}: "
-                        f"{type(e).__name__}: {e}"
+                        f"{_mask_secrets(f'{type(e).__name__}: {e}')}"
                     )
                     # Record audit and fail immediately
                     if audit_ctx is not None:
                         await _record_llm_call(
                             audit_ctx, self, last_result, last_latency_ms,
-                            success=False, error=str(last_error)[:200]
+                            success=False,
+                            error=_mask_secrets(str(last_error))[:200],
                         )
                     raise RuntimeError(
-                        f"LLM call failed (non-retryable){ctx_tag}: {last_error}"
+                        f"LLM call failed (non-retryable){ctx_tag}: "
+                        f"{_mask_secrets(str(last_error))}"
                     )
                 logger.warning(
                     f"LLM call attempt {attempt}/{retries} failed{ctx_tag}: "
-                    f"{type(e).__name__}: {e}"
+                    f"{_mask_secrets(f'{type(e).__name__}: {e}')}"
                 )
                 if attempt < retries:
                     import random
@@ -170,10 +202,11 @@ class LLMClient:
         if audit_ctx is not None:
             await _record_llm_call(
                 audit_ctx, self, last_result, last_latency_ms,
-                success=False, error=str(last_error)[:200]
+                success=False, error=_mask_secrets(str(last_error))[:200],
             )
         raise RuntimeError(
-            f"LLM call failed after {retries} attempts{ctx_tag}: {last_error}"
+            f"LLM call failed after {retries} attempts{ctx_tag}: "
+            f"{_mask_secrets(str(last_error))}"
         )
 
     async def chat_json(

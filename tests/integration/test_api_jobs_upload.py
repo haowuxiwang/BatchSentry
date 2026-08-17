@@ -23,13 +23,26 @@ async def client(test_db):
     """提供基于 ASGITransport 的 API 客户端（依赖 test_db 隔离数据库）。"""
     from main import app
     async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
+        transport=ASGITransport(app=app), base_url="http://localhost:8000"
     ) as c:
         yield c
 
 
 class TestUploadPdf:
     """POST /api/jobs — 上传 PDF 并创建 job。"""
+
+    @pytest.mark.asyncio
+    async def test_upload_rejected_from_non_local_host(self, test_db):
+        """对抗审查（cr-13）：非本地 Host 的上传请求必须 403（CSRF 防护）。"""
+        from main import app
+        from io import BytesIO
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://evil.com:8000"
+        ) as c:
+            files = {"file": ("test.pdf", BytesIO(b"%PDF-1.4 test"), "application/pdf")}
+            r = await c.post("/api/jobs", files=files)
+        assert r.status_code == 403
+        assert "non-local" in r.text
 
     @pytest.mark.asyncio
     async def test_upload_pdf_creates_job(self, client, tmp_path, test_db):
@@ -105,6 +118,45 @@ class TestUploadPdf:
                 files={"file": ("empty.pdf", b"", "application/pdf")},
             )
         assert r.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_upload_rejects_encrypted_pdf(self, client):
+        """加密 PDF（fitz needs_pass=True）应 400 拒绝，不启动 pipeline。
+
+        云端 OCR 后端无法解密加密 PDF，上传时拒绝比 pipeline 跑完才 error 体验好。
+        """
+        from unittest.mock import MagicMock
+
+        doc = MagicMock()
+        doc.needs_pass = True
+        doc.page_count = 3
+        doc.__enter__.return_value = doc
+        with patch("api.jobs.launch_pipeline") as mock_pipe, patch("fitz.open", return_value=doc):
+            r = await client.post(
+                "/api/jobs",
+                files={"file": ("locked.pdf", b"%PDF-1.4 encrypted", "application/pdf")},
+            )
+        assert r.status_code == 400
+        assert "加密" in r.text
+        mock_pipe.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_upload_rejects_zero_page_pdf(self, client):
+        """0 页 PDF 应 400 拒绝，不启动 pipeline。"""
+        from unittest.mock import MagicMock
+
+        doc = MagicMock()
+        doc.needs_pass = False
+        doc.page_count = 0
+        doc.__enter__.return_value = doc
+        with patch("api.jobs.launch_pipeline") as mock_pipe, patch("fitz.open", return_value=doc):
+            r = await client.post(
+                "/api/jobs",
+                files={"file": ("nopages.pdf", b"%PDF-1.4 x", "application/pdf")},
+            )
+        assert r.status_code == 400
+        assert "页面" in r.text
+        mock_pipe.assert_not_called()
 
 
 class TestUploadDedup:

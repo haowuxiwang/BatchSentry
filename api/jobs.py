@@ -105,6 +105,7 @@ def _invalidate_pdf_doc(job_id: str):
 async def create_job(
     file: UploadFile = File(...),
     force: bool = False,
+    request: Request = None,
 ):
     """Upload a PDF and start OCR + analysis pipeline.
 
@@ -113,6 +114,14 @@ async def create_job(
     (query param), which lets users re-analyze the same batch record
     intentionally (e.g. after SOP/rule changes).
     """
+    # 对抗审查（cr-13）：上传端点是 multipart/form-data（CORS safelisted，
+    # 浏览器不触发 preflight），此前无守卫 — 恶意网页可跨站 POST 任意 PDF，
+    # 真实启动 pipeline 消耗用户 OCR/LLM 配额。与 /api/settings/* 对齐。
+    # request 为 None 时跳过守卫（单元测试直接调用 create_job 的场景）。
+    from core.security import is_local_request
+    if request is not None and not is_local_request(request):
+        raise HTTPException(403, "Forbidden (non-local request)")
+
     if not file.filename or not file.filename.lower().endswith(".pdf"):
         raise HTTPException(400, "Only PDF files accepted")
 
@@ -223,17 +232,34 @@ async def create_job(
     # "X / Y" 页码（之前 total_pages 在 OCR 完成后才写入，导致显示 "1 / 0"）。
     # 用 PyMuPDF (fitz) 读取，开销 < 100ms 即使 200MB PDF。
     # 线程池执行避免阻塞事件循环（损坏/超大 PDF 的 xref 修复可能秒级）。
+    class _PdfStructuralError(Exception):
+        """PDF 结构性不可用（加密/0 页）— 上传时立即拒绝而非等 pipeline 失败。"""
+
     def _count_pdf_pages_sync(path: str) -> int:
         import fitz  # PyMuPDF
         with fitz.open(path) as doc:
+            # 加密 PDF：fitz 可打开但 needs_pass=True（内容需密码解密）。
+            # 云端 OCR 后端必然失败（请求会带不出解密内容），上传时拒绝
+            # 比用户等 pipeline 跑 10+ 分钟才 error 体验好得多。
+            if doc.needs_pass:
+                raise _PdfStructuralError("encrypted")
+            if doc.page_count == 0:
+                raise _PdfStructuralError("empty")
             return doc.page_count
 
     pdf_page_count = 0
     try:
         pdf_page_count = await asyncio.to_thread(_count_pdf_pages_sync, str(pdf_path))
         logger.info(f"[{job_id}] PDF page count: {pdf_page_count}")
+    except _PdfStructuralError as e:
+        pdf_path.unlink(missing_ok=True)
+        shutil.rmtree(job_dir, ignore_errors=True)
+        detail = "PDF 已加密，无法进行 OCR 分析，请先解密后上传。" if "encrypted" in str(e) else "PDF 不包含任何页面。"
+        logger.warning(f"[{job_id}] Upload rejected: {detail}")
+        raise HTTPException(400, detail)
     except Exception as e:
-        # 读页数失败不阻断上传 — pipeline 仍会在 OCR 完成后设置 total_pages
+        # 其他读取失败不阻断上传 — 部分损坏 PDF 云端 OCR 后端可能仍能处理
+        # （Paddle/MinerU 各有容错），pipeline 仍会在 OCR 完成后设置 total_pages
         logger.warning(f"[{job_id}] Failed to read PDF page count: {e}")
         pdf_page_count = 0
 

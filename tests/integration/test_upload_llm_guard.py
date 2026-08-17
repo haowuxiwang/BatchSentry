@@ -26,7 +26,7 @@ async def no_llm_client(test_db):
     try:
         async with AsyncClient(
             transport=ASGITransport(app=__import__("main").app),
-            base_url="http://test",
+            base_url="http://localhost:8000",
         ) as c:
             yield c
     finally:
@@ -61,7 +61,7 @@ class TestUploadLLMGuard:
         try:
             async with AsyncClient(
                 transport=ASGITransport(app=__import__("main").app),
-                base_url="http://test",
+                base_url="http://localhost:8000",
             ) as c:
                 files = {"file": ("test.pdf", b"%PDF-1.4 test", "application/pdf")}
                 r = await c.post("/api/jobs", files=files)
