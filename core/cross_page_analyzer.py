@@ -97,7 +97,15 @@ def _parse_time(s: Optional[str], fallback_date: Optional[str] = None) -> Option
         fb = _parse_time(fallback_date)
         if fb:
             ss = int(m.group(3)) if m.group(3) else 0
-            return fb.replace(hour=int(m.group(1)), minute=int(m.group(2)), second=ss)
+            # 对抗审查 P1-5：_TIME_ONLY_RE 允许 "99:99" 类越界值（OCR 手写
+            # 时间噪声高频出现），datetime.replace(hour=99) 抛 ValueError —
+            # 本分支是全部 5 个分支中唯一漏掉 try/except 的，异常会传播出
+            # 规则层直接炸掉整个 Stage 3（job error 而非 partial_review）。
+            # docstring 承诺 "parse failure → None, does NOT raise"。
+            try:
+                return fb.replace(hour=int(m.group(1)), minute=int(m.group(2)), second=ss)
+            except ValueError:
+                return None
         return None
     if m and not fallback_date:
         return None
@@ -471,6 +479,18 @@ async def analyze_cross_page(page_structures: list[dict], job_id: str = "") -> l
     r8 = _check_low_confidence_params(pages)
     rule_findings.extend(r8)
     logger.info(f"[{job_id}] R8 low_confidence: {len(r8)}")
+    # R9: handwritten notes — surface for manual verification
+    r9 = _check_handwritten_notes(pages)
+    rule_findings.extend(r9)
+    logger.info(f"[{job_id}] R9 handwritten_notes: {len(r9)}")
+    # R-M1: cross-page measurement time sequence (same step, monotonic rows)
+    rm1 = _check_measurement_time_sequence(pages)
+    rule_findings.extend(rm1)
+    logger.info(f"[{job_id}] R-M1 measurement_time_sequence: {len(rm1)}")
+    # R-M2: cross-page measurement column consistency (missing columns)
+    rm2 = _check_measurement_column_consistency(pages)
+    rule_findings.extend(rm2)
+    logger.info(f"[{job_id}] R-M2 measurement_column_consistency: {len(rm2)}")
     # R3: param_out_of_spec (collects llm_queue as side effect)
     r3 = _check_param_out_of_spec(pages, llm_queue)
     rule_findings.extend(r3)
@@ -1150,6 +1170,45 @@ def _check_completeness(pages: list[dict]) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# R9: handwritten notes — OCR of handwritten fields is unreliable, so surface
+# steps with handwritten content for manual verification against the PDF page
+# image. Info-level only: never blocks, but tells the reviewer where to look.
+# ---------------------------------------------------------------------------
+
+
+def _check_handwritten_notes(pages: list[dict]) -> list[dict]:
+    findings = []
+    seen: set[tuple] = set()  # dedup by (page, step_no, first note)
+    for page in pages:
+        pno = page["page"]
+        for step in page["steps"]:
+            notes = [str(n).strip() for n in (step.get("handwritten") or []) if str(n).strip()]
+            if not notes:
+                continue
+            step_no = step.get("step_no", "?")
+            key = (pno, str(step_no), notes[0])
+            if key in seen:
+                continue
+            seen.add(key)
+            preview = notes[0][:30]
+            extra = len(notes) - 1
+            findings.append({
+                "page": pno,
+                "type": "handwritten",
+                "severity": "info",
+                "description": (
+                    f"第{pno}页 工序{step_no} 含 {len(notes)} 条手写内容"
+                    f"（如「{preview}」{f' 等 {extra} 条' if extra else ''}）"
+                    f"，手写体 OCR 易误读，请对照 PDF 原页人工核对"
+                ),
+                "ocr_text": "；".join(notes)[:200],
+                "operator": "",
+                "source": "rule",
+            })
+    return findings
+
+
+# ---------------------------------------------------------------------------
 # R7: batch number consistency — all pages should share the same batch_no.
 # Mixed batch numbers across pages indicate binding errors or cross-batch
 # contamination (serious GMP deviation).
@@ -1240,6 +1299,108 @@ def _check_low_confidence_params(pages: list[dict]) -> list[dict]:
                     "operator": "",
                     "source": "rule",
                 })
+    return findings
+
+
+def _check_measurement_time_sequence(pages: list[dict]) -> list[dict]:
+    """R-M1: 同一工序（step_no）的跨页测量时间序列应单调不减。
+
+    批记录的参数矩阵常跨页（大表在 51 页实测文件中跨页出现），R1-a/b 只
+    比较 step.start_time/end_time，逐行测量时间（measurements[].time）从未
+    被校验——缺行/行序错乱/时间倒序会静默通过。此规则把同 step_no 的所有
+    页测量行按 (页序, 行序) 拼接后检查严格倒序（time_prev > time_curr）。
+    相等的重复测量（同一分钟多次取样）合理，不报告；解析失败点打断连续
+    性（避免把跨无效时间的行误判为倒序）。
+    """
+    findings: list[dict] = []
+    groups: dict[str, list[dict]] = {}
+    for page in pages:
+        pno = page["page"]
+        fb_date = page["page_info"].get("production_date")
+        for step in page["steps"]:
+            key = str(step.get("step_no", "?"))
+            for m in step.get("measurements", []) or []:
+                if not isinstance(m, dict):
+                    continue
+                groups.setdefault(key, []).append({
+                    "page": pno,
+                    "time_raw": m.get("time"),
+                    "t": _parse_time(m.get("time"), fb_date),
+                })
+    for key, rows in groups.items():
+        if len(rows) < 2:
+            continue
+        prev: dict | None = None
+        for row in rows:
+            if row["t"] is None:
+                prev = None  # 解析失败点打断连续性，避免误报
+                continue
+            if prev is not None and prev["t"] > row["t"]:
+                findings.append({
+                    "page": row["page"],
+                    "type": "time_reversal",
+                    "severity": "warning",
+                    "description": (
+                        f"工序{key} 测量时间跨页倒序：第{prev['page']}页 "
+                        f"{prev['time_raw']} 晚于 第{row['page']}页 {row['time_raw']}"
+                        f" — 可能表格缺行、行序错乱或 OCR 提取错误，请人工核对参数矩阵"
+                    ),
+                    "ocr_text": f"{prev['time_raw']} > {row['time_raw']}",
+                    "operator": "",
+                    "source": "rule",
+                })
+            prev = row
+    return findings
+
+
+def _check_measurement_column_consistency(pages: list[dict]) -> list[dict]:
+    """R-M2: 同一工序（step_no）跨页参数矩阵列集合应一致。
+
+    大表跨页时每页表头重印；若某页测量行 values 键缺失（整列丢失），
+    R3 的逐格判定无法发现"整列缺失"（它只看有值的格）。此规则只报
+    "缺列"（多出来的列可能是新增参数，不误报），且要求该 step 跨 ≥2 页
+    且有 ≥2 行数据，避免小样本噪音。
+    """
+    findings: list[dict] = []
+    groups: dict[str, dict] = {}
+    for page in pages:
+        pno = page["page"]
+        for step in page["steps"]:
+            key = str(step.get("step_no", "?"))
+            g = groups.setdefault(key, {"pages": set(), "rows": 0, "page_cols": {}})
+            rows = step.get("measurements", []) or []
+            g["rows"] += len(rows)
+            cols: set[str] = set()
+            for m in rows:
+                if isinstance(m, dict) and isinstance(m.get("values"), dict):
+                    cols.update(m["values"].keys())
+            if cols:
+                g["pages"].add(pno)
+                g["page_cols"][pno] = cols
+    for key, g in groups.items():
+        if len(g["pages"]) < 2 or g["rows"] < 2:
+            continue
+        all_cols: set[str] = set()
+        for cols in g["page_cols"].values():
+            all_cols.update(cols)
+        for pno in sorted(g["page_cols"]):
+            missing = all_cols - g["page_cols"][pno]
+            if not missing:
+                continue
+            missing_sorted = sorted(missing)
+            findings.append({
+                "page": pno,
+                "type": "completeness",
+                "severity": "info",
+                "description": (
+                    f"工序{key} 参数矩阵跨页列不一致：第{pno}页缺列 "
+                    f"{'、'.join(missing_sorted)}（其余页均有）— "
+                    f"可能表格截断或提取丢失，请人工核对"
+                ),
+                "ocr_text": "missing: " + "、".join(missing_sorted),
+                "operator": "",
+                "source": "rule",
+            })
     return findings
 
 
@@ -1400,7 +1561,13 @@ def _user_rules_section(rules: list[dict] | None = None) -> tuple[str, str]:
         rules = [r for r in load_user_rules() if r.get("active")]
     if not rules:
         return "", "none"
-    lines = [f"- [规则ID: {r['id']}] {r['text']}" for r in rules]
+    # 对抗审查 P2-8：手改 config.json（文档支持）可造出缺 id/text 的规则，
+    # r['id'] 下标访问 → KeyError → 整个 Stage 3 崩溃。防御式取值并跳过
+    # 无文本的条目（无法执行的规则不应进 prompt）。
+    rules = [r for r in rules if isinstance(r, dict) and str(r.get("text", "")).strip()]
+    if not rules:
+        return "", "none"
+    lines = [f"- [规则ID: {r.get('id', '?')}] {r.get('text')}" for r in rules]
     section = (
         "<USER_RULES>\n"
         "用户自定义合规规则（必须逐条核对记录是否满足，"

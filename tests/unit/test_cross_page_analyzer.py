@@ -52,7 +52,7 @@ def _make_page(page_no, steps, findings=None, page_info=None, event_year_groups=
 
 
 def _make_step(step_no, start_time=None, end_time=None, operator="", reviewer="",
-               measurements=None, parameters=None, signatures=None):
+               measurements=None, parameters=None, signatures=None, handwritten=None):
     """构造 step 字典。"""
     s = {"step_no": step_no}
     if start_time:
@@ -69,6 +69,8 @@ def _make_step(step_no, start_time=None, end_time=None, operator="", reviewer=""
         s["parameters"] = parameters
     if signatures:
         s["signatures"] = signatures
+    if handwritten:
+        s["handwritten"] = handwritten
     return s
 
 
@@ -334,6 +336,14 @@ class TestParseTime:
         assert dt.year == 2024
         assert dt.hour == 14
         assert dt.minute == 30
+
+    def test_time_only_out_of_range_hhmm_returns_none(self):
+        """对抗审查 P1-5：OCR 手写时间噪声 '99:99' 越界 — datetime.replace
+        抛 ValueError，此前该分支无 try/except 会传播出规则层直接炸掉
+        Stage 3（job error）。必须返回 None 不崩溃。"""
+        assert _parse_time("25:10", fallback_date="2024.01.01") is None
+        assert _parse_time("9:85", fallback_date="2024.01.01") is None
+        assert _parse_time("99:99:99", fallback_date="2024.01.01") is None
 
     def test_ocr_noise_pattern_valid(self):
         """OCR 串扰格式 '2022/4/202205.07' 应解析为 2022.05.07（lines 99-103）。"""
@@ -1682,3 +1692,178 @@ class TestUserRulesInjection:
         assert by_page[3] is None
         assert by_page[4] is None
         assert by_page[5] is None  # 非 user_rule 一律不带 rule_id
+
+
+# ─── F4 跨页测量校验规则（R-M1 / R-M2）────────────────────────
+
+
+class TestMeasurementCrossPageRules:
+    """R-M1 跨页测量时间序列 + R-M2 跨页列一致性。"""
+
+    def test_sequence_reversal_across_pages_flagged(self):
+        from core.cross_page_analyzer import _check_measurement_time_sequence
+
+        pages = _norm([
+            _make_page(1, [_make_step(3, measurements=[
+                {"time": "09:00", "values": {"A": _make_cell(1, "1")}},
+                {"time": "09:10", "values": {"A": _make_cell(1, "1")}},
+            ])], page_info={"production_date": "2025-06-01"}),
+            # 第 2 页同一工序测量时间倒序（早于第 1 页最后一行）
+            _make_page(2, [_make_step(3, measurements=[
+                {"time": "08:50", "values": {"A": _make_cell(1, "1")}},
+            ])], page_info={"production_date": "2025-06-01"}),
+        ])
+        findings = _check_measurement_time_sequence(pages)
+        assert len(findings) == 1
+        assert findings[0]["severity"] == "warning"
+        assert "工序3" in findings[0]["description"]
+        assert findings[0]["page"] == 2
+        assert "09:10" in findings[0]["ocr_text"] and "08:50" in findings[0]["ocr_text"]
+
+    def test_sequence_monotonic_no_finding(self):
+        from core.cross_page_analyzer import _check_measurement_time_sequence
+
+        pages = _norm([
+            _make_page(1, [_make_step(3, measurements=[
+                {"time": "09:00", "values": {"A": _make_cell(1, "1")}},
+                {"time": "09:10", "values": {"A": _make_cell(1, "1")}},
+            ])], page_info={"production_date": "2025-06-01"}),
+            _make_page(2, [_make_step(3, measurements=[
+                {"time": "09:20", "values": {"A": _make_cell(1, "1")}},
+            ])], page_info={"production_date": "2025-06-01"}),
+        ])
+        assert _check_measurement_time_sequence(pages) == []
+
+    def test_sequence_equal_times_not_flagged(self):
+        """同一分钟多次重复测量（相等）不算倒序。"""
+        from core.cross_page_analyzer import _check_measurement_time_sequence
+
+        pages = _norm([
+            _make_page(1, [_make_step(3, measurements=[
+                {"time": "09:00", "values": {"A": _make_cell(1, "1")}},
+                {"time": "09:00", "values": {"A": _make_cell(1, "1")}},
+            ])], page_info={"production_date": "2025-06-01"}),
+        ])
+        assert _check_measurement_time_sequence(pages) == []
+
+    def test_sequence_unparseable_breaks_continuity(self):
+        """解析失败的时间点打断连续性（不误报跨断点倒序）。"""
+        from core.cross_page_analyzer import _check_measurement_time_sequence
+
+        pages = _norm([
+            _make_page(1, [_make_step(3, measurements=[
+                {"time": "09:00", "values": {"A": _make_cell(1, "1")}},
+                {"time": "疑似乱码!!", "values": {"A": _make_cell(1, "1")}},
+                {"time": "08:00", "values": {"A": _make_cell(1, "1")}},
+            ])], page_info={"production_date": "2025-06-01"}),
+        ])
+        assert _check_measurement_time_sequence(pages) == []
+
+    def test_missing_column_across_pages_flagged(self):
+        from core.cross_page_analyzer import _check_measurement_column_consistency
+
+        pages = _norm([
+            _make_page(1, [_make_step(4, measurements=[
+                {"time": "09:00", "values": {
+                    "温度": _make_cell(25, "20-30", "℃"),
+                    "湿度": _make_cell(50, "40-60", "%"),
+                    "压力": _make_cell(2.0, "1-3", "kPa"),
+                }},
+            ])]),
+            # 第 2 页缺"压力"列（整列提取丢失）
+            _make_page(2, [_make_step(4, measurements=[
+                {"time": "09:10", "values": {
+                    "温度": _make_cell(25, "20-30", "℃"),
+                    "湿度": _make_cell(50, "40-60", "%"),
+                }},
+            ])]),
+        ])
+        findings = _check_measurement_column_consistency(pages)
+        assert len(findings) == 1
+        assert findings[0]["page"] == 2
+        assert findings[0]["severity"] == "info"
+        assert "压力" in findings[0]["description"]
+
+    def test_consistent_columns_no_finding(self):
+        from core.cross_page_analyzer import _check_measurement_column_consistency
+
+        pages = _norm([
+            _make_page(1, [_make_step(4, measurements=[
+                {"time": "09:00", "values": {
+                    "温度": _make_cell(25, "20-30", "℃"),
+                    "湿度": _make_cell(50, "40-60", "%"),
+                }},
+            ])]),
+            _make_page(2, [_make_step(4, measurements=[
+                {"time": "09:10", "values": {
+                    "温度": _make_cell(25, "20-30", "℃"),
+                    "湿度": _make_cell(50, "40-60", "%"),
+                }},
+            ])]),
+        ])
+        assert _check_measurement_column_consistency(pages) == []
+
+    def test_single_page_column_rule_skipped(self):
+        """单页（非跨页大表）不做列一致性检查，避免小样本误报。"""
+        from core.cross_page_analyzer import _check_measurement_column_consistency
+
+        pages = _norm([
+            _make_page(1, [_make_step(4, measurements=[
+                {"time": "09:00", "values": {
+                    "温度": _make_cell(25, "20-30", "℃"),
+                }},
+            ])]),
+        ])
+        assert _check_measurement_column_consistency(pages) == []
+
+
+class TestHandwrittenRule:
+
+    def test_handwritten_content_surfaced(self):
+        from core.cross_page_analyzer import _check_handwritten_notes
+
+        pages = _norm([
+            _make_page(1, [_make_step(2, start_time="09:00", end_time="09:30",
+                                      handwritten=["庞明女署2027.01.17"])]),
+        ])
+        findings = _check_handwritten_notes(pages)
+        assert len(findings) == 1
+        assert findings[0]["page"] == 1
+        assert findings[0]["type"] == "handwritten"
+        assert findings[0]["severity"] == "info"
+        assert findings[0]["source"] == "rule"
+        assert "庞明女署" in findings[0]["description"]
+        assert "人工核对" in findings[0]["description"]
+        assert "庞明女署" in findings[0]["ocr_text"]
+
+    def test_multiple_notes_single_finding(self):
+        from core.cross_page_analyzer import _check_handwritten_notes
+
+        pages = _norm([
+            _make_page(1, [_make_step(2, handwritten=["A", "B"])]),
+        ])
+        findings = _check_handwritten_notes(pages)
+        assert len(findings) == 1
+        assert "2 条" in findings[0]["description"]
+
+    def test_empty_and_missing_handwritten_no_finding(self):
+        from core.cross_page_analyzer import _check_handwritten_notes
+
+        pages = _norm([
+            _make_page(1, [_make_step(1), _make_step(2, handwritten=[])]),
+            _make_page(2, [_make_step(1, handwritten=["  "])]),
+        ])
+        assert _check_handwritten_notes(pages) == []
+
+    def test_dedup_repeated_step(self):
+        """LLM 可能重复输出同一 step —— 同一 (page, step_no, 内容) 只报一次。"""
+        from core.cross_page_analyzer import _check_handwritten_notes
+
+        pages = _norm([
+            _make_page(1, [
+                _make_step(2, handwritten=["庞明女署"]),
+                _make_step(2, handwritten=["庞明女署"]),
+            ]),
+        ])
+        findings = _check_handwritten_notes(pages)
+        assert len(findings) == 1

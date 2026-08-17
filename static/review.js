@@ -697,6 +697,23 @@
       llm_cross: "LLM跨页",
       user_rule: "用户规则",
     };
+    // finding type 英文 → 中文（用户面向中文，后端规则 type 是英文常量，
+    // LLM 自由输出的未知 type 保留原文兜底显示）
+    const typeZh = {
+      time_reversal: "时间倒序",
+      year_contradiction: "年份矛盾",
+      suspicious_date: "日期可疑",
+      signature_time_anomaly: "签名时间异常",
+      completeness: "信息缺失",
+      batch_inconsistency: "批号不一致",
+      param_out_of_spec: "参数超标",
+      low_confidence: "低置信度",
+      handwritten: "手写内容需核对",
+      signature_mismatch: "签名不符",
+      user_rule: "用户规则",
+      ocr_noise: "OCR 噪音",
+      time_anomaly: "时间异常",
+    };
     const statusZh = {
       pending: "待复核",
       confirmed: "已确认",
@@ -765,7 +782,7 @@
                         <span class="w-1.5 h-1.5 rounded-full ${sevDot} mt-[7px] shrink-0"></span>
                         <div class="flex-1 min-w-0">
                             <div class="flex items-center gap-2 mb-0.5">
-                                <span class="text-[13px] font-medium text-foreground">${esc(f.type)}</span>
+                                <span class="text-[13px] font-medium text-foreground">${esc(typeZh[f.type] || f.type)}</span>
                                 ${statusTag}
                                 ${sourceTag}
                                 <span class="text-[10px] text-muted-foreground uppercase tracking-wider ml-auto">${esc(severityZh[f.severity] || f.severity)}</span>
@@ -899,17 +916,17 @@
     const btn = document.getElementById("ocr-toggle-btn");
     const gradient = document.getElementById("ocr-gradient");
     if (!el) return;
-    const collapsed = el.style.maxHeight === "200px" || !el.style.maxHeight;
+    const collapsed = el.style.maxHeight !== "none";
     if (collapsed) {
       el.style.maxHeight = "none";
-      el.style.overflow = "auto";
-      if (btn) btn.textContent = "收起";
+      el.style.overflow = "visible";
+      if (btn) btn.textContent = "收起 ↑";
       if (gradient) gradient.style.display = "none";
     } else {
-      el.style.maxHeight = "200px";
+      el.style.maxHeight = "360px";
       el.style.overflow = "hidden";
-      if (btn) btn.textContent = "展开更多";
-      if (gradient) gradient.style.display = "flex";
+      if (btn) btn.textContent = "展开全部 ↓";
+      if (gradient) gradient.style.display = "block";
     }
     log("toggleOcr —", collapsed ? "expanded" : "collapsed");
   }
@@ -1055,11 +1072,11 @@
       const raw = el.getAttribute("data-raw") || "";
       el.textContent = htmlToText(raw) || "无 OCR 数据";
     }
+    // 折叠按钮常驻：内容未溢出时隐藏渐变遮罩（避免误导），按钮本身保留
     if (el && gradient) {
-      el.style.maxHeight = "200px";
+      el.style.maxHeight = "360px";
       el.style.overflow = "hidden";
-      // 内容未溢出则隐藏渐变和按钮
-      if (el.scrollHeight <= 200) {
+      if (el.scrollHeight <= 360) {
         gradient.style.display = "none";
       }
     }

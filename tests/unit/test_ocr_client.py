@@ -226,10 +226,12 @@ class TestRunOCRPAGES:
 
     @patch("core.mineru_client.run_ocr")
     def test_out_of_range_page_keeps_empty_text(self, mock_ocr):
+        """越界页（99）空文本保留；P1-2 修复后批返回 1 页 ≠ 请求 3 页时
+        合法页退回单页重跑（页 2 是合法页 → 拿到 ONLY，不再按下标取空）。"""
         pdf = self._make_pdf(2)
         mock_ocr.return_value = [{"markdown": {"text": "ONLY"}}]
         out = mineru_client.run_ocr_pages(pdf, [1, 99, 2], batch_size=3)
-        assert out == [(1, "ONLY"), (99, ""), (2, "")]
+        assert out == [(1, "ONLY"), (99, ""), (2, "ONLY")]
 
     @patch("core.mineru_client.run_ocr")
     def test_all_pages_out_of_range_skips_submission(self, mock_ocr):
@@ -237,6 +239,39 @@ class TestRunOCRPAGES:
         out = mineru_client.run_ocr_pages(pdf, [99, 100], batch_size=2)
         assert out == [(99, ""), (100, "")]
         mock_ocr.assert_not_called()
+
+    @patch("core.mineru_client.run_ocr")
+    def test_short_response_falls_back_to_single_page(self, mock_ocr):
+        """对抗审查 P1-2：MinerU 对 3 页切片只返回 2 页时，按数组下标写
+        会把第 7 页内容张冠李戴到第 6 页。必须退回逐页独立重跑。"""
+        pdf = self._make_pdf(3)
+        # 批调用返回 2 页（缺 1 页）→ 每页单独重跑（返回 1 页各一次）
+        mock_ocr.side_effect = [
+            [{"markdown": {"text": "P1"}}, {"markdown": {"text": "P2"}}],  # 批：缺页
+            [{"markdown": {"text": "S1"}}],  # 单页 1
+            [{"markdown": {"text": "S2"}}],  # 单页 2
+            [{"markdown": {"text": "S3"}}],  # 单页 3
+        ]
+        out = mineru_client.run_ocr_pages(pdf, [1, 2, 3], batch_size=3)
+        # 每页内容与其自身单页重跑结果一一对应，不串页
+        assert out == [(1, "S1"), (2, "S2"), (3, "S3")]
+        assert mock_ocr.call_count == 4  # 1 批 + 3 单页
+        import os
+
+        os.unlink(pdf)
+
+    @patch("core.mineru_client.run_ocr")
+    def test_batch_exception_falls_back_to_single_page(self, mock_ocr):
+        """对抗审查 P2-1：单批异常不再中断整条重试链，退回单页重跑。"""
+        pdf = self._make_pdf(2)
+        mock_ocr.side_effect = [
+            RuntimeError("network boom"),  # 批失败
+            [{"markdown": {"text": "S1"}}],
+            [{"markdown": {"text": "S2"}}],
+        ]
+        out = mineru_client.run_ocr_pages(pdf, [1, 2], batch_size=2)
+        assert out == [(1, "S1"), (2, "S2")]
+        assert mock_ocr.call_count == 3
 
 
 class TestPaddleOCRClient:

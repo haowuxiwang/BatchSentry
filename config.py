@@ -108,25 +108,31 @@ def _migrate_env_to_json(env_path: Path, json_path: Path) -> None:
 
     保留 .env 文件原样（不删除，不重命名），仅创建 JSON 副本。
     迁移后 config.py 只读 JSON，.env 不再生效。
+
+    对抗审查 P2-I：原实现用简易正则 ^([A-Z_]+)=..."?(.*)"?$ 解析，三个缺陷：
+    (a) 行内注释 `KEY=sk-xxx # comment` 整段进 value → 迁移后密钥带垃圾
+        尾巴，LLM/OCR 认证神秘失败；(b) `export KEY=...` 行首字母小写
+        不匹配 → 配置静默丢失；(c) 写盘非原子。改用 dotenv 官方解析器
+        （项目本就依赖 python-dotenv）+ tmp+replace 原子写盘。
     """
-    import re
-    config_data: dict[str, str] = {}
-    with open(env_path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            m = re.match(r'^([A-Z_]+)="?(.*)"?$', line)
-            if m:
-                key = m.group(1)
-                value = m.group(2)
-                # 去掉尾部可能残留的引号
-                if value.endswith('"') and not value.endswith('\\"'):
-                    value = value[:-1]
-                config_data[key] = value
+    import uuid
+    from dotenv import dotenv_values
+    config_data = dotenv_values(str(env_path))
+    if not config_data:
+        logger.info(f"No parseable keys in {env_path} — skipping migration")
+        return
     json_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(json_path, "w", encoding="utf-8") as f:
-        json.dump(config_data, f, indent=2, ensure_ascii=False)
+    tmp = json_path.parent / f"config.json.tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(config_data, f, indent=2, ensure_ascii=False)
+        tmp.replace(json_path)
+    except Exception:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise  # 迁移失败上抛，由调用方决定是否继续
     logger.info(f"Migrated {len(config_data)} keys from {env_path} → {json_path}")
 
 
@@ -144,9 +150,18 @@ def _load_json_config() -> None:
     json_path = _config_path()
 
     if json_path.exists():
-        # JSON 配置存在 — 加载到 os.environ
-        with open(json_path, "r", encoding="utf-8") as f:
-            config_data = json.load(f)
+        # 对抗审查 P1-C：config.json 损坏（PowerShell 5.1 BOM / 手改语法
+        # 错误 / 半写文件）此前在模块导入期 json.load 直接崩 → 应用无法
+        # 启动（frozen 模式 exit code 1，无任何降级）。与 load_user_rules
+        # 同款防御：utf-8-sig 吞 BOM + 解析失败回退空配置并告警。
+        config_data: dict = {}
+        try:
+            with open(json_path, "r", encoding="utf-8-sig") as f:
+                config_data = json.load(f)
+        except (ValueError, OSError) as e:
+            logger.warning(f"config.json unreadable ({e}) — starting with defaults")
+        if not isinstance(config_data, dict):
+            config_data = {}
         for key, value in config_data.items():
             # 不覆盖已有的 OS 环境变量（允许 OS 级别覆盖 JSON 配置）
             # 非标量值（user_rules 列表等）不进入 os.environ，由
@@ -162,8 +177,14 @@ def _load_json_config() -> None:
         logger.info(f"Config JSON not found, migrating from {env_path}")
         _migrate_env_to_json(env_path, json_path)
         # 迁移后重新加载 JSON
-        with open(json_path, "r", encoding="utf-8") as f:
-            config_data = json.load(f)
+        config_data = {}
+        try:
+            with open(json_path, "r", encoding="utf-8-sig") as f:
+                config_data = json.load(f)
+        except (ValueError, OSError) as e:
+            logger.warning(f"config.json unreadable after migration ({e})")
+        if not isinstance(config_data, dict):
+            config_data = {}
         for key, value in config_data.items():
             if key not in os.environ and isinstance(value, (str, int, float, bool)):
                 os.environ[key] = str(value)

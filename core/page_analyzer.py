@@ -40,7 +40,6 @@ PROMPTS = {
 
 严格输出 JSON，不要 Markdown 代码包裹。""",
         "user_suffix": """
-```
 
 输出 JSON 格式：{"page_info":{"title":"","file_code":"","version":"","batch_no":"","production_date":""},"steps":[{"step_no":"","operation":"","start_time":"","end_time":"","parameters":[{"name":"","spec_range":"","value":"","unit":""}],"operator":"","reviewer":"","handwritten":[],"anomalies":[]}],"time_anomalies":[],"ocr_noise":[],"overall_confidence":"high|medium|low"}""",
     },
@@ -103,7 +102,6 @@ signatures: [{"role":"workshop_reviewer", "name":"李四", "sign_time":"2025.01.
 
 严格输出 JSON，不要 Markdown 代码包裹。""",
         "user_suffix": """
-```
 
 输出 JSON 格式：
 {"page_info":{"title":"","file_code":"","version":"","batch_no":"","production_date":""},
@@ -390,6 +388,25 @@ async def analyze_page(html: str, page_num: int, *, job_id: str = "") -> dict:
                 "overall_confidence": "low",
             }
 
+    # 对抗审查 P1-4：_parse_json 对合法 JSON 标量直接放行
+    # （"null"→None、"123"→int、'"str"'→str）。此前 dict/list 之外的类型
+    # 直接进 _validate_page_result → 'in' 运算符 TypeError 崩溃，该页被
+    # 简单归失败；str 还会在 _sanitize_page_result 的 data["steps"]=[]
+    # 处抛 "str does not support item assignment"。此处统一转 _parse_error，
+    # 保持"页失败但不炸 pipeline"的语义（触发面：LLM 推理异常/max_tokens 截断）。
+    if not isinstance(result, dict):
+        logger.warning(
+            f"Page {page_num}: LLM returned non-object JSON "
+            f"({type(result).__name__}) — marking parse error"
+        )
+        return {
+            "page_number": page_num,
+            "_parse_error": True,
+            "_raw": str(result)[:500],
+            "_prompt_version": CURRENT_PROMPT_VERSION,
+            "overall_confidence": "low",
+        }
+
     # Schema validation
     errors = _validate_page_result(result)
     if errors:
@@ -434,6 +451,15 @@ def _clean_html(html: str) -> str:
     boundary = cut.rfind("</table>")
     if boundary > _MAX_HTML_CHARS * 0.6:
         cut = cut[: boundary + len("</table>")]
+    else:
+        # 对抗审查 P2-5：截断点落在未闭合的单个大表中间时找不到 </table>，
+        # 原实现直接字符截断，可能切开 <td>/<tr> 标签 → LLM 收到非法 HTML，
+        # 后半行数据被忽略或误读。对齐到最近的完整行标签边界。
+        tr_boundary = cut.rfind("<tr")
+        td_boundary = cut.rfind("<td")
+        line_boundary = max(tr_boundary, td_boundary)
+        if line_boundary > _MAX_HTML_CHARS * 0.6:
+            cut = cut[:line_boundary]
     cut += f"\n[HTML 已截断：原文 {orig_len} 字符，超过上限 {_MAX_HTML_CHARS}，"
     cut += "本页信息可能不完整]"
     return cut

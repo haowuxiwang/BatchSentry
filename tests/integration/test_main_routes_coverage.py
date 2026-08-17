@@ -153,6 +153,34 @@ class TestReviewPageFullRendering:
         r = await c.get("/jobs/full-job/review?page=1")
         assert r.status_code == 200  # 应正常渲染，failed_pages 降级为空
 
+    @pytest.mark.asyncio
+    async def test_review_ocr_text_not_truncated(self, client_with_full_job, test_db):
+        """F1: SSR 首屏 data-raw 应包含完整 raw_html（不再 5000 截断），显示区保留换行。
+
+        回归：此前 main.py 把 ocr_text 截断到 5000 字符且折叠全部换行，
+        首屏只显示当页 OCR 文本的一部分；AJAX 翻页路径却返回完整内容，
+        双路径不一致。修复后 data-raw 注入完整 raw_html，由 htmlToText 统一转换。
+        """
+        long_html = (
+            "<table><tr><td>row1</td></tr></table>\n"
+            + ("x" * 5200)
+            + "\n<p>END_MARKER_TAIL</p>"
+        )
+        await test_db.execute(
+            "UPDATE page_cache SET raw_html = ? WHERE job_id = ? AND page = ?",
+            (long_html, "full-job", 1),
+        )
+        await test_db.commit()
+        c, _ = client_with_full_job
+        r = await c.get("/jobs/full-job/review?page=1")
+        assert r.status_code == 200
+        # 尾部标记存在于页面（若仍 5000 截断则被切掉）
+        assert "END_MARKER_TAIL" in r.text
+        # data-raw 注入完整 raw_html（HTML 实体已转义，可安全进属性）
+        assert "&lt;table&gt;" in r.text
+        # 显示区（SSR 兜底）保留换行，整页不再被折叠成一坨
+        assert "\n" in r.text
+
 
 class TestServePdfSuccess:
     """GET /api/jobs/{id}/pdf — PDF 文件服务成功路径。"""

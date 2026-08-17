@@ -790,6 +790,121 @@ class TestOcrFailover:
         assert (await cursor.fetchone())["status"] == "error"
 
 
+# ─── 2.6 F3: retry 缓存复用（跳过 Stage 1 OCR）─────────────────
+
+
+class TestRetryReuseOcr:
+    """F3: page_cache 已覆盖全部页时 retry 跳过真实 OCR，直接复用缓存进 Stage 2。
+
+    省掉整个 PDF 重传重 OCR（上游配额 + 数分钟等待）。仅整份路径生效。
+    """
+
+    @pytest.mark.asyncio
+    async def test_full_cache_skips_ocr(self, pipeline_db, tmp_path):
+        """缓存全覆盖 → _run_ocr_with_failover 不被调用；Stage 2 用缓存文本；
+        ocr_backend_used 保留上次真实后端（不写 "cached"）。"""
+        job_id = await _insert_job(pipeline_db, job_id="reuse-1", status="pending")
+        pdf_path = str(tmp_path / "fake.pdf")
+        Path(pdf_path).write_bytes(b"%PDF-1.4 fake")
+        await pipeline_db.execute(
+            "UPDATE jobs SET total_pages = 2, ocr_backend_used = 'mineru' WHERE id = ?",
+            (job_id,),
+        )
+        await pipeline_db.executemany(
+            "INSERT INTO page_cache (job_id, page, raw_html) VALUES (?, ?, ?)",
+            [
+                ("reuse-1", 1, "<p>cached p1</p>"),
+                ("reuse-1", 2, "<p>cached p2</p>"),
+            ],
+        )
+        await pipeline_db.commit()
+
+        seen: list[str] = []
+
+        async def _fake_analyze(raw_html, page_num=None, job_id=None, **kw):
+            seen.append(raw_html)
+            return {"steps": [], "findings": [], "overall_confidence": "high"}
+
+        with patch(
+            "core.pipeline._run_ocr_with_failover",
+            new=AsyncMock(side_effect=AssertionError("OCR must be skipped")),
+        ), patch(
+            "core.pipeline._pdf_page_count", return_value=2
+        ), patch(
+            "core.pipeline.analyze_page", new=_fake_analyze
+        ), patch(
+            "core.pipeline.analyze_cross_page", new=AsyncMock(return_value=[])
+        ):
+            await run_pipeline(job_id, pdf_path)
+
+        cursor = await pipeline_db.execute(
+            "SELECT status, ocr_backend_used, total_pages FROM jobs WHERE id = ?",
+            (job_id,),
+        )
+        row = await cursor.fetchone()
+        assert row["status"] == "review"
+        assert row["ocr_backend_used"] == "mineru"  # 保留真实后端，非 "cached"
+        # Stage 2 消费的是缓存文本（顺序按 page）
+        assert seen == ["<p>cached p1</p>", "<p>cached p2</p>"]
+        # 审计可见 stage1_skipped
+        cursor = await pipeline_db.execute(
+            "SELECT detail FROM audit_log WHERE job_id = ? AND action = 'stage1_skipped'",
+            (job_id,),
+        )
+        assert (await cursor.fetchone()) is not None
+
+    @pytest.mark.asyncio
+    async def test_partial_cache_still_runs_ocr(self, pipeline_db, tmp_path):
+        """缓存未覆盖全部页（1/2）→ 正常走 OCR failover 路径。"""
+        job_id = await _insert_job(pipeline_db, job_id="reuse-2", status="pending")
+        pdf_path = str(tmp_path / "fake.pdf")
+        Path(pdf_path).write_bytes(b"%PDF-1.4 fake")
+        await pipeline_db.execute(
+            "UPDATE jobs SET total_pages = 2, ocr_backend_used = 'mineru' WHERE id = ?",
+            (job_id,),
+        )
+        await pipeline_db.execute(
+            "INSERT INTO page_cache (job_id, page, raw_html) VALUES (?, ?, ?)",
+            ("reuse-2", 1, "<p>cached p1</p>"),
+        )
+        await pipeline_db.commit()
+
+        fake_pages = [
+            {"markdown": {"text": "fresh p1"}},
+            {"markdown": {"text": "fresh p2"}},
+        ]
+        calls = {"n": 0}
+
+        async def _spy_failover(db, job_id, pdf_path, progress_callback=None):
+            calls["n"] += 1
+            return fake_pages, "mineru", []
+
+        with patch(
+            "core.pipeline._run_ocr_with_failover", side_effect=_spy_failover
+        ), patch(
+            "core.pipeline.analyze_page",
+            new=AsyncMock(return_value={"steps": [], "findings": [], "overall_confidence": "high"}),
+        ), patch(
+            "core.pipeline.analyze_cross_page", new=AsyncMock(return_value=[])
+        ):
+            await run_pipeline(job_id, pdf_path)
+
+        assert calls["n"] == 1  # OCR 真实执行
+        # 未覆盖的页（p2）执行了新 OCR 并写入缓存
+        cursor = await pipeline_db.execute(
+            "SELECT raw_html FROM page_cache WHERE job_id = ? AND page = 2",
+            (job_id,),
+        )
+        row = await cursor.fetchone()
+        assert row is not None and "fresh p2" in row["raw_html"]
+        # 无 stage1_skipped 审计
+        cursor = await pipeline_db.execute(
+            "SELECT COUNT(*) AS c FROM audit_log WHERE job_id = ? AND action = 'stage1_skipped'",
+            (job_id,),
+        )
+        assert (await cursor.fetchone())["c"] == 0
+
+
 # ─── 2.5 健壮性改进（robustness A/B 组）───────────────────────────
 
 
@@ -1107,6 +1222,48 @@ class TestSanitizeOcrText:
         from core.pipeline import _sanitize_ocr_text
 
         assert _sanitize_ocr_text("a\n\n\n\n\nb") == "a\n\nb"
+
+    def test_pseudo_latex_stripped(self):
+        """F2: 伪 LaTeX 残留（$...$/\\text{...}/{{...}}）应从 raw_html 剥离。"""
+        from core.pipeline import _sanitize_ocr_text
+
+        out = _sanitize_ocr_text("温度 $\\text{25.0}$℃ 记录 见 批件")
+        assert "$" not in out
+        assert "{" not in out and "}" not in out
+        assert "\\text" not in out
+        assert out == "温度 25.0℃ 记录 见 批件"
+
+    def test_empty_cells_and_tag_whitespace_compressed(self):
+        """F2: 空单元格（含 &nbsp;）规整 + 标签间空白压缩，省 token。"""
+        from core.pipeline import _sanitize_ocr_text
+
+        html = (
+            "<table>\n"
+            "<tr>\n<td> 值A </td>\n<td>&nbsp;</td>\n<td> </td>\n</tr>\n"
+            "</table>"
+        )
+        out = _sanitize_ocr_text(html)
+        assert "<td>值A</td>" not in out  # 值A 两端空格属于内容，不动
+        assert "<td></td>" in out
+        assert "\n" not in out  # 标签间换行空白已压缩
+        assert "&nbsp;" not in out
+
+    def test_control_chars_replaced_with_space(self):
+        """F2: PDF 控制字符应替换为空格（防单词粘连），\n \t 保留。"""
+        from core.pipeline import _sanitize_ocr_text
+
+        out = _sanitize_ocr_text("A\x00B\x1fC\nD")
+        assert out == "A B C\nD"
+
+    def test_page_number_lines_filtered(self):
+        """F2: 页码整行（第 N 页 / N/M）应过滤 — Paddle 路径无块级过滤的补偿。"""
+        from core.pipeline import _sanitize_ocr_text
+
+        text = "正文开始\n第 3 页\n2/24\n正文结束"
+        out = _sanitize_ocr_text(text)
+        assert "第 3 页" not in out
+        assert "2/24" not in out
+        assert "正文开始" in out and "正文结束" in out
 
 
 # ─── 4. MinerU 分片 OCR + 渐进分析（流式输出）───────────────────

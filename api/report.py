@@ -55,8 +55,13 @@ async def _generate_report_md_cached(job_id: str) -> str:
     last_id = findings[-1]["id"] if findings else 0
     # Include status hash in cache key so review operations (confirm/reject/correct)
     # invalidate the cache — without this, reports show stale finding statuses.
+    # 对抗审查 P1-A：必须把 corrected_text/reviewer_note/reviewed_at 也纳入 —
+    # 复核接口允许不改 status 单独更新这两个字段（同状态二次修正），原 key
+    # 只看 (id, status) → 修正内容变化后报告仍返回旧缓存文本（GMP 场景下
+    # 报告静默携带过期内容，用户以为导出的是最新版本）。
     status_hash = hash(tuple(sorted(
-        (f["id"], f["status"]) for f in findings
+        (f["id"], f["status"], f.get("corrected_text") or "", f.get("reviewer_note") or "")
+        for f in findings
     )))
     cache_key = (job_id, len(findings), last_id, status_hash)
 
@@ -145,8 +150,16 @@ def _generate_markdown(job: dict, findings: list[dict], total_pages: int) -> str
     # 对抗审查(cr-7): 报告里的 LLM/OCR 内容是模型生成的可疑文本，可能含
     # HTML/脚本。Markdown 本身浏览器不渲染，但用户常用 Typora/Obsidian 等
     # 自动渲染 HTML 的编辑器打开 → 形成 XSS 执行面。统一 HTML-escape。
+    # 对抗审查 P1-B：html.escape 只转义 <>& — LLM 文本里的 `![x](url)` /
+    # `[x](...)` 在 Typora/Obsidian 中成为真实图片/链接（远端图片会触发
+    # 请求 = 隐私泄露/追踪；路径外链可指向 file://）。对 LLM/OCR 无信任
+    # 文本额外转义 Markdown 元字符，使其成为纯文本。
     def esc(text) -> str:
-        return html.escape(str(text), quote=False)
+        s = html.escape(str(text), quote=False)
+        # 转义 Markdown 图像/链接/强调元字符 — 仅限无信任来源字段
+        for ch in ("!", "[", "]", "(", ")"):
+            s = s.replace(ch, "&#{};".format(ord(ch)))
+        return s
 
     lines = [
         "# GMP 批生产记录合规检查报告",
@@ -176,9 +189,11 @@ def _generate_markdown(job: dict, findings: list[dict], total_pages: int) -> str
             lines.append(f"- **第{f['page']}页** | `{esc(f['type'])}` {st_icon} {f['status']}")
             lines.append(f"  - {esc(f['description'])}")
             if f.get("ocr_text"):
-                lines.append(f"  - OCR原文: `{esc(f['ocr_text'])[:100]}`")
+                # P2: 先截原始文本再转义 — 反过来的话实体（如 &#33;）会被
+                # 拦腰截断，渲染成字面 "&#33"，且实际展示字符数不足
+                lines.append(f"  - OCR原文: `{esc(f['ocr_text'][:100])}`")
             if f.get("corrected_text"):
-                lines.append(f"  - 修正为: `{esc(f['corrected_text'])[:100]}`")
+                lines.append(f"  - 修正为: `{esc(f['corrected_text'][:100])}`")
             if f.get("reviewer_note"):
                 lines.append(f"  - 审查员备注: {esc(f['reviewer_note'])}")
             lines.append("")

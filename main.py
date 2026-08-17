@@ -331,9 +331,13 @@ async def review_page(job_id: str, request: Request, page: int = 1):
     row = await cursor.fetchone()
     raw_html = row["raw_html"] if row else ""
     structured_json = row["structured_json"] if row else None
-    # Strip HTML tags for display
+    # Strip HTML tags for display — keep line breaks so tables stay readable.
+    # Full raw_html goes to the template separately as ocr_raw_html and is
+    # converted client-side by review.js htmlToText (same path as AJAX paging,
+    # no 5000-char truncation — F1 fix).
     ocr_text = re.sub(r"<[^>]+>", " ", raw_html) if raw_html else ""
-    ocr_text = re.sub(r"\s+", " ", ocr_text).strip()
+    ocr_text = re.sub(r"[ \t]+", " ", ocr_text)
+    ocr_text = re.sub(r"\n{3,}", "\n\n", ocr_text).strip()
 
     # Phase 3: get findings for THIS page, ordered by severity then source.
     # Critical + rule findings surface at the top so reviewers see them first.
@@ -428,7 +432,8 @@ async def review_page(job_id: str, request: Request, page: int = 1):
         "error_message": job["error_message"] if "error_message" in job.keys() else None,
         "page": page,
         "total_pages": total_pages,
-        "ocr_text": ocr_text[:5000],
+        "ocr_text": ocr_text,
+        "ocr_raw_html": raw_html,
         "findings": findings,
         "severity_counts": severity_counts,
         "page_finding_counts": page_finding_counts,

@@ -109,8 +109,25 @@ def poll_job(job_id: str, progress_callback=None) -> dict:
                     raise RuntimeError(f"Poll failed after {consecutive_errors} consecutive HTTP errors")
                 time.sleep(POLL_INTERVAL)
                 continue
-            consecutive_errors = 0  # 成功后重置错误计数
-            j = resp.json()
+            try:
+                j = resp.json()
+            except ValueError as e:
+                # 对抗审查 P1-3：HTTP 200 但响应体是网关 HTML 错误页/非 JSON
+                # 时 json() 抛 JSONDecodeError — 未被下方 except RequestException
+                # 捕获 → 轮询中断整单失败（mineru 端 P-W6 已修，此处同构未修）。
+                # 计为重试错误，与网络错误同一退避路径。
+                consecutive_errors += 1
+                logger.warning(f"Poll non-JSON response ({consecutive_errors}/5): {e}")
+                if consecutive_errors >= 5:
+                    raise RuntimeError(
+                        f"Poll failed after {consecutive_errors} consecutive non-JSON responses: {e}"
+                    )
+                time.sleep(POLL_INTERVAL * 2)
+                continue
+            # 修复 P0 回归：重置必须在 JSON 解析成功之后——此前重置点在
+            # json() 之前，HTTP 200 但响应体非 JSON 时每次循环都被重置为 0，
+            # (1/5) 永远不递增，轮询空转满 POLL_TIMEOUT(600s) 才失败。
+            consecutive_errors = 0
             state = str(j.get("data", {}).get("state") or j.get("state") or "").lower()
             progress = j.get("data", {}).get("extractProgress", {})
             extracted = progress.get("extractedPages", "?")
@@ -197,6 +214,9 @@ def download_result(poll_response: dict) -> list[dict]:
 
     # JSONL (one JSON object per line, each with 4 pages)
     line_count = 0
+    # 对抗审查 P2-3：Windows 侧服务常发 UTF-8 BOM 的 JSONL，首行
+    # \ufeff 前缀使 json.loads 失败 → 前 4 页静默丢弃（小文件直接 0 页）
+    raw = raw.lstrip("\ufeff")
     for line in raw.strip().split("\n"):
         line = line.strip()
         if not line:

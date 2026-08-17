@@ -93,17 +93,44 @@ def _sanitize_ocr_text(text: str) -> str:
       用户看到满屏 "\\n" 而非真实换行；
     - 每个 <td> 都带 style='text-align: center; word-wrap: break-word;'
       行内样式（对 LLM 和 OCR 文本面板都是纯噪音）；
-    - img src 是长路径（imgs/img_in_image_box_xxx.jpg），截断为文件名。
+    - img src 是长路径（imgs/img_in_image_box_xxx.jpg），截断为文件名；
+    - 伪 LaTeX 残留（$\\text{...}$、{{...}}，公式检测误报），与
+      cross_page_analyzer._parse_spec 的剥离规则对齐（F2）；
+    - 空单元格（<td> </td>/<td>&nbsp;</td>）与标签间空白（token 浪费）；
+    - PDF 控制字符；PaddleOCR-VL 路径无块级页脚过滤（页码整行，
+      MinerU 已在后端过滤，此处幂等）。
 
     清洗后 raw_html 同时服务于 LLM 输入（page_analyzer 仍会二次剥离）
     与 review 页面 OCR 文本面板（htmlToText 展示）。
     """
     if not text:
         return text
-    s = text.replace("\\n", "\n").replace("\\t", "\t")
+    # F2: 伪 LaTeX / OCR 残留符号（$...$、\text/\frac 命令、花括号）——
+    # 必须先于下方 \\n/\\t 字面转义，否则 \text 的 \t 会被转成制表符，
+    # 子串失配导致命令剥离失效（与 cross_page_analyzer._parse_spec 对齐）。
+    s = re.sub(r"\$+", "", text)
+    # {2,}：排除 \\n / \\t 单字母字面转义（MinerU 合法分隔符，下方 replace 处理）
+    s = re.sub(r"\\[a-zA-Z]{2,}", "", s)
+    s = s.replace("{", "").replace("}", "")
+    s = s.replace("\\n", "\n").replace("\\t", "\t")
     s = re.sub(r"""\s*style=['"][^'"]*['"]""", "", s)
     s = re.sub(r"""\s*width=['"][^'"]*['"]""", "", s)
     s = re.sub(r"""(src=["'])[^"']*/([^/"']+)(["'>])""", r"\1\2\3", s)
+    # F2: 空单元格规整（&nbsp;/空格 → 空），减少 LLM prompt token 浪费
+    s = re.sub(r"<td>(?:&nbsp;|\s)*</td>", "<td></td>", s, flags=re.IGNORECASE)
+    # F2: HTML 标签间空白压缩（不触碰单元格文本内容）
+    s = re.sub(r">\s+<", "><", s)
+    # F2: 剥离 PDF 控制字符（保留 \n \t；替换为空格防单词粘连）
+    s = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", " ", s)
+    s = re.sub(r" {2,}", " ", s)
+    # F2: 页码整行过滤（"第 N 页" / "N/M" — 正文表格外的明确页码模式）
+    lines = []
+    for ln in s.split("\n"):
+        t = ln.strip()
+        if re.fullmatch(r"第\s*\d+\s*页", t) or re.fullmatch(r"\d+\s*/\s*\d+", t):
+            continue
+        lines.append(ln)
+    s = "\n".join(lines)
     # 折叠 3+ 个连续空行为 2 个（保留段落分隔）
     s = re.sub(r"\n{3,}", "\n\n", s)
     return s.strip()
@@ -500,11 +527,45 @@ async def _run_pipeline_impl(job_id: str, pdf_path: str):
                 return
             pages = []  # Stage 3 不依赖 pages（数据已在 page_cache）
         else:
-            # 双 OCR 兜底：主后端失败（异常/0 页/严重缺页）自动切换备后端
-            # 整单重试，job 记录实际使用的后端（jobs.ocr_backend_used）审计。
-            pages, used_backend, ocr_failures = await _run_ocr_with_failover(
-                db, job_id, pdf_path, _ocr_progress_cb
+            # F3: retry 智能复用 — job 上次 OCR 已把全部页写入 page_cache 时
+            # （典型场景：Stage 2/3 失败后 retry），跳过真实 OCR，直接从缓存
+            # 重建 pages 列表进入 Stage 2。省掉整个 PDF 重传重 OCR（上游配额
+            # + 数分钟等待）。仅整份路径生效（分片路径按片流的语义，不复用）。
+            reuse_pages = None
+            cursor = await db.execute(
+                "SELECT total_pages FROM jobs WHERE id = ?", (job_id,)
             )
+            jrow = await cursor.fetchone()
+            target_pages = (jrow["total_pages"] or 0) if jrow else 0
+            if target_pages > 0:
+                cursor = await db.execute(
+                    "SELECT raw_html FROM page_cache WHERE job_id = ? AND raw_html IS NOT NULL "
+                    "ORDER BY page",
+                    (job_id,),
+                )
+                cached_rows = await cursor.fetchall()
+                if len(cached_rows) >= target_pages:
+                    reuse_pages = [
+                        {"markdown": {"text": r["raw_html"] or ""}}
+                        for r in cached_rows
+                    ]
+                    await _audit_log(
+                        db, job_id, "stage1_skipped",
+                        f"reuse {len(reuse_pages)} cached pages (no re-OCR)",
+                    )
+                    logger.info(
+                        f"[{job_id}] Stage 1 skipped: reusing {len(reuse_pages)} cached pages"
+                    )
+            if reuse_pages is not None:
+                # used_backend="cached" 仅用于日志/审计；不覆盖 jobs.ocr_backend_used
+                # （保留上次真实后端，见下方 UPDATE 条件）。
+                pages, used_backend, ocr_failures = reuse_pages, "cached", []
+            else:
+                # 双 OCR 兜底：主后端失败（异常/0 页/严重缺页）自动切换备后端
+                # 整单重试，job 记录实际使用的后端（jobs.ocr_backend_used）审计。
+                pages, used_backend, ocr_failures = await _run_ocr_with_failover(
+                    db, job_id, pdf_path, _ocr_progress_cb
+                )
             stage1_ms = int((time.time() - stage1_start) * 1000)
             if not pages:
                 reason = ocr_failures[0] if ocr_failures else f"backend={ocr_backend}"
@@ -525,10 +586,13 @@ async def _run_pipeline_impl(job_id: str, pdf_path: str):
                 await _audit_log(db, job_id, "stage1_failed", err_msg)
                 return
 
-            await db.execute(
-                "UPDATE jobs SET ocr_backend_used = ? WHERE id = ?",
-                (used_backend, job_id),
-            )
+            if used_backend != "cached":
+                # F3: 缓存复用路径不覆盖 jobs.ocr_backend_used — 保留上次真实后端
+                # 供 GMP 溯源（"cached" 不是 OCR 后端，写进去会污染审计显示）。
+                await db.execute(
+                    "UPDATE jobs SET ocr_backend_used = ? WHERE id = ?",
+                    (used_backend, job_id),
+                )
             logger.info(
                 f"[{job_id}] Stage 1: OCR complete: {len(pages)} pages "
                 f"in {stage1_ms}ms (backend={used_backend})"
@@ -620,6 +684,16 @@ async def _run_pipeline_impl(job_id: str, pdf_path: str):
                         # 3 页批 4/6 恢复、单页批全部恢复过）。
                         for attempt, batch_size in enumerate((3, 1)):
                             if not still_empty:
+                                break
+                            # 对抗审查 P2-9：两轮重试各需 15-40s+，期间用户
+                            # 取消 → 继续跑完并写库，浪费上游配额且取消
+                            # 不生效。每轮前检查取消，中断并保留已恢复页。
+                            if await _is_cancelled(job_id):
+                                logger.info(
+                                    f"[{job_id}] Empty-page retry cancelled "
+                                    f"(round {attempt + 1}) — "
+                                    f"keeping {len(recovered)} recovered pages"
+                                )
                                 break
                             logger.info(
                                 f"[{job_id}] Empty-page retry round {attempt + 1} "
@@ -1120,6 +1194,10 @@ async def _run_sliced_stage1_2(
     new_pages = 0
     total_pages = 0
     seen_max = 0
+    # 对抗审查 P1-1：记录已收到回调的页区间，OCR 结束后计算缺口。
+    # 原实现只在 seen_max < total_pages 时补记尾页 — 中间片失败时
+    # （如第 2 片失败、第 3 片成功）seen_max 可达 total，缺页静默通过。
+    received_ranges: list[tuple[int, int]] = []
 
     while True:
         try:
@@ -1140,7 +1218,9 @@ async def _run_sliced_stage1_2(
                 break
             continue
         total_pages = total
-        seen_max = max(seen_max, start_page + len(pages) - 1)
+        if pages:
+            seen_max = max(seen_max, start_page + len(pages) - 1)
+            received_ranges.append((start_page, start_page + len(pages) - 1))
         # 该片页面落库（INSERT OR IGNORE 兼容 resume）
         # P1-3 修复：落库 + commit 整体持 db_lock — 否则与 _analyze_one 的
         # rollback() 竞争：分析失败回滚会撤销本循环尚未提交的 INSERT，
@@ -1157,10 +1237,13 @@ async def _run_sliced_stage1_2(
                 )
                 new_pages += 1
             await db.execute(
-                "UPDATE jobs SET total_pages = ? WHERE id = ?", (seen_max, job_id)
+                # 对抗审查 P1-1 关联：必须用 split_pdf 的权威总数 total_pages，
+                # 不能用 seen_max — 中间片失败时 seen_max < 真实页数，会把
+                # jobs.total_pages 永久覆盖成小值（复核页导航/报告全错）
+                "UPDATE jobs SET total_pages = ? WHERE id = ?", (total_pages, job_id)
             )
             await db.commit()
-        logger.info(
+            logger.info(
             f"[{job_id}] Stage 1 (sliced): slice start={start_page} pages={len(pages)} "
             f"persisted ({new_pages} new)"
         )
@@ -1188,19 +1271,32 @@ async def _run_sliced_stage1_2(
             return 0, 0, failed_pages, total_pages
 
     stage1_ms = int((time.time() - stage1_start) * 1000)
-    # P1-4 (sliced)：缺页显式暴露 — OCR 声明 total 页但实际只产出到 seen_max
-    # （单片失败/片内缺页），缺失页码并入 failed_pages 降级 partial_review
-    if total_pages and seen_max < total_pages:
-        missing_pages = list(range(seen_max + 1, total_pages + 1))
+    # 对抗审查 P1-1：缺页显式暴露 — 按"已收到回调的区间"计算全部缺口
+    # （不仅限尾页）。中间片失败（第 2 片失败、第 3 片成功）时原逻辑
+    # seen_max==total 会漏报，GMP 复核页数错乱而 job 仍显示成功。
+    if total_pages:
+        received_ranges.sort()
+        missing_pages: list[int] = []
+        ptr = 1
+        for s, e in received_ranges:
+            for pn in range(ptr, min(s, total_pages + 1)):
+                missing_pages.append(pn)
+            ptr = max(ptr, e + 1)
+        for pn in range(ptr, total_pages + 1):
+            missing_pages.append(pn)
         for pn in missing_pages:
             if pn not in failed_pages:
                 failed_pages.append(pn)
-        logger.warning(
-            f"[{job_id}] Sliced OCR pages missing: {missing_pages} "
-            f"(total={total_pages}, produced up to {seen_max})"
-        )
-        await _audit_log(db, job_id, "stage1_pagemismatch",
-                         f"sliced: produced {seen_max}/{total_pages} pages")
+        if missing_pages:
+            logger.warning(
+                f"[{job_id}] Sliced OCR pages missing: {missing_pages} "
+                f"(total={total_pages}, produced={received_ranges})"
+            )
+            await _audit_log(
+                db, job_id, "stage1_pagemismatch",
+                f"sliced: missing {len(missing_pages)}/{total_pages} pages "
+                f"ranges={received_ranges}",
+            )
     logger.info(
         f"[{job_id}] Stage 1 (sliced): OCR complete: {new_pages} new pages "
         f"(total={total_pages}) in {stage1_ms}ms"

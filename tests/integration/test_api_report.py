@@ -105,8 +105,69 @@ class TestReportMarkdown:
         r = await report_client.get("/api/jobs/report-job/report.md")
         assert r.status_code == 200
         assert "<script>alert(1)</script>" not in r.text
-        assert "&lt;script&gt;alert(1)&lt;/script&gt;" in r.text
+        # 对抗审查 P1-B：(-) 也转义 → 断言更新为实体形式
+        assert "&lt;script&gt;alert&#40;1&#41;&lt;/script&gt;" in r.text
         assert "&lt;b&gt;bold&lt;/b&gt;" in r.text
+
+    @pytest.mark.asyncio
+    async def test_report_md_escapes_markdown_injection(self, report_client, test_db):
+        """对抗审查 P1-B: LLM 生成的 description 含 `![img](url)` / `[x](url)`
+        Markdown 图片/链接语法时，在 Typora/Obsidian 打开会触发远端图片请求
+        （隐私泄露/追踪）或可点击链接 — 必须转义 ! [ ] ( ) 使其成为纯文本。"""
+        # 独立 job：_report_cache 是模块级缓存，fixture 每测试重建的 findings
+        # 拥有相同的 (job_id, count, last_id, status_hash) → 会命中其他测试
+        # 已生成的报告缓存（GMP 缓存 key 语义在生产正确，此处是测试隔离问题）
+        await test_db.execute(
+            "INSERT INTO jobs (id, filename, pdf_path, status, total_pages) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("report-job-md", "test2.pdf", "/tmp/test2.pdf", "review", 2),
+        )
+        await test_db.execute(
+            "INSERT INTO findings (job_id, page, type, severity, source, description, status) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("report-job-md", 1, "md-inject", "warning", "llm_cross",
+             "![追](http://evil.example/t.png) [点我](javascript:void(0))", "pending"),
+        )
+        await test_db.commit()
+        r = await report_client.get("/api/jobs/report-job-md/report.md")
+        assert r.status_code == 200
+        # ! [ ] ( ) 全部转义后不再是 Markdown 图片/链接语法
+        assert "![" not in r.text
+        assert "](" not in r.text
+        assert "http://evil.example" in r.text  # URL 本身还在（纯文本）
+
+    @pytest.mark.asyncio
+    async def test_report_cache_invalidates_on_note_or_corrected_change(
+        self, report_client, test_db
+    ):
+        """对抗审查 P1-A：复核接口允许不改 status 单独更新
+        corrected_text/reviewer_note — 旧缓存 key 只看 (id, status)，二次
+        修正后导出仍返回旧文本（GMP 报告静默携带过期内容）。key 必须
+        纳入这两个字段。"""
+        r1 = await report_client.get("/api/jobs/report-job/report.md")
+        assert "修正为" not in r1.text
+
+        # 不改 status，仅给某 finding 追加 corrected_text
+        await test_db.execute(
+            "UPDATE findings SET corrected_text = '应填 25.0 而非 250.0' "
+            "WHERE job_id = ? AND id = 1",
+            ("report-job",),
+        )
+        await test_db.commit()
+
+        r2 = await report_client.get("/api/jobs/report-job/report.md")
+        assert "修正为" in r2.text
+        assert "25.0" in r2.text  # 新内容出现在报告里，而非旧缓存
+
+        # 再改 reviewer_note 也应失效
+        await test_db.execute(
+            "UPDATE findings SET reviewer_note = '复核人：张工（8/17 复核）' "
+            "WHERE job_id = ? AND id = 1",
+            ("report-job",),
+        )
+        await test_db.commit()
+        r3 = await report_client.get("/api/jobs/report-job/report.md")
+        assert "张工" in r3.text
 
 
 class TestReportJson:

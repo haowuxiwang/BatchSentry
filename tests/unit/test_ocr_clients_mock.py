@@ -212,6 +212,42 @@ class TestPaddleOCRPoll:
         assert result["data"]["state"] == "success"
 
     @patch('core.ocr_client.requests.get')
+    def test_poll_job_non_json_response_retries_then_succeeds(self, mock_get, paddle_cfg):
+        """对抗审查 P1-3：HTTP 200 但响应体是 HTML 错误页（网关层拦截，
+        resp.json() 抛 JSONDecodeError）— 此前未被 except RequestException
+        捕获 → 单次抖动整单失败。现在计入 consecutive_errors 重试。"""
+        from json import JSONDecodeError
+        html_resp = MagicMock()
+        html_resp.status_code = 200
+        html_resp.json.side_effect = JSONDecodeError("Expecting value", "<html>", 0)
+        ok_resp = MagicMock()
+        ok_resp.status_code = 200
+        ok_resp.json.return_value = {"data": {"state": "done", "extractProgress": {}}}
+        ok_resp.headers = {}
+        mock_get.side_effect = [html_resp, ok_resp]
+
+        with patch("core.ocr_client.time.sleep"):
+            result = ocr_client.poll_job("job-123")
+
+        assert result["data"]["state"] == "done"
+        assert mock_get.call_count == 2
+
+    @patch('core.ocr_client.requests.get')
+    def test_poll_job_non_json_response_exhausts_retries(self, mock_get, paddle_cfg):
+        """对抗审查 P1-3：连续非 JSON 响应 5 次后应抛 RuntimeError（超时兜底）。"""
+        from json import JSONDecodeError
+        html_resp = MagicMock()
+        html_resp.status_code = 200
+        html_resp.json.side_effect = JSONDecodeError("Expecting value", "<html>", 0)
+        mock_get.return_value = html_resp
+
+        with patch("core.ocr_client.time.sleep"):
+            with pytest.raises(RuntimeError, match="non-JSON"):
+                ocr_client.poll_job("job-123")
+
+        assert mock_get.call_count == 5
+
+    @patch('core.ocr_client.requests.get')
     def test_poll_job_failed_raises(self, mock_get, paddle_cfg):
         """state=failed 时抛 RuntimeError。"""
         mock_resp = MagicMock()
@@ -1127,7 +1163,9 @@ class TestMinerURunOcrSliced:
         results = mineru_client.run_ocr_sliced(
             real_pdf,
             2,
-            on_batch=lambda start, pages: batches.append((start, pages)),
+            # 对抗审查 P0-1：on_batch 生产签名是 (start, pages, total) —
+            # 旧 mock 用 2 参伪造回调，恰好掩盖了生产路径的分片 100% 失败
+            on_batch=lambda start, pages, total: batches.append((start, pages)),
             progress_callback=lambda done, total: progress.append((done, total)),
         )
 
@@ -1162,7 +1200,8 @@ class TestMinerURunOcrSliced:
         results = mineru_client.run_ocr_sliced(
             real_pdf,
             2,
-            on_batch=lambda start, pages: batches.append((start, pages)),
+            # P0-1：on_batch 生产签名 (start, pages, total)
+            on_batch=lambda start, pages, total: batches.append((start, pages)),
         )
 
         # 失败片不阻塞：正常片（start=3）仍回调并返回（page_count 已重映射为全局 3）

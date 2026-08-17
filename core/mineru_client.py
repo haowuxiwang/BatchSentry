@@ -696,6 +696,25 @@ def run_ocr_pages(
 
     results: list[tuple[int, str]] = []
     tmp_dir = Path(tempfile.mkdtemp(prefix="pbc_retry_"))
+
+    def _ocr_single(pno: int) -> str:
+        # 单页独立切片 OCR — P1-2/P2-1 的兜底路径
+        pdoc = fitz.open()
+        try:
+            if 1 <= pno <= src_doc.page_count:
+                pdoc.insert_pdf(src_doc, from_page=pno - 1, to_page=pno - 1)
+            if pdoc.page_count == 0:
+                return ""
+            tmp = tmp_dir / f"single_{pno}.pdf"
+            pdoc.save(tmp)
+        finally:
+            pdoc.close()
+        try:
+            spages = run_ocr(str(tmp), job_id=job_id)
+            return spages[0].get("markdown", {}).get("text", "") if spages else ""
+        except Exception:
+            return ""  # 单页也失败 → 该页保持空，交由外层空页逻辑兜底
+
     try:
         src_doc = fitz.open(pdf_path)
         try:
@@ -714,10 +733,29 @@ def run_ocr_pages(
                     pdoc.save(tmp)
                 finally:
                     pdoc.close()
-                pages = run_ocr(str(tmp), job_id=job_id)
-                for i, pno in enumerate(batch):
-                    text = pages[i].get("markdown", {}).get("text", "") if i < len(pages) else ""
-                    results.append((pno, text or ""))
+                try:
+                    pages = run_ocr(str(tmp), job_id=job_id)
+                except Exception as e:
+                    # P2-1：单批网络/服务抖动不再中断整条重试链 —
+                    # 该批退回单页重试，避免此前的"已恢复页不落库、后续批不执行"
+                    logger.warning(f"[{job_id}] OCR batch {batch} failed: {e} — falling back to single pages")
+                    for pno in batch:
+                        results.append((pno, _ocr_single(pno)))
+                    continue
+                if len(pages) == len(batch):
+                    for i, pno in enumerate(batch):
+                        text = pages[i].get("markdown", {}).get("text", "") if i < len(pages) else ""
+                        results.append((pno, text or ""))
+                else:
+                    # P1-2：服务端返回页数 != 请求页数 → 按数组下标写会把
+                    # 第 N 页内容张冠李戴到第 M 页。退回逐页独立重跑保证页号
+                    # 与内容严格一一对应（该函数本就为服务端丢页而生）。
+                    logger.warning(
+                        f"[{job_id}] OCR batch {batch} returned {len(pages)} pages "
+                        f"(expected {len(batch)}) — re-OCR each page standalone"
+                    )
+                    for pno in batch:
+                        results.append((pno, _ocr_single(pno)))
         finally:
             src_doc.close()
     finally:
@@ -804,7 +842,11 @@ def run_ocr_sliced(
                     continue
                 results[idx] = (start_page, pages)
                 if on_batch:
-                    on_batch(start_page, pages)
+                    # 对抗审查 P0-1：原实现只传 (start_page, pages) 两参，
+                    # pipeline 端签名是 (start_page, pages, total) → 第一片
+                    # 完成即 TypeError → 分片路径 100% 失败（测试 mock 掩盖）。
+                    # total 由 split_pdf 返回值闭包捕获，与单页切片语义一致。
+                    on_batch(start_page, pages, total)
     finally:
         cleanup_slices(slices)
     return results

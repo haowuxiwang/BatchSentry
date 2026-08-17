@@ -246,6 +246,22 @@ class TestErrorHandling:
         assert result["page_number"] == 6
         assert result["_prompt_version"] == CURRENT_PROMPT_VERSION
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("scalar", [None, "plain string", 123, True, 3.14])
+    async def test_scalar_json_returns_parse_error(self, scalar):
+        """对抗审查 P1-4：_parse_json 对合法 JSON 标量直接放行（null/数字/
+        字符串/bool）。此前 dict/list 之外的类型进 _validate_page_result
+        抛 TypeError（str 还会在 _sanitize_page_result 的 item assignment
+        崩），该页被归失败 — 现在统一转 _parse_error 不炸 pipeline。"""
+        mock_client = _make_mock_client(scalar)
+        with patch("core.page_analyzer.get_llm_client", return_value=mock_client):
+            result = await analyze_page("<table></table>", page_num=8)
+
+        assert result["_parse_error"] is True
+        assert result["overall_confidence"] == "low"
+        assert result["page_number"] == 8
+        assert "steps" not in result or result["steps"] != "plain string"
+
 
 class TestHtmlCleaning:
     """验证 _clean_html 在 analyze_page 流程中的效果。"""

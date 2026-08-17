@@ -41,6 +41,8 @@ const WATCHDOG_MAX_FAILURES = 3;
 const WATCHDOG_RETRY_DELAY_MS = 2000;
 
 let pythonProcess = null;
+let reusedPid = null; // 对抗审查 P2-K：复用的孤儿 pbc-server.exe PID（退出时需清理）
+let spawnError = null; // 对抗审查 P2-L：spawn error 事件记录，waitForServer 立即失败
 let mainWindow = null;
 let splashWindow = null;
 let isShuttingDown = false;
@@ -108,6 +110,7 @@ function resolveServerCommand() {
  * Start the Python server as a child process.
  */
 function startPythonServer() {
+  spawnError = null; // 每次重启清空上次 spawn 失败记录
   const { cmd, args, isDev, cwd } = resolveServerCommand();
   const env = {
     ...process.env,
@@ -135,7 +138,11 @@ function startPythonServer() {
   });
 
   pythonProcess.on("error", (err) => {
+    // 对抗审查 P2-L：spawn 失败（exe 缺失/无权限/被杀软拦截）此前只打
+    // 日志，waitForServer 继续空轮询满 60 次（30s）后才报误导性的
+    // "启动超时"。此处把错误记录到全局，waitForServer 立即失败。
     console.error("[BatchSentry] Failed to start server:", err);
+    spawnError = err;
   });
 
   pythonProcess.on("exit", (code, signal) => {
@@ -152,6 +159,10 @@ function waitForServer() {
     let checks = 0;
 
     const check = () => {
+      if (spawnError) {
+        reject(spawnError);
+        return;
+      }
       const req = http.get(
         `http://${SERVER_HOST}:${SERVER_PORT}/health`,
         (res) => {
@@ -269,6 +280,24 @@ function probeHealth(port) {
       req.destroy();
       resolve(false);
     });
+  });
+}
+
+/**
+ * Find the PID of the process listening on a TCP port (Windows: netstat).
+ * Used to track orphaned pbc-server.exe processes for cleanup on exit
+ * (对抗审查 P2-K). Returns null when nothing is listening.
+ */
+function findPortPid(port) {
+  return new Promise((resolve) => {
+    try {
+      const out = execSync("netstat -ano", { encoding: "utf8", timeout: 5000 });
+      const re = new RegExp(`\\b${port}\\b\\s+.*LISTENING\\s+(\\d+)\\s*$`, "m");
+      const m = out.match(re);
+      resolve(m ? parseInt(m[1], 10) : null);
+    } catch {
+      resolve(null);
+    }
   });
 }
 
@@ -412,13 +441,16 @@ function createWindow() {
     mainWindow.show();
   });
 
-  // Open external links (PDFs, links with target=_blank) in the default browser
+  // Open external links (PDFs, links with target=_blank) in the default browser.
+  // 对抗审查 P2-N：原实现对非 http(s) 协议一律 allow —— 页面里任何
+  // window.open("file:///...") / target=_blank 会开新 BrowserWindow 加载
+  // 本地文件（file:// 窗口可读任意本地路径）。收紧：仅 http(s) 交给系统
+  // 浏览器，其余（file:/javascript:/data: 等）一律 deny。
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     if (url.startsWith("http://") || url.startsWith("https://")) {
       shell.openExternal(url);
-      return { action: "deny" };
     }
-    return { action: "allow" };
+    return { action: "deny" };
   });
 
   // DevTools in dev mode only
@@ -454,6 +486,11 @@ app.whenReady().then(async () => {
       if (reused) {
         setSplashStatus("检测到正在运行的 BatchSentry 服务，直接连接…");
         console.warn(`SERVER: Port ${SERVER_PORT} occupied by a healthy backend, reusing it (orphan recovery)`);
+        // 对抗审查 P2-K：记录孤儿后端 PID，退出时必须一并清理 —
+        // 否则每次"强杀 Electron 后重启"都残留一个 pbc-server.exe，
+        // 累积多个后端进程常驻内存。
+        reusedPid = await findPortPid(SERVER_PORT);
+        console.warn(`SERVER: orphan backend pid=${reusedPid} will be shut down on exit`);
       } else {
         const choice = dialog.showMessageBoxSync({
           type: "error",
@@ -527,8 +564,13 @@ async function gracefulShutdown() {
   isShuttingDown = true;
 
   // Step 1: 请求后端优雅关闭
-  if (pythonProcess) {
-    console.log("[BatchSentry] Requesting backend graceful shutdown...");
+  // 对抗审查 P2-K：目标进程 = 本实例 spawn 的 pythonProcess 或复用的
+  // 孤儿后端（reusedPid）。原实现以 `if (pythonProcess)` 为入口，
+  // reused 路径（pythonProcess 保持 null）完全跳过清理 → 孤儿永不关闭，
+  // 每次"强杀后重启"累积一个常驻 pbc-server.exe。
+  const targetPid = pythonProcess ? pythonProcess.pid : reusedPid;
+  if (targetPid) {
+    console.log(`[BatchSentry] Requesting backend graceful shutdown (pid=${targetPid})...`);
     try {
       await new Promise((resolve) => {
         const req = http.request(
@@ -587,6 +629,7 @@ async function gracefulShutdown() {
     }
     pythonProcess = null;
   }
+  reusedPid = null;
 }
 
 app.on("before-quit", async (e) => {

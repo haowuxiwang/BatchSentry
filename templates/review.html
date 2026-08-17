@@ -352,11 +352,12 @@
                     <span class="text-[11px] text-muted-foreground">第 {{ page }} 页</span>
                 </div>
                 <div class="relative border-t border-border">
-                    <div id="ocr-text" class="px-3 py-3 overflow-hidden text-[12px] leading-[1.6] text-muted-foreground whitespace-pre-wrap font-mono" style="max-height: 200px;" data-raw="{{ (ocr_text or '') | e }}">{{ (ocr_text or '无 OCR 数据') | e }}</div>
-                    <!-- 浮层展开按钮 — 仅在内容溢出时显示 -->
-                    <div id="ocr-gradient" class="absolute bottom-0 left-0 right-0 h-8 bg-gradient-to-t from-background to-transparent pointer-events-none flex items-end justify-center pb-1">
-                        <button onclick="toggleOcr()" id="ocr-toggle-btn" class="btn-press text-[11px] font-medium text-foreground hover:text-muted-foreground bg-background px-2 py-0.5 rounded">
-                            展开更多
+                    <div id="ocr-text" class="px-3 py-3 overflow-hidden text-[12px] leading-[1.6] text-muted-foreground whitespace-pre-wrap font-mono" style="max-height: 360px;" data-raw="{{ (ocr_raw_html or '') | e }}">{{ (ocr_text or '无 OCR 数据') | e }}</div>
+                    <!-- OCR 原文折叠按钮 — 常驻显示（面板短时也可见），点击展开全部 -->
+                    <div class="absolute bottom-0 left-0 right-0 flex items-center justify-center pb-1">
+                        <div id="ocr-gradient" class="absolute inset-0 bg-gradient-to-t from-background via-background/70 to-transparent pointer-events-none"></div>
+                        <button onclick="toggleOcr()" id="ocr-toggle-btn" class="btn-press focus-ring relative z-10 text-[11px] font-medium text-foreground border border-border bg-background px-3 py-1 rounded-full shadow-sm hover:bg-muted/50">
+                            展开全部 ↓
                         </button>
                     </div>
                 </div>

@@ -92,7 +92,11 @@ def _ratelimit_sleep(resp, attempt: int) -> float:
         reset_seconds = float(reset)
     except (TypeError, ValueError):
         reset_seconds = 0.0
-    delay = max(reset_seconds, _BACKOFF_SECONDS[attempt])
+    # 对抗审查 P2-E：reset 头可能被代理/异常响应填充超大值或 epoch 秒，
+    # 直接 time.sleep 会让调用线程睡数小时 — 该调用在 pipeline 末段
+    # asyncio.to_thread 线程池里，阻塞通知收尾且非 daemon 线程阻止
+    # 解释器退出（应用关不掉）。上限 30s，超限按指数退避处理。
+    delay = min(max(reset_seconds, _BACKOFF_SECONDS[attempt]), 30.0)
     time.sleep(delay)
     return delay
 
@@ -167,17 +171,25 @@ def build_text_message(
     return payload
 
 
-def _already_notified(job_id: str, status: str, db):
+async def _already_notified(job_id: str, status: str, db):
     """Async dedup guard for the webhook channel (has no idempotency key).
 
     Terminal events fire at most once per (job_id, status); a prior successful
     audit record means we already delivered this notification.
+
+    对抗审查 P2-D：原实现是非 async 函数直接 return 未 await 的
+    db.execute()，靠调用端 await 返回值（aiosqlite 0.21 的可 await
+    cursor 兼容行为）生效；requirements 无上界，未来版本移除该兼容后
+    去重检查静默失败 → 通知功能整体失效且无测试暴露。改为 async def
+    显式 await 拿 cursor，语义不变。
     """
-    return db.execute(
+    # 对抗审查 P2-D：显式 await db.execute 拿 cursor
+    cur = await db.execute(
         "SELECT 1 FROM audit_log WHERE job_id = ? AND action = 'feishu_notify' "
         "AND detail LIKE ? LIMIT 1",
         (job_id, f"%status={status} ok=True%"),
     )
+    return cur
 
 
 def _should_notify(status: str, feishu_cfg: dict) -> bool:

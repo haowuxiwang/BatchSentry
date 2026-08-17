@@ -196,6 +196,55 @@ class TestLoadUserRules:
         cfg.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
         return cfg
 
+    def test_bom_config_json_loads_without_crash(self, tmp_path, monkeypatch):
+        """对抗审查 P1-C：PowerShell 5.1 Set-Content -Encoding UTF8 写的
+        BOM（UTF-8 BOM）此前让 _load_json_config 在导入期直接崩 → 应用
+        无法启动（frozen exit code 1）。utf-8-sig 应对 BOM。"""
+        import os
+        from unittest.mock import patch as _patch
+        monkeypatch.delenv("LLM_PROVIDER", raising=False)
+        bom = "\ufeff".encode("utf-8") + b'{"LLM_PROVIDER": "deepseek"}'
+        cfg = tmp_path / "config.json"
+        cfg.write_bytes(bom)
+        with _patch("config._config_path", return_value=cfg):
+            from config import _load_json_config
+            _load_json_config()
+        assert os.environ.get("LLM_PROVIDER") == "deepseek"
+        monkeypatch.delenv("LLM_PROVIDER", raising=False)  # 清理，避免污染其他测试
+
+    def test_corrupt_config_json_falls_back_to_defaults(self, tmp_path, monkeypatch):
+        """对抗审查 P1-C：损坏的 config.json（手改语法错误）不应崩溃 —
+        降级为默认配置并继续启动（与 load_user_rules 同款防御）。"""
+        import os
+        from unittest.mock import patch as _patch
+        monkeypatch.delenv("LLM_PROVIDER", raising=False)
+        cfg = tmp_path / "config.json"
+        cfg.write_text("{ this is not json !!!", encoding="utf-8")
+        with _patch("config._config_path", return_value=cfg):
+            from config import _load_json_config
+            _load_json_config()  # 不应抛异常
+        assert os.environ.get("LLM_PROVIDER") is None
+
+    def test_migrate_env_handles_comments_and_export(self, tmp_path):
+        """对抗审查 P2-I：.env 迁移应剥离行内注释、支持 export 前缀 —
+        旧正则会把 'KEY=sk-xxx # comment' 整段当 value（密钥带垃圾尾巴
+        认证神秘失败），'export KEY=...' 整行静默丢失。"""
+        import json
+        from config import _migrate_env_to_json
+        env = tmp_path / ".env"
+        env.write_text(
+            "LLM_PROVIDER=deepseek\n"
+            "DEEPSEEK_API_KEY=sk-abc123 # 这是注释\n"
+            "export SILICONFLOW_API_KEY=sf-xyz789\n",
+            encoding="utf-8",
+        )
+        out = tmp_path / "config.json"
+        _migrate_env_to_json(env, out)
+        data = json.loads(out.read_text(encoding="utf-8"))
+        assert data["LLM_PROVIDER"] == "deepseek"
+        assert data["DEEPSEEK_API_KEY"] == "sk-abc123"  # 注释已剥离
+        assert data["SILICONFLOW_API_KEY"] == "sf-xyz789"  # export 已支持
+
     def test_no_config_file_returns_empty(self, tmp_path):
         from config import load_user_rules
         with patch("config._config_path", return_value=tmp_path / "nope.json"):
