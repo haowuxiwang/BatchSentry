@@ -142,10 +142,16 @@ async def test_probe_llm_failure():
 @pytest.mark.asyncio
 async def test_probe_all_aggregation():
     """probe_all runs OCR + LLM probes in parallel and aggregates."""
-    with patch("core.health.probe_paddle_ocr", return_value={"ok": True, "latency_ms": 50, "reason": ""}):
-        with patch("core.health.probe_llm", new_callable=AsyncMock, return_value={"ok": True, "latency_ms": 100, "reason": "", "model": "m", "provider": "p"}):
-            from core.health import probe_all
-            result = await probe_all()
+    from config import config as _cfg
+    orig_backend = _cfg["app"].ocr_backend
+    _cfg["app"].ocr_backend = "paddle"  # 固定分支：测试假设 paddle 维度的断言
+    try:
+        with patch("core.health.probe_paddle_ocr", return_value={"ok": True, "latency_ms": 50, "reason": ""}):
+            with patch("core.health.probe_llm", new_callable=AsyncMock, return_value={"ok": True, "latency_ms": 100, "reason": "", "model": "m", "provider": "p"}):
+                from core.health import probe_all
+                result = await probe_all()
+    finally:
+        _cfg["app"].ocr_backend = orig_backend
     assert result["ocr_backend"] == "paddle"
     assert result["ocr"]["ok"] is True
     assert result["llm"]["ok"] is True
@@ -155,10 +161,16 @@ async def test_probe_all_aggregation():
 @pytest.mark.asyncio
 async def test_probe_all_partial_failure():
     """probe_all returns all_ok=False when one service fails."""
-    with patch("core.health.probe_paddle_ocr", return_value={"ok": False, "reason": "timeout"}):
-        with patch("core.health.probe_llm", new_callable=AsyncMock, return_value={"ok": True, "reason": "", "model": "m", "provider": "p"}):
-            from core.health import probe_all
-            result = await probe_all()
+    from config import config as _cfg
+    orig_backend = _cfg["app"].ocr_backend
+    _cfg["app"].ocr_backend = "paddle"
+    try:
+        with patch("core.health.probe_paddle_ocr", return_value={"ok": False, "reason": "timeout"}):
+            with patch("core.health.probe_llm", new_callable=AsyncMock, return_value={"ok": True, "reason": "", "model": "m", "provider": "p"}):
+                from core.health import probe_all
+                result = await probe_all()
+    finally:
+        _cfg["app"].ocr_backend = orig_backend
     assert result["all_ok"] is False
     assert result["ocr"]["ok"] is False
     assert result["llm"]["ok"] is True
@@ -180,3 +192,17 @@ async def test_health_downstream_endpoint(test_client):
     assert data["ocr"]["ok"] is True
     assert data["llm"]["ok"] is True
     assert data["ocr_backend"] == "paddle"
+
+
+@pytest.mark.asyncio
+async def test_health_downstream_rejects_non_local_host(test_client):
+    """对抗审查：downstream 探测有副作用的成本（token 配额），
+    非本地来源（Host 非本机/内网）请求必须 403。"""
+    from httpx import ASGITransport, AsyncClient
+    from main import app
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://evil.com:8000",
+    ) as client:
+        r = await client.get("/api/health/downstream")
+    assert r.status_code == 403

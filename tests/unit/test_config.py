@@ -83,11 +83,15 @@ class TestUpdateConfig:
 
     def test_update_ocr_backend(self):
         """应能运行时切换 OCR 后端。"""
-        update_config({"ocr_backend": "mineru"})
         from config import config
+        orig = config["app"].ocr_backend
+        update_config({"ocr_backend": "mineru"})
         assert config["app"].ocr_backend == "mineru"
-        # 恢复
-        update_config({"ocr_backend": "paddle"})
+        # 恢复原值而非硬编码 paddle — 硬编码会污染后续测试（test_health
+        # 读全局 config；config.json 为 mineru 时残留 paddle 会让 probe_all
+        # 选择错误的 probe 分支，全量测试通过/单独跑失败取决运行顺序）。
+        update_config({"ocr_backend": orig})
+        assert config["app"].ocr_backend == orig
 
     def test_update_deepseek_api_key(self):
         """应能更新 DeepSeek API key。"""
@@ -211,6 +215,21 @@ class TestLoadUserRules:
             _load_json_config()
         assert os.environ.get("LLM_PROVIDER") == "deepseek"
         monkeypatch.delenv("LLM_PROVIDER", raising=False)  # 清理，避免污染其他测试
+
+    def test_config_json_overrides_stale_env(self, tmp_path, monkeypatch):
+        """对抗审查 cr-17：config.json 必须压过残留的 OS 环境变量 —
+        设置页只写 JSON；若 shell 曾 export 旧值（如 LLM_PROVIDER），
+        旧实现 `key not in os.environ` 让 env 赢 → 每次启动配置回滚。"""
+        import os
+        from unittest.mock import patch as _patch
+        monkeypatch.setenv("LLM_PROVIDER", "stale-env-value")
+        cfg = tmp_path / "config.json"
+        cfg.write_text('{"LLM_PROVIDER": "deepseek"}', encoding="utf-8")
+        with _patch("config._config_path", return_value=cfg):
+            from config import _load_json_config
+            _load_json_config()
+        assert os.environ.get("LLM_PROVIDER") == "deepseek"
+        monkeypatch.delenv("LLM_PROVIDER", raising=False)
 
     def test_corrupt_config_json_falls_back_to_defaults(self, tmp_path, monkeypatch):
         """对抗审查 P1-C：损坏的 config.json（手改语法错误）不应崩溃 —
@@ -351,6 +370,20 @@ class TestLoadFeishuConfig:
     def test_empty_events_key_keeps_defaults(self, tmp_path):
         from config import load_feishu_config
         self._write(tmp_path, {"feishu_enabled": True, "feishu_events": "  "})
+        with patch("config._config_path", return_value=tmp_path / "config.json"):
+            cfg = load_feishu_config()
+        assert cfg["events"] == ["review", "partial_review", "error"]
+
+    def test_events_whitelist_filters_unknown(self, tmp_path):
+        from config import load_feishu_config
+        self._write(tmp_path, {"feishu_enabled": True, "feishu_events": "review,evil,cancelled"})
+        with patch("config._config_path", return_value=tmp_path / "config.json"):
+            cfg = load_feishu_config()
+        assert cfg["events"] == ["review", "cancelled"]
+
+    def test_events_non_string_ignored(self, tmp_path):
+        from config import load_feishu_config
+        self._write(tmp_path, {"feishu_enabled": True, "feishu_events": ["review"]})
         with patch("config._config_path", return_value=tmp_path / "config.json"):
             cfg = load_feishu_config()
         assert cfg["events"] == ["review", "partial_review", "error"]

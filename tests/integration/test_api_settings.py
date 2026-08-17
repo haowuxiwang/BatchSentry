@@ -554,6 +554,42 @@ class TestUserRules:
         assert "1 rules" in rows[0][1]
 
     @pytest.mark.asyncio
+    async def test_put_rejected_writes_failure_audit(self, settings_client):
+        """校验失败（空文本）也应写 audit_log — 用户保存失败无留痕会让
+
+        「规则没起作用」无法诊断（真实故障：用户以为已保存但 config 从未
+        更新，audit_log 无任何记录）。"""
+        from db.client import get_db
+        r = await settings_client.put("/api/settings/rules", json={
+            "rules": [{"text": "   ", "active": True}],
+        })
+        assert r.status_code == 400
+        db = await get_db()
+        cur = await db.execute(
+            "SELECT action, detail FROM audit_log "
+            "WHERE action = 'user_rules_update_failed'"
+        )
+        rows = await cur.fetchall()
+        assert len(rows) == 1
+        assert "内容不能为空" in rows[0][1]
+        # 失败不应污染 config 中的规则
+        import config
+        assert config.load_user_rules() == []
+
+    @pytest.mark.asyncio
+    async def test_get_rules_last_saved_at(self, settings_client):
+        """GET /rules 返回最近保存时间；从未成功保存时为 None（前端防呆提示）。"""
+        r = await settings_client.get("/api/settings/rules")
+        assert r.json()["last_saved_at"] is None
+
+        await settings_client.put("/api/settings/rules", json={
+            "rules": [{"text": "批号必须一致", "active": True}],
+        })
+        r2 = await settings_client.get("/api/settings/rules")
+        assert r2.json()["last_saved_at"] is not None
+        assert r2.json()["rules"][0]["text"] == "批号必须一致"
+
+    @pytest.mark.asyncio
     async def test_get_rules_reports_hits(self, settings_client):
         """GET /api/settings/rules 应返回各规则历史命中数（source=user_rule 按 id 分组）。"""
         from db.client import get_db
@@ -884,3 +920,90 @@ class TestFeishuNotifySettings:
         })
         assert r.json()["ok"] is False
         assert "接收者" in r.json()["reason"]
+
+
+class TestSettingsAudit:
+    """设置保存审计（Settings API 写入 audit_log，GMP 追溯）。"""
+
+    @pytest.mark.asyncio
+    async def test_post_settings_writes_audit(self, settings_client):
+        """POST /api/settings 成功后必须写 settings_update 审计（不含敏感值）。"""
+        from db.client import get_db
+        await settings_client.post("/api/settings", json={
+            "llm_provider": "siliconflow",
+            "deepseek_api_key": "sk-secret-abc",
+        })
+        db = await get_db()
+        cur = await db.execute(
+            "SELECT action, detail FROM audit_log WHERE action='settings_update'"
+        )
+        rows = await cur.fetchall()
+        assert len(rows) == 1
+        action, detail = rows[0]
+        assert "LLM_PROVIDER" in detail
+        assert "sk-secret-abc" not in detail
+
+    @pytest.mark.asyncio
+    async def test_set_active_provider_writes_audit(self, settings_client):
+        """切换 active provider 写 provider_switch 审计。"""
+        from db.client import get_db
+        r = await settings_client.post(
+            "/api/settings/set_active_provider", json={"provider": "deepseek"}
+        )
+        assert r.status_code == 200
+        db = await get_db()
+        cur = await db.execute(
+            "SELECT action, detail FROM audit_log WHERE action='provider_switch'"
+        )
+        rows = await cur.fetchall()
+        assert len(rows) == 1
+        assert "deepseek" in rows[0][1]
+
+    @pytest.mark.asyncio
+    async def test_clear_feishu_secret_by___CLEAR__(self, settings_client, tmp_path):
+        """对抗审查：飞书 secret 也支持 __CLEAR__ 清空（注册到清除列表）。"""
+        await settings_client.post("/api/settings", json={
+            "feishu_secret": "feishu-secret-zzz",
+        })
+        await settings_client.post("/api/settings", json={
+            "feishu_secret": "__CLEAR__",
+        })
+        import json
+        data = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
+        assert data.get("feishu_secret", "") == ""
+
+    @pytest.mark.asyncio
+    async def test_clear_feishu_app_secret_by___CLEAR__(self, settings_client, tmp_path):
+        """对抗审查：飞书 app_secret 支持 __CLEAR__ 清空。"""
+        await settings_client.post("/api/settings", json={
+            "feishu_app_secret": "feishu-app-secret-abc",
+        })
+        await settings_client.post("/api/settings", json={
+            "feishu_app_secret": "__CLEAR__",
+        })
+        import json
+        data = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
+        assert data.get("feishu_app_secret", "") == ""
+
+    @pytest.mark.asyncio
+    async def test_bom_config_survives_rules_update(self, settings_client, tmp_path):
+        """对抗审查：PowerShell BOM 写的 config.json 也能被安全读取。
+        带 BOM 文件上 PUT rules 后，其他键不得丢失（utf-8-sig 读取）。"""
+        import json
+        cfg_path = tmp_path / "config.json"
+        cfg_path.write_bytes(
+            b"\xef\xbb\xbf" + json.dumps({
+                "deepseek_api_key": "sk-keep-me",
+                "llm_provider": "deepseek",
+                "user_rules": [],
+            }, ensure_ascii=False).encode("utf-8")
+        )
+        r = await settings_client.put("/api/settings/rules", json={
+            "rules": [{"text": "新规则", "active": True}],
+        })
+        assert r.status_code == 200
+        raw = cfg_path.read_bytes()
+        assert raw.startswith(b"\xef\xbb\xbf") is False  # 重写时去 BOM
+        data = json.loads(raw.decode("utf-8"))
+        assert data["deepseek_api_key"] == "sk-keep-me"
+        assert data["user_rules"][0]["text"] == "新规则"

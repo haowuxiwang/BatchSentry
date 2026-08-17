@@ -21,6 +21,39 @@ from config import ProviderConfig
 from llm.adapters.base import ChatResult
 
 
+def test_mask_secrets_redacts_api_keys():
+    """对抗审查：错误消息中的 sk- 密钥必须被掩码（防日志/审计泄露）。"""
+    from llm.client import _mask_secrets
+    masked = _mask_secrets("401 error: sk-abcdefgh12345678 invalid")
+    assert "sk-abcdefgh12345678" not in masked
+    assert "sk-***" in masked
+    # 短于阈值的串不掩码（避免误伤普通文本）
+    assert _mask_secrets("sk-a") == "sk-a"
+    assert _mask_secrets("no secret here") == "no secret here"
+
+
+def test_mask_secrets_redacts_hex_token():
+    """对抗审查（cr-14）：32 位 hex 访问令牌（PaddleOCR token 格式）必须脱敏。"""
+    from llm.client import _mask_secrets
+    tok = "26f37846a1b2c3d4e5f60718293a4b5c"
+    masked = _mask_secrets(f"http error with token={tok} in message")
+    assert tok not in masked
+    assert "***" in masked
+    # 非 32 位 hex 不误伤（例如 8 位短 hash 或含字母的单词）
+    assert _mask_secrets("abc123 def456") == "abc123 def456"
+
+
+def test_mask_secrets_redacts_feishu_app_id_and_bearer():
+    """对抗审查（cr-14）：飞书 cli_ app_id 与 Bearer 授权头必须脱敏。"""
+    from llm.client import _mask_secrets
+    masked = _mask_secrets("auth failed app=cli_a1b2c3d4e5f6g7h8j9k")
+    assert "cli_a1b2c3d4e5f6g7h8j9k" not in masked
+    assert "cli_***" in masked
+    masked2 = _mask_secrets("Authorization: Bearer x-api-key-12345678 failed")
+    assert "x-api-key-12345678" not in masked2
+    assert "Bearer ***" in masked2
+
+
 def _make_provider(name="deepseek", protocol="openai", **kw):
     """Helper: build a ProviderConfig for tests."""
     return ProviderConfig(

@@ -220,3 +220,33 @@ class TestReportJson:
     async def test_report_json_nonexistent_job_returns_404(self, report_client):
         r = await report_client.get("/api/jobs/nonexistent-id/report.json")
         assert r.status_code == 404
+
+
+class TestReportExportAudit:
+    """报告导出必须写 audit_log（GMP 追溯：谁何时导出了什么）。"""
+
+    @pytest.mark.asyncio
+    async def test_report_md_export_audited(self, report_client):
+        r = await report_client.get("/api/jobs/report-job/report.md")
+        assert r.status_code == 200
+        from db.client import get_db
+        db = await get_db()
+        cur = await db.execute(
+            "SELECT detail FROM audit_log WHERE action='report_export'"
+        )
+        rows = await cur.fetchall()
+        assert len(rows) == 1
+        assert "format=md" in rows[0][0]
+
+    @pytest.mark.asyncio
+    async def test_report_json_export_audited(self, report_client):
+        r = await report_client.get("/api/jobs/report-job/report.json")
+        assert r.status_code == 200
+        from db.client import get_db
+        db = await get_db()
+        cur = await db.execute(
+            "SELECT detail FROM audit_log WHERE action='report_export'"
+        )
+        rows = await cur.fetchall()
+        assert len(rows) == 1
+        assert "json" in rows[0][0]

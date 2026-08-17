@@ -141,8 +141,11 @@ def _load_json_config() -> None:
 
     优先级（从高到低）：
       1. JSON 配置文件（config.json）— 设置页面管理的正式配置
-      2. .env 文件（仅当 JSON 不存在时自动迁移）— 向后兼容
-      3. OS 环境变量 — 开发/测试时手动设置
+      2. OS 环境变量 / .env — 无 config.json 时的部署/迁移来源
+      3. 代码默认值
+      注意：1 优先于 2 — 设置页保存只写 config.json（os.environ 只是
+      进程级镜像）；若 OS 环境变量残留旧值（如 LLM_PROVIDER 曾 export），
+      JSON 必须压过它，否则每次启动设置被回滚（对抗审查 cr-17）。
 
     迁移逻辑：JSON 不存在但 .env 存在 → 读取 .env 写入 JSON，
     后续只读 JSON。
@@ -163,10 +166,12 @@ def _load_json_config() -> None:
         if not isinstance(config_data, dict):
             config_data = {}
         for key, value in config_data.items():
-            # 不覆盖已有的 OS 环境变量（允许 OS 级别覆盖 JSON 配置）
-            # 非标量值（user_rules 列表等）不进入 os.environ，由
-            # load_user_rules() 等专用读取器直接从 JSON 文件获取
-            if key not in os.environ and isinstance(value, (str, int, float, bool)):
+            # 无条件载入（覆盖 OS 环境变量）：设置页只写 config.json，
+            # env 是进程级镜像 — 残留 env 值（重启回滚 bug 根因）必须
+            # 被 JSON 压过。非标量值（user_rules 列表等）不进入
+            # os.environ，由 load_user_rules() 等专用读取器直接从
+            # JSON 文件获取。
+            if isinstance(value, (str, int, float, bool)):
                 os.environ[key] = str(value)
         logger.info(f"Loaded {len(config_data)} config keys from {json_path}")
         return
@@ -175,7 +180,16 @@ def _load_json_config() -> None:
     env_path = _env_path_legacy()
     if env_path.exists():
         logger.info(f"Config JSON not found, migrating from {env_path}")
-        _migrate_env_to_json(env_path, json_path)
+        try:
+            _migrate_env_to_json(env_path, json_path)
+        except Exception as e:
+            # 对抗审查：迁移失败（磁盘满/权限/畸形 .env）此前直接上抛 —
+            # 模块导入期崩溃，frozen 模式 exit code 1。迁移只是便利功能，
+            # 失败不应阻断启动（用户可稍后手工修复或重跑迁移）。
+            logger.warning(
+                f".env migration failed ({e}) — continuing with defaults; "
+                f"review {env_path} manually"
+            )
         # 迁移后重新加载 JSON
         config_data = {}
         try:
@@ -186,7 +200,7 @@ def _load_json_config() -> None:
         if not isinstance(config_data, dict):
             config_data = {}
         for key, value in config_data.items():
-            if key not in os.environ and isinstance(value, (str, int, float, bool)):
+            if isinstance(value, (str, int, float, bool)):
                 os.environ[key] = str(value)
         logger.info(f"Loaded {len(config_data)} config keys from {json_path} (after migration)")
         return
@@ -308,8 +322,14 @@ def load_feishu_config() -> dict:
     out["open_id"] = str(data.get("feishu_open_id", "")).strip()
     out["mobile"] = str(data.get("feishu_mobile", "")).strip()
     events = data.get("feishu_events")
-    if events:
-        parsed_events = [e.strip() for e in str(events).split(",") if e.strip()]
+    # 对抗审查：feishu_events 理论上应是逗号分隔字符串；若 config.json
+    # 被手改/旧版写入成 list/bool，str() 会把它变成 "['a', 'b']" 之类的
+    # 垃圾事件名（触发条件误判）。非字符串按未配置处理。
+    if isinstance(events, str) and events.strip():
+        parsed_events = [e.strip() for e in events.split(",") if e.strip()]
+        # 白名单：非法状态名直接丢弃（防脏数据进通知开关）
+        allowed = {"review", "partial_review", "error", "cancelled"}
+        parsed_events = [e for e in parsed_events if e in allowed]
         if parsed_events:
             out["events"] = parsed_events
     return out

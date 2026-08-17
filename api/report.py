@@ -27,6 +27,22 @@ _report_cache_lock = asyncio.Lock()
 _REPORT_CACHE_MAX = 32
 
 
+async def _audit_report_export(job_id: str, fmt: str, size: int) -> None:
+    """报告导出写 audit_log（对抗审查：导出是质量体系事件，此前无留痕）。
+
+    失败不阻断导出（审计是附属动作）。
+    """
+    try:
+        db = await get_db()
+        await db.execute(
+            "INSERT INTO audit_log (job_id, action, detail) VALUES (?, ?, ?)",
+            (job_id, "report_export", f"format={fmt} size={size}"),
+        )
+        await db.commit()
+    except Exception as e:
+        logger.warning(f"Failed to write report_export audit log: {e}")
+
+
 async def _generate_report_md_cached(job_id: str) -> str:
     """生成 Markdown 报告（带缓存，并发安全）。
 
@@ -92,6 +108,7 @@ async def _generate_report_md_cached(job_id: str) -> str:
 async def download_report_md(job_id: str):
     """Generate and return Markdown report (cached)."""
     md = await _generate_report_md_cached(job_id)
+    await _audit_report_export(job_id, "md", len(md))
     return PlainTextResponse(md, media_type="text/markdown")
 
 
@@ -119,6 +136,7 @@ async def download_report_json(job_id: str):
     )
     findings = [dict(r) for r in await cursor.fetchall()]
     logger.info(f"[{job_id}] Report.json generated: {len(findings)} findings")
+    await _audit_report_export(job_id, "json", len(findings))
     return {
         "job": {
             "id": job["id"],
