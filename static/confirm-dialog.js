@@ -55,7 +55,7 @@
     toast.textContent = msg;
     container.appendChild(toast);
     setTimeout(() => {
-      toast.style.transition = "opacity 0.3s, transform 0.3s";
+      toast.style.transition = `opacity var(--ms-300), transform var(--ms-300)`;
       toast.style.opacity = "0";
       toast.style.transform = "translateY(4px)";
       setTimeout(() => toast.remove(), 300);
@@ -79,9 +79,9 @@
       const settle = (val) => {
         if (settled) return;
         settled = true;
-        overlay.style.transition = "opacity 0.15s ease-out";
+        overlay.style.transition = `opacity var(--motion-hover)`;
         modal.style.transition =
-          "opacity 0.15s ease-out, transform 0.15s ease-out";
+          `opacity var(--motion-hover), transform var(--motion-hover)`;
         overlay.style.opacity = "0";
         modal.style.transform = "scale(0.96)";
         modal.style.opacity = "0";
@@ -102,13 +102,13 @@
       overlay.setAttribute("aria-modal", "true");
       overlay.setAttribute("aria-labelledby", "confirm-dialog-title");
       overlay.style.cssText =
-        "background: hsl(222 47% 11% / 0.32); backdrop-filter: blur(2px); animation: fade-in-up 0.15s ease-out both;";
+        "background: hsl(var(--foreground) / 0.32); backdrop-filter: blur(2px); animation: fade-in-up var(--motion-fade-in) both;";
 
       const modal = document.createElement("div");
       modal.className =
         "bg-card border border-border rounded-lg w-full max-w-sm overflow-hidden";
       modal.style.cssText =
-        "box-shadow: var(--shadow-strong); animation: pbc-modal-in 0.2s cubic-bezier(0.2, 0.9, 0.1, 1) both;";
+        "box-shadow: var(--shadow-strong); animation: pbc-modal-in var(--ms-200) var(--ease-snap) both;";
 
       const body = document.createElement("div");
       body.className = "px-5 py-4";
@@ -217,9 +217,9 @@
       const settle = (val) => {
         if (settled) return;
         settled = true;
-        overlay.style.transition = "opacity 0.15s ease-out";
+        overlay.style.transition = `opacity var(--motion-hover)`;
         modal.style.transition =
-          "opacity 0.15s ease-out, transform 0.15s ease-out";
+          `opacity var(--motion-hover), transform var(--motion-hover)`;
         overlay.style.opacity = "0";
         modal.style.transform = "scale(0.96)";
         modal.style.opacity = "0";
@@ -239,13 +239,13 @@
       overlay.setAttribute("aria-modal", "true");
       overlay.setAttribute("aria-labelledby", "prompt-dialog-title");
       overlay.style.cssText =
-        "background: hsl(222 47% 11% / 0.32); backdrop-filter: blur(2px); animation: fade-in-up 0.15s ease-out both;";
+        "background: hsl(var(--foreground) / 0.32); backdrop-filter: blur(2px); animation: fade-in-up var(--motion-fade-in) both;";
 
       const modal = document.createElement("div");
       modal.className =
         "bg-card border border-border rounded-lg w-full max-w-sm overflow-hidden";
       modal.style.cssText =
-        "box-shadow: var(--shadow-strong); animation: pbc-modal-in 0.2s cubic-bezier(0.2, 0.9, 0.1, 1) both;";
+        "box-shadow: var(--shadow-strong); animation: pbc-modal-in var(--ms-200) var(--ease-snap) both;";
 
       const body = document.createElement("div");
       body.className = "px-5 py-4";

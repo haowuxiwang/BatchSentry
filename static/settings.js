@@ -1469,13 +1469,15 @@
   function showMsg(text, level) {
     const msg = document.getElementById("save-msg");
     msg.textContent = text;
+    // P1-12: 硬编码 HSL → 状态令牌（此前 success 用 35% 明度，与
+    // --success（45%）漂移；颜色统一从 design-tokens 取值）
     msg.style.color =
       level === "err"
-        ? "hsl(0 84% 50%)"
+        ? "hsl(var(--destructive))"
         : level === "warn"
-          ? "hsl(38 92% 50%)"
+          ? "hsl(var(--warning))"
           : level === "info"
-            ? "hsl(142 71% 35%)"
+            ? "hsl(var(--success))"
             : "hsl(var(--muted-foreground))";
   }
 

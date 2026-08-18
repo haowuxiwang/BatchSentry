@@ -12,6 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi.responses import HTMLResponse, FileResponse
 from markupsafe import Markup
+from pathlib import Path
 
 from config import config
 from db.client import get_db, close_db
@@ -222,6 +223,27 @@ def render_page_links(text: str, job_id: str) -> str:
 
 
 templates.env.filters["render_page_links"] = render_page_links
+
+_STATIC_DIR = Path(__file__).resolve().parent / "static"
+
+
+def asset_ver(path: str) -> str:
+    """Cache-busting version for static assets (frontend build hygiene).
+
+    Returns the file mtime as version string — editing a CSS/JS file
+    automatically invalidates browser cache, replacing the manual
+    `?v=N` bumping (settings.js?v=12 style) that silently served stale
+    assets when a bump was forgotten. Frozen (PyInstaller) mode: files
+    are extracted with their mtimes preserved, so versions stay stable
+    across restarts until the bundle is rebuilt.
+    """
+    try:
+        return str(int((_STATIC_DIR / path).stat().st_mtime))
+    except OSError:
+        return "0"
+
+
+templates.env.globals["asset_ver"] = asset_ver
 
 app.include_router(review_router)  # 先注册 review（findings 路由优先）
 app.include_router(jobs_router)

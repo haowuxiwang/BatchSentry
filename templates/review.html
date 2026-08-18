@@ -4,9 +4,9 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>复核 — 批记录辅助审查</title>
-    <link rel="stylesheet" href="/static/design-tokens.css?v=4">
-    <link rel="stylesheet" href="/static/app.css?v=3">
-    <link rel="stylesheet" href="/static/review.css?v=3">
+    <link rel="stylesheet" href="/static/design-tokens.css?v={{ asset_ver('design-tokens.css') }}">
+    <link rel="stylesheet" href="/static/app.css?v={{ asset_ver('app.css') }}">
+    <link rel="stylesheet" href="/static/review.css?v={{ asset_ver('review.css') }}">
     {# 中英文映射：DB 中 severity/source/status/confidence 为英文枚举，前端统一渲染为中文 #}
     {% set severity_zh = {'critical': '严重', 'warning': '警告', 'info': '信息'} %}
     {% set source_zh = {'rule': '规则', 'llm_page': 'LLM单页', 'llm_fallback': 'LLM兜底', 'llm_cross': 'LLM跨页', 'user_rule': '用户规则'} %}
@@ -143,7 +143,7 @@
         </aside>
 
         <!-- CENTER: PDF preview -->
-        <section class="flex flex-col gap-3 min-w-0">
+        <section id="center-panel" class="flex flex-col gap-3 min-w-0">
             <div class="flex items-center justify-between">
                 <h2 class="text-sm font-semibold text-muted-foreground tracking-wide">
                     PDF 原图 · 第 <span id="page-num" class="text-foreground font-mono">{{ page }}</span> / <span id="page-total" class="text-foreground font-mono">{{ total_pages if total_pages else '?' }}</span> 页
@@ -489,7 +489,7 @@
         },
       };
     </script>
-    <script src="/static/confirm-dialog.js?v=1" defer></script>
-    <script src="/static/review.js?v=5" defer></script>
+    <script src="/static/confirm-dialog.js?v={{ asset_ver('confirm-dialog.js') }}" defer></script>
+    <script src="/static/review.js?v={{ asset_ver('review.js') }}" defer></script>
 </body>
 </html>

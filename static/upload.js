@@ -698,160 +698,18 @@
     loadHistory(page);
   };
 
-  // === Toast 提示 ===
-  function showToast(msg, type = "info") {
-    let container = document.getElementById("toast-container");
-    if (!container) {
-      container = document.createElement("div");
-      container.id = "toast-container";
-      container.className = "fixed bottom-4 right-4 z-50 flex flex-col gap-2";
-      document.body.appendChild(container);
-    }
-    const color =
-      type === "ok"
-        ? "text-success"
-        : type === "err"
-          ? "text-destructive"
-          : "text-info";
-    const toast = document.createElement("div");
-    toast.className = `bg-card border border-border rounded-md px-4 py-2.5 text-[12px] ${color} shadow-md`;
-    toast.style.cssText = "animation: fade-in-up 0.2s ease-out both;";
-    toast.textContent = msg;
-    container.appendChild(toast);
-    setTimeout(() => {
-      toast.style.transition = "opacity 0.3s, transform 0.3s";
-      toast.style.opacity = "0";
-      toast.style.transform = "translateY(4px)";
-      setTimeout(() => toast.remove(), 300);
-    }, 3000);
+  // === Toast + 确认弹窗（共享实现 confirm-dialog.js）===
+  // P1-5: 本地 showToast/confirmDialog 曾是 confirm-dialog.js 的逐字副本
+  // 但缺 aria 属性（role/aria-modal/aria-labelledby）、无 focus trap，
+  // 且 :1174 曾把本页 confirmDialog 覆盖到 window.PBC（双实现漂移，
+  // settings.js/review.js 用的是共享版）。现统一走共享实现：upload.html
+  // 先加载 confirm-dialog.js，这里只留薄别名（页面 API 名不变，
+  // 调用点零改动）。函数声明（非 const）避免 TDZ，顶层/回调皆安全。
+  function showToast(msg, type) {
+    return window.PBC.showToast(msg, type);
   }
-
-  // === Notion 风格确认弹窗（替代原生 confirm()）===
-  // 返回 Promise<boolean>，支持 Esc 取消 / Enter 确认 / 点击遮罩取消
-  // danger=true 时确认按钮用 destructive 色调（用于删除等不可恢复操作）
-  // statusBadge 可选：{ text, dotClass } — 在标题下方展示任务状态徽章
-  function confirmDialog({
-    title,
-    message = "",
-    confirmText = "确认",
-    cancelText = "取消",
-    danger = false,
-    statusBadge = null,
-  }) {
-    return new Promise((resolve) => {
-      let settled = false;
-      const settle = (val) => {
-        if (settled) return;
-        settled = true;
-        overlay.style.transition = "opacity 0.15s ease-out";
-        modal.style.transition =
-          "opacity 0.15s ease-out, transform 0.15s ease-out";
-        overlay.style.opacity = "0";
-        modal.style.transform = "scale(0.96)";
-        modal.style.opacity = "0";
-        setTimeout(() => {
-          overlay.remove();
-          document.removeEventListener("keydown", onKey);
-          document.body.style.overflow = "";
-          resolve(val);
-        }, 150);
-      };
-
-      const overlay = document.createElement("div");
-      overlay.className =
-        "fixed inset-0 z-[60] flex items-center justify-center px-4";
-      overlay.style.cssText =
-        "background: hsl(222 47% 11% / 0.32); backdrop-filter: blur(2px); animation: fade-in-up 0.15s ease-out both;";
-
-      const modal = document.createElement("div");
-      modal.className =
-        "bg-card border border-border rounded-lg w-full max-w-sm overflow-hidden";
-      modal.style.cssText =
-        "box-shadow: var(--shadow-strong); animation: pbc-modal-in 0.2s cubic-bezier(0.2, 0.9, 0.1, 1) both;";
-
-      const body = document.createElement("div");
-      body.className = "px-5 py-4";
-      const titleEl = document.createElement("div");
-      titleEl.className = "text-[14px] font-medium";
-      titleEl.textContent = title;
-      body.appendChild(titleEl);
-      // 状态徽章 — 展示任务当前状态，让用户预判操作后果
-      if (statusBadge) {
-        const badge = document.createElement("div");
-        badge.className =
-          "inline-flex items-center gap-1.5 mt-2 text-[11px] text-muted-foreground bg-muted/50 px-2 py-0.5 rounded";
-        const dot = document.createElement("span");
-        dot.className = `w-1.5 h-1.5 rounded-full ${statusBadge.dotClass}`;
-        badge.appendChild(dot);
-        badge.appendChild(
-          document.createTextNode(`当前状态：${statusBadge.text}`),
-        );
-        body.appendChild(badge);
-      }
-      if (message) {
-        const msgEl = document.createElement("div");
-        msgEl.className =
-          "text-[12px] text-muted-foreground mt-1.5 whitespace-pre-line leading-relaxed";
-        msgEl.textContent = message;
-        body.appendChild(msgEl);
-      }
-      modal.appendChild(body);
-
-      const footer = document.createElement("div");
-      footer.className =
-        "flex items-center justify-end gap-2 px-5 py-3 border-t border-border bg-muted/30";
-      const cancelBtn = document.createElement("button");
-      cancelBtn.type = "button";
-      cancelBtn.textContent = cancelText;
-      cancelBtn.className =
-        "btn-press focus-ring text-[12px] px-3 py-1.5 rounded text-muted-foreground hover:text-foreground";
-      const confirmBtn = document.createElement("button");
-      confirmBtn.type = "button";
-      confirmBtn.textContent = confirmText;
-      confirmBtn.className = danger
-        ? "btn-press focus-ring text-[12px] px-3 py-1.5 rounded bg-destructive text-destructive-foreground hover:bg-destructive/90 font-medium"
-        : "btn-press focus-ring text-[12px] px-3 py-1.5 rounded bg-primary text-primary-foreground hover:bg-primary/90 font-medium";
-      cancelBtn.addEventListener("click", () => settle(false));
-      confirmBtn.addEventListener("click", () => settle(true));
-      footer.appendChild(cancelBtn);
-      footer.appendChild(confirmBtn);
-      modal.appendChild(footer);
-
-      overlay.appendChild(modal);
-      // 点击遮罩空白处取消（点击 modal 本身不取消）
-      overlay.addEventListener("click", (e) => {
-        if (e.target === overlay) settle(false);
-      });
-      document.body.appendChild(overlay);
-      document.body.style.overflow = "hidden";
-
-      const onKey = (e) => {
-        if (e.key === "Escape") {
-          e.preventDefault();
-          settle(false);
-        } else if (e.key === "Enter") {
-          // 安全规范：Enter 行为跟随当前焦点。
-          // 焦点在按钮上时，让浏览器默认行为处理（button Enter → click），
-          // 这样危险操作默认聚焦 cancel，Enter 会触发 cancel 而非 confirm。
-          // 焦点不在按钮时（如刚打开未 Tab），非危险操作默认确认（用户期望），
-          // 危险操作默认取消（安全兜底）。
-          if (
-            document.activeElement === cancelBtn ||
-            document.activeElement === confirmBtn
-          ) {
-            return; // 不 preventDefault，让浏览器触发 button click
-          }
-          e.preventDefault();
-          settle(danger ? false : true);
-        }
-      };
-      document.addEventListener("keydown", onKey);
-
-      // 安全规范：危险操作默认聚焦"取消"按钮，防止回车误触删除
-      // （APG/Polaris/Material 3 一致规范）。用户需主动 Tab 到确认按钮
-      // 并按 Enter 才会确认，或鼠标点击确认按钮。
-      setTimeout(() => cancelBtn.focus(), 50);
-    });
+  function confirmDialog(opts) {
+    return window.PBC.confirmDialog(opts);
   }
 
   // === Job 归档/删除 (事件委托，DOM 淡出) ===
@@ -1171,10 +1029,7 @@
     log.err("unhandledrejection", e.reason);
   });
 
-  // === 暴露共享原语到 window.PBC 命名空间 ===
-  // review.js / settings.js 通过 <script src="/static/confirm-dialog.js"> 加载
-  // 独立副本；upload.html 不引入该文件，故在此导出本页定义的 confirmDialog，
-  // 供未来跨页面复用（showToast 为本页私有，未导出）。
-  window.PBC = window.PBC || {};
-  window.PBC.confirmDialog = confirmDialog;
+  // P1-5: 原在此把本页 confirmDialog 覆盖到 window.PBC —— 与共享版
+  // confirm-dialog.js 双实现漂移（settings.js/review.js 已用共享版）。
+  // 删除：upload.html 已引入 confirm-dialog.js，PBC 由共享文件挂载。
 })();

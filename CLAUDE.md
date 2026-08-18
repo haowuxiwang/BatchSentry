@@ -22,6 +22,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Test status**: 998 passed, 93.67% coverage (target ≥90%). Note: test_config/test_health share the process-global config singleton — both now restore original values (order-independent).
 
+**Web 版（飞书入口）决策（2026-08-18）**: 调研已完成（WEB.md，D1~D5 已拍板），但 **Web 版暂缓实施** — 当前优先桌面端迭代，不主动开展 Web 化（auth_mode/守卫改造/移动端适配等）。后续若启动，按 WEB.md §6 实施路线推进，决策结论无需重开讨论。
+
 ---
 
 ## Common Commands

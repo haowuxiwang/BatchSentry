@@ -32,7 +32,7 @@
   color: hsl(var(--muted-foreground));
   min-height: 36px;
   text-decoration: none;
-  transition: background 150ms ease, color 150ms ease;
+  transition: background var(--motion-hover), color var(--motion-hover);
   user-select: none;
 }
 .settings-nav-link:hover {
@@ -40,8 +40,8 @@
   color: hsl(var(--foreground));
 }
 .settings-nav-link.active {
-  background: hsl(214 100% 97%);
-  color: hsl(214 100% 40%);
+  background: hsl(var(--foreground));
+  color: hsl(var(--background));
   font-weight: 500;
 }
 
@@ -67,7 +67,7 @@
 }
 .settings-nav-mobile .settings-nav-link.active {
   background: transparent;
-  border-bottom-color: hsl(214 100% 40%);
+  border-bottom-color: hsl(var(--foreground));
 }
 
 /* ─── Content Area ─── */
@@ -140,9 +140,7 @@ body {
   color: hsl(var(--foreground));
   font-size: 13px;
   outline: none;
-  transition:
-    border-color 0.12s,
-    box-shadow 0.12s;
+  transition: border-color var(--motion-hover), box-shadow var(--motion-hover);
 }
 .input:focus {
   border-color: hsl(var(--foreground));
@@ -168,7 +166,7 @@ body {
   color: hsl(var(--muted-foreground));
   border: none;
   cursor: pointer;
-  transition: all 0.12s;
+  transition: all var(--motion-hover);
 }
 .seg button:hover {
   color: hsl(var(--foreground));
@@ -181,7 +179,7 @@ body {
 
 /* 状态徽章 */
 .badge-ok {
-  color: hsl(142 71% 35%);
+  color: hsl(var(--success));
   font-size: 11px;
 }
 .badge-no {
@@ -190,40 +188,17 @@ body {
 }
 
 /* ============================================================
-   统一按钮系统 — 3 级层级
-   .btn-primary: 实心主操作 (保存)
-   .btn-secondary: 边框次操作 (测试连接)
-   .btn-ghost: 透明轻量操作 (设为当前/测试/展开)
-   .btn-danger: 危险操作 (移除/清除)
-   全部统一 12px 字体, 28px 高度, 6px 圆角
+   统一按钮系统 — sidebar 底部操作按钮
+   测试连接: 边框次操作 (唯一实现在此的按钮，模板无 #save-btn)
    ============================================================ */
-#save-btn,
 #test-conn-btn {
   font-size: 12px;
   font-weight: 500;
   padding: 6px 16px;
-  height: 30px;
+  min-height: 30px;
   border-radius: 6px;
-  transition: all 0.12s;
+  transition: all var(--motion-hover);
   cursor: pointer;
-}
-#save-btn {
-  background: hsl(var(--foreground));
-  color: hsl(var(--background));
-  border: 1px solid hsl(var(--foreground));
-}
-#save-btn:hover:not(:disabled) {
-  opacity: 0.88;
-}
-#save-btn:active:not(:disabled) {
-  transform: scale(0.98);
-}
-#save-btn:disabled {
-  background: hsl(var(--foreground) / 0.4);
-  color: hsl(var(--background) / 0.7);
-  cursor: not-allowed;
-}
-#test-conn-btn {
   background: hsl(var(--card));
   color: hsl(var(--foreground));
   border: 1px solid hsl(var(--border));
@@ -248,17 +223,15 @@ body {
   border-radius: 8px;
   background: hsl(var(--card));
   overflow: hidden;
-  transition:
-    border-color 0.12s,
-    box-shadow 0.12s;
+  transition: border-color var(--motion-hover), box-shadow var(--motion-hover);
 }
 .provider-row:hover {
   border-color: hsl(var(--muted-foreground) / 0.3);
-  box-shadow: 0 1px 3px hsl(0 0% 0% / 0.04);
+  box-shadow: var(--shadow-subtle);
 }
 .provider-row.is-active {
   border-color: hsl(var(--foreground) / 0.4);
-  box-shadow: 0 1px 4px hsl(0 0% 0% / 0.06);
+  box-shadow: var(--shadow-subtle);
 }
 .provider-head {
   display: flex;
@@ -267,7 +240,7 @@ body {
   padding: 10px 14px;
   cursor: pointer;
   user-select: none;
-  transition: background 0.1s;
+  transition: background var(--motion-pressed);
 }
 .provider-head:hover {
   background: hsl(var(--muted) / 0.25);
@@ -322,7 +295,7 @@ body {
   color: hsl(var(--muted-foreground));
   border-radius: 4px;
   cursor: pointer;
-  transition: all 0.1s;
+  transition: all var(--motion-pressed);
   white-space: nowrap;
 }
 /* "设为当前" — 轻量主操作 */
@@ -364,7 +337,7 @@ body {
 .provider-body {
   padding: 0 14px 14px 14px;
   border-top: 1px solid hsl(var(--border));
-  animation: providerExpand 0.15s ease-out;
+  animation: providerExpand var(--motion-hover);
 }
 @keyframes providerExpand {
   from { opacity: 0; transform: translateY(-2px); }
@@ -406,7 +379,7 @@ body {
   height: 24px;
   border-radius: 4px;
   cursor: pointer;
-  transition: all 0.1s;
+  transition: all var(--motion-pressed);
   white-space: nowrap;
 }
 .btn-primary-small {

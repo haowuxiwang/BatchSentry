@@ -412,7 +412,10 @@
   let pageLoadingOverlay = null;
   function showPageLoading() {
     if (pageLoadingOverlay) return;
-    const center = document.querySelector("section.flex-1.border-t");
+    // P0-2: 原 selector "section.flex-1.border-t" 与模板中列 class
+    // （flex flex-col gap-3 min-w-0）不匹配 → overlay 永不创建、翻页
+    // 无反馈且旧数据残留。改用 ID 定位，消除对 class 组合的脆弱依赖。
+    const center = document.getElementById("center-panel");
     if (!center) return;
     pageLoadingOverlay = document.createElement("div");
     pageLoadingOverlay.className =
