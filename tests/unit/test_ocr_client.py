@@ -51,8 +51,10 @@ class TestMinerUClient:
         with _patch("core.mineru_client.requests.get",
                     side_effect=mc.requests.exceptions.ConnectionError("connection reset")):
             with _patch("core.mineru_client.POLL_TIMEOUT", 1800):
-                with pytest.raises(RuntimeError, match="5 consecutive network errors"):
-                    mc.poll_job("batch-1", lambda done, total: None)
+                with _patch("core.mineru_client.time.sleep") as mock_sleep:  # 消除 4×5s 真实睡眠
+                    with pytest.raises(RuntimeError, match="5 consecutive network errors"):
+                        mc.poll_job("batch-1", lambda done, total: None)
+        assert mock_sleep.call_count >= 4
 
     def test_mineru_poll_recovers_after_transient_error(self):
         """连续错误后成功响应应重置计数（不误杀）。"""
@@ -74,7 +76,7 @@ class TestMinerUClient:
 
         with _patch("core.mineru_client.requests.get", side_effect=flaky_get), \
              _patch("core.mineru_client._headers", return_value={}), \
-             _patch("core.mineru_client._API_BASE", "http://mock"), \
+             _patch("core.mineru_client._api_base", return_value="http://mock"), \
              _patch("core.mineru_client.POLL_TIMEOUT", 1800):
             # 第 3 次成功后走到结果处理分支，需要 download 相关 mock
             with _patch("core.mineru_client.time.sleep"):
@@ -157,7 +159,7 @@ class TestMinerUClient:
         assert "中间体储存温度 15-25°C" in joined
 
     def test_download_result_keeps_content_list_when_complete(self):
-        """content_list 内容完整时（>=50% full.md）不应触发回退。"""
+        """content_list 内容完整时（正文存在）不应触发回退（结构维度对照）。"""
         import io, zipfile
         from unittest.mock import patch as _patch
 
@@ -182,6 +184,116 @@ class TestMinerUClient:
 
         assert len(pages) == 1
         assert "完整段落内容 ABC" in pages[0]["markdown"]["text"]
+
+    def test_download_result_structural_check_passes_when_tables_intact(self):
+        """表格被完整提取（content_list 3 表）时不应回退 — 即使 HTML 标签
+        膨胀使字符数远超 full.md（P1-4：结构维度替代字符数对比）。"""
+        import io, zipfile
+        from unittest.mock import patch as _patch
+
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr(
+                "x_content_list_v2.json",
+                json.dumps([
+                    [
+                        {"type": "table", "content": {"table_html": "<table><tr><td>批号</td></tr></table>"}},
+                        {"type": "table", "content": {"table_html": "<table><tr><td>含量</td></tr></table>"}},
+                        {"type": "table", "content": {"table_html": "<table><tr><td>水分</td></tr></table>"}},
+                    ]
+                ]),
+            )
+            zf.writestr(
+                "x_full.md",
+                "| 批号 |\n| --- |\n| 112701 |\n"
+                "| 含量 |\n| --- |\n| 99.2% |\n"
+                "| 水分 |\n| --- |\n| 0.5% |\n",
+            )
+        with _patch("core.mineru_client.requests.get") as mock_get:
+            resp = mock.MagicMock()
+            resp.status_code = 200
+            resp.content = buf.getvalue()
+            mock_get.return_value = resp
+            pages = mineru_client.download_result({"full_zip_url": "http://mock/zip"})
+
+        assert len(pages) == 1
+        assert "<table>" in pages[0]["markdown"]["text"]
+
+    def test_download_result_falls_back_when_tables_all_missing(self):
+        """表格整体丢失：content_list 0 表格而 full.md 有管道表 → 回退
+        （P1-4：批记录核心信息在表格，全丢 = 灾难）。"""
+        import io, zipfile
+        from unittest.mock import patch as _patch
+
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr(
+                "x_content_list_v2.json",
+                json.dumps([
+                    [{"type": "text", "content": {"paragraph_content": [{"type": "text", "content": "只有正文"}]}}],
+                ]),
+            )
+            zf.writestr(
+                "x_full.md",
+                "| 批号 | 含量 |\n| --- | --- |\n| 112701 | 99.2% |\n",
+            )
+        with _patch("core.mineru_client.requests.get") as mock_get:
+            resp = mock.MagicMock()
+            resp.status_code = 200
+            resp.content = buf.getvalue()
+            mock_get.return_value = resp
+            pages = mineru_client.download_result({"full_zip_url": "http://mock/zip2"})
+
+        assert "| 批号 |" in "\n".join(p["markdown"]["text"] for p in pages)
+
+    def test_download_result_no_fallback_when_page_count_close(self):
+        """页数差 ≤1（分页符解析抖动）不应触发回退（P1-4 容差）。"""
+        import io, zipfile
+        from unittest.mock import patch as _patch
+
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr(
+                "x_content_list_v2.json",
+                json.dumps([
+                    [{"type": "paragraph", "content": {"paragraph_content": [{"type": "text", "content": "页1"}]}}],
+                ]),
+            )
+            zf.writestr(
+                "x_full.md",
+                "页1\n\f\n尾部杂散分隔符（无实际内容）\n",  # full.md 拆出 2 页
+            )
+        with _patch("core.mineru_client.requests.get") as mock_get:
+            resp = mock.MagicMock()
+            resp.status_code = 200
+            resp.content = buf.getvalue()
+            mock_get.return_value = resp
+            pages = mineru_client.download_result({"full_zip_url": "http://mock/zip3"})
+
+        assert len(pages) == 1  # 保持 content_list 结果
+
+    def test_structural_violated_helper(self):
+        """_structural_completeness_violated 三信号直接验证。"""
+        # 1. 页数缺失
+        v, reason = mineru_client._structural_completeness_violated(
+            "a\n\fb", n_pages=0, n_tables=1, n_paragraphs=1
+        )
+        assert v and "页数" in reason
+        # 2. 表格全丢
+        v, reason = mineru_client._structural_completeness_violated(
+            "| a |\n| b |", n_pages=1, n_tables=0, n_paragraphs=1
+        )
+        assert v and "表格" in reason
+        # 3. 噪声块仅剩（无正文无表格）→ 空内容不判残
+        v, _ = mineru_client._structural_completeness_violated(
+            "   ", n_pages=1, n_tables=0, n_paragraphs=0
+        )
+        assert not v
+        # 4. 完整：正文 + 表格齐全
+        v, _ = mineru_client._structural_completeness_violated(
+            "段落\n| a |\n| b |", n_pages=1, n_tables=1, n_paragraphs=1
+        )
+        assert not v
 
 
 class TestRunOCRPAGES:
@@ -212,7 +324,7 @@ class TestRunOCRPAGES:
             {"markdown": {"text": "CCC"}},
         ]
         out = mineru_client.run_ocr_pages(pdf, [1, 2, 3], batch_size=3)
-        assert out == [(1, "AAA"), (2, "BBB"), (3, "CCC")]
+        assert out == [(1, "AAA", 0), (2, "BBB", 0), (3, "CCC", 0)]
         mock_ocr.assert_called_once()
         import os
 
@@ -224,7 +336,7 @@ class TestRunOCRPAGES:
         mock_ocr.return_value = [{"markdown": {"text": "X"}}]
         out = mineru_client.run_ocr_pages(pdf, [1, 5], batch_size=1)
         assert mock_ocr.call_count == 2
-        assert out == [(1, "X"), (5, "X")]
+        assert out == [(1, "X", 0), (5, "X", 0)]
 
     @patch("core.mineru_client.run_ocr")
     def test_out_of_range_page_keeps_empty_text(self, mock_ocr):
@@ -233,13 +345,13 @@ class TestRunOCRPAGES:
         pdf = self._make_pdf(2)
         mock_ocr.return_value = [{"markdown": {"text": "ONLY"}}]
         out = mineru_client.run_ocr_pages(pdf, [1, 99, 2], batch_size=3)
-        assert out == [(1, "ONLY"), (99, ""), (2, "ONLY")]
+        assert out == [(1, "ONLY", 0), (99, "", 0), (2, "ONLY", 0)]
 
     @patch("core.mineru_client.run_ocr")
     def test_all_pages_out_of_range_skips_submission(self, mock_ocr):
         pdf = self._make_pdf(2)
         out = mineru_client.run_ocr_pages(pdf, [99, 100], batch_size=2)
-        assert out == [(99, ""), (100, "")]
+        assert out == [(99, "", 0), (100, "", 0)]
         mock_ocr.assert_not_called()
 
     @patch("core.mineru_client.run_ocr")
@@ -256,7 +368,7 @@ class TestRunOCRPAGES:
         ]
         out = mineru_client.run_ocr_pages(pdf, [1, 2, 3], batch_size=3)
         # 每页内容与其自身单页重跑结果一一对应，不串页
-        assert out == [(1, "S1"), (2, "S2"), (3, "S3")]
+        assert out == [(1, "S1", 0), (2, "S2", 0), (3, "S3", 0)]
         assert mock_ocr.call_count == 4  # 1 批 + 3 单页
         import os
 
@@ -272,8 +384,34 @@ class TestRunOCRPAGES:
             [{"markdown": {"text": "S2"}}],
         ]
         out = mineru_client.run_ocr_pages(pdf, [1, 2], batch_size=2)
-        assert out == [(1, "S1"), (2, "S2")]
+        assert out == [(1, "S1", 0), (2, "S2", 0)]
         assert mock_ocr.call_count == 3
+
+    @patch("core.mineru_client.run_ocr")
+    def test_discarded_count_propagates(self, mock_ocr):
+        """D3 修复（Round 3）：自愈切片重跑也透传 _discarded_count（低置信度
+        丢弃块数），pipeline 据此给恢复页补回 OCR 不完整警告 — 恢复页不再被
+        静默当作完整页（LLM 置信度虚高）。"""
+        pdf = self._make_pdf(3)
+        mock_ocr.return_value = [
+            {"markdown": {"text": "AAA"}, "_discarded_count": 2},
+            {"markdown": {"text": "BBB"}},
+            {"markdown": {"text": "CCC"}, "_discarded_count": 5},
+        ]
+        out = mineru_client.run_ocr_pages(pdf, [1, 2, 3], batch_size=3)
+        assert out == [(1, "AAA", 2), (2, "BBB", 0), (3, "CCC", 5)]
+        # 单页回退路径同样透传
+        mock_ocr.reset_mock()
+        mock_ocr.return_value = [
+            {"markdown": {"text": "S1"}, "_discarded_count": 3}
+        ]
+        pdf1 = self._make_pdf(1)
+        out1 = mineru_client.run_ocr_pages(pdf1, [1], batch_size=3)
+        assert out1 == [(1, "S1", 3)]
+        import os
+
+        os.unlink(pdf)
+        os.unlink(pdf1)
 
 
 class TestPaddleOCRClient:

@@ -15,6 +15,8 @@
     {# job 状态映射（与 static/upload.js STATUS_ZH job 部分保持一致） #}
     {% set job_status_zh = {'pending': '待处理', 'queued': '排队中', 'processing': '处理中', 'ocr_running': '识别中', 'ocr_done': '识别完成', 'analyzing': '分析中', 'review': '可复核', 'partial_review': '部分可复核', 'error': '出错', 'cancelled': '已取消', 'cancelling': '取消中', 'done': '已完成', 'archived': '已归档'} %}
     {% set confidence_zh = {'high': '高', 'medium': '中', 'low': '低'} %}
+    {# finding type 映射（与 static/review.js typeZh 保持一致 — SSR/AJAX 必须同源，否则同一 finding 首屏英文、翻页后变中文） #}
+    {% set type_zh = {'time_reversal': '时间倒序', 'year_contradiction': '年份矛盾', 'suspicious_date': '日期可疑', 'signature_time_anomaly': '签名时间异常', 'completeness': '信息缺失', 'batch_inconsistency': '批号不一致', 'param_out_of_spec': '参数超标', 'low_confidence': '低置信度', 'handwritten': '手写内容需核对', 'signature_mismatch': '签名不符', 'user_rule': '用户规则', 'ocr_noise': 'OCR 噪音', 'time_anomaly': '时间异常'} %}
 </head>
 <body class="h-full flex flex-col">
     <!-- ============= Top App Bar — 48px, 无 logo, 纯文字 ============= -->
@@ -29,9 +31,16 @@
             <span class="text-[13px] font-medium truncate max-w-[280px]">{{ filename }}</span>
             <span class="inline-flex items-center gap-1 text-[11px] text-muted-foreground">
                 <span class="w-1.5 h-1.5 rounded-full bg-success"></span>
-                {{ job_status_zh.get(status, status) }}
+                <span id="status-badge">{{ job_status_zh.get(status, status) }}</span>
             </span>
             <span class="text-[11px] text-muted-foreground font-mono">{{ job_id }}</span>
+            {# cr-19: 实际 OCR 后端徽章 — failover/自愈后用户可见（GMP 追溯），
+               SSR 一次性渲染，SSE 期间由 review.js 实时更新 #}
+            {% if ocr_backend_used %}
+            <span id="ocr-backend-badge" class="text-[10px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground">{{ ocr_backend_used }}</span>
+            {% else %}
+            <span id="ocr-backend-badge" class="hidden text-[10px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground"></span>
+            {% endif %}
             {# SSE 实时进度条：仅在非终态显示 #}
             <span id="progress-bar-container" class="hidden items-center gap-2 text-[11px] text-muted-foreground">
                 <span id="progress-text">—</span>
@@ -43,7 +52,7 @@
             <!-- 上下文按钮：取消/重试/报告 — 按状态显示 -->
             <nav class="flex items-center gap-2">
                 {% if status in ['ocr_running', 'ocr_done', 'analyzing', 'pending'] %}
-                <button onclick="cancelJob(event)"
+                <button onclick="cancelJob(event)" id="cancel-btn"
                         class="btn-press text-[12px] text-muted-foreground hover:text-destructive">
                     取消任务
                 </button>
@@ -52,6 +61,11 @@
                 <button onclick="retryJob(event)"
                         class="btn-press text-[12px] text-muted-foreground hover:text-foreground">
                     重试
+                </button>
+                {% elif status == 'review' %}
+                <button onclick="retryJob(event)" data-full-retry="1"
+                        class="btn-press text-[12px] text-muted-foreground hover:text-foreground">
+                    重新分析
                 </button>
                 {% endif %}
                 {% if status in ['review', 'partial_review', 'done'] %}
@@ -109,7 +123,7 @@
                     {% if is_current %}
                     <span class="absolute left-0 top-1 bottom-1 w-0.5 bg-foreground"></span>
                     {% endif %}
-                    <span class="font-mono tabular-nums">P{{ p }}</span>
+                    <span class="tabular-nums">第{{ p }}页</span>
                     {% if pfc.total > 0 %}
                     <span class="flex items-center gap-1">
                         {% if pfc.critical > 0 %}
@@ -274,6 +288,21 @@
             </div>
             {% endif %}
 
+            {# C3 修复（Round 3）：OCR 不完整警告横幅 — MinerU 低置信度丢弃
+               内容块时，LLM 已被降级提示（[系统警告]），复核者需同步看到
+               缺失原因，避免对低置信度分析结果误信。 #}
+            {% if page_ocr_warning %}
+            <div id="ocr-warning-banner" class="ocr-warning-banner rounded-md border-l-2 border-warning bg-card px-3 py-2 flex items-center gap-2">
+                <span class="w-1.5 h-1.5 rounded-full bg-warning shrink-0"></span>
+                <span class="text-xs text-foreground">此页 OCR 不完整：{{ page_ocr_warning }} — 分析已降级，请以 PDF 原图核对</span>
+            </div>
+            {% else %}
+            <div id="ocr-warning-banner" class="ocr-warning-banner rounded-md border-l-2 border-warning bg-card px-3 py-2 flex items-center gap-2 hidden">
+                <span class="w-1.5 h-1.5 rounded-full bg-warning shrink-0"></span>
+                <span class="text-xs text-foreground">此页 OCR 不完整 — 分析已降级，请以 PDF 原图核对</span>
+            </div>
+            {% endif %}
+
             <!-- Findings list — Linear 风格扁平列表，无外层卡片包裹 -->
             <div class="flex flex-col">
                 <!-- 列表 header — 仅标题 + 计数，无卡片背景 -->
@@ -293,7 +322,7 @@
                                 <div class="flex-1 min-w-0">
                                     <!-- 第一行: type + 状态点（类似 Linear issue row）-->
                                     <div class="flex items-center gap-2 mb-0.5">
-                                        <span class="text-[13px] font-medium text-foreground">{{ f.type }}</span>
+                                        <span class="text-[13px] font-medium text-foreground">{{ type_zh.get(f.type, f.type) }}</span>
                                         {% if f.status != 'pending' %}
                                         <span class="text-[10px] text-muted-foreground">· {{ status_zh.get(f.status, f.status) }}</span>
                                         {% endif %}

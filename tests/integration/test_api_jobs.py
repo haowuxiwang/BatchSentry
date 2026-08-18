@@ -41,7 +41,7 @@ async def client_with_data(test_db):
 
     from main import app
     from httpx import ASGITransport
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://localhost:8000") as client:
         yield client
 
 
@@ -100,10 +100,11 @@ class TestArchiveUnarchive:
         assert r.json()["status"] == "review"
 
     @pytest.mark.asyncio
-    async def test_archive_nonexistent_returns_400(self, client_with_data):
-        """不存在的 job 归档应返回错误（transition_status 抛 InvalidTransitionError → 400）。"""
+    async def test_archive_nonexistent_returns_404(self, client_with_data):
+        """不存在的 job 归档 → 404（Round 3 统一守卫：先查 job 再走状态机，
+        不存在的 job 不再落入 InvalidTransitionError 的 400 分支）。"""
         r = await client_with_data.post("/api/jobs/nonexistent-id/archive")
-        assert r.status_code == 400
+        assert r.status_code == 404
 
 
 class TestDeleteJob:

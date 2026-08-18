@@ -225,6 +225,10 @@ class TestPipelineRun:
         assert all(
             c.cr_frame.f_locals.get("job_id") == job_id for c in scheduled
         )
+        # 拦截了 run_coroutine_threadsafe，协程从未被执行 → close 释放
+        # （否则 GC 时报 RuntimeWarning "coroutine was never awaited"）
+        for c in scheduled:
+            c.close()
 
         # _update_ocr_progress 直接写库（当前 loop 内，锁正常 acquire/release）
         await _update_ocr_progress(job_id, 51, 51)
@@ -608,6 +612,50 @@ class TestStuckJobRecovery:
         assert log is not None
         assert "analyzing" in log["detail"]
         assert "error" in log["detail"]
+
+    @pytest.mark.asyncio
+    async def test_recover_skips_jobs_newer_than_process_start(self, pipeline_db):
+        """B7 竞态防护：created_at 晚于 process_started_at 的 job 不被恢复。
+
+        lifespan 中 recover 以 background task 执行，可能与本进程新上传的
+        pending job 并发 — 那些 job 的 pipeline 即将运行，绝不能误标 error。
+        """
+        from datetime import datetime, timedelta
+
+        await _insert_job(pipeline_db, job_id="old-1", status="ocr_running")
+        # 显式控制 created_at（新上传的 job：created_at 晚于 cutoff）
+        await pipeline_db.execute(
+            "INSERT INTO jobs (id, filename, status, pdf_path, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("new-1", "new.pdf", "pending", "/tmp/new.pdf", "2099-01-01 00:00:00"),
+        )
+        await pipeline_db.commit()
+
+        # cutoff = 现在 +1min：old-1（created_at=now）早于 cutoff，new-1 晚于
+        cutoff = (datetime.utcnow() + timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S")
+        count = await recover_stuck_jobs(process_started_at=cutoff)
+        assert count == 1  # 只恢复 old-1
+
+        cursor = await pipeline_db.execute("SELECT status FROM jobs WHERE id = 'old-1'")
+        assert (await cursor.fetchone())["status"] == "error"
+        cursor = await pipeline_db.execute("SELECT status FROM jobs WHERE id = 'new-1'")
+        assert (await cursor.fetchone())["status"] == "pending"
+
+    @pytest.mark.asyncio
+    async def test_recover_without_cutoff_recovers_all(self, pipeline_db):
+        """无 process_started_at 参数时行为不变（向后兼容，全部恢复）。"""
+        await _insert_job(pipeline_db, job_id="old-2", status="analyzing")
+        await pipeline_db.execute(
+            "INSERT INTO jobs (id, filename, status, pdf_path, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("new-2", "new.pdf", "pending", "/tmp/new.pdf", "2099-01-01 00:00:00"),
+        )
+        await pipeline_db.commit()
+
+        count = await recover_stuck_jobs()
+        assert count == 2
+        cursor = await pipeline_db.execute("SELECT status FROM jobs WHERE id = 'new-2'")
+        assert (await cursor.fetchone())["status"] == "error"
 
 
 class TestLaunchPipeline:
@@ -1451,6 +1499,10 @@ class TestSlicedPipeline:
     @pytest.mark.asyncio
     async def test_sliced_failure_sets_job_to_error(self, pipeline_db, tmp_path):
         """分片 OCR 抛异常 → job 进入 error（与整份路径一致）。"""
+        from core import pipeline as pipeline_mod
+
+        pipeline_mod.db_lock = asyncio.Lock()
+
         job_id = await _insert_job(pipeline_db, status="pending")
         pdf_path = str(tmp_path / "fake.pdf")
         Path(pdf_path).write_bytes(b"%PDF-1.4 fake")
@@ -1459,7 +1511,9 @@ class TestSlicedPipeline:
             raise RuntimeError("sliced OCR crashed")
 
         orig_backend = config["app"].ocr_backend
+        orig_timeout = pipeline_mod._SLICE_QUEUE_TIMEOUT
         config["app"].ocr_backend = "mineru"
+        pipeline_mod._SLICE_QUEUE_TIMEOUT = 0.05
         try:
             with patch(
                 "core.mineru_client.run_ocr_sliced", side_effect=_boom
@@ -1471,6 +1525,7 @@ class TestSlicedPipeline:
                 await run_pipeline(job_id, pdf_path)
         finally:
             config["app"].ocr_backend = orig_backend
+            pipeline_mod._SLICE_QUEUE_TIMEOUT = orig_timeout
 
         cursor = await pipeline_db.execute("SELECT status FROM jobs WHERE id = ?", (job_id,))
         assert (await cursor.fetchone())["status"] == "error"
@@ -1752,7 +1807,7 @@ class TestStage1EmptyPageRetry:
         pages[4]["markdown"]["text"] = ""  # p5 空 → 触发重试
 
         def fake_retry(pdf_path, page_nums, batch_size=3, job_id=""):
-            return [(pno, f"recovered content p{pno} " + "y" * 200) for pno in page_nums]
+            return [(pno, f"recovered content p{pno} " + "y" * 200, 0) for pno in page_nums]
 
         job_id, calls = await self._run(
             pipeline_db, tmp_path, pages, fake_retry=fake_retry
@@ -1790,7 +1845,7 @@ class TestStage1EmptyPageRetry:
 
         def fake_retry(pdf_path, page_nums, batch_size=3, job_id=""):
             # 两轮都返回空（模拟服务端真识别不了）
-            return [(pno, "") for pno in page_nums]
+            return [(pno, "", 0) for pno in page_nums]
 
         job_id, calls = await self._run(
             pipeline_db, tmp_path, pages, fake_retry=fake_retry
@@ -1869,7 +1924,8 @@ class TestStage1EmptyPageRetry:
             def fake_retry(pdf_path, page_nums, batch_size=3, job_id=""):
                 calls.append((list(page_nums), batch_size))
                 return [
-                    (pno, f"recovered content p{pno} " + "y" * 200) for pno in page_nums
+                    (pno, f"recovered content p{pno} " + "y" * 200, 0)
+                    for pno in page_nums
                 ]
 
             with patch(

@@ -19,6 +19,7 @@ from config import config
 from db.client import get_db
 from core.page_analyzer import analyze_page
 from core.cross_page_analyzer import analyze_cross_page
+from core.security import redact_urls
 
 logger = logging.getLogger(__name__)
 
@@ -176,7 +177,7 @@ VALID_TRANSITIONS = {
     "ocr_done":         {"analyzing", "error", "cancelling"},
     "analyzing":        {"review", "partial_review", "error", "cancelling"},
     "cancelling":       {"cancelled", "error"},
-    "review":           {"archived"},
+    "review":           {"pending", "archived"},  # pending: 重新分析（retry）
     "partial_review":   {"pending", "archived"},  # pending: retry 补分析失败页
     "error":            {"pending", "archived"},
     "cancelled":        {"pending", "archived"},
@@ -269,21 +270,33 @@ async def transition_status(db, job_id: str, new_status: str, detail: str = "") 
 _STUCK_STATUSES = ("pending", "ocr_running", "ocr_done", "analyzing", "cancelling")
 
 
-async def recover_stuck_jobs() -> int:
+async def recover_stuck_jobs(process_started_at: str | None = None) -> int:
     """重启时将卡死的 job 标记为 error。
 
     应用崩溃 / 强杀时，处于 pending / ocr_running / ocr_done / analyzing /
     cancelling 的 job 永远不会完成（pipeline 进程已死）。在启动 lifespan 中
     调用此函数，将这些 job 标记为 error，写入 error_message，允许用户重试。
 
+    Args:
+        process_started_at: 进程启动时刻（UTC "YYYY-MM-DD HH:MM:SS"）。
+            仅恢复 created_at **早于**该时刻的 job — 晚于启动时刻创建的
+            job 是当前进程存活期间新上传的任务（pipeline 正在/即将运行），
+            不能误判为上次崩溃的遗留。竞态场景：lifespan 中 recover 以
+            background task 方式执行，可能与本进程的新上传并发。
+
     Returns:
         被恢复（标记为 error）的 job 数量
     """
     db = await get_db()
     placeholders = ",".join("?" * len(_STUCK_STATUSES))
+    params: tuple = _STUCK_STATUSES
+    where_status = f"status IN ({placeholders})"
+    if process_started_at:
+        where_status += " AND created_at < ?"
+        params = _STUCK_STATUSES + (process_started_at,)
     cursor = await db.execute(
-        f"SELECT id, status, filename, created_at FROM jobs WHERE status IN ({placeholders})",
-        _STUCK_STATUSES,
+        f"SELECT id, status, filename, created_at FROM jobs WHERE {where_status}",
+        params,
     )
     stuck = await cursor.fetchall()
     if not stuck:
@@ -318,6 +331,14 @@ async def recover_stuck_jobs() -> int:
             f"recovered on startup: {old_status} → error",
         )
         logger.info(f"[{job_id}] Stuck job recovered: {old_status} → error")
+        # P1-8：应用重启恢复也是终态（error）— 与 pipeline 正常 error 路径
+        # 一致地发飞书通知。用户不在 GUI 前时（崩溃重启典型场景）也能得知
+        # 任务失败可重试。旁路：通知失败绝不影响启动流程。
+        try:
+            from core.notify import notify_job
+            await notify_job(job_id, "error")
+        except Exception:
+            pass  # notify_job 自身已兜底，此处双保险防异常逃逸
 
     await db.commit()
     logger.warning(
@@ -382,26 +403,64 @@ async def run_pipeline(job_id: str, pdf_path: str):
 
     资源清理：pipeline 结束后（无论成功/失败/取消）删除上传的 PDF 临时文件。
     OCR 完成后 raw_html 已存入数据库，PDF 文件不再需要。
+
+    progress_futures：OCR 线程经 run_coroutine_threadsafe 调度回主 loop 的
+    进度更新 future。测试场景 loop 即刻关闭会导致协程悬挂（RuntimeWarning
+    "was never awaited"）；统一在收尾 flush（超时 1s，不阻塞退出）。
+
+    Per-job lock 用引用计数管理注册表条目（对抗审查 T3.1）：
+    - 每个进入 run_pipeline 的协程 refs +1，退出（无论是否拿到锁/被取消）-1
+    - 仅当 refs 归零才 pop 条目 —— 等待中的协程仍持有 refs，不会发生
+      "等待者被取消时误删持有者锁 entry" 的并发窗口（旧实现无脑 pop：
+      A 持锁 B 等待时 B 被取消会删掉 A 的锁条目，第三个协程 C 随后
+      setdefault 建新锁而与 B 并行执行同一 job）。
     """
-    # Acquire per-job lock — prevents two pipelines on the same job_id
+    progress_futures: list = []
+    # Acquire per-job lock — prevents two pipelines on the same job_id.
+    # Registry entry = {lock, refs}; refs counts every coroutine that
+    # entered run_pipeline (holding or waiting/cancelled) so the entry is
+    # only removed when no one is involved with this job anymore.
     async with _locks_guard:
-        lock_existed = job_id in _pipeline_locks
-        lock = _pipeline_locks.setdefault(job_id, asyncio.Lock())
-    if lock_existed:
+        entry = _pipeline_locks.setdefault(job_id, {"lock": asyncio.Lock(), "refs": 0})
+        refs_before = entry["refs"]
+        entry["refs"] += 1
+        lock = entry["lock"]
+    if refs_before > 0:
         logger.info(f"[{job_id}] Lock contention: another pipeline still draining, waiting...")
     try:
         if lock.locked():
             logger.info(f"[{job_id}] Per-job lock held by another coroutine, waiting to acquire")
         async with lock:
             logger.info(f"[{job_id}] Per-job lock acquired")
-            await _run_pipeline_impl(job_id, pdf_path)
+            await _run_pipeline_impl(job_id, pdf_path, progress_futures)
     finally:
-        # Cleanup lock entry after pipeline exits
+        # Flush any in-flight progress coroutines before the loop may close
+        if progress_futures:
+            try:
+                real_futures = [
+                    f for f in progress_futures if asyncio.isfuture(f)
+                ]
+                if real_futures:
+                    await asyncio.wait_for(
+                        asyncio.gather(*real_futures, return_exceptions=True),
+                        timeout=1.0,
+                    )
+            except asyncio.TimeoutError:
+                pass
+            progress_futures.clear()
+        # Cleanup lock entry — only when the last coroutine for this job
+        # exits (waiter cancellation must not delete the holder's entry).
+        popped = None
         async with _locks_guard:
-            popped = _pipeline_locks.pop(job_id, None)
+            cur = _pipeline_locks.get(job_id)
+            if cur is not None:
+                cur["refs"] -= 1
+                if cur["refs"] <= 0:
+                    popped = _pipeline_locks.pop(job_id, None)
+        removed = popped
         logger.info(
-            f"[{job_id}] Per-job lock released and removed from registry "
-            f"(was_present={popped is not None})"
+            f"[{job_id}] Per-job lock released "
+            f"(registry_removed={removed is not None})"
         )
         # NOTE: PDF 文件不在此处删除 — 复核页 /api/jobs/{id}/pdf 需要它。
         # PDF 在 job 删除 (DELETE /api/jobs/{id}) 或归档时清理。
@@ -441,7 +500,7 @@ async def _run_ocr_with_failover(db, job_id: str, pdf_path: str, progress_cb) ->
             finally:
                 ocr_job_id_var.reset(_ocr_ctx_token)
         except Exception as e:
-            failures.append(f"{name}: {type(e).__name__}: {str(e)[:300]}")
+            failures.append(f"{name}: {type(e).__name__}: {redact_urls(str(e))[:300]}")
             logger.error(f"[{job_id}] OCR attempt failed (backend={name}): {failures[-1]}")
             continue
         if not pages:
@@ -464,7 +523,7 @@ async def _run_ocr_with_failover(db, job_id: str, pdf_path: str, progress_cb) ->
     return [], "", failures
 
 
-async def _run_pipeline_impl(job_id: str, pdf_path: str):
+async def _run_pipeline_impl(job_id: str, pdf_path: str, progress_futures: list):
     """Pipeline implementation — guarded by per-job lock from run_pipeline."""
     db = await get_db()
     pipeline_start = time.time()
@@ -501,9 +560,10 @@ async def _run_pipeline_impl(job_id: str, pdf_path: str):
                 return
             last_progress = (done, total)
             try:
-                asyncio.run_coroutine_threadsafe(
+                fut = asyncio.run_coroutine_threadsafe(
                     _update_ocr_progress(job_id, done, total), loop
                 )
+                progress_futures.append(fut)
             except Exception as e:
                 logger.warning(f"[{job_id}] OCR progress callback failed: {e}")
 
@@ -687,7 +747,10 @@ async def _run_pipeline_impl(job_id: str, pdf_path: str):
                 )
                 row = await cursor.fetchone()
                 self_heal_backend = row["ocr_backend_used"] if row else ""
-            if self_heal_backend == "mineru":
+            # 空页自愈（Round 3 A1 扩展）：MinerU（服务端 >100MB 丢页缺陷）
+            # 与 Paddle（服务端组装失败/极短页）都启用。Paddle 无切片 API，
+            # 走 fitz 提取单页独立 PDF 重新提交一次。
+            if self_heal_backend in ("mineru", "paddle"):
                 # 空页判定增强（对抗审查 cr-17）：仅看 raw_html 长度会漏判
                 # "标签多、文字少"的页（如 <table><tr><td></td></tr></table>
                 # 无文字模板 >100 字符）。去 HTML 标签后按真实文本长度判定。
@@ -717,53 +780,130 @@ async def _run_pipeline_impl(job_id: str, pdf_path: str):
                         f"pages={retry_targets} — retrying with per-page slices",
                     )
                     try:
-                        from core.mineru_client import run_ocr_pages
+                        if self_heal_backend == "mineru":
+                            from core.mineru_client import run_ocr_pages
 
-                        recovered = []
-                        still_empty = list(retry_targets)
-                        # 两轮重试：首轮 3 页小批（快）；未恢复页第二轮单页批
-                        # （服务端丢页有随机性，单页批成功率最高 — 实测
-                        # 3 页批 4/6 恢复、单页批全部恢复过）。
-                        for attempt, batch_size in enumerate((3, 1)):
-                            if not still_empty:
-                                break
-                            # 对抗审查 P2-9：两轮重试各需 15-40s+，期间用户
-                            # 取消 → 继续跑完并写库，浪费上游配额且取消
-                            # 不生效。每轮前检查取消，中断并保留已恢复页。
-                            if await _is_cancelled(job_id):
-                                logger.info(
-                                    f"[{job_id}] Empty-page retry cancelled "
-                                    f"(round {attempt + 1}) — "
-                                    f"keeping {len(recovered)} recovered pages"
-                                )
-                                break
-                            logger.info(
-                                f"[{job_id}] Empty-page retry round {attempt + 1} "
-                                f"(batch_size={batch_size}): p{still_empty}"
-                            )
-                            retried = await asyncio.to_thread(
-                                run_ocr_pages,
-                                pdf_path,
-                                still_empty,
-                                job_id=job_id,
-                                batch_size=batch_size,
-                            )
-                            still_empty = []
-                            for pno, md in retried:
-                                if md and len(md.strip()) > 100:
-                                    clean = _sanitize_ocr_text(md.strip())
-                                    await db.execute(
-                                        "UPDATE page_cache SET raw_html = ?, "
-                                        "structured_json = NULL, analyzed_at = NULL "
-                                        "WHERE job_id = ? AND page = ?",
-                                        (clean, job_id, pno),
+                            recovered = []
+                            still_empty = list(retry_targets)
+                            # 两轮重试：首轮 3 页小批（快）；未恢复页第二轮单页批
+                            # （服务端丢页有随机性，单页批成功率最高 — 实测
+                            # 3 页批 4/6 恢复、单页批全部恢复过）。
+                            for attempt, batch_size in enumerate((3, 1)):
+                                if not still_empty:
+                                    break
+                                # 对抗审查 P2-9：两轮重试各需 15-40s+，期间用户
+                                # 取消 → 继续跑完并写库，浪费上游配额且取消
+                                # 不生效。每轮前检查取消，中断并保留已恢复页。
+                                if await _is_cancelled(job_id):
+                                    logger.info(
+                                        f"[{job_id}] Empty-page retry cancelled "
+                                        f"(round {attempt + 1}) — "
+                                        f"keeping {len(recovered)} recovered pages"
                                     )
-                                    recovered.append(pno)
-                                else:
-                                    still_empty.append(pno)
-                            await db.commit()
-                            if not still_empty:
-                                break
+                                    break
+                                logger.info(
+                                    f"[{job_id}] Empty-page retry round {attempt + 1} "
+                                    f"(batch_size={batch_size}): p{still_empty}"
+                                )
+                                retried = await asyncio.to_thread(
+                                    run_ocr_pages,
+                                    pdf_path,
+                                    still_empty,
+                                    job_id=job_id,
+                                    batch_size=batch_size,
+                                )
+                                still_empty = []
+                                for pno, md, discarded in retried:
+                                    if md and len(md.strip()) > 100:
+                                        clean = _sanitize_ocr_text(md.strip())
+                                        # D3 修复（Round 3）：自愈恢复页也补回
+                                        # OCR 不完整警告前缀（主流程 L714 对
+                                        # 自愈路径不生效，恢复页曾被静默当作
+                                        # 完整页 — LLM 置信度虚高）。
+                                        if discarded:
+                                            clean = (
+                                                f"[OCR 警告: 本页有 {discarded} 个内容块"
+                                                f"因置信度过低被 OCR 丢弃, 以下内容可能"
+                                                f"不完整, 分析仅供参考]\n\n{clean}"
+                                            )
+                                        await db.execute(
+                                            "UPDATE page_cache SET raw_html = ?, "
+                                            "structured_json = NULL, analyzed_at = NULL "
+                                            "WHERE job_id = ? AND page = ?",
+                                            (clean, job_id, pno),
+                                        )
+                                        recovered.append(pno)
+                                    else:
+                                        still_empty.append(pno)
+                                await db.commit()
+                                if not still_empty:
+                                    break
+                        else:
+                            # Paddle：fitz 提取单页为独立 PDF 重提交一次。
+                            # Paddle 无切片接口且服务端无大文件丢页缺陷 —
+                            # 空页大概率是单次服务端波动/真空白页，一轮足够。
+                            # 真空白页（扫描件末页）重跑后仍空 → 保留
+                            # _ocr_empty 标记走人工复核路径。
+                            import fitz
+                            from core import ocr_client
+
+                            job_dir_p = Path(config["app"].output_dir) / job_id
+                            recovered = []
+                            still_empty = []
+                            src_doc = fitz.open(pdf_path)
+                            try:
+                                for pno in retry_targets:
+                                    if await _is_cancelled(job_id):
+                                        logger.info(
+                                            f"[{job_id}] Paddle empty-page retry "
+                                            f"cancelled — keeping {len(recovered)} "
+                                            f"recovered pages"
+                                        )
+                                        break
+                                    logger.info(
+                                        f"[{job_id}] Paddle self-heal: re-OCR page "
+                                        f"{pno} as standalone slice"
+                                    )
+                                    slice_path = job_dir_p / f"selfheal-p{pno}.pdf"
+                                    out = fitz.open()
+                                    out.insert_pdf(
+                                        src_doc, from_page=pno - 1, to_page=pno - 1
+                                    )
+                                    out.save(str(slice_path))
+                                    out.close()
+                                    try:
+                                        pages = await asyncio.to_thread(
+                                            ocr_client.run_ocr, str(slice_path)
+                                        )
+                                        md = (
+                                            pages[0]["markdown"]["text"]
+                                            if pages and len(pages) > 0
+                                            else ""
+                                        )
+                                    except Exception as slice_err:
+                                        from core.security import redact_urls
+                                        logger.warning(
+                                            f"[{job_id}] Paddle self-heal p{pno} "
+                                            f"failed: "
+                                            f"{redact_urls(str(slice_err))[:200]}"
+                                        )
+                                        md = ""
+                                    finally:
+                                        slice_path.unlink(missing_ok=True)
+                                    if md and len(md.strip()) > 100:
+                                        clean = _sanitize_ocr_text(md.strip())
+                                        await db.execute(
+                                            "UPDATE page_cache SET raw_html = ?, "
+                                            "structured_json = NULL, analyzed_at = NULL "
+                                            "WHERE job_id = ? AND page = ?",
+                                            (clean, job_id, pno),
+                                        )
+                                        recovered.append(pno)
+                                    else:
+                                        still_empty.append(pno)
+                                    await db.commit()
+                            finally:
+                                src_doc.close()
                         if recovered:
                             logger.info(
                                 f"[{job_id}] Empty-page retry: recovered "
@@ -777,7 +917,7 @@ async def _run_pipeline_impl(job_id: str, pdf_path: str):
                         if still_empty:
                             logger.warning(
                                 f"[{job_id}] Empty-page retry: still empty "
-                                f"after 2 rounds — p{still_empty} truly "
+                                f"after re-OCR — p{still_empty} truly "
                                 f"unrecognizable by the OCR backend"
                             )
                     except Exception as retry_err:
@@ -922,8 +1062,6 @@ async def _run_pipeline_impl(job_id: str, pdf_path: str):
         dedup_seen: set[tuple] = set()
         batch_rows: list[tuple] = []
         for f in findings:
-            sev = f.get("severity", "info")
-            severity_counts[sev] = severity_counts.get(sev, 0) + 1
             # 跳过已在 Stage 2 写入的 page-level LLM findings
             if f.get("source") == "llm_page":
                 skipped_llm_page += 1
@@ -940,6 +1078,11 @@ async def _run_pipeline_impl(job_id: str, pdf_path: str):
                 )
                 continue
             dedup_seen.add(fingerprint)
+            # A3 修复（Round 3）：severity 计数改为在去重/跳过之后统计
+            # 实际写入行 — 原实现先计数后跳过，llm_page（Stage 2 已入库）
+            # 和重复行被重复计入，日志与真实数据不符（GMP 审计误导）。
+            sev = f.get("severity", "info")
+            severity_counts[sev] = severity_counts.get(sev, 0) + 1
             batch_rows.append((
                 job_id, f["page"], f["type"], f["severity"], f["description"],
                 f.get("ocr_text"), f.get("operator"), f.get("source", "rule"),
@@ -947,13 +1090,17 @@ async def _run_pipeline_impl(job_id: str, pdf_path: str):
             ))
             inserted += 1
         if batch_rows:
-            await db.executemany(
-                "INSERT OR IGNORE INTO findings "
-                "(job_id, page, type, severity, description, ocr_text, operator, source, user_rule_id) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                batch_rows,
-            )
-        await db.commit()  # Flush findings before status transition (prevent ghost findings)
+            # 对抗审查 T3.2：批量写 findings 与其他写事务（transition/audit/
+            # 进度更新）串行化 —— 多 job 并行进入 Stage 3 时防止 executemany+
+            # commit 与其他写穿插交错事务边界。
+            async with db_lock:
+                await db.executemany(
+                    "INSERT OR IGNORE INTO findings "
+                    "(job_id, page, type, severity, description, ocr_text, operator, source, user_rule_id) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    batch_rows,
+                )
+                await db.commit()
         logger.info(
             f"[{job_id}] DB: findings inserted ({inserted} new + {skipped_llm_page} "
             f"llm_page skipped, severity={severity_counts})"
@@ -1038,11 +1185,13 @@ async def _run_pipeline_impl(job_id: str, pdf_path: str):
             except Exception:
                 pass  # notify_job 自身已兜底，此处双保险防异常逃逸
     except Exception as e:
-        logger.error(f"[{job_id}] Pipeline failed: {e}", exc_info=True)
-        await _audit_log(db, job_id, "pipeline_error", str(e)[:200])
-        error_msg = str(e)[:500]
+        logger.error(f"[{job_id}] Pipeline failed: {redact_urls(str(e))}", exc_info=True)
+        await _audit_log(db, job_id, "pipeline_error", redact_urls(str(e))[:200])
+        # P1-7：签名 URL 反刍兜底 — OCR 客户端异常消息可能回显完整签名 URL
+        # （requests MaxRetryError），error_message 会出现在报告/飞书通知中
+        error_msg = redact_urls(str(e))[:500]
         try:
-            await transition_status(db, job_id, "error", f"Pipeline failed: {str(e)[:100]}")
+            await transition_status(db, job_id, "error", f"Pipeline failed: {redact_urls(str(e))[:100]}")
             # transition_status 只更新 status 字段，还需显式写入 error_message + finished_at
             await db.execute(
                 "UPDATE jobs SET error_message = ?, finished_at = CURRENT_TIMESTAMP WHERE id = ?",
@@ -1289,7 +1438,17 @@ async def _run_sliced_stage1_2(
                 page_num = start_page + i
                 if page_num in existing:
                     continue
-                raw_html = _sanitize_ocr_text(page.get("markdown", {}).get("text", ""))
+                raw_html = page.get("markdown", {}).get("text", "")
+                # OCR 不完整标记（与整份路径 653-658 保持一致）：sliced 路径
+                # 曾遗漏 _discarded_count 警告注入 — 分片模式下同一页由单片
+                # OCR 产出，丢弃块的风险同样存在，LLM 需感知。
+                discarded_count = page.get("_discarded_count")
+                if discarded_count:
+                    raw_html = (
+                        f"[OCR 警告: 本页有 {discarded_count} 个内容块因置信度过低"
+                        f"被 OCR 丢弃, 以下内容可能不完整, 分析仅供参考]\n\n{raw_html}"
+                    )
+                raw_html = _sanitize_ocr_text(raw_html)
                 await db.execute(
                     "INSERT OR IGNORE INTO page_cache (job_id, page, raw_html) VALUES (?, ?, ?)",
                     (job_id, page_num, raw_html),

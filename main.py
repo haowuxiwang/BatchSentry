@@ -58,11 +58,18 @@ async def lifespan(app: FastAPI):
     logger.info(f"  output_dir: {config['app'].output_dir}")
     logger.info(f"  frozen: {getattr(sys, 'frozen', False)}")
     await get_db()  # initializes schema on first connect
-    # 启动时恢复卡死的 job（应用上次崩溃/强杀时留下的非终态 job）
-    # 异步执行：不阻塞 lifespan yield，避免 Electron 首屏延迟
+    # 启动时恢复卡死的 job（应用上次崩溃/强杀时留下的非终态 job）。
+    # 异步执行：不阻塞 lifespan yield，避免 Electron 首屏延迟。
+    # 竞态防护（B7）：process_started_at = 本进程启动时刻 — 仅恢复 created_at
+    # 早于该时刻的 job；lifespan yield 后马上可接收新上传（pending job 活着，
+    # pipeline 即将运行），若按"全部非终态"恢复会把这些新任务误标为 error。
+    from datetime import datetime, timezone as _tz
+
+    process_started_at = datetime.now(_tz.utc).strftime("%Y-%m-%d %H:%M:%S")
+
     async def _recover_bg():
         try:
-            recovered = await recover_stuck_jobs()
+            recovered = await recover_stuck_jobs(process_started_at=process_started_at)
             if recovered:
                 logger.warning(f"  recovered {recovered} stuck jobs (marked as error)")
         except Exception as e:
@@ -90,14 +97,18 @@ app = FastAPI(
 # 所有 fetch 读不到响应（无 ACAO 头）、POST 全被 preflight 拦截，设置页
 # 在 localhost 下完全不可用。补 localhost 同端口白名单，与守卫口径一致
 # （恶意页面 Origin 不会命中白名单，安全性不变）。
+# B8（P2-x 端口常量集中）：白名单端口不再硬编码 8000/58765 双份 — 由
+# config["app"].port 动态生成（该值感知 PORT/APP_PORT env；Electron 传
+# PORT=58765，dev 默认 8000）。Electron 修改 SERVER_PORT 或 dev 换端口时
+# CORS 与守卫口径自动一致，不会把合法页面拦在门外。
+def _cors_origins() -> list[str]:
+    port = config["app"].port
+    return [f"http://{h}:{port}" for h in ("127.0.0.1", "localhost")]
+
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://127.0.0.1:8000",   # dev server (uvicorn)
-        "http://127.0.0.1:58765",  # Electron default port
-        "http://localhost:8000",   # dev server via localhost alias
-        "http://localhost:58765",  # Electron via localhost alias
-    ],
+    allow_origins=_cors_origins(),
     allow_methods=["GET", "POST", "PUT", "DELETE"],  # PUT: /api/settings/rules
     allow_headers=["Content-Type", "X-Request-ID"],
     allow_credentials=False,
@@ -387,6 +398,9 @@ async def review_page(job_id: str, request: Request, page: int = 1):
         page_parse_error = bool(data.get("_parse_error"))
         page_ocr_empty = bool(data.get("_ocr_empty"))
         page_ocr_sparse = bool(data.get("_ocr_sparse"))
+        # C3 修复（Round 3）：OCR 不完整警告（MinerU 低置信度丢弃块）透出
+        # 到 review 横幅 — LLM 已被系统警告降级置信度，复核者需知道缺失原因
+        page_ocr_warning = str(data.get("_ocr_warning") or "")
         page_confidence = data.get("overall_confidence") or ""
         col_set: dict[str, None] = {}
         for step in data.get("steps", []) or []:
@@ -404,6 +418,7 @@ async def review_page(job_id: str, request: Request, page: int = 1):
         page_parse_error = False
         page_ocr_empty = False
         page_ocr_sparse = False
+        page_ocr_warning = ""
         page_confidence = ""
 
     # Count findings by severity (all pages, for status bar)
@@ -462,7 +477,10 @@ async def review_page(job_id: str, request: Request, page: int = 1):
         "page_parse_error": page_parse_error,
         "page_ocr_empty": page_ocr_empty,
         "page_ocr_sparse": page_ocr_sparse,
+        "page_ocr_warning": page_ocr_warning,
         "page_confidence": page_confidence,
+        # cr-19: 实际 OCR 后端（failover 后与配置不同 — GMP 复核可见性）
+        "ocr_backend_used": job["ocr_backend_used"] if "ocr_backend_used" in job.keys() else None,
     })
 
 

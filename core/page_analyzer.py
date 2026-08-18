@@ -128,6 +128,10 @@ _SPARSE_TEXT_THRESHOLD = 80
 _SPARSE_TABLE_ROWS_MIN = 3
 _SPARSE_TABLE_CHARS_MAX = 200
 
+# B1: pipeline 在 raw_html 前注入的 OCR 不完整警告前缀（MinerU 低置信度
+# 丢弃块计数）。analyze_page 将其剥离出 fenced 数据区 → system 警告区。
+_OCR_WARNING_RE = re.compile(r"^\[OCR 警告:\s*([^\]]+)\]")
+
 # ── Schema validation ──────────────────────────────────────────
 REQUIRED_PAGE_FIELDS = {"page_info", "steps"}
 REQUIRED_PAGE_INFO_FIELDS = {"title"}
@@ -297,6 +301,16 @@ async def analyze_page(html: str, page_num: int, *, job_id: str = "") -> dict:
             "_prompt_version": CURRENT_PROMPT_VERSION,
         }
 
+    # B1 修复（Round 3）：pipeline 在 raw_html 前注入的 `[OCR 警告: ...]`
+    # 前缀（MinerU 低置信度丢弃块计数）原本直接落入 <PBC_UNTRUSTED_OCR>
+    # fenced 数据区 — 被 LLM 当作 OCR 数据的一部分，降级提示可能被忽略。
+    # 这里把它剥离出来，转为 system 区的显式警告（与稀疏页警告同机制）。
+    ocr_warning = None
+    m = _OCR_WARNING_RE.match(cleaned)
+    if m:
+        ocr_warning = m.group(1)
+        cleaned = cleaned[m.end():].lstrip()
+
     # robustness-E1: 稀疏内容页 — OCR 页数一致但内容极少，是"整页解析
     # 不完整"最常见的形态：模型把残缺内容当完整内容分析，可能生成幻觉
     # findings 且无任何提示。两类判定：
@@ -334,6 +348,13 @@ async def analyze_page(html: str, page_num: int, *, job_id: str = "") -> dict:
             "请仅基于现有内容谨慎分析：不要推测不存在的工序/参数/时间，"
             "若无法识别有效内容请将 overall_confidence 设为 low 且 "
             "findings 留空。"
+        )
+    if ocr_warning:
+        # B1：OCR 不完整警告放 system 区（fence 之外），LLM 按指令级别
+        # 对待 — 降低整页置信度而非当作数据噪声忽略。
+        prompt += (
+            f"\n\n[系统警告] OCR 后端报告本页存在内容缺失：{ocr_warning}。"
+            "请如实反映缺失（overall_confidence 降低），不要补全推测内容。"
         )
 
     # Phase 7 security: prompt-injection mitigation.
@@ -411,6 +432,41 @@ async def analyze_page(html: str, page_num: int, *, job_id: str = "") -> dict:
     errors = _validate_page_result(result)
     if errors:
         logger.warning(f"Page {page_num}: schema validation issues: {errors}")
+        # C1 修复（Round 3）：校验失败（缺字段/类型错）不再静默入库 —
+        # 类型污染是 Stage 3 规则层崩溃的主因（P1-2 系列）。带错误回显
+        # 重发一次（复用原 prompt + 原始 OCR 内容），仅限 1 次避免无限
+        # 重试；仍失败则入库 + _schema_warn 标记供人工复核关注。
+        fix_suffix = (
+            "\n\n[系统提示] 你上一次输出的 JSON 结构校验失败："
+            + "；".join(errors)
+            + "。请重新输出完整 JSON，确保：字段齐全、类型正确、"
+            "measurements 的 values 为对象而非字符串、steps 为数组。"
+            "不要添加解释，不要使用 markdown 围栏，直接输出 JSON。"
+        )
+        retry = await client.chat_json(
+            prompt_cfg["system"],
+            prompt + fix_suffix,
+            max_tokens=6000,
+            temperature=0.1,
+            timeout=240.0,
+            audit_ctx={
+                "job_id": job_id,
+                "page": page_num,
+                "stage": "page_analysis_schema_fix",
+                "prompt_version": CURRENT_PROMPT_VERSION,
+            },
+        )
+        if isinstance(retry, dict) and not retry.get("_parse_error"):
+            if isinstance(retry.get("page_info"), dict) or isinstance(retry.get("steps"), list):
+                retry_errors = _validate_page_result(retry)
+                if not retry_errors:
+                    logger.info(
+                        f"Page {page_num}: schema fix retry produced valid result"
+                    )
+                    result = retry
+                    errors = []
+        if errors:
+            result["_schema_warn"] = errors[:5]
     # P1-2: deep sanitize before persisting — rule layer must never touch
     # type-polluted elements (would crash the whole Stage 3)
     _sanitize_page_result(result)
@@ -420,20 +476,33 @@ async def analyze_page(html: str, page_num: int, *, job_id: str = "") -> dict:
     if is_sparse:
         # 稀疏页标记：即使 LLM 返回了结果，也如实告知下游"输入可能不完整"
         result["_ocr_sparse"] = True
+    if ocr_warning:
+        # B1：OCR 不完整警告随结果透出（review 页横幅可见）
+        result["_ocr_warning"] = ocr_warning
     return result
 
 
 # HTML 截断上限 — 超长表格页（大矩阵/多表页）防 token 溢出；截断带显式标记
 _MAX_HTML_CHARS = 12000
+# 截断标记预留预算 — 标记文本（含跳过表格数/裁剪说明）≤ 128 字符
+_MARKER_BUDGET = 128
 
 
 def _clean_html(html: str) -> str:
     """Reduce HTML token noise: strip style attributes, class names, etc.
 
-    截断策略（OCR 完整性）：上限 MAX_HTML_CHARS（12000 字符 ≈ 6-10K tokens，
-    主流模型上下文安全）。截断时对齐表格边界并在末尾追加显式标记 — LLM
-    看到 [HTML 已截断] 会知道信息不完整，不会把残缺内容当完整内容分析
-    （静默截断是"OCR 缺内容"另一常见根因）。
+    截断策略（OCR 完整性，P1-5 重构）：上限 MAX_HTML_CHARS（12000 字符
+    ≈ 6-10K tokens，主流模型上下文安全）。
+
+    表格优先（batch records 的核心信息在表格）：
+    1. 提取整页所有 <table> 块，预算优先保证表格完整保留（按原顺序）；
+       预算不足时跳过靠后的表格（不切开，语义完整）
+    2. 表间正文文本在剩余预算内裁剪，超出部分截断 — 文本可砍，表格不砍
+    3. 显式截断标记：LLM 看到 [HTML 已截断] 会知道信息不完整，不会把
+       残缺内容当完整内容分析（静默截断是"OCR 缺内容"另一常见根因）
+
+    无表格页退回 P2-5 的安全截断（对齐 </table>/<tr>/<td> 边界，避免
+    切开标签给 LLM 非法 HTML）。
     """
     orig_len = len(html)
     # Remove style='...' and style="..."
@@ -446,7 +515,82 @@ def _clean_html(html: str) -> str:
     cleaned = re.sub(r"\s+", " ", cleaned)
     if len(cleaned) <= _MAX_HTML_CHARS:
         return cleaned
-    # 截断并对齐最近表格边界（避免把 <tr> 从中间切断）
+    return _truncate_tables_first(cleaned, orig_len)
+
+
+def _truncate_tables_first(cleaned: str, orig_len: int) -> str:
+    """表格优先截断：表格预算优先保证，表间文本用剩余预算裁剪。
+
+    两遍评估：
+    - 表格总长 ≤ 预算 → 全部表格完整保留（按原顺序），正文在剩余预算
+      内裁剪（文本可砍，表格不砍）
+    - 表格总长 > 预算：
+      - 单表超限 → 回退表内安全对齐截断（P2-5），保留前半数据
+      - 多表超限 → 按序保留放得下的表格，超预算的表整表跳过（不切开，
+        语义完整）+ 标记告知
+    """
+    table_re = re.compile(r"<table>.*?</table>", re.S)
+    matches = list(table_re.finditer(cleaned))
+    if not matches:
+        # 无表格页 — 保留 P2-5 安全对齐截断逻辑
+        return _truncate_plain(cleaned, orig_len)
+
+    # 组装有序片段流：text / table 交替
+    segments: list[tuple[str, str]] = []
+    pos = 0
+    for m in matches:
+        if m.start() > pos:
+            segments.append(("text", cleaned[pos:m.start()]))
+        segments.append(("table", m.group(0)))
+        pos = m.end()
+    if pos < len(cleaned):
+        segments.append(("text", cleaned[pos:]))
+
+    budget = _MAX_HTML_CHARS - _MARKER_BUDGET
+    table_total = sum(len(s) for k, s in segments if k == "table")
+    keep_all_tables = table_total <= budget
+    text_budget = budget - table_total if keep_all_tables else 0
+
+    out: list[str] = []
+    used = 0
+    truncated_text = False
+    skipped_tables = 0
+    for kind, seg in segments:
+        if kind == "table":
+            if keep_all_tables or used + len(seg) <= budget:
+                out.append(seg)
+                used += len(seg)
+            else:
+                # 预算不足的表格整表跳过 — 不切开，语义完整 + 标记告知
+                skipped_tables += 1
+        else:
+            if text_budget <= 0:
+                truncated_text = True
+                continue
+            if len(seg) <= text_budget:
+                out.append(seg)
+                text_budget -= len(seg)
+            else:
+                # 文本可裁剪：截到剩余预算并去尾部空白
+                out.append(seg[:text_budget].rstrip())
+                text_budget = 0
+                truncated_text = True
+
+    # 单表超限：表格一个都没保住 → 回退表内对齐截断（保留前半数据）
+    if skipped_tables == len([s for k, s in segments if k == "table"]) and not out:
+        return _truncate_plain(cleaned, orig_len)
+
+    marker = f"\n[HTML 已截断：原文 {orig_len} 字符，超过上限 {_MAX_HTML_CHARS}"
+    if skipped_tables:
+        marker += f"，跳过 {skipped_tables} 个表格"
+    if truncated_text:
+        marker += "，部分正文被裁剪"
+    marker += "，本页信息可能不完整]"
+    return "".join(out) + marker
+
+
+def _truncate_plain(cleaned: str, orig_len: int) -> str:
+    """无表格内容的安全截断（P2-5 对齐）：避免把 <tr>/<td> 从中间切断。"""
     cut = cleaned[:_MAX_HTML_CHARS]
     boundary = cut.rfind("</table>")
     if boundary > _MAX_HTML_CHARS * 0.6:

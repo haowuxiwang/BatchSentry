@@ -29,6 +29,7 @@ from pathlib import Path
 import requests
 
 from config import config
+from core.security import redact_urls
 from logging_config import ocr_job_id_var, JobIdFilter
 
 logger = logging.getLogger(__name__)
@@ -45,7 +46,15 @@ POLL_TIMEOUT = 1800  # 30 分钟（批记录 PDF 较大，MinerU 解析耗时较
 
 # MinerU API 入口 — 默认官方地址；私有化部署/代理场景可用
 # MINERU_BASE_URL 覆盖（对抗审查 cr-17：此前硬编码无法配置）。
-_API_BASE = os.getenv("MINERU_BASE_URL", "https://mineru.net/api/v4").rstrip("/")
+# T2.2：改为运行时动态读取（Settings 页保存 MINERU_BASE_URL 后
+# 立即生效，无需重启；此前是模块导入期常量）。
+_DEFAULT_API_BASE = "https://mineru.net/api/v4"
+
+
+def _api_base() -> str:
+    """当前 MinerU API 入口（尾斜杠已剥离）。"""
+    url = os.getenv("MINERU_BASE_URL", _DEFAULT_API_BASE).strip()
+    return url.rstrip("/")
 
 
 def _headers() -> dict:
@@ -91,7 +100,7 @@ def submit_pdf(pdf_path: str) -> tuple[str, str]:
 
     # Step 1: 申请上传链接
     resp = requests.post(
-        f"{_API_BASE}/file-urls/batch",
+        f"{_api_base()}/file-urls/batch",
         headers=_headers(),
         json={
             "files": [{"name": pdf_name, "is_ocr": True}],
@@ -103,28 +112,38 @@ def submit_pdf(pdf_path: str) -> tuple[str, str]:
         timeout=60,
     )
     if resp.status_code != 200:
-        raise RuntimeError(f"申请上传链接失败 HTTP {resp.status_code}: {resp.text[:300]}")
+        raise RuntimeError(
+            "申请上传链接失败 HTTP "
+            f"{resp.status_code}: {redact_urls(resp.text[:300])}"
+        )
 
     result = resp.json()
     if result.get("code") != 0:
-        raise RuntimeError(f"申请上传链接失败: {result.get('msg', result)}")
+        raise RuntimeError(
+            f"申请上传链接失败: {redact_urls(str(result.get('msg', result)))}"
+        )
 
     data = result["data"]
     batch_id = data["batch_id"]
     file_urls = data["file_urls"]
     if not file_urls:
-        raise RuntimeError(f"未返回上传 URL: {data}")
+        raise RuntimeError(f"未返回上传 URL: {redact_urls(str(data))}")
 
     upload_url = file_urls[0]
     logger.info(f"[MinerU] 上传链接获取成功, batch_id={batch_id}")
 
     # Step 2: PUT 上传文件（注意：上传时不要设置 Content-Type）
     logger.info("[MinerU] 上传文件到 OSS...")
-    with open(pdf_path, "rb") as f:
-        upload_resp = requests.put(upload_url, data=f, timeout=300)
+    try:
+        with open(pdf_path, "rb") as f:
+            upload_resp = requests.put(upload_url, data=f, timeout=300)
+    except requests.exceptions.RequestException as e:
+        # requests 异常消息可能回显完整签名 URL（MaxRetryError）— 脱敏后抛
+        raise RuntimeError(f"文件上传网络错误: {redact_urls(str(e))}")
     if upload_resp.status_code != 200:
         raise RuntimeError(
-            f"文件上传失败 HTTP {upload_resp.status_code}: {upload_resp.text[:300]}"
+            "文件上传失败 HTTP "
+            f"{upload_resp.status_code}: {redact_urls(upload_resp.text[:300])}"
         )
     logger.info("[MinerU] 文件上传完成, 等待系统自动提交解析任务...")
 
@@ -141,7 +160,7 @@ def poll_job(batch_id: str, progress_callback=None) -> dict:
     供 pipeline 实时更新 job 进度（Stage 1 流式反馈）。
     """
     start = time.time()
-    url = f"{_API_BASE}/extract-results/batch/{batch_id}"
+    url = f"{_api_base()}/extract-results/batch/{batch_id}"
     consecutive_errors = 0
 
     while (time.time() - start) < POLL_TIMEOUT:
@@ -149,9 +168,11 @@ def poll_job(batch_id: str, progress_callback=None) -> dict:
             resp = requests.get(url, headers=_headers(), timeout=30)
         except requests.RequestException as e:
             consecutive_errors += 1
-            logger.warning(f"[MinerU] 轮询请求异常, 重试: {e}")
+            logger.warning(f"[MinerU] 轮询请求异常, 重试: {redact_urls(str(e))}")
             if consecutive_errors >= 5:
-                raise RuntimeError(f"MinerU poll failed: 5 consecutive network errors: {e}")
+                raise RuntimeError(
+                    f"MinerU poll failed: 5 consecutive network errors: {redact_urls(str(e))}"
+                )
             time.sleep(POLL_INTERVAL)
             continue
 
@@ -180,9 +201,11 @@ def poll_job(batch_id: str, progress_callback=None) -> dict:
             continue
         if j.get("code") != 0:
             consecutive_errors += 1
-            logger.warning(f"[MinerU] 轮询返回错误码: {j.get('msg')}")
+            logger.warning(f"[MinerU] 轮询返回错误码: {redact_urls(str(j.get('msg')))}")
             if consecutive_errors >= 5:
-                raise RuntimeError(f"MinerU poll failed: 5 consecutive error codes: {j.get('msg')}")
+                raise RuntimeError(
+                    f"MinerU poll failed: 5 consecutive error codes: {redact_urls(str(j.get('msg')))}"
+                )
             time.sleep(POLL_INTERVAL)
             continue
 
@@ -217,7 +240,7 @@ def poll_job(batch_id: str, progress_callback=None) -> dict:
             return task
         if state == "failed":
             err = task.get("err_msg", "未知错误")
-            raise RuntimeError(f"[MinerU] 解析失败 task={task_id}: {err}")
+            raise RuntimeError(f"[MinerU] 解析失败 task={task_id}: {redact_urls(str(err))}")
 
         time.sleep(POLL_INTERVAL)
 
@@ -238,13 +261,19 @@ def download_result(task_result: dict) -> list[dict]:
     """
     zip_url = task_result.get("full_zip_url")
     if not zip_url:
-        raise RuntimeError(f"[MinerU] 结果中无 full_zip_url: {task_result}")
+        raise RuntimeError(
+            f"[MinerU] 结果中无 full_zip_url: {redact_urls(str(task_result))}"
+        )
 
-    # 对抗审查（cr-16）：zip_url 是签名 CDN 地址，query 可能带签名 token —
-    # 日志只记 pathname（pipeline.log 可查排障）。
+    # 对抗审查（cr-16）+ P1-7：zip_url 是签名 CDN 地址，query 可能带签名
+    # token — 日志只记 pathname；异常消息同样脱敏（requests 网络异常会
+    # 回显完整 URL，冒泡进 jobs.error_message → 报告/通知反刍泄露）。
     from urllib.parse import urlsplit
     logger.info(f"[MinerU] 下载结果 zip: {urlsplit(zip_url).path[:80]}...")
-    resp = requests.get(zip_url, timeout=300, verify=True)
+    try:
+        resp = requests.get(zip_url, timeout=300, verify=True)
+    except requests.RequestException as e:
+        raise RuntimeError(f"[MinerU] 下载 zip 网络错误: {redact_urls(str(e))}") from e
     if resp.status_code != 200:
         raise RuntimeError(f"[MinerU] 下载 zip 失败 HTTP {resp.status_code}")
 
@@ -264,19 +293,24 @@ def download_result(task_result: dict) -> list[dict]:
         full_md_name = next((n for n in names if n.endswith("full.md")), None)
 
         if content_list_name:
-            pages = _split_pages_by_content_list(zf, content_list_name)
-            # 完整性对照（OCR 鲁棒性）：content_list 结构化解析若丢失大部分
-            # 内容（格式漂移/未知块类型/服务端降级），静默输出残缺页会让
-            # 下游 LLM 拿到残缺信息。用 full.md（MinerU 官方合并文本）做
-            # 兜底对照：逐页文本总量 < full.md 总量 50% 时回退 full.md 拆分。
+            pages, n_tables, n_paragraphs = _split_pages_by_content_list(
+                zf, content_list_name
+            )
+            # 完整性对照（OCR 鲁棒性，P1-4 重构）：content_list 结构化解析若
+            # 丢失大部分内容（格式漂移/未知块类型/服务端降级），静默输出残缺
+            # 页会让下游 LLM 拿到残缺信息。用 full.md（MinerU 官方合并文本）
+            # 按"结构维度"兜底对照 — 字符数比值对照不可靠：表格保留为 HTML
+            # 时标签膨胀改变总量（50% 阈值既误报又漏检表格丢失），改为三个
+            # 高信号结构信号：页数差 / 表格整体丢失 / 正文表格全丢。
             full_md_name = next((n for n in names if n.endswith("full.md")), None)
             if full_md_name:
                 full_md = zf.read(full_md_name).decode("utf-8", errors="replace")
-                extracted_total = sum(len(p["markdown"]["text"]) for p in pages)
-                if len(full_md.strip()) > 0 and extracted_total < len(full_md) * 0.5:
+                violated, reason = _structural_completeness_violated(
+                    full_md, len(pages), n_tables, n_paragraphs
+                )
+                if violated:
                     logger.warning(
-                        f"[MinerU] content_list 提取不完整 "
-                        f"({extracted_total} < {len(full_md) * 0.5:.0f} chars of full.md), "
+                        f"[MinerU] content_list 结构不完整（{reason}），"
                         f"回退 full.md 拆分 — 防止静默丢失页面内容"
                     )
                     pages = _split_pages_by_separator(full_md)
@@ -298,7 +332,44 @@ def download_result(task_result: dict) -> list[dict]:
     return pages
 
 
-def _split_pages_by_content_list(zf: zipfile.ZipFile, name: str) -> list[dict]:
+def _structural_completeness_violated(
+    full_md: str, n_pages: int, n_tables: int, n_paragraphs: int
+) -> tuple[bool, str]:
+    """结构维度完整性对照（P1-4）— 判定 content_list 是否丢失大部分内容。
+
+    背景：旧实现用"提取字符数 < full.md 50%"做对照，但 content_list 的
+    表格保留为 HTML（LLM 友好），标签膨胀使字符总量失真 — 阈值既不触发
+    （表格多时 HTML 总量反超），也漏检表格整体丢失。改为三个高信号
+    结构指标（任一命中即残缺）：
+
+    1. 页数差：content_list 分组页数显著少于 full.md 分页数（≥2 页，
+       ±1 容差分页符解析抖动）
+    2. 表格整体丢失：content_list 0 个表格 而 full.md 含 ≥2 行管道表
+       （批记录的核心信息在表格；全丢 = 灾难。管道表最少 2 行 — 表头+
+       数据，单行管道基本只可能是表内一行，回退 full.md 代价低、召回优先）
+    3. 正文+表格全丢：表格与段落都没有（只剩页眉/页脚/页码等噪声块），
+       而 full.md 有实质内容
+    """
+    full_stripped = full_md.strip()
+    if not full_stripped:
+        return False, ""
+    md_pages = len(_split_pages_by_separator(full_md))
+    pipe_rows = sum(1 for ln in full_md.splitlines() if ln.strip().startswith("|"))
+    if md_pages >= 1 and n_pages < md_pages - 1:
+        return True, f"页数缺失（content_list {n_pages} 页 < full.md {md_pages} 页）"
+    if n_tables == 0 and pipe_rows >= 2:
+        return True, (
+            f"表格全部丢失（content_list 0 个表格，"
+            f"full.md 含 {pipe_rows} 行管道表）"
+        )
+    if n_paragraphs == 0 and pipe_rows == 0:
+        return True, "正文与表格均未提取（content_list 仅剩噪声块）"
+    return False, ""
+
+
+def _split_pages_by_content_list(
+    zf: zipfile.ZipFile, name: str
+) -> tuple[list[dict], int, int]:
     """用 content_list 按页分组，保留整页结构（表格 HTML + 正文）。
 
     优先 content_list_v2.json，其结构为按页分组的二维数组
@@ -318,6 +389,10 @@ def _split_pages_by_content_list(zf: zipfile.ZipFile, name: str) -> list[dict]:
     3. 页眉/标题块保留为 markdown 标题（含起草/审核日期信息）
     4. 图片/公式块保留占位提示，让 LLM 知道此处有图
     5. 每页开头添加 "## 第 N 页" 标题，便于 LLM 理解页面边界
+
+    Returns:
+        (pages, n_tables, n_paragraphs) — 页面列表 + 结构统计
+        （表格/段落块数量，供完整性对照用）
     """
     raw = zf.read(name).decode("utf-8", errors="replace")
     try:
@@ -328,10 +403,16 @@ def _split_pages_by_content_list(zf: zipfile.ZipFile, name: str) -> list[dict]:
     # v2 格式：按页分组的二维数组，索引即页号（0-based）
     if isinstance(blocks, list) and blocks and isinstance(blocks[0], list):
         pages = []
+        n_tables = n_paragraphs = 0
         for i, group in enumerate(blocks):
-            text, discarded_count = _compose_page_markdown(
-                i + 1, [b for b in group if isinstance(b, dict)]
-            )
+            block_dicts = [b for b in group if isinstance(b, dict)]
+            for b in block_dicts:
+                btype = b.get("type", "text")
+                if btype == "table":
+                    n_tables += 1
+                elif btype in ("paragraph", "text", "title"):
+                    n_paragraphs += 1
+            text, discarded_count = _compose_page_markdown(i + 1, block_dicts)
             page_dict = {
                 "markdown": {"text": text},
                 "page_count": i + 1,
@@ -341,7 +422,7 @@ def _split_pages_by_content_list(zf: zipfile.ZipFile, name: str) -> list[dict]:
                 # 暴露页级 OCR 完整性信息，pipeline 用于 UI 警告 + LLM 降级提示
                 page_dict["_discarded_count"] = discarded_count
             pages.append(page_dict)
-        return pages
+        return pages, n_tables, n_paragraphs
 
     # v1 格式：扁平数组 + page_idx 字段
     if not isinstance(blocks, list):
@@ -362,8 +443,15 @@ def _split_pages_by_content_list(zf: zipfile.ZipFile, name: str) -> list[dict]:
 
     # 生成连续页（1-based，与 pipeline 一致）
     pages = []
+    n_tables = n_paragraphs = 0
     for i in range(max_page + 1):
         blocks_for_page = page_blocks.get(i, [])
+        for b in blocks_for_page:
+            btype = b.get("type", "text")
+            if btype == "table":
+                n_tables += 1
+            elif btype in ("paragraph", "text", "title"):
+                n_paragraphs += 1
         text, discarded_count = _compose_page_markdown(i + 1, blocks_for_page)
         page_dict = {
             "markdown": {"text": text},
@@ -373,7 +461,7 @@ def _split_pages_by_content_list(zf: zipfile.ZipFile, name: str) -> list[dict]:
         if discarded_count > 0:
             page_dict["_discarded_count"] = discarded_count
         pages.append(page_dict)
-    return pages
+    return pages, n_tables, n_paragraphs
 
 
 # 句末标点 — 用于判断 text 块是否构成完整段落
@@ -416,6 +504,19 @@ def _compose_page_markdown(page_num: int, blocks: list[dict]) -> tuple[str, int]
             discarded_count += 1
             continue
         content = _block_to_markdown(block)
+        if btype == "table":
+            # 表格块：先结束当前段落，表格前后加空行
+            flush_paragraph()
+            parts.append("")
+            if content:
+                parts.append(content)
+            else:
+                # P1-2: 表格结构+文本全部提取失败 — 显式占位并计数，
+                # 触发 pipeline 的"OCR 不完整"警告注入（此前整表静默丢失）
+                discarded_count += 1
+                parts.append("[表格内容提取失败 — OCR 结构缺失]")
+            parts.append("")
+            continue
         if not content:
             continue
 
@@ -425,12 +526,6 @@ def _compose_page_markdown(page_num: int, blocks: list[dict]) -> tuple[str, int]
             # 句末标点 → 结束当前段落
             if content and content[-1] in _SENTENCE_END:
                 flush_paragraph()
-        elif btype == "table":
-            # 表格块：先结束当前段落，表格前后加空行
-            flush_paragraph()
-            parts.append("")
-            parts.append(content)
-            parts.append("")
         elif btype in ("image", "equation"):
             # 图片/公式：先结束当前段落，占位提示独占一行
             flush_paragraph()
@@ -484,7 +579,11 @@ def _block_to_markdown(block: dict) -> str:
 
     if btype == "table":
         html = _table_html(block)
-        return html if html else ""
+        if html:
+            return html
+        # P1-2: HTML 提取失败不再静默丢整表 — fall through 到下方通用
+        # 文本提取（递归捞块内全部字符串），至少保留表格内容；连文本
+        # 都没有时由 _compose_page_markdown 计数注入缺失占位 + OCR 警告。
 
     if btype == "paragraph":
         txt = _content_text(block) or (block.get("text") or "").strip()
@@ -707,31 +806,39 @@ def run_ocr_pages(
         job_id: 日志前缀（透传 run_ocr）
 
     Returns:
-        [(page_num, markdown_text), ...]，保持 page_nums 顺序；
-        重跑后仍为空（服务端也识别不了）时返回原空文本。
+        [(page_num, markdown_text, discarded_count), ...]，保持 page_nums
+        顺序；重跑后仍为空（服务端也识别不了）时返回原空文本。
+        discarded_count 为该页因置信度过低被丢弃的块数（0 = 无），
+        供 pipeline 恢复写库时补回 OCR 不完整警告（与主流程一致，
+        D3 修复：此前自愈路径丢失该信息，恢复页被静默当作完整页）。
     """
     import fitz  # PyMuPDF — 切片 & 合并
 
-    results: list[tuple[int, str]] = []
+    results: list[tuple[int, str, int]] = []
     tmp_dir = Path(tempfile.mkdtemp(prefix="pbc_retry_"))
 
-    def _ocr_single(pno: int) -> str:
+    def _ocr_single(pno: int) -> tuple[str, int]:
         # 单页独立切片 OCR — P1-2/P2-1 的兜底路径
         pdoc = fitz.open()
         try:
             if 1 <= pno <= src_doc.page_count:
                 pdoc.insert_pdf(src_doc, from_page=pno - 1, to_page=pno - 1)
             if pdoc.page_count == 0:
-                return ""
+                return "", 0
             tmp = tmp_dir / f"single_{pno}.pdf"
             pdoc.save(tmp)
         finally:
             pdoc.close()
         try:
             spages = run_ocr(str(tmp), job_id=job_id)
-            return spages[0].get("markdown", {}).get("text", "") if spages else ""
+            if spages:
+                return (
+                    spages[0].get("markdown", {}).get("text", ""),
+                    spages[0].get("_discarded_count", 0),
+                )
+            return "", 0
         except Exception:
-            return ""  # 单页也失败 → 该页保持空，交由外层空页逻辑兜底
+            return "", 0  # 单页也失败 → 该页保持空，交由外层空页逻辑兜底
 
     try:
         src_doc = fitz.open(pdf_path)
@@ -745,7 +852,7 @@ def run_ocr_pages(
                             pdoc.insert_pdf(src_doc, from_page=pno - 1, to_page=pno - 1)
                     if pdoc.page_count == 0:
                         for pno in batch:
-                            results.append((pno, ""))
+                            results.append((pno, "", 0))
                         continue
                     tmp = tmp_dir / f"slice_{batch[0]}_{batch[-1]}.pdf"
                     pdoc.save(tmp)
@@ -758,12 +865,17 @@ def run_ocr_pages(
                     # 该批退回单页重试，避免此前的"已恢复页不落库、后续批不执行"
                     logger.warning(f"[{job_id}] OCR batch {batch} failed: {e} — falling back to single pages")
                     for pno in batch:
-                        results.append((pno, _ocr_single(pno)))
+                        results.append((pno, *_ocr_single(pno)))
                     continue
                 if len(pages) == len(batch):
                     for i, pno in enumerate(batch):
                         text = pages[i].get("markdown", {}).get("text", "") if i < len(pages) else ""
-                        results.append((pno, text or ""))
+                        discarded = (
+                            pages[i].get("_discarded_count", 0)
+                            if i < len(pages)
+                            else 0
+                        )
+                        results.append((pno, text or "", discarded))
                 else:
                     # P1-2：服务端返回页数 != 请求页数 → 按数组下标写会把
                     # 第 N 页内容张冠李戴到第 M 页。退回逐页独立重跑保证页号
@@ -773,7 +885,7 @@ def run_ocr_pages(
                         f"(expected {len(batch)}) — re-OCR each page standalone"
                     )
                     for pno in batch:
-                        results.append((pno, _ocr_single(pno)))
+                        results.append((pno, *_ocr_single(pno)))
         finally:
             src_doc.close()
     finally:

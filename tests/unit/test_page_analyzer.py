@@ -6,6 +6,7 @@
 - 错误处理：_parse_error / list 响应 / 空 list
 - prompt 构造：v3 系统提示 + 用户提示拼接
 """
+import re
 import pytest
 from unittest.mock import patch, AsyncMock, MagicMock
 
@@ -281,6 +282,42 @@ class TestHtmlCleaning:
         assert "<table>" in user_prompt
         assert "<td>X</td>" in user_prompt
 
+    def test_truncation_keeps_all_tables_trims_text(self):
+        """P1-5 表格优先：两小表 + 巨大正文 → 表格全保留，正文按预算裁剪。"""
+        from core.page_analyzer import _clean_html, _MAX_HTML_CHARS
+        table1 = "<table><tr><td>批号</td><td>112701</td></tr></table>"
+        table2 = "<table><tr><td>含量</td><td>99.2%</td></tr></table>"
+        huge_text = "<p>工序说明</p>" * 3000  # ~36K 字符，远超预算
+        html = table1 + huge_text + table2
+        out = _clean_html(html)
+        assert len(out) <= _MAX_HTML_CHARS
+        assert table1 in out  # 表1 完整
+        assert table2 in out  # 表2 完整（表格优先 — 即使它在正文后面）
+        assert "部分正文被裁剪" in out
+
+    def test_truncation_single_huge_table_falls_back_to_plain_alignment(self):
+        """P1-5 单表超预算：回退 P2-5 表内安全截断（保留前半数据 + 不切标签）。"""
+        from core.page_analyzer import _clean_html, _MAX_HTML_CHARS
+        huge_table = "<table><tr><td>" + "x" * (_MAX_HTML_CHARS + 500) + "</td></tr></table>"
+        out = _clean_html(huge_table)
+        assert len(out) <= _MAX_HTML_CHARS + 80  # 标记少量溢出容忍
+        # 不允许出现切开标签的残片（截断点后不应残留孤立的 <tr/></tr> 片段）
+        assert not re.search(r"<tr[^>]*$", out)
+
+    def test_truncation_skips_later_table_when_budget_exhausted(self):
+        """P1-5 多表超预算：按序保留放得下的表，超预算的表整表跳过 + 标记。"""
+        from core.page_analyzer import _clean_html, _MAX_HTML_CHARS
+        row = "<tr><td>行数据</td></tr>"
+        t1 = "<table>" + row * 200 + "</table>"  # ~4K
+        t2 = "<table>" + row * 200 + "</table>"  # ~4K（t1+t2 ≈ 8K < 预算）
+        t3 = "<table>" + row * 300 + "</table>"  # ~6K — 加上后超预算
+        out = _clean_html(t1 + t2 + t3)
+        assert t1 in out  # 前表保留
+        assert t2 in out  # 中表保留
+        assert t3 not in out  # 后表整表跳过（不切开）
+        assert "跳过" in out
+        assert len(out) <= _MAX_HTML_CHARS
+
 
 class TestEmptyPageShortCircuit:
     """robustness-D1: 空/无内容页短路 — 不调 LLM，返回 _ocr_empty 标记。"""
@@ -369,6 +406,51 @@ class TestSparsePageShortCircuit:
             result = await analyze_page(long_text, page_num=7)
 
         assert result.get("_ocr_sparse") is not True
+
+
+class TestOcrWarningSeparation:
+    """B1 修复（Round 3）：pipeline 注入的 `[OCR 警告: ...]` 前缀必须从
+    <PBC_UNTRUSTED_OCR> fenced 数据区剥离，转为 system 区显式警告 —
+    否则 LLM 把降级提示当作 OCR 数据的一部分（可被忽略）。"""
+
+    @pytest.mark.asyncio
+    async def test_warning_moved_out_of_data_zone(self):
+        """警告前缀从 prompt 数据区移除，转为 [系统警告]，result 带标记。"""
+        rows = "".join(f"<tr><td>第{i}行 {i}</td></tr>" for i in range(1, 6))
+        html = (
+            "[OCR 警告: 本页有 3 个内容块因置信度过低被 OCR 丢弃, "
+            "以下内容可能不完整, 分析仅供参考]\n\n"
+            f"<table>{rows}</table>"
+        )
+        mock_client = _make_mock_client(_ok_payload())
+        with patch("core.page_analyzer.get_llm_client", return_value=mock_client):
+            result = await analyze_page(html, page_num=4)
+
+        prompt_arg = mock_client.chat_json.call_args.args[1]
+        # 数据区不再含警告前缀（fence 内干净）
+        assert "[OCR 警告:" not in prompt_arg.split("<PBC_UNTRUSTED_OCR>")[1]
+        # 系统警告区含该内容
+        assert "[系统警告] OCR 后端报告本页存在内容缺失" in prompt_arg
+        assert "3 个内容块" in prompt_arg
+        # 结果标记透出（review 横幅用）
+        assert result["_ocr_warning"] == (
+            "本页有 3 个内容块因置信度过低被 OCR 丢弃, 以下内容可能不完整, "
+            "分析仅供参考"
+        )
+        # 表格内容仍完整送入 LLM
+        assert "第1行" in prompt_arg
+
+    @pytest.mark.asyncio
+    async def test_no_warning_prefix_untouched(self):
+        """无警告前缀的普通页：prompt 不含 OCR 警告段，无 _ocr_warning。"""
+        rows = "".join(f"<tr><td>第{i}行 {i}</td></tr>" for i in range(1, 6))
+        mock_client = _make_mock_client(_ok_payload())
+        with patch("core.page_analyzer.get_llm_client", return_value=mock_client):
+            result = await analyze_page(f"<table>{rows}</table>", page_num=2)
+
+        prompt_arg = mock_client.chat_json.call_args.args[1]
+        assert "OCR 后端报告本页存在内容缺失" not in prompt_arg
+        assert result.get("_ocr_warning") is None
 
 
 class TestSanitizePageResult:

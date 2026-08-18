@@ -12,7 +12,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Current phase**: Phase 12 (Feishu job notifications) + 2 rounds of adversarial review (22 fixes incl. sliced-OCR callback arity P0, poll non-JSON retry, report cache correctness; round 2: cr-13 upload CSRF guard, cr-17 config precedence JSON-wins, MinerU footer selective retention, failover threshold max(2,10%), empty-page tag-strip detection + small-file self-heal, page-mark HTML comments, MINERU_BASE_URL), v0.1.0, local single-user deployment via PyInstaller exe + Electron wrapper.
 
-**Test status**: 928 passed, 90.19% coverage (target ≥90%). Note: test_config/test_health share the process-global config singleton — both now restore original values (order-independent).
+**Round 3 (P1-4~P1-8 + P2-1~P2-6)**: image upload (jpg/png/webp/bmp/tif/tiff → backend converts to PDF), MinerU structural completeness check, table-first truncation, review→pending full re-analysis state machine, signed-URL redaction, stuck-job recovery notifications + provider-test audit, unified GET/DELETE endpoint guards, recover_stuck_jobs process-start cutoff, CORS port constants.
+
+**Round 3 audit round 3 (A1/B1/B2/C1/C2/C3/D3/A3)**: empty-page self-heal extended to Paddle (fitz single-page re-submit), `[OCR 警告]` prefix moved OUT of the fenced OCR data zone into the system-warning zone (`_OCR_WARNING_RE` in page_analyzer + `_ocr_warning` result key → review banner), schema-validation-failure fix-hint retry (1 retry with error echo, `_schema_warn` marker if still invalid), `run_ocr_pages` returns `(page, text, discarded_count)` so self-healed pages re-attach the OCR warning prefix, severity counts moved after dedup (log matches real DB writes), archive-nonexistent test corrected to 404 (unified guard behavior).
+
+**Test status**: 974 passed, 93.63% coverage (target ≥90%). Note: test_config/test_health share the process-global config singleton — both now restore original values (order-independent).
 
 ---
 
@@ -104,15 +108,16 @@ Entry point: `main.py` (dev) or `server.py` (bundled, port 58765).
 
 1. **Stage 1 — OCR** (`core/ocr_client.py` or `core/mineru_client.py`): submit PDF → poll → download JSON. 10-minute poll timeout, 5s interval. Blocking `requests` wrapped via `asyncio.to_thread`.
    **Dual-OCR failover**: `_get_ocr_chain()` builds a primary+secondary chain (primary = `OCR_BACKEND`, secondary = the other backend if its token/api_url is configured). `_run_ocr_with_failover()` retries the whole job on the secondary when the primary raises, returns 0 pages, or loses >20%/5 pages vs the PDF physical page count (`_pdf_page_count`). The actual backend is stored in `jobs.ocr_backend_used` and surfaced in `/api/jobs/{id}` + SSE snapshots (GMP traceability). Sliced mode (`OCR_SLICES>1`, MinerU only) keeps its own path without failover.
-   **Empty-page self-healing** (Phase 11): MinerU drops pages on >100MB PDFs (server-side defect; a page OCR'd standalone returns 1111-1702 chars). After page_cache write, pages with `<100` chars are re-OCR'd as small slices via `run_ocr_pages()` (two rounds: batch_size 3 then 1, only for mineru + ≥10-page files). Recovered pages UPDATE page_cache; audit_log records `stage1_empty_pages` / `stage1_empty_recovered`. Truly empty pages stay as-is and the review UI shows an `_ocr_empty` banner (manual review path).
-2. **Stage 2 — Per-page LLM** (`core/page_analyzer.py`): each page's HTML table → LLM extraction prompt → structured JSON with `steps[].measurements[]` time series. Uses string concatenation (NOT `.format()`) to avoid brace collision with HTML. 240s timeout (fix-hint JSON-recovery retries inherit it), 3 retries with exponential backoff.
+   **MinerU structural completeness (Round 3 P1-4b)**: `_split_pages_by_content_list` returns `(pages, n_tables, n_paragraphs)`; MinerU pages whose `n_tables == 0` while the PDF physical page count ≥2 are treated as incomplete → whole-job failover to the secondary OCR backend.
+   **Empty-page self-healing** (Phase 11): MinerU drops pages on >100MB PDFs (server-side defect; a page OCR'd standalone returns 1111-1702 chars). After page_cache write, pages with `<100` chars (tag-stripped text length) are re-OCR'd as small slices via `run_ocr_pages()` (two rounds: batch_size 3 then 1; mineru + any file size). Recovered pages UPDATE page_cache; audit_log records `stage1_empty_pages` / `stage1_empty_recovered`. **Round 3 audit A1**: extended to Paddle (fitz single-page slice re-submitted once, no slice API); **D3**: `run_ocr_pages` returns `(page, text, discarded_count)` and self-healed pages re-attach the `[OCR 警告]` prefix when the slice still dropped low-confidence blocks (previously silently treated as complete). Truly empty pages stay as-is and the review UI shows an `_ocr_empty` banner (manual review path).
+2. **Stage 2 — Per-page LLM** (`core/page_analyzer.py`): each page's HTML table → LLM extraction prompt → structured JSON with `steps[].measurements[]` time series. Uses string concatenation (NOT `.format()`) to avoid brace collision with HTML. 240s timeout (fix-hint JSON-recovery retries inherit it), 3 retries with exponential backoff. **Round 3 audit B1**: the `[OCR 警告:...]` prefix injected by the pipeline is stripped out of the `<PBC_UNTRUSTED_OCR>` fenced data zone (`_OCR_WARNING_RE`) and re-injected as a `[系统警告]` in the system zone — plus an `_ocr_warning` result key surfaced in the review banner (C3) — so LLM treats it as an instruction-level signal instead of ignorable OCR data. **C1**: schema-validation failures trigger 1 fix-hint retry echoing the errors (`_schema_warn` marker persists the page as analysed-but-flagged if still invalid).
 3. **Stage 3 — Cross-page analysis** (`core/cross_page_analyzer.py`): rule-based time reversal + LLM-based semantic anomalies + user-defined compliance rules injected into the LLM prompt (`source=user_rule` findings; `findings.user_rule_id` carries the matched rule id; `prompt_version` carries a rules content hash for GMP traceability). All write to the same `findings` table with `source` field (`rule` / `llm_page` / `llm_cross` / `llm_fallback` / `user_rule`).
 
 **Job completion notifications (Phase 12, `core/notify.py`)**: on terminal state (review / partial_review / error / cancelled), `notify_job()` pushes a Feishu summary. Two channels: webhook group bot or app_bot DM (event subscription). 90-min dedup cache; notification failure never blocks the pipeline. Config in `config.json` under the `feishu` keys, editable from the Settings page ("飞书通知" section, includes a "测试连接" button hitting `POST /api/settings/test_feishu`).
 
 **Live progress (SSE, Phase 10)**: `GET /api/jobs/{id}/stream` pushes a progress snapshot every 3s (default `message` event, `done` event + close on terminal state, `error` event when the job is missing). Review page subscribes and hot-refreshes the current page's findings as `pages_analyzed` grows (page-level streaming — no need to wait for the whole job). Upload page tracks active job rows the same way: inline `OCR 12/51` counts, per-page analysis counts, and auto re-enabling of archive/delete buttons at terminal state. Frontend logs page-level events via `[PBC]` logger.
 
-**State machine** (`pipeline.VALID_TRANSITIONS`): `pending → ocr_running → ocr_done → analyzing → review | partial_review | error | cancelled`. Terminal states can `archived`. Invalid transitions raise `InvalidTransitionError`.
+**State machine** (`pipeline.VALID_TRANSITIONS`): `pending → ocr_running → ocr_done → analyzing → review | partial_review | error | cancelled`. Terminal states can `archived`. **Round 3 P1-6**: `review → pending` allowed (full re-analysis; `partial_review → pending` also allowed). Invalid transitions raise `InvalidTransitionError`.
 
 ### Data Flow
 
@@ -141,7 +146,7 @@ SQLite via `aiosqlite` with WAL mode. Singleton connection in `db/client.py`.
 
 | Router | Prefix | Purpose |
 |---|---|---|
-| `jobs.py` | `/api/jobs` | Upload (8MB chunked, 200MB max), status, cancel, retry, archive, unarchive, delete, page data, findings |
+| `jobs.py` | `/api/jobs` | Upload (8MB chunked, 200MB max; PDF or image), status, cancel, retry, archive, unarchive, delete, page data, findings |
 | `review.py` | `/api/jobs/{id}/findings` | List/get/update findings (confirm/reject/correct) + audit log + page measurements |
 | `report.py` | `/api/jobs/{id}/report.{md,json}` | Export Markdown + JSON reports |
 | `settings.py` | `/api/settings` | Read (masked) / update `config.json` with live reload |
@@ -166,9 +171,10 @@ API routes emit business logs (upload/cancel/retry/archive/delete/finding update
 
 ### Security Posture
 
-- **CORS**: only `127.0.0.1:8000` (dev uvicorn) and `127.0.0.1:58765` (Electron), per `main.py` (Phase 8 tightened). `localhost` hosts pass `is_local_request()` on the settings API but NOT the CORS allowlist — use `http://127.0.0.1:8000` in dev. `file://` removed to prevent XSS via Electron renderer.
+- **CORS**: allowlist generated from `config["app"].port` (Round 3 B8) — 127.0.0.1 + localhost on the actual serving port (dev 8000 / Electron 58765 via `PORT` env). Port constant lives in `config.py` (`port=_env_int("PORT", _env_int("APP_PORT", 8000))`); changing `electron/main.js` `SERVER_PORT` no longer breaks CORS. `file://` removed to prevent XSS via Electron renderer.
 - **CORS headers**: restricted to `Content-Type, X-Request-ID` (not `*`).
-- **Upload**: 8MB chunked streaming, `Path(file.filename).name` sanitization, 200MB hard limit, empty-file rejection, `%PDF-` magic bytes check, MD5 content-hash duplicate rejection (409, `force=1` bypass).
+- **Endpoint guards (unified)**: all state-changing endpoints (upload/cancel/retry/archive/unarchive/delete/settings/shutdown/health-probe) AND all GET read endpoints (jobs list/status/page image/SSE/findings/audit/reports, Round 3 P2-1) run `is_local_request()` — non-local `Host` → 403. GET read endpoints were previously unguarded (side-channel probing via `<img>/<script>` from hostile pages).
+- **Upload**: 8MB chunked streaming, `Path(file.filename).name` sanitization, 200MB hard limit, empty-file rejection, magic bytes check (`%PDF-` for PDF; per-format prefixes for jpg/png/webp/bmp/tif/tiff), MD5 content-hash duplicate rejection (409, `force=1` bypass). Empty filename falls back to `{job_id}.pdf` (still magic-checked).
 - **SQL**: all queries parameterized (`?` placeholders).
 - **Secrets**: `.env` never committed; Settings API masks keys (`sk-abcd...wxyz`).
 - **PDF preview**: pages are rendered by PyMuPDF to JPEG (quality 82) via `GET /api/jobs/{id}/page/{n}` and shown as `<img>` (zoom capped at 2000px, cached 6 docs / 30min TTL, render in thread pool). `content_disposition_type="inline"` for the raw PDF endpoint.
@@ -210,10 +216,13 @@ The probe does NOT submit real OCR/LLM work — it just verifies auth + connecti
 - **GMP audit trail**: every LLM call (per-page + cross-page + fallback) is recorded in `llm_call_audit` table with provider, protocol, model, prompt_version, token usage, latency, success/error — for traceability.
 - **JSON parsing resilience** (`llm/client.py:_parse_json`): handles markdown fences, leading text, both `{...}` and `[...]`, truncated JSON recovery. Parse failures trigger a fix-hint retry (`chat_json`, up to 2 extra single-shot calls, no API-level backoff) — found by the 51-page real-file regression (page 19 returned ```json-fenced output that survived the API call but failed parsing).
 - **Upload dedup**: MD5 computed during chunked streaming (schema v3, `jobs.md5`); identical content → 409 with existing job hint. Dedup check + INSERT are inside `db_lock` (no TOCTOU race).
-- **HTML cleaning** (`page_analyzer.py`): strips `style=`/`width=`, simplifies img src, truncates to 12000 chars aligned to table boundary with explicit truncation marker (LLM knows info is incomplete). Prevents token overflow.
+- **Image upload (Round 3 P1-4)**: jpg/png/webp/bmp/tif/tiff accepted; backend converts to PDF (Pillow `exif_transpose` for camera orientation + PyMuPDF at 300 DPI) so pipeline/OCR/LLM/review/report stay untouched. Original image archived in job_dir; `pdf_path` points at the converted `<job_id>.pdf`; MD5 is computed on the ORIGINAL image bytes (dedup works); audit_log records `source=image`. Magic bytes checked per format independently of extension.
+- **HTML cleaning** (`page_analyzer.py`): strips `style=`/`width=`, simplifies img src, truncates to 12000 chars **table-first** (Round 3 P1-5: keep table content over body text; single oversized table falls back to plain truncation with explicit marker; multiple tables keep the fitting prefix). LLM knows info is incomplete. Prevents token overflow.
 - **Rule + LLM hybrid**: rule-based checks (deterministic, no token cost) + LLM-based semantic anomalies. Both feed `findings` table with `source` field.
 - **Resume**: pipeline skips pages that already have `structured_json` in `page_cache`.
+- **Full re-analysis (Round 3 P1-6)**: `retry` on a `review`-state job = full re-analysis (clears findings + NULLs `structured_json`, keeps `raw_html` OCR cache, audit `analysis_reset`); `partial_review` still retries only missing pages.
 - **Fault tolerance**: single page LLM failure sets `_parse_error` flag, cross-page analysis skips it, job continues to `partial_review`.
+- **Crash recovery guard (Round 3 P2-x)**: `recover_stuck_jobs(process_started_at)` only marks jobs with `created_at` EARLIER than the process start as error — new uploads racing the async recovery task are never mis-marked.
 
 ---
 
