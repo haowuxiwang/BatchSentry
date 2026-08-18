@@ -161,3 +161,59 @@ def is_local_request(request) -> bool:
         return origin_host in ("localhost", "127.0.0.1", "::1")
     except ValueError:
         return False
+
+
+# ── 签名 URL 反刍脱敏（P1-7） ────────────────────────────────────────────
+# OCR 服务的 result URL 是签名 CDN 地址（query 携带签名 token）。requests
+# 的 MaxRetryError 等异常消息会回显完整 URL（含 query），这些消息一路
+# 进入 jobs.error_message → 报告/飞书通知 → 反刍泄露。所有进入异常消息
+# /日志的 URL 必须经 redact_urls() 过滤后再传递。
+_URL_RE = None
+
+
+def _build_url_re():
+    global _URL_RE
+    if _URL_RE is None:
+        import re as _re
+        # 两类形态：
+        # 1) 完整 URL：https://host/path?query
+        # 2) relative path + query（requests 的 MaxRetryError str 回显
+        #    "with url: /zip/out.zip?X-Amz-Signature=..." — 无 scheme）
+        _URL_RE = _re.compile(
+            r"""\b(?:https?://[^\s"'<>]+|/[^\s"'<>?]*\?[^\s"'<>]+)""", _re.I
+        )
+    return _URL_RE
+
+
+def redact_urls(text: str) -> str:
+    """Strip query strings (signed tokens) from URLs embedded in arbitrary text.
+
+    规则：
+    - 匹配完整 URL（https?://...）与 requests 异常回显的相对路径带 query
+      两种形态（`with url: /zip/out.zip?X-Amz-Signature=...`）
+    - 有 query → 保留 scheme://netloc+path（或无 scheme 的相对 path），
+      query 整体替换为 ?<redacted>
+    - path 超长（签名也可能藏在 path 尾部）→ 截前 120 字符 + ...
+    - 无 query 的普通 URL/路径原样保留（配置类 URL 泄露面为 0，保留排障）
+
+    用于：OCR 客户端 raise 前（源头）、pipeline error_message 入库前（兜底）。
+    """
+    if not text or ("http" not in text.lower() and "?" not in text):
+        return text
+    regex = _build_url_re()
+
+    def _redact(m):
+        url = m.group(0)
+        try:
+            from urllib.parse import urlsplit
+            p = urlsplit(url)
+        except ValueError:
+            return "<redacted-url>"
+        if p.query:
+            return f"{p.path}?<redacted>" if not p.scheme else f"{p.scheme}://{p.netloc}{p.path}?<redacted>"
+        path = p.path[:120]
+        if len(p.path) > 120:
+            path += "..."
+        return f"{p.path}" if not p.scheme else f"{p.scheme}://{p.netloc}{path}"
+
+    return regex.sub(_redact, text)

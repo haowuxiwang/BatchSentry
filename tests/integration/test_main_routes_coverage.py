@@ -78,7 +78,7 @@ async def client_with_full_job(test_db, tmp_path):
 
     from main import app
     async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
+        transport=ASGITransport(app=app), base_url="http://localhost:8000"
     ) as c:
         yield c, str(pdf_path)
 

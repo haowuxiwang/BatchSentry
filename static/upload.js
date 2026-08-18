@@ -18,6 +18,9 @@
   const area = document.getElementById("upload-area");
   const status = document.getElementById("status");
 
+  // 图片上传（Phase 13）：与后端 _IMAGE_EXTENSIONS 同步 — 客户端预检
+  const IMAGE_EXTS = [".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"];
+
   log("upload.html loaded", {
     has_input: !!input,
     has_area: !!area,
@@ -101,9 +104,12 @@
       lastModified: new Date(file.lastModified).toISOString(),
       force,
     });
-    if (!file.name.toLowerCase().endsWith(".pdf")) {
-      log.warn("uploadFile — rejected (not .pdf)", file.name);
-      setStatus("仅支持 PDF 文件", "err");
+    if (
+      !file.name.toLowerCase().endsWith(".pdf") &&
+      !IMAGE_EXTS.some((e) => file.name.toLowerCase().endsWith(e))
+    ) {
+      log.warn("uploadFile — rejected (not pdf/image)", file.name);
+      setStatus("仅支持 PDF 或图片（jpg/png/webp/bmp/tif）", "err");
       return;
     }
     if (file.size > 200 * 1024 * 1024) {
@@ -376,6 +382,11 @@
       } catch (_) {
         return;
       }
+      // cr-19：成功帧重置断线计数 — 旧实现 errCount 粘滞，EventSource 正常
+      // 自动重连（retry: 2000）也会累积计数，3 次瞬时抖动后即使连接已恢复
+      // 也错误降级为 10s 轮询（与 review.js 的 retryCount 语义不一致）。
+      if (errCount > 0) errCount = 0;
+      log.info("SSE aggregated update", { jobs: (d.jobs || []).length });
       const jobs = Array.isArray(d) ? d : d.jobs || [];
       jobs.forEach((snap) => {
         if (!snap || !snap.id) return;
@@ -454,18 +465,42 @@
     const dot = li.querySelector(".status-dot");
     const stText = li.querySelector(".status-text");
     const pages = li.querySelector(".job-pages");
+    const err = li.querySelector(".job-error");
+    const ocrTag = li.querySelector(".job-ocr-backend");
     if (dot) dot.className = `w-1.5 h-1.5 rounded-full ${statusDotClass(st)}`;
     if (stText) stText.textContent = STATUS_ZH[st] || st;
     if (pages) {
       const prog = d.ocr_progress || {};
       if ((st === "ocr_running" || st === "ocr_done") && prog.total > 0) {
-        pages.textContent = `OCR ${prog.done}/${prog.total}`;
+        // 分片模式（MinerU + OCR_SLICES>1）下分析与 OCR 并行 — 同时显示两路进度
+        pages.textContent =
+          d.pages_analyzed > 0
+            ? `OCR ${prog.done}/${prog.total} · 分析 ${d.pages_analyzed}/${d.total_pages || "?"}`
+            : `OCR ${prog.done}/${prog.total}`;
       } else if (st === "analyzing") {
         pages.textContent = `分析 ${d.pages_analyzed || 0}/${d.total_pages || "?"}`;
       } else if (st === "partial_review" && d.error_message) {
         pages.textContent = `部分可复核 · ${d.pages_analyzed}/${d.total_pages || "?"} 页`;
       } else {
         pages.textContent = `${d.total_pages || "?"} 页`;
+      }
+    }
+    // cr-19：错误行实时显示失败原因（旧实现只有红点"出错"，原因需点进复核页）
+    if (err) {
+      if (st === "error" && d.error_message) {
+        err.textContent = d.error_message;
+        err.classList.remove("hidden");
+      } else {
+        err.classList.add("hidden");
+      }
+    }
+    // cr-19：实际使用的 OCR 后端（failover/自愈后留痕，GMP 追溯可见）
+    if (ocrTag) {
+      if (d.ocr_backend_used) {
+        ocrTag.textContent = `OCR: ${d.ocr_backend_used}`;
+        ocrTag.classList.remove("hidden");
+      } else {
+        ocrTag.classList.add("hidden");
       }
     }
   }
@@ -480,6 +515,8 @@
       status: d.status,
       total_pages: d.total_pages || 0,
       ocr_progress: d.ocr_progress || {},
+      pages_analyzed: d.pages_analyzed || 0,
+      ocr_backend_used: d.ocr_backend_used || "",
       error_message: d.error_message || "",
     };
     return renderJobRow(job, 0);
@@ -537,8 +574,16 @@
     metaEl.className =
       "text-[11px] text-muted-foreground mt-0.5 tabular-nums job-meta";
     metaEl.textContent = `${job.id} · ${job.created_at}`;
+    // cr-19：出错任务行直接显示失败原因（快照已透传 error_message，
+    // 旧实现 renderJobRow 不渲染 — 用户看不到错误，只能点进复核页）
+    const errEl = document.createElement("div");
+    errEl.className =
+      "job-error text-[11px] text-destructive mt-0.5 truncate";
+    errEl.textContent = job.error_message || "";
+    if (st !== "error" || !job.error_message) errEl.classList.add("hidden");
     info.appendChild(titleEl);
     info.appendChild(metaEl);
+    info.appendChild(errEl);
 
     const statusWrap = document.createElement("div");
     statusWrap.className = "flex items-center gap-3 shrink-0";
@@ -559,12 +604,25 @@
     // OCR 进行中且有实时进度时显示 "OCR 12/51"（后端 jobs.ocr_progress）
     const prog = job.ocr_progress || {};
     if ((st === "ocr_running" || st === "ocr_done") && prog.total > 0) {
-      pagesEl.textContent = `OCR ${prog.done}/${prog.total}`;
+      // 分片模式（MinerU + OCR_SLICES>1）下分析与 OCR 并行 — 同时显示两路进度
+      pagesEl.textContent =
+        (job.pages_analyzed || 0) > 0
+          ? `OCR ${prog.done}/${prog.total} · 分析 ${job.pages_analyzed || 0}/${job.total_pages || "?"}`
+          : `OCR ${prog.done}/${prog.total}`;
     } else {
       pagesEl.textContent = `${job.total_pages || "?"} 页`;
     }
+    // cr-19：实际使用的 OCR 后端标签（failover 后与配置不同，GMP 追溯可见）
+    const ocrTagEl = document.createElement("span");
+    ocrTagEl.className =
+      "job-ocr-backend text-[10px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground ml-2";
+    ocrTagEl.textContent = job.ocr_backend_used
+      ? `OCR: ${job.ocr_backend_used}`
+      : "";
+    if (!job.ocr_backend_used) ocrTagEl.classList.add("hidden");
     statusWrap.appendChild(statusEl);
     statusWrap.appendChild(pagesEl);
+    statusWrap.appendChild(ocrTagEl);
 
     link.appendChild(info);
     link.appendChild(statusWrap);

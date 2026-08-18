@@ -17,7 +17,7 @@ async def client(test_db):
     """基于 ASGITransport 的 API 客户端（依赖 test_db 隔离数据库）。"""
     from main import app
     async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
+        transport=ASGITransport(app=app), base_url="http://localhost:8000"
     ) as c:
         yield c
 

@@ -88,11 +88,16 @@
           <div class="px-5 py-4 border-b border-border">
             <h2 class="text-[14px] font-medium">上传文件</h2>
             <p class="text-[11px] text-muted-foreground mt-0.5">
-              支持 PDF 格式，最大 200MB
+              支持 PDF 或图片（jpg/png/webp/bmp/tif），最大 200MB
             </p>
           </div>
           <div class="p-5">
-            <input type="file" id="file-input" accept=".pdf" class="hidden" />
+            <input
+              type="file"
+              id="file-input"
+              accept=".pdf,.jpg,.jpeg,.png,.webp,.bmp,.tif,.tiff"
+              class="hidden"
+            />
             <label
               for="file-input"
               id="upload-area"
@@ -119,7 +124,7 @@
                   </svg>
                 </div>
                 <div>
-                  <p class="text-[13px] font-medium">点击选择或拖拽 PDF</p>
+                  <p class="text-[13px] font-medium">点击选择或拖拽 PDF / 图片</p>
                   <p class="text-[11px] text-muted-foreground mt-1">
                     批生产记录将被自动分析
                   </p>

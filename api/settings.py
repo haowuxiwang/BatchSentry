@@ -25,7 +25,18 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 from typing import Optional
 
-from config import config, update_config, _config_path, load_user_rules, load_feishu_config
+from config import (
+    config,
+    update_config,
+    _config_path,
+    load_user_rules,
+    load_feishu_config,
+    ProviderConfig,
+    TEST_KEY_PATTERNS,
+    USER_RULES_MAX,
+    USER_RULES_TEXT_MAX,
+    FEISHU_ALLOWED_EVENTS,
+)
 from core.security import validate_external_url, is_local_request
 from db.client import get_db
 from llm.client import reset_llm_client
@@ -76,21 +87,10 @@ def _providers_payload() -> list[dict]:
     return payload
 
 
-# Obvious test/placeholder values that should NOT count as "configured".
-# These are common patterns users leave in config files during development.
-# Real API keys have format: sk-<random 20+ chars> or sk-ant-<random>.
-_TEST_KEY_PATTERNS = (
-    "sk-test",
-    "sk-glm-test",
-    "sk-ant-test",
-    "sk-example",
-    "sk-placeholder",
-    "sk-your-",
-    "test-key",
-    "placeholder",
-    "changeme",
-    "xxxxx",
-)
+# 测试/占位 Key 模式集中定义于 config.py（T2.4：此前 settings.py 与
+# config.py 各持一份，加新模式需改两处，改一半会行为漂移 —
+# settings 的 configured 标志与启动时 auto-activate 判定不一致）。
+_TEST_KEY_PATTERNS = TEST_KEY_PATTERNS
 
 
 def _is_real_api_key(key: str) -> bool:
@@ -162,6 +162,7 @@ async def get_settings(request: Request):
             },
             "mineru": {
                 "token": _mask(cfg["mineru"].token),
+                "base_url": getattr(cfg["mineru"], "base_url", ""),
                 "model_version": cfg["mineru"].model_version,
                 "language": cfg["mineru"].language,
                 "enable_formula": cfg["mineru"].enable_formula,
@@ -202,6 +203,7 @@ _STATIC_FIELDS = {
     "paddle_ocr_token": "PADDLE_OCR_TOKEN",
     "paddle_ocr_model": "PADDLE_OCR_MODEL",
     "mineru_token": "MINERU_TOKEN",
+    "mineru_base_url": "MINERU_BASE_URL",
     "mineru_model_version": "MINERU_MODEL_VERSION",
     "mineru_language": "MINERU_LANGUAGE",
     "mineru_enable_formula": "MINERU_ENABLE_FORMULA",
@@ -265,16 +267,19 @@ def _validate_provider_name(name: str) -> bool:
 
 def _build_env_updates(
     req: SettingsUpdate,
-) -> tuple[dict[str, str], dict[str, object], list[str]]:
-    """把请求字段拆为 (env_updates, mem_updates, errors)。
+) -> tuple[dict[str, str], dict[str, object], list[str], list[str]]:
+    """把请求字段拆为 (env_updates, mem_updates, errors, skipped)。
 
     env_updates: 写入 config.json 的 KEY=VALUE 字典
     mem_updates: 传给 update_config() 的内存热更新字段
     errors: 校验错误信息（如有则拒绝本次写入）
+    skipped: 掩码回写被跳过的字段名（T2.3：此前静默跳过无提示，
+             用户以为已修改；随响应 message 回显）
     """
     env_updates: dict[str, str] = {}
     mem_updates: dict[str, object] = {}
     errors: list[str] = []
+    skipped: list[str] = []
 
     raw = req.model_dump(exclude_none=True)
 
@@ -292,6 +297,7 @@ def _build_env_updates(
                 "",
             )
             if str(value).strip() == _mask(current):
+                skipped.append(field)
                 continue
         # 飞书模式白名单
         if field == "feishu_mode":
@@ -305,7 +311,7 @@ def _build_env_updates(
         # 飞书事件白名单校验
         if field == "feishu_events":
             events = [e.strip().lower() for e in str(value).split(",") if e.strip()]
-            allowed = {"review", "partial_review", "error", "cancelled"}
+            allowed = FEISHU_ALLOWED_EVENTS
             bad = [e for e in events if e not in allowed]
             if bad:
                 errors.append(f"invalid feishu events: {bad} (allowed: {sorted(allowed)})")
@@ -313,6 +319,22 @@ def _build_env_updates(
             env_updates[env_key] = ",".join(events)
             mem_updates[field] = ",".join(events)
             continue
+        # MinerU 取值白名单（对抗审查 T2.2：此前任意字符串落盘，
+        # 手误拼写会静默走错解析链路；常量集中于 config.py）
+        if field == "mineru_model_version":
+            if str(value).strip() not in config.MINERU_MODEL_VERSIONS:
+                errors.append(
+                    f"invalid mineru_model_version: {value!r} "
+                    f"(allowed: {sorted(config.MINERU_MODEL_VERSIONS)})"
+                )
+                continue
+        if field == "mineru_language":
+            if str(value).strip() not in config.MINERU_LANGUAGES:
+                errors.append(
+                    f"invalid mineru_language: {value!r} "
+                    f"(allowed: {sorted(config.MINERU_LANGUAGES)})"
+                )
+                continue
         # llm_provider 需校验为已注册的 provider（如果新增 provider 的
         # llm_providers_add 与 llm_provider 同批提交，注册表尚未更新，
         # 我们允许这次写入但内存热更新在 add 之后执行）
@@ -457,10 +479,17 @@ def _build_env_updates(
             env_updates[env_key] = ""
             mem_updates[field] = ""
         else:
+            # T2.3: per-provider api_key 掩码回写保护（与 feishu 字段对齐）
+            # — 用户从页面复制掩码值粘贴提交时，等于没改，跳过并提示
+            if prov_field == "api_key" and str(value).strip() == _mask(
+                config["providers"].get(prov_name, ProviderConfig(name=prov_name)).api_key or ""
+            ):
+                skipped.append(field)
+                continue
             env_updates[env_key] = str(value)
             mem_updates[field] = value
 
-    return env_updates, mem_updates, errors
+    return env_updates, mem_updates, errors, skipped
 
 
 @router.post("/api/settings")
@@ -491,7 +520,7 @@ async def update_settings(req: SettingsUpdate, request: Request):
         )
         raise HTTPException(403, "Settings can only be modified from localhost")
 
-    env_updates, mem_updates, errors = _build_env_updates(req)
+    env_updates, mem_updates, errors, skipped = _build_env_updates(req)
 
     # Phase 7 security: validate URLs to prevent SSRF
     # paddle_ocr_api_url and any <provider>_base_url must be external.
@@ -535,6 +564,16 @@ async def update_settings(req: SettingsUpdate, request: Request):
         raise HTTPException(400, detail={"errors": errors})
 
     if not env_updates:
+        if skipped:
+            return {
+                "ok": True,
+                "updated": 0,
+                "skipped": skipped,
+                "message": (
+                    "已保存值未变化：以下字段与已保存内容相同（掩码），"
+                    f"未修改：{'、'.join(skipped)}"
+                ),
+            }
         return {"ok": True, "updated": 0, "message": "无更新字段"}
 
     config_path = _settings_config_path()
@@ -603,11 +642,16 @@ async def update_settings(req: SettingsUpdate, request: Request):
     logger.info(
         f"Settings updated and applied live: {list(env_updates.keys())} -> {config_path}"
     )
+    msg = "配置已保存并立即生效"
+    # T2.3: 掩码回写被跳过的字段显式提示（此前静默跳过，用户以为已修改）
+    if skipped:
+        msg += f"；以下字段与已保存值相同（掩码），未修改：{'、'.join(skipped)}"
     return {
         "ok": True,
         "updated": len(env_updates),
+        "skipped": skipped,
         "fields": list(env_updates.keys()),
-        "message": "配置已保存并立即生效",
+        "message": msg,
         "config_file": str(config_path),
         "providers": _providers_payload(),
     }
@@ -629,8 +673,9 @@ class UserRulesUpdate(BaseModel):
     rules: list[UserRuleItem] = []
 
 
-_USER_RULES_MAX = 100
-_USER_RULES_TEXT_MAX = 1000
+# 上限常量复用 config.py 定义（T2.4 去重）
+_USER_RULES_MAX = USER_RULES_MAX
+_USER_RULES_TEXT_MAX = USER_RULES_TEXT_MAX
 
 
 def _read_raw_config() -> dict:
@@ -872,6 +917,19 @@ class TestProviderRequest(BaseModel):
     provider: str
 
 
+async def _audit_llm_test(provider: str, action: str, detail: str) -> None:
+    """审计：provider 测试结果写 audit_log（job_id='system'，与 feishu_test 同模式）。"""
+    try:
+        db = await get_db()
+        await db.execute(
+            "INSERT INTO audit_log (job_id, action, detail) VALUES ('system', ?, ?)",
+            (action, detail),
+        )
+        await db.commit()
+    except Exception as e:
+        logger.warning(f"[settings] audit write failed ({action}): {e}")
+
+
 @router.post("/api/settings/test_provider")
 async def test_provider(req: TestProviderRequest, request: Request):
     """测试指定 provider 的连通性 — 用临时构建的 LLMClient 真实调用。
@@ -894,7 +952,7 @@ async def test_provider(req: TestProviderRequest, request: Request):
         return {
             "ok": False,
             "provider": name,
-            "reason": "API key not configured",
+            "reason": "API 密钥未配置",
         }
 
     # 用临时 client 测试，不影响全局单例
@@ -910,6 +968,9 @@ async def test_provider(req: TestProviderRequest, request: Request):
             timeout=8,
         )
         elapsed_ms = int((time.time() - start) * 1000)
+        await _audit_llm_test(name, "llm_test_ok",
+                              f"provider={name} model={cfg.model} "
+                              f"latency_ms={elapsed_ms}")
         return {
             "ok": True,
             "provider": name,
@@ -928,7 +989,15 @@ async def test_provider(req: TestProviderRequest, request: Request):
         elif any(kw in err_str for kw in ["connection", "dns", "resolve"]):
             reason = "无法连接到 Base URL"
         else:
-            reason = f"{e.__class__.__name__}: {str(e)[:200]}"
+            # P0-1/P1-8: fallback 消息经 _mask_secrets 脱敏（防止 URL 签名/
+            # 密钥随异常回显到设置页），中文化前缀便于用户理解
+            from llm.client import _mask_secrets
+            reason = f"测试失败：{e.__class__.__name__}: {_mask_secrets(str(e))[:200]}"
+        # P1-8: 测试结果同样写审计（llm_call_audit 走 LLMClient 内部路径，但
+        # 设置页直接调 adapter.chat 不经 client — 此处显式记录 provider 测试
+        # 的成败，满足 GMP 追溯要求的完整操作记录）
+        await _audit_llm_test(name, "llm_test_failed",
+                              f"provider={name} model={cfg.model} reason={reason[:200]}")
         return {
             "ok": False,
             "provider": name,

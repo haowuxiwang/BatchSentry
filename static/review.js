@@ -197,6 +197,41 @@
             } else if (d.status === "review" || d.status === "partial_review") {
               pct = 100;
               label = "完成";
+            } else if (d.status === "cancelling" || d.status === "cancelled") {
+              pct = 0;
+              label = d.status === "cancelling" ? "取消中…" : "已取消";
+            } else if (d.status === "error") {
+              pct = 0;
+              label = "出错";
+            } else {
+              label = d.status; // 未知状态兜底显示原始值
+            }
+
+            // cr-19：头栏状态徽章/取消按钮随 SSE 实时更新 — 旧实现是 SSR
+            // 一次性渲染：阶段切换（ocr_running→analyzing）徽章不变化；
+            // 终态后 done 事件与 1.5s reload 之间取消按钮仍可点（后端
+            // 400 Invalid transition）。job 状态中文映射与 upload.js STATUS_ZH 一致。
+            const statusZh = {
+              pending: "待处理", queued: "排队中", processing: "处理中",
+              ocr_running: "识别中", ocr_done: "识别完成", analyzing: "分析中",
+              review: "可复核", partial_review: "部分可复核", error: "出错",
+              cancelled: "已取消", cancelling: "取消中", done: "已完成", archived: "已归档",
+            };
+            const badgeEl = document.getElementById("status-badge");
+            if (badgeEl) badgeEl.textContent = statusZh[d.status] || d.status;
+            const cancelBtn = document.getElementById("cancel-btn");
+            if (cancelBtn) {
+              const canCancel = ["pending", "ocr_running", "ocr_done", "analyzing"].includes(d.status);
+              cancelBtn.disabled = !canCancel;
+              cancelBtn.classList.toggle("opacity-40", !canCancel);
+              cancelBtn.classList.toggle("pointer-events-none", !canCancel);
+            }
+            const ocrBadge = document.getElementById("ocr-backend-badge");
+            if (ocrBadge) {
+              if (d.ocr_backend_used) {
+                ocrBadge.textContent = d.ocr_backend_used;
+                ocrBadge.classList.remove("hidden");
+              }
             }
 
             fill.style.width = pct + "%";
@@ -220,13 +255,13 @@
           if (retryCount < MAX_RETRIES) {
             // 指数退避重试：2s / 4s / 8s
             const delay = 2000 * Math.pow(2, retryCount);
-            txt.textContent = `连接断开，${delay / 1000}s 后重试…`;
+            txt.textContent = `连接断开，${delay / 1000} 秒后重试…`;
             retryCount++;
             setTimeout(connect, delay);
           } else {
             // 重试耗尽：fallback 到 10s 轮询 /api/jobs/{id}
             log.warn("SSE retries exhausted, fallback to polling");
-            txt.textContent = "SSE 不可用，切换轮询…";
+            txt.textContent = "实时连接不可用，切换轮询…";
             pollTimer = setInterval(async () => {
               try {
                 const r = await fetch(`/api/jobs/${jid}`);
@@ -363,8 +398,8 @@
         goPage(p);
       });
       const label = document.createElement("span");
-      label.className = "font-mono tabular-nums";
-      label.textContent = "P" + p;
+      label.className = "tabular-nums";
+      label.textContent = "第" + p + "页";
       a.appendChild(label);
       nav.appendChild(a);
     }
@@ -504,9 +539,15 @@
 
       // 更新 OCR 文本 — htmlToText 保留表格结构（行/列分隔），
       // 纯字符串处理 + textContent，无 XSS 面
+      // P1 修复（cr-19）：无条件更新 — 空页 raw_html 为 ""（Paddle 空页）时
+      // 原条件 `if (ocrEl && pageData.raw_html)` 跳过赋值，OCR 面板残留
+      // 上一页文本，GMP 复核会误读；SSR 初次加载路径显示"无 OCR 数据"，
+      // 两条路径行为需一致。
       const ocrEl = document.getElementById("ocr-text");
-      if (ocrEl && pageData.raw_html) {
-        ocrEl.textContent = htmlToText(pageData.raw_html);
+      if (ocrEl) {
+        ocrEl.textContent = pageData.raw_html
+          ? htmlToText(pageData.raw_html)
+          : "（此页无 OCR 内容，请以 PDF 原图为准）";
       }
 
       // 更新 findings 列表（重新渲染）
@@ -858,10 +899,14 @@
   }
 
   async function retryJob(e) {
+    // P1-6: review 状态 = 全量重新分析（清空结果），其余状态 = 断点续跑
+    const fullRetry = e && e.currentTarget && e.currentTarget.dataset.fullRetry === "1";
     const ok = await window.PBC.confirmDialog({
-      title: "确定重试此任务？",
-      message: "将从中断处继续处理。",
-      confirmText: "确认重试",
+      title: fullRetry ? "确定重新分析此任务？" : "确定重试此任务？",
+      message: fullRetry
+        ? "将清空现有分析结果并完整重新分析（OCR 结果复用，不重复消耗）。"
+        : "将从中断处继续处理。",
+      confirmText: fullRetry ? "确认重新分析" : "确认重试",
       cancelText: "取消",
     });
     if (!ok) return;

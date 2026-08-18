@@ -35,7 +35,7 @@ async def review_client(test_db):
 
     from main import app
     from httpx import ASGITransport
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://localhost:8000") as client:
         yield client
 
 
@@ -128,3 +128,27 @@ class TestUpdateFinding:
             data={"status": "invalid"},
         )
         assert r.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_update_rejected_from_non_local_origin(self, test_db):
+        """对抗审查（cr-18）：恶意 Origin 的 finding 更新必须 403 —— Form 编码是
+        CORS 简单请求，此前无守卫，跨站可篡改 GMP 审计数据。"""
+        from main import app
+        from httpx import AsyncClient, ASGITransport
+        await test_db.execute(
+            "INSERT INTO jobs (id, filename, pdf_path, status, total_pages) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("evil-job", "test.pdf", "/tmp/test.pdf", "review", 1),
+        )
+        await test_db.execute(
+            "INSERT INTO findings (job_id, page, type, severity, source, description, status) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("evil-job", 1, "参数越界", "critical", "rule", "温度超出", "pending"),
+        )
+        await test_db.commit()
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://evil.com:8000"
+        ) as c:
+            r = await c.post("/api/jobs/evil-job/findings/1", data={"status": "confirmed"})
+        assert r.status_code == 403
+        assert "non-local" in r.text

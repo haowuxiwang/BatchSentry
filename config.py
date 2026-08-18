@@ -220,8 +220,11 @@ _load_json_config()
 # ============================================================
 
 _USER_RULES_KEY = "user_rules"
-_USER_RULES_MAX = 100
-_USER_RULES_TEXT_MAX = 1000
+
+# 用户规则上限 — 单一来源（T2.4：settings API 校验与 load_user_rules 截断
+# 共用，此前两处各写一遍，调整上限时容易改一处漏一处）
+USER_RULES_MAX = 100
+USER_RULES_TEXT_MAX = 1000
 
 
 def load_user_rules() -> list[dict]:
@@ -256,7 +259,7 @@ def load_user_rules() -> list[dict]:
             "active": bool(r.get("active", True)),
             "created_at": str(r.get("created_at", "")),
         })
-    return valid[: _USER_RULES_MAX]
+    return valid[: USER_RULES_MAX]
 
 
 def uuid_str() -> str:
@@ -267,6 +270,10 @@ def uuid_str() -> str:
 
 # ============================================================
 # Feishu notification (Phase 12)
+
+# 通知触发状态白名单 — 单一来源（T2.4：load_feishu_config 过滤与
+# settings API 校验共用；此前两份同义 set，改白名单要同步两处）
+FEISHU_ALLOWED_EVENTS = ("review", "partial_review", "error", "cancelled")
 
 _FEISHU_DEFAULTS: dict = {
     "enabled": False,
@@ -328,8 +335,7 @@ def load_feishu_config() -> dict:
     if isinstance(events, str) and events.strip():
         parsed_events = [e.strip() for e in events.split(",") if e.strip()]
         # 白名单：非法状态名直接丢弃（防脏数据进通知开关）
-        allowed = {"review", "partial_review", "error", "cancelled"}
-        parsed_events = [e for e in parsed_events if e in allowed]
+        parsed_events = [e for e in parsed_events if e in FEISHU_ALLOWED_EVENTS]
         if parsed_events:
             out["events"] = parsed_events
     return out
@@ -371,14 +377,22 @@ class PaddleOCRConfig:
     model: str
 
 
+# MinerU 可配置取值（T2.2 集中单一来源；settings API 后端 + 前端下拉共用）
+MINERU_MODEL_VERSIONS = {"pipeline", "vlm", "MinerU-HTML"}
+MINERU_LANGUAGES = {"ch", "en"}
+
+
 @dataclass
 class MinerUConfig:
     """MinerU 精准解析 API 配置。
 
     Token 在 https://mineru.net/apiManage 页面创建。
+    base_url: 默认官方 https://mineru.net/api/v4；私有化/代理场景覆盖。
     model_version: pipeline (默认) / vlm (推荐,精度更高) / MinerU-HTML
+    language: ch / en
     """
     token: str
+    base_url: str
     model_version: str
     language: str
     enable_formula: bool
@@ -462,6 +476,35 @@ def _env_int(key: str, default: int) -> int:
         return default
 
 
+# 测试/占位 Key 模式 — 单一来源（T2.4：settings API 的 configured 标志
+# 与启动时的 auto-activate 判定共用此常量，加新模式只改一处）
+TEST_KEY_PATTERNS = (
+    "sk-test",
+    "sk-glm-test",
+    "sk-ant-test",
+    "sk-example",
+    "sk-placeholder",
+    "sk-your-",
+    "test-key",
+    "placeholder",
+    "changeme",
+    "xxxxx",
+)
+
+
+def _is_real_key(key: str) -> bool:
+    """Return True only if the key looks like a real API key (not a test value).
+
+    判定逻辑（业界做法 - 参考 OpenAI/Anthropic）：
+      1. 非空（已配置就应被识别，不靠长度猜测）
+      2. 不匹配明显的测试/占位模式（sk-test, placeholder 等）
+    """
+    if not key:
+        return False
+    kl = key.lower()
+    return not any(p in kl for p in TEST_KEY_PATTERNS)
+
+
 def load_config():
     # Phase 5B: in frozen mode, redirect db/output to per-user APPDATA dir
     # so the bundled exe doesn't need write access to Program Files.
@@ -501,17 +544,8 @@ def load_config():
     # 自动切换到第一个已配置的 provider 并持久化。
     # 场景：用户配置了 SiliconFlow Key 但 active 仍是默认 deepseek（无 Key），
     # 导致所有 LLM 调用和 health probe 报 "API key not configured"。
-    _TEST_KEY_PATTERNS = (
-        "sk-test", "sk-glm-test", "sk-ant-test", "sk-example",
-        "sk-placeholder", "sk-your-", "test-key", "placeholder",
-        "changeme", "xxxxx",
-    )
 
-    def _is_real_key(key: str) -> bool:
-        if not key:
-            return False
-        kl = key.lower()
-        return not any(p in kl for p in _TEST_KEY_PATTERNS)
+    # 判定函数 _is_real_key / TEST_KEY_PATTERNS 见模块级定义（T2.4 单一来源）
 
     active_cfg = providers.get(llm_provider)
     if active_cfg and not _is_real_key(active_cfg.api_key):
@@ -540,6 +574,7 @@ def load_config():
         ),
         "mineru": MinerUConfig(
             token=os.getenv("MINERU_TOKEN", ""),
+            base_url=os.getenv("MINERU_BASE_URL", "https://mineru.net/api/v4"),
             model_version=os.getenv("MINERU_MODEL_VERSION", "vlm"),
             language=os.getenv("MINERU_LANGUAGE", "ch"),
             enable_formula=os.getenv("MINERU_ENABLE_FORMULA", "true").lower() == "true",
@@ -638,6 +673,10 @@ def update_config(updates: dict):
     # MinerU
     if "mineru_token" in updates:
         config["mineru"].token = updates["mineru_token"]
+    if "mineru_base_url" in updates:
+        config["mineru"].base_url = updates["mineru_base_url"]
+        # mineru_client 运行时从 env 读取，同步进程镜像使热更新生效
+        os.environ["MINERU_BASE_URL"] = str(updates["mineru_base_url"])
     if "mineru_model_version" in updates:
         config["mineru"].model_version = updates["mineru_model_version"]
     if "mineru_language" in updates:

@@ -308,6 +308,74 @@ class TestPaddleOCRDownload:
         assert pages[1]["markdown"]["text"] == "第2页内容"
 
     @patch('core.ocr_client.requests.get')
+    def test_download_result_falls_back_to_parsing_list(self, mock_get, paddle_cfg):
+        """对抗审查（cr-19）：markdown.text 为空时用 parsing_res_list 块级
+        文本组装兜底 — 服务端 HTML 组装失败时表格外文本不再静默丢失。"""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.text = json.dumps({
+            "result": {
+                "layoutParsingResults": [
+                    {
+                        "markdown": {"text": ""},
+                        "prunedResult": {
+                            "parsing_res_list": [
+                                {"type": "text", "text": "批号: B20260801"},
+                                {"type": "text", "text": "生产日期: 2026-08-01"},
+                                {
+                                    "type": "table",
+                                    "content": [
+                                        {"text": "温度"},
+                                        {"text": "25.5℃"},
+                                    ],
+                                },
+                                {"type": "box", "points": [[10, 10], [20, 20]]},
+                            ]
+                        },
+                    }
+                ],
+                "dataInfo": {},
+            }
+        })
+        mock_get.return_value = mock_resp
+
+        pages = ocr_client.download_result({"data": {"resultUrl": {"jsonUrl": "https://res.test/empty"}}})
+
+        assert len(pages) == 1
+        fallback = pages[0]["markdown"]["text"]
+        assert "批号: B20260801" in fallback
+        assert "25.5℃" in fallback
+        assert "生产日期" in fallback
+        # P1-3: 兜底文本必须带显式降级警告行（LLM/规则层知道表格结构已丢失）
+        assert "OCR 警告" in fallback
+        assert "表格结构已丢失" in fallback
+        # 警告行必须在正文之前
+        assert fallback.index("OCR 警告") < fallback.index("批号")
+
+    @patch('core.ocr_client.requests.get')
+    def test_download_result_keeps_short_but_present_text(self, mock_get, paddle_cfg):
+        """对抗审查（cr-19）：markdown.text 非短（>=20 字符）时不触发兜底，
+        即使 parsing_res_list 存在也不改写。"""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.text = json.dumps({
+            "result": {
+                "layoutParsingResults": [
+                    {
+                        "markdown": {"text": "这是一段超过二十个字符长度的完整页面内容文本。"},
+                        "prunedResult": {"parsing_res_list": [{"text": "不该被使用"}]},
+                    }
+                ],
+                "dataInfo": {},
+            }
+        })
+        mock_get.return_value = mock_resp
+
+        pages = ocr_client.download_result({"data": {"resultUrl": {"jsonUrl": "https://res.test/full"}}})
+
+        assert pages[0]["markdown"]["text"] == "这是一段超过二十个字符长度的完整页面内容文本。"
+
+    @patch('core.ocr_client.requests.get')
     def test_download_result_jsonl(self, mock_get, paddle_cfg):
         """解析 JSONL 响应（每行一个 JSON 对象）。"""
         line1 = json.dumps({"result": {"layoutParsingResults": [{"markdown": {"text": "p1"}}]}})
@@ -433,10 +501,12 @@ class TestPaddleOCRRunOCR:
         with caplog.at_level(logging.INFO, logger="core.ocr_client"):
             with patch('core.ocr_client.requests.post',
                        side_effect=RuntimeError("conn refused")):
-                with pytest.raises(RuntimeError):
-                    ocr_client.submit_pdf(fake_pdf)
+                with patch('core.ocr_client.time.sleep') as mock_sleep:  # 消除 2s+4s 真实退避睡眠
+                    with pytest.raises(RuntimeError):
+                        ocr_client.submit_pdf(fake_pdf)
 
         assert all(not r.message.startswith("[") for r in caplog.records)
+        assert mock_sleep.call_count >= 2
 
     def test_poll_job_invokes_progress_callback(self, paddle_cfg):
         """poll_job 轮询到 extractProgress 时回调 (done, total)。"""
@@ -454,10 +524,12 @@ class TestPaddleOCRRunOCR:
             }})(),
         ])
         with _patch('core.ocr_client.requests.get', side_effect=lambda *a, **k: next(progress_responses)):
-            progress_calls = []
-            ocr_client.poll_job("job-prog", progress_callback=lambda d, t: progress_calls.append((d, t)))
+            with _patch('core.ocr_client.time.sleep') as mock_sleep:  # 消除轮询间真实 5s 睡眠
+                progress_calls = []
+                ocr_client.poll_job("job-prog", progress_callback=lambda d, t: progress_calls.append((d, t)))
 
         assert progress_calls == [(12, 51), (51, 51)]
+        assert mock_sleep.call_count >= 1
 
     @patch('core.ocr_client.download_result')
     @patch('core.ocr_client.poll_job')
@@ -986,10 +1058,10 @@ class TestMinerUBlockToMarkdown:
         assert result == "| a | b |"
 
     def test_table_block_fallback_to_text(self):
-        """table 块无 HTML/markdown 时返回空（宁缺毋滥，避免纯文本表格丢失结构）。"""
+        """P1-2: table 块无 HTML/markdown 时降级为块内文本（此前整表静默丢失）。"""
         assert mineru_client._block_to_markdown(
             {"type": "table", "text": "fallback"}
-        ) == ""
+        ) == "fallback"
 
     def test_table_block_v1_table_body_html(self):
         """v1 table 块从 table_body 取 HTML（page_analyzer 的 prompt 按 HTML 表格设计）。"""
@@ -1038,6 +1110,24 @@ class TestMinerUBlockToMarkdown:
     def test_default_type_is_text(self):
         """无 type 字段时按 text 处理。"""
         assert mineru_client._block_to_markdown({"text": "default"}) == "default"
+
+    def test_table_block_fully_empty_still_empty(self):
+        """table 块连文本都没有时返回空（由 _compose_page_markdown 兜底计数）。"""
+        assert mineru_client._block_to_markdown({"type": "table"}) == ""
+
+    def test_compose_table_failure_injects_placeholder_and_count(self):
+        """P1-2: 表格提取彻底失败时 — 占位标记 + discarded 计数（触发 OCR 警告）。"""
+        md, count = mineru_client._compose_page_markdown(3, [{"type": "table"}])
+        assert "[表格内容提取失败 — OCR 结构缺失]" in md
+        assert count == 1
+
+    def test_compose_table_text_fallback_not_counted(self):
+        """P1-2: 表格降级到文本时不算 discarded（内容已保留）。"""
+        md, count = mineru_client._compose_page_markdown(
+            3, [{"type": "table", "text": "浓度 0.5"}]
+        )
+        assert "浓度 0.5" in md
+        assert count == 0
 
 
 class TestMinerURunOCR:

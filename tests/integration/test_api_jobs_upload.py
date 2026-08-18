@@ -264,7 +264,11 @@ class TestUploadDedup:
                 )
             job_id = r1.json()["job_id"]
 
-            # 归档第一个任务
+            # 归档第一个任务（先置为终态 — 状态机健壮性修复后归档拒绝运行中的 job）
+            await test_db.execute(
+                "UPDATE jobs SET status = 'review' WHERE id = ?", (job_id,)
+            )
+            await test_db.commit()
             ar = await client.post(f"/api/jobs/{job_id}/archive")
             assert ar.status_code == 200
 
@@ -380,6 +384,23 @@ class TestCancelJob:
     """POST /api/jobs/{id}/cancel。"""
 
     @pytest.mark.asyncio
+    async def test_cancel_rejected_from_non_local_origin(self, test_db):
+        """对抗审查（cr-18）：恶意 Origin 的 cancel 请求必须 403（CSRF 防护）。"""
+        from main import app
+        await test_db.execute(
+            "INSERT INTO jobs (id, filename, pdf_path, status) "
+            "VALUES (?, ?, ?, ?)",
+            ("cancel-evil", "p.pdf", "/tmp/p.pdf", "pending"),
+        )
+        await test_db.commit()
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://evil.com:8000"
+        ) as c:
+            r = await c.post("/api/jobs/cancel-evil/cancel")
+        assert r.status_code == 403
+        assert "non-local" in r.text
+
+    @pytest.mark.asyncio
     async def test_cancel_pending_job_returns_200(self, client, test_db):
         """pending → cancelling 合法，应返回 200。"""
         await test_db.execute(
@@ -395,7 +416,7 @@ class TestCancelJob:
 
     @pytest.mark.asyncio
     async def test_cancel_review_job_returns_400(self, client, test_db):
-        """review → cancelling 非法（review 只能 → archived），应返回 400。"""
+        """review → cancelling 非法（取消只对活跃流程有意义 — 终态 review 用重试/重新分析），应返回 400。"""
         await test_db.execute(
             "INSERT INTO jobs (id, filename, pdf_path, status) "
             "VALUES (?, ?, ?, ?)",
@@ -415,6 +436,23 @@ class TestCancelJob:
 
 class TestRetryJob:
     """POST /api/jobs/{id}/retry。"""
+
+    @pytest.mark.asyncio
+    async def test_retry_rejected_from_non_local_origin(self, test_db):
+        """对抗审查（cr-18）：恶意 Origin 的 retry 请求必须 403（消耗配额类端点）。"""
+        from main import app
+        await test_db.execute(
+            "INSERT INTO jobs (id, filename, pdf_path, status) "
+            "VALUES (?, ?, ?, ?)",
+            ("retry-evil", "p.pdf", "/tmp/p.pdf", "error"),
+        )
+        await test_db.commit()
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://evil.com:8000"
+        ) as c:
+            r = await c.post("/api/jobs/retry-evil/retry")
+        assert r.status_code == 403
+        assert "non-local" in r.text
 
     @pytest.mark.asyncio
     async def test_retry_error_job_with_pdf_returns_200(self, client, test_db, tmp_path):
@@ -457,8 +495,10 @@ class TestRetryJob:
         assert r.status_code == 400
 
     @pytest.mark.asyncio
-    async def test_retry_review_job_returns_400(self, client, test_db, tmp_path):
-        """review → pending 非法（review 只能 → archived），应返回 400。"""
+    async def test_retry_review_job_returns_200_and_resets_analysis(self, client, test_db, tmp_path):
+        """P1-6: review → pending 合法（全量重新分析语义）：
+        findings 清空、structured_json 置 NULL、raw_html 保留（不重 OCR）、
+        audit_log 记录 analysis_reset。"""
         import fitz
         doc = fitz.open()
         doc.new_page()
@@ -471,11 +511,45 @@ class TestRetryJob:
             "VALUES (?, ?, ?, ?)",
             ("retry-review", "review.pdf", str(pdf_path), "review"),
         )
+        # 制造既有分析产物：1 条 finding + 已分析的 page_cache（含 raw_html 与
+        # structured_json），模拟 review 完成态
+        await test_db.execute(
+            "INSERT INTO page_cache (job_id, page, raw_html, structured_json) "
+            "VALUES (?, 1, '<table><tr><td>批号</td></tr></table>', '{\"steps\":[]}')",
+            ("retry-review",),
+        )
+        await test_db.execute(
+            "INSERT INTO findings (job_id, page, type, severity, source, description, status) "
+            "VALUES (?, 1, '完整性', 'warning', 'rule', '旧分析结果', 'pending')",
+            ("retry-review",),
+        )
         await test_db.commit()
 
-        with patch("api.jobs.launch_pipeline"):
+        with patch("api.jobs.launch_pipeline") as mock_pipe:
             r = await client.post("/api/jobs/retry-review/retry")
-        assert r.status_code == 400
+
+        assert r.status_code == 200
+        assert r.json()["status"] == "pending"
+        assert mock_pipe.call_count == 1
+        assert mock_pipe.call_args.args[0] == "retry-review"
+
+        cursor = await test_db.execute(
+            "SELECT raw_html, structured_json FROM page_cache WHERE job_id = ?", ("retry-review",)
+        )
+        pc = await cursor.fetchone()
+        assert pc["raw_html"] is not None  # OCR 缓存保留（stage1_skipped 复用）
+        assert pc["structured_json"] is None  # 分析结果清空（全量重提取）
+
+        cursor = await test_db.execute(
+            "SELECT COUNT(*) AS n FROM findings WHERE job_id = ?", ("retry-review",)
+        )
+        assert (await cursor.fetchone())["n"] == 0
+
+        cursor = await test_db.execute(
+            "SELECT action FROM audit_log WHERE job_id = ?", ("retry-review",)
+        )
+        actions = [r["action"] for r in await cursor.fetchall()]
+        assert "analysis_reset" in actions
 
     @pytest.mark.asyncio
     async def test_retry_nonexistent_returns_404(self, client):
@@ -506,3 +580,54 @@ class TestRetryJob:
         assert r.status_code == 200
         assert r.json()["status"] == "pending"
         assert mock_pipe.call_count == 1
+
+class TestGuardUnifiedReadDelete:
+    """B6（P2-1）：GET 读端点 + DELETE 破坏性端点守卫统一 — 非本地一律 403。"""
+
+    @pytest.mark.asyncio
+    async def test_delete_rejected_from_non_local_origin(self, test_db):
+        """恶意 Origin 的 DELETE 必须 403（与 cancel/archive 同口径）。"""
+        from main import app
+        await test_db.execute(
+            "INSERT INTO jobs (id, filename, pdf_path, status) "
+            "VALUES (?, ?, ?, ?)",
+            ("del-evil", "p.pdf", "/tmp/p.pdf", "review"),
+        )
+        await test_db.commit()
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://evil.com:8000"
+        ) as c:
+            r = await c.delete("/api/jobs/del-evil")
+        assert r.status_code == 403
+        assert "non-local" in r.text
+        # job 未被删除
+        cursor = await test_db.execute("SELECT COUNT(*) AS n FROM jobs WHERE id = 'del-evil'")
+        assert (await cursor.fetchone())["n"] == 1
+
+    @pytest.mark.asyncio
+    async def test_get_jobs_rejected_from_non_local_origin(self, test_db):
+        """恶意 Origin 的 GET /api/jobs（读端点）必须 403。"""
+        from main import app
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://evil.com:8000"
+        ) as c:
+            r = await c.get("/api/jobs")
+        assert r.status_code == 403
+        assert "non-local" in r.text
+
+    @pytest.mark.asyncio
+    async def test_get_report_rejected_from_non_local_origin(self, test_db):
+        """恶意 Origin 的 GET 报告（读端点）必须 403。"""
+        from main import app
+        await test_db.execute(
+            "INSERT INTO jobs (id, filename, pdf_path, status) "
+            "VALUES (?, ?, ?, ?)",
+            ("rep-evil", "p.pdf", "/tmp/p.pdf", "review"),
+        )
+        await test_db.commit()
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://evil.com:8000"
+        ) as c:
+            r = await c.get("/api/jobs/rep-evil/report.md")
+        assert r.status_code == 403
+        assert "non-local" in r.text

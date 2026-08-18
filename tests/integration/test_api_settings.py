@@ -400,7 +400,7 @@ class TestTestProviderEndpoint:
 
     @pytest.mark.asyncio
     async def test_test_provider_without_key_returns_not_configured(self, settings_client):
-        """测试未配置 Key 的 provider 应返回 ok=False + 'API key not configured'。"""
+        """测试未配置 Key 的 provider 应返回 ok=False + 中文 reason。"""
         # 确保 deepseek 没配置 key
         await settings_client.post("/api/settings", json={
             "llm_provider": "deepseek",
@@ -412,7 +412,7 @@ class TestTestProviderEndpoint:
         assert r.status_code == 200
         data = r.json()
         assert data["ok"] is False
-        assert "not configured" in data["reason"].lower() or "api key" in data["reason"].lower()
+        assert "未配置" in data["reason"] or "密钥" in data["reason"]
 
     @pytest.mark.asyncio
     async def test_test_unknown_provider_returns_404(self, settings_client):
@@ -713,6 +713,43 @@ class TestFeishuNotifySettings:
         assert r.status_code == 200
         # 真值未被掩码覆盖
         assert config.load_feishu_config()["webhook_url"] == "https://open.feishu.cn/open-apis/bot/v2/hook/realtoken"
+
+    @pytest.mark.asyncio
+    async def test_masked_value_reports_skipped_in_response(self, settings_client):
+        """T2.3：掩码值回传被跳过时，响应须显式列出 skipped 字段（此前静默跳过）。"""
+        import config
+        await settings_client.post("/api/settings", json={
+            "feishu_webhook_url": "https://open.feishu.cn/open-apis/bot/v2/hook/realtoken2",
+        })
+        masked = (await settings_client.get("/api/settings")).json()["feishu"]["webhook_url"]
+        r = await settings_client.post("/api/settings", json={
+            "feishu_webhook_url": masked,
+        })
+        data = r.json()
+        assert data.get("skipped") == ["feishu_webhook_url"]
+        assert "feishu_webhook_url" in data.get("message", "")
+        # updated=0 且 skipped 非空的路径同样有提示（全量掩码跳过分支）
+        assert data.get("updated") == 0
+        assert config.load_feishu_config()["webhook_url"] == "https://open.feishu.cn/open-apis/bot/v2/hook/realtoken2"
+
+    @pytest.mark.asyncio
+    async def test_partial_masked_skip_still_updates_others(self, settings_client):
+        """T2.3：一份请求里掩码字段被跳过，其他字段仍正常写入并计入 updated。"""
+        import config
+        await settings_client.post("/api/settings", json={
+            "feishu_webhook_url": "https://open.feishu.cn/open-apis/bot/v2/hook/keepme",
+        })
+        masked = (await settings_client.get("/api/settings")).json()["feishu"]["webhook_url"]
+        r = await settings_client.post("/api/settings", json={
+            "feishu_webhook_url": masked,
+            "feishu_mode": "app_bot",
+        })
+        data = r.json()
+        assert data.get("skipped") == ["feishu_webhook_url"]
+        assert data.get("updated") == 1
+        assert "feishu_mode" in data.get("fields", [])
+        assert config.load_feishu_config()["mode"] == "app_bot"
+        assert config.load_feishu_config()["webhook_url"] == "https://open.feishu.cn/open-apis/bot/v2/hook/keepme"
 
     @pytest.mark.asyncio
     async def test_test_feishu_success(self, settings_client):

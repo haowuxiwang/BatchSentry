@@ -31,7 +31,7 @@ async def report_client(test_db):
     await test_db.commit()
     from main import app
     from httpx import ASGITransport
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://localhost:8000") as client:
         yield client
 
 

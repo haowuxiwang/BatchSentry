@@ -27,6 +27,26 @@ router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 _CHUNK_SIZE = 8 * 1024 * 1024  # 8 MB
 _MAX_PDF_BYTES = 200 * 1024 * 1024  # 200 MB
 
+# 图片上传（Phase 13）：纸质批记录扫描件常为 jpg/png 单图。
+# 设计决策 —"后端统一转 PDF"方案（最佳实践）：
+#   - PaddleOCR 异步服务仅接受 PDF；MinerU 云端原生支持图片但提交协议
+#     有差异。统一转 PDF 后双后端行为一致，pipeline/OCR/LLM/复核/报告
+#     链路零改动，无需按后端分叉。
+#   - Pillow 负责解码 + EXIF 方向修正（手机/相机竖图不修正会 90° 旋转，
+#     OCR 质量灾难）；PyMuPDF 合成单页 PDF（300 DPI 映射）。
+#   - 原图留档在 job 目录（GMP 追溯），jobs.pdf_path 指向转换后的 PDF。
+_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
+_MAX_IMAGE_PIXELS = 100_000_000  # ~31623x31623 — 超大图解码内存保护（防 DoS）
+# 图片 magic bytes 白名单（独立于扩展名校验 — 防伪装扩展名绕过后端解码路径）
+_IMAGE_MAGIC_PREFIXES = (
+    (b"\xff\xd8\xff", "JPEG"),
+    (b"\x89PNG\r\n\x1a\n", "PNG"),
+    (b"BM", "BMP"),
+    (b"II*\x00", "TIFF"),
+    (b"MM\x00*", "TIFF"),
+)
+_WEBP_MAGIC = (b"RIFF", b"WEBP")  # 8 字节偏移后为 WEBP
+
 # Concurrency guard — prevents memory exhaustion from many parallel pipelines.
 # Each pipeline holds the OCR result + LLM JSON in memory; 3 concurrent 200MB
 # PDFs with multi-page OCR results can hit ~2GB. Override via MAX_CONCURRENT_JOBS.
@@ -122,8 +142,16 @@ async def create_job(
     if request is not None and not is_local_request(request):
         raise HTTPException(403, "Forbidden (non-local request)")
 
-    if not file.filename or not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(400, "Only PDF files accepted")
+    # 扩展名白名单：显式命名时校验（含图片）；空文件名（异常客户端/拖拽）
+    # 兜底为 {job_id}.pdf —— 后续 magic bytes 校验（%PDF- 头）仍然拦截伪装内容。
+    safe_name0 = Path(file.filename or "").name
+    ext = Path(safe_name0 or "fallback.pdf").suffix.lower()
+    if ext != ".pdf" and ext not in _IMAGE_EXTENSIONS:
+        raise HTTPException(
+            400,
+            "仅支持 PDF 或图片（jpg/jpeg/png/webp/bmp/tif/tiff）",
+        )
+    is_image = ext != ".pdf"
 
     # 友好拦截：未配置 LLM 服务商时拒绝上传。
     # 批记录审查核心价值是 LLM 结构化分析，未配置时上传必然在 analysis
@@ -206,16 +234,27 @@ async def create_job(
         raise HTTPException(500, "Upload failed (disk write error)")
     content_md5 = file_md5.hexdigest()
 
-    # Magic bytes check: real PDFs start with %PDF-
+    # Magic bytes check: PDF 以 %PDF- 开头；图片按格式白名单匹配。
+    # 真实文件头校验独立于扩展名 — 伪装扩展名的图片不得绕过校验。
     if total_bytes < 5:
         pdf_path.unlink(missing_ok=True)
-        raise HTTPException(400, "File too small to be a valid PDF")
+        raise HTTPException(400, "File too small to be a valid file")
     try:
         with open(pdf_path, "rb") as f:
-            header = f.read(5)
-        if header != b"%PDF-":
+            header = f.read(12)
+        if is_image:
+            ok = False
+            if header.startswith(_WEBP_MAGIC[0]) and len(header) >= 12:
+                ok = header[8:12] == _WEBP_MAGIC[1]
+            if not ok:
+                ok = any(header.startswith(m) for m, _ in _IMAGE_MAGIC_PREFIXES)
+            if not ok:
+                pdf_path.unlink(missing_ok=True)
+                logger.warning(f"[{job_id}] Upload rejected: bad image magic bytes {header[:8]!r}")
+                raise HTTPException(400, "文件不是有效的图片（文件头不匹配）")
+        elif not header.startswith(b"%PDF-"):
             pdf_path.unlink(missing_ok=True)
-            logger.warning(f"[{job_id}] Upload rejected: bad magic bytes {header!r}")
+            logger.warning(f"[{job_id}] Upload rejected: bad magic bytes {header[:8]!r}")
             raise HTTPException(400, "File is not a valid PDF (missing %PDF- header)")
     except HTTPException:
         raise
@@ -247,21 +286,83 @@ async def create_job(
                 raise _PdfStructuralError("empty")
             return doc.page_count
 
-    pdf_page_count = 0
-    try:
-        pdf_page_count = await asyncio.to_thread(_count_pdf_pages_sync, str(pdf_path))
-        logger.info(f"[{job_id}] PDF page count: {pdf_page_count}")
-    except _PdfStructuralError as e:
-        pdf_path.unlink(missing_ok=True)
-        shutil.rmtree(job_dir, ignore_errors=True)
-        detail = "PDF 已加密，无法进行 OCR 分析，请先解密后上传。" if "encrypted" in str(e) else "PDF 不包含任何页面。"
-        logger.warning(f"[{job_id}] Upload rejected: {detail}")
-        raise HTTPException(400, detail)
-    except Exception as e:
-        # 其他读取失败不阻断上传 — 部分损坏 PDF 云端 OCR 后端可能仍能处理
-        # （Paddle/MinerU 各有容错），pipeline 仍会在 OCR 完成后设置 total_pages
-        logger.warning(f"[{job_id}] Failed to read PDF page count: {e}")
+    # 图片 → 转换 PDF：Pillow 解码（EXIF 方向修正）+ PyMuPDF 合成单页。
+    # 线程池执行 — 超大图解码可能秒级，不阻塞事件循环。
+    # 注意：Image.open 惰性解码，exif_transpose 可能返回原对象 — 全部处理
+    # 必须在 with 块内完成（块退出即 close），块外只保留纯值。
+    def _image_to_pdf_sync(src: str, dst: str) -> int:
+        from PIL import Image, ImageOps
+        img_w = img_h = 0
+        png_bytes = b""
+        try:
+            with Image.open(src) as img:
+                img = ImageOps.exif_transpose(img)
+                img_w, img_h = img.size
+                if img_w * img_h > _MAX_IMAGE_PIXELS:
+                    raise ValueError(
+                        f"图片过大（{img_w}x{img_h} 像素，上限 1 亿像素）"
+                    )
+                if img.mode not in ("RGB", "L"):
+                    img = img.convert("RGB")
+                import io as _io
+                buf = _io.BytesIO()
+                img.save(buf, format="PNG")
+                png_bytes = buf.getvalue()
+            if not png_bytes:
+                raise ValueError("图片解码为空")
+            # 300 DPI 映射：像素 → PDF 点（pt = px * 72/300），扫描件
+            # 常见分辨率，页面物理尺寸与纸面一致
+            width_pt = img_w * 72 / 300
+            height_pt = img_h * 72 / 300
+            with fitz.open() as doc:
+                page = doc.new_page(width=width_pt, height=height_pt)
+                page.insert_image(
+                    page.rect,
+                    stream=png_bytes,
+                    width=img_w,
+                    height=img_h,
+                )
+                doc.save(dst, garbage=4, deflate=True)
+            return 1
+        except (ValueError, OSError, TypeError) as e:
+            raise _PdfStructuralError(str(e)) from e
+
+    if is_image:
+        try:
+            converted_pdf = job_dir / f"{job_id}.pdf"
+            pdf_page_count = await asyncio.to_thread(
+                _image_to_pdf_sync, str(pdf_path), str(converted_pdf)
+            )
+            # 转换成功后 jobs.pdf_path 指向转换 PDF；原图保留在 job 目录留档
+            pdf_path = converted_pdf
+            logger.info(f"[{job_id}] Image converted to PDF: {safe_name} -> {converted_pdf.name}")
+        except _PdfStructuralError as e:
+            pdf_path.unlink(missing_ok=True)
+            shutil.rmtree(job_dir, ignore_errors=True)
+            detail = f"图片无法解析：{e}"
+            logger.warning(f"[{job_id}] Upload rejected: {detail}")
+            raise HTTPException(400, detail)
+        except Exception as e:
+            pdf_path.unlink(missing_ok=True)
+            shutil.rmtree(job_dir, ignore_errors=True)
+            logger.error(f"[{job_id}] Image conversion failed: {e}", exc_info=True)
+            raise HTTPException(500, "图片转换失败（服务器内部错误）")
+    else:
         pdf_page_count = 0
+        try:
+            pdf_page_count = await asyncio.to_thread(_count_pdf_pages_sync, str(pdf_path))
+            logger.info(f"[{job_id}] PDF page count: {pdf_page_count}")
+        except _PdfStructuralError as e:
+            pdf_path.unlink(missing_ok=True)
+            shutil.rmtree(job_dir, ignore_errors=True)
+            detail = "PDF 已加密，无法进行 OCR 分析，请先解密后上传。" if "encrypted" in str(e) else "PDF 不包含任何页面。"
+            logger.warning(f"[{job_id}] Upload rejected: {detail}")
+            raise HTTPException(400, detail)
+        except Exception as e:
+            # 其他读取失败不阻断上传 — 部分损坏 PDF 云端 OCR 后端可能仍能处理
+            # （Paddle/MinerU 各有容错），pipeline 仍会在 OCR 完成后设置 total_pages
+            logger.warning(f"[{job_id}] Failed to read PDF page count: {e}")
+            pdf_page_count = 0
 
     # INSERT 在 db_lock 内（与去重检查 + 其他 DB 写入序列化，避免两个相同
     # 上传并发都通过检查）。去重：内容 md5 相同 → 409 提示已有任务，不创建
@@ -294,7 +395,7 @@ async def create_job(
             )
             await db.execute(
                 "INSERT INTO audit_log (job_id, action, detail) VALUES (?, 'pipeline_start', ?)",
-                (job_id, f"Uploaded {safe_name} ({total_bytes} bytes, {pdf_page_count} pages)"),
+                (job_id, f"Uploaded {safe_name} ({total_bytes} bytes, {pdf_page_count} pages, source={ 'image' if is_image else 'pdf' })"),
             )
             await db.commit()
         except HTTPException:
@@ -318,11 +419,17 @@ async def create_job(
 
 
 @router.get("")
-async def list_jobs(page: int = 1, page_size: int = 20):
+async def list_jobs(page: int = 1, page_size: int = 20, request: Request = None):
     """List active (non-archived) jobs with pagination.
 
     Returns JSON for AJAX-loaded history list (no full page reload).
     """
+    # P2-1: GET 读端点守卫统一 — 本地单用户数据（文件名/状态/耗时）不暴露给
+    # 任意网页探测（恶意站点可用 <img>/<script> 发起无 CORS 的 GET 侧信道）。
+    # request=None 时跳过（单元测试直接调用路径）。
+    from core.security import is_local_request
+    if request is not None and not is_local_request(request):
+        raise HTTPException(403, "Forbidden (non-local request)")
     page = max(1, page)
     page_size = max(1, min(page_size, 100))  # cap to prevent abuse
     offset = (page - 1) * page_size
@@ -384,7 +491,7 @@ async def _live_jobs_snapshot(db) -> list[dict]:
 
 
 @router.get("/live")
-async def stream_all_live_jobs(request: Request):
+async def stream_all_live_jobs(request: Request = None):
     """SSE 聚合端点：单连接推送所有活跃任务的进度快照。
 
     解决 HTTP/1.1 每域 6 条 EventSource 连接上限：upload 页多任务并行
@@ -392,6 +499,10 @@ async def stream_all_live_jobs(request: Request):
     很容易撞上限），而是聚合为一条流，事件体为
     {"jobs": [{job 快照}, ...]}，前端按 job_id 分发。
     """
+    # P2-1: 守卫统一（EventSource 跨源受 CORS 限制，但读端点统一策略）
+    from core.security import is_local_request
+    if request is not None and not is_local_request(request):
+        raise HTTPException(403, "Forbidden (non-local request)")
     import asyncio
     from fastapi.responses import StreamingResponse
 
@@ -419,7 +530,7 @@ async def stream_all_live_jobs(request: Request):
 
 
 @router.get("/{job_id}/page/{page_num}")
-async def get_job_page_image(job_id: str, page_num: int):
+async def get_job_page_image(job_id: str, page_num: int, request: Request = None):
     """Render a PDF page to JPEG for inline preview.
 
     替代浏览器原生 PDF viewer（iframe）：新版 Chromium/Electron 的 PDF
@@ -436,6 +547,9 @@ async def get_job_page_image(job_id: str, page_num: int):
     page_num 1-based；越界返回 404。文档句柄缓存 _pdf_doc_cache 避免
     大 PDF 反复打开。
     """
+    from core.security import is_local_request
+    if request is not None and not is_local_request(request):
+        raise HTTPException(403, "Forbidden (non-local request)")
     db = await get_db()
     cursor = await db.execute("SELECT pdf_path FROM jobs WHERE id = ?", (job_id,))
     row = await cursor.fetchone()
@@ -483,8 +597,12 @@ async def get_job_page_image(job_id: str, page_num: int):
 
 
 @router.get("/{job_id}")
-async def get_job_status(job_id: str):
+async def get_job_status(job_id: str, request: Request = None):
     """Get job status, progress, and findings summary."""
+    # P2-1: GET 读端点守卫统一
+    from core.security import is_local_request
+    if request is not None and not is_local_request(request):
+        raise HTTPException(403, "Forbidden (non-local request)")
     db = await get_db()
     cursor = await db.execute("SELECT * FROM jobs WHERE id = ?", (job_id,))
     job = await cursor.fetchone()
@@ -623,12 +741,16 @@ def _parse_ocr_progress(raw) -> dict:
 
 
 @router.get("/{job_id}/stream")
-async def stream_job_progress(job_id: str, request: Request):
+async def stream_job_progress(job_id: str, request: Request = None):
     """SSE 端点：实时推送 job 进度，直到终态。
 
     前端通过 EventSource 订阅，每 2 秒收到一次进度更新。
     遇到终态 (review/partial_review/error/cancelled/archived) 后推送最终状态并关闭。
     """
+    # P2-1: 守卫统一
+    from core.security import is_local_request
+    if request is not None and not is_local_request(request):
+        raise HTTPException(403, "Forbidden (non-local request)")
     import asyncio
     from fastapi.responses import StreamingResponse
 
@@ -675,8 +797,14 @@ async def stream_job_progress(job_id: str, request: Request):
 
 
 @router.post("/{job_id}/cancel")
-async def cancel_job(job_id: str):
+async def cancel_job(job_id: str, request: Request = None):
     """Cancel a running job."""
+    # 对抗审查（cr-18）：cancel/retry/archive/unarchive 为无请求体 POST
+    # （CORS 简单请求，恶意网页可跨站触发），补齐 is_local_request 守卫
+    # 与上传端点（cr-13）对齐。request=None 时跳过（单元测试直调场景）。
+    from core.security import is_local_request
+    if request is not None and not is_local_request(request):
+        raise HTTPException(403, "Forbidden (non-local request)")
     db = await get_db()
     try:
         await transition_status(db, job_id, "cancelling", "User requested cancel")
@@ -688,8 +816,12 @@ async def cancel_job(job_id: str):
 
 
 @router.post("/{job_id}/retry")
-async def retry_job(job_id: str):
+async def retry_job(job_id: str, request: Request = None):
     """Retry a failed or cancelled job from where it left off."""
+    # cr-18: CSRF 守卫（retry 会真实启动 pipeline 消耗 OCR/LLM 配额）。
+    from core.security import is_local_request
+    if request is not None and not is_local_request(request):
+        raise HTTPException(403, "Forbidden (non-local request)")
     db = await get_db()
     cursor = await db.execute("SELECT * FROM jobs WHERE id = ?", (job_id,))
     job = await cursor.fetchone()
@@ -723,6 +855,23 @@ async def retry_job(job_id: str):
             "UPDATE jobs SET error_message = NULL, finished_at = NULL WHERE id = ?",
             (job_id,),
         )
+        # P1-6: review → pending = 全量重新分析。review 是完整终态，其分析
+        # 产物（findings + structured_json）代表上一次完整结果 — 用户重试
+        # 的意图是"重新分析"而非"补页"（补页是 partial_review 的语义）。
+        # 保留 raw_html（OCR 缓存），Stage 1 走 stage1_skipped 复用路径，
+        # 不重复消耗 OCR 配额；清空后 Stage 2 全量重新提取、Stage 3 重跑规则。
+        if job["status"] == "review":
+            await db.execute("DELETE FROM findings WHERE job_id = ?", (job_id,))
+            await db.execute(
+                "UPDATE page_cache SET structured_json = NULL, analyzed_at = NULL "
+                "WHERE job_id = ? AND raw_html IS NOT NULL",
+                (job_id,),
+            )
+            await db.execute(
+                "INSERT INTO audit_log (job_id, action, detail) VALUES (?, 'analysis_reset', ?)",
+                (job_id, "Retry from review: findings + structured_json cleared "
+                         "(full re-analysis, raw_html kept)"),
+            )
         await db.commit()
         logger.info(f"[{job_id}] Retry requested from status={job['status']}")
     except InvalidTransitionError as e:
@@ -737,14 +886,34 @@ async def retry_job(job_id: str):
 # 生产环境必需：PDF 和数据库会无限累积，需要归档/删除机制
 
 @router.post("/{job_id}/archive")
-async def archive_job(job_id: str, keep_pdf: bool = True):
+async def archive_job(job_id: str, keep_pdf: bool = True, request: Request = None):
     """归档 job — 标记为已归档，从前端列表隐藏，但保留数据用于审计。
 
     Args:
         keep_pdf: True（默认）保留 PDF 用于审计追溯；False 删除 PDF 释放磁盘。
                   数据库记录始终保留。
     """
+    # cr-18: CSRF 守卫。
+    from core.security import is_local_request
+    if request is not None and not is_local_request(request):
+        raise HTTPException(403, "Forbidden (non-local request)")
     db = await get_db()
+    # 状态机健壮性（Round 3 审计）：归档 = 已完成任务的存档。运行中的 job
+    # （pipeline 正持有，会继续向 DB 写入并尝试状态转换）若被归档，pipeline
+    # 末尾的 transition 会撞 InvalidTransitionError 并把 job 强改 error —
+    # 状态错乱且用户困惑。与 delete_job 的 _ACTIVE_STATUSES 拒绝对齐。
+    cursor = await db.execute("SELECT status FROM jobs WHERE id = ?", (job_id,))
+    row = await cursor.fetchone()
+    if not row:
+        raise HTTPException(404, "Job not found")
+    if row["status"] in _ACTIVE_STATUSES:
+        logger.warning(
+            f"[{job_id}] Archive blocked: job is active (status={row['status']})"
+        )
+        raise HTTPException(
+            409,
+            f"任务正在处理中（状态: {row['status']}），请等待进入复核/终态后再归档。",
+        )
     try:
         await transition_status(db, job_id, "archived", "User archived")
         logger.info(f"[{job_id}] Archived by user (keep_pdf={keep_pdf})")
@@ -779,8 +948,12 @@ async def archive_job(job_id: str, keep_pdf: bool = True):
 
 
 @router.post("/{job_id}/unarchive")
-async def unarchive_job(job_id: str):
+async def unarchive_job(job_id: str, request: Request = None):
     """取消归档 — 恢复到 review 状态。"""
+    # cr-18: CSRF 守卫。
+    from core.security import is_local_request
+    if request is not None and not is_local_request(request):
+        raise HTTPException(403, "Forbidden (non-local request)")
     db = await get_db()
     # 对抗审查(cr-9): 归档时 keep_pdf=False 会删除 PDF，恢复后 review 页
     # PDF 预览 404、retry 报"PDF file not found"。无 PDF 的 job 允许恢复
@@ -798,7 +971,7 @@ async def unarchive_job(job_id: str):
 
 
 @router.delete("/{job_id}")
-async def delete_job(job_id: str, keep_pdf: bool = False):
+async def delete_job(job_id: str, keep_pdf: bool = False, request: Request = None):
     """彻底删除 job — 删除数据库记录 + PDF 文件。
 
     生产环境清理必需，避免数据无限累积。
@@ -806,6 +979,11 @@ async def delete_job(job_id: str, keep_pdf: bool = False):
     Args:
         keep_pdf: True 时保留 PDF 原文件（用于审计），False 时一并删除
     """
+    # P2-1: DELETE 破坏性端点守卫（与 cancel/archive 等统一）。
+    # request=None 时跳过守卫（单元测试直接调用路径）。
+    from core.security import is_local_request
+    if request is not None and not is_local_request(request):
+        raise HTTPException(403, "Forbidden (non-local request)")
     import shutil
 
     db = await get_db()
@@ -902,8 +1080,12 @@ async def delete_job(job_id: str, keep_pdf: bool = False):
 
 
 @router.get("/archived/list")
-async def list_archived():
+async def list_archived(request: Request = None):
     """列出已归档的 jobs。"""
+    # P2-1: GET 读端点守卫统一
+    from core.security import is_local_request
+    if request is not None and not is_local_request(request):
+        raise HTTPException(403, "Forbidden (non-local request)")
     db = await get_db()
     cursor = await db.execute(
         "SELECT id, filename, status, total_pages, created_at, finished_at "
@@ -914,8 +1096,12 @@ async def list_archived():
 
 
 @router.get("/stats/overview")
-async def stats_overview():
+async def stats_overview(request: Request = None):
     """数据库存储统计 — 用于监控累积情况。"""
+    # P2-1: GET 读端点守卫统一
+    from core.security import is_local_request
+    if request is not None and not is_local_request(request):
+        raise HTTPException(403, "Forbidden (non-local request)")
     import os
     db = await get_db()
 

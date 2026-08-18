@@ -35,7 +35,10 @@ def test_mask_secrets_redacts_api_keys():
 def test_mask_secrets_redacts_hex_token():
     """对抗审查（cr-14）：32 位 hex 访问令牌（PaddleOCR token 格式）必须脱敏。"""
     from llm.client import _mask_secrets
-    tok = "26f37846a1b2c3d4e5f60718293a4b5c"
+    # P0-1: 原 fixture 沿用历史泄露过的 PaddleOCR token 字面量
+    # （见 daba3dd commit 的 PLAN.md）— 替换为随机假值，避免工作树
+    # 与生产凭据字面关联。
+    tok = "92a4c929eb7d988d3d386a9ef0f1bbb2"
     masked = _mask_secrets(f"http error with token={tok} in message")
     assert tok not in masked
     assert "***" in masked

@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 #
 # 覆盖四类凭据模式（对抗审查 cr-14 扩展）：
 #   1. sk- 前缀密钥（DeepSeek/SiliconFlow/OpenAI 风格）
-#   2. 32 位 hex 访问令牌（PaddleOCR token 格式，如 26f37846...）
+#   2. 32 位 hex 访问令牌（PaddleOCR token 格式）
 #   3. cli_ 前缀应用 ID（飞书 app_id）
 #   4. Bearer 授权头值（Anthropic x-api-key 报错回显场景）
 _MASK_PATTERNS = None

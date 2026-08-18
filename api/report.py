@@ -12,7 +12,7 @@ import html
 import logging
 from datetime import datetime
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import PlainTextResponse
 
 from db.client import get_db
@@ -105,21 +105,29 @@ async def _generate_report_md_cached(job_id: str) -> str:
 
 
 @router.get("/jobs/{job_id}/report.md", response_class=PlainTextResponse)
-async def download_report_md(job_id: str):
+async def download_report_md(job_id: str, request: Request = None):
     """Generate and return Markdown report (cached)."""
+    # P2-1: GET 读端点守卫统一
+    from core.security import is_local_request
+    if request is not None and not is_local_request(request):
+        raise HTTPException(403, "Forbidden (non-local request)")
     md = await _generate_report_md_cached(job_id)
     await _audit_report_export(job_id, "md", len(md))
     return PlainTextResponse(md, media_type="text/markdown")
 
 
 @router.get("/jobs/{job_id}/report.json")
-async def download_report_json(job_id: str):
+async def download_report_json(job_id: str, request: Request = None):
     """Return structured JSON report with job metadata + findings.
 
     Phase 3 fix: include job field (filename/status/total_pages/stages) so
     downstream consumers (e.g. E2E test, external integrations) can identify
     the job without a separate API call.
     """
+    # P2-1: GET 读端点守卫统一
+    from core.security import is_local_request
+    if request is not None and not is_local_request(request):
+        raise HTTPException(403, "Forbidden (non-local request)")
     db = await get_db()
     cursor = await db.execute("SELECT * FROM jobs WHERE id = ?", (job_id,))
     job = await cursor.fetchone()

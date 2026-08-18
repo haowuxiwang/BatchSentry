@@ -96,6 +96,10 @@ class TestValidTransitions:
     def test_review_can_transition_to_archived(self):
         assert "archived" in VALID_TRANSITIONS["review"]
 
+    def test_review_can_transition_to_pending_for_reanalysis(self):
+        """P1-6: review → pending 合法 — 全量重新分析（retry 语义）。"""
+        assert "pending" in VALID_TRANSITIONS["review"]
+
     def test_error_can_transition_to_pending_for_retry(self):
         assert "pending" in VALID_TRANSITIONS["error"]
 

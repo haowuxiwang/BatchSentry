@@ -58,7 +58,7 @@
   // OCR 后端显示名（测试连接消息用）
   const OCR_DISPLAY = { mineru: "MinerU", paddle: "PaddleOCR" };
   function ocrDisplay(backend) {
-    return OCR_DISPLAY[backend] || backend;
+    return OCR_DISPLAY[backend] || backend || "未知";
   }
 
   function showBackendForm(backend) {
@@ -92,7 +92,7 @@
         <div class="provider-actions">
           ${isActive ? "" : `<button type="button" class="provider-use-btn" data-action="use" title="设为当前使用的提供商">设为当前</button>`}
           <button type="button" class="provider-test-btn" data-action="test" title="测试此提供商的连通性">测试</button>
-          <button type="button" class="provider-toggle-btn" data-action="toggle">${isConfigured ? "更换 Key" : "展开"}</button>
+          <button type="button" class="provider-toggle-btn" data-action="toggle">${isConfigured ? "更换密钥" : "展开"}</button>
           ${BUILTIN.has(prov.name) ? "" : `<button type="button" class="provider-remove-btn" data-action="remove" title="移除该提供商">移除</button>`}
         </div>
       </div>
@@ -104,7 +104,7 @@
     return div;
   }
 
-  // 已配置: 显示脱敏 key + base_url/model 只读 + "更换 Key" input (默认隐藏)
+  // 已配置: 显示脱敏 key + base_url/model 只读 + "更换密钥" input (默认隐藏)
   // 未配置: 显示空白 input + 引导文案
   function renderProviderBody(prov, isConfigured) {
     if (isConfigured) {
@@ -134,7 +134,7 @@
             <label class="field-label">输入新密钥覆盖原值</label>
             <input class="input" type="password" name="${esc(prov.name)}_api_key" placeholder="粘贴新的 API 密钥..." autocomplete="new-password" />
             <div class="mt-2 flex gap-2">
-              <button type="button" class="save-key-btn btn-primary-small" data-provider="${esc(prov.name)}">保存此密钥</button>
+              <button type="button" class="save-key-btn btn-primary-small" data-provider="${esc(prov.name)}">保存</button>
               <button type="button" class="clear-key-btn btn-danger-small" data-provider="${esc(prov.name)}" title="清除已保存的 API 密钥">移除密钥</button>
               <button type="button" class="cancel-replace-btn btn-text">取消</button>
             </div>
@@ -148,8 +148,8 @@
         <div>
           <label class="field-label">协议</label>
           <select class="input" name="${esc(prov.name)}_protocol">
-            <option value="openai" ${prov.protocol === "openai" ? "selected" : ""}>openai</option>
-            <option value="anthropic" ${prov.protocol === "anthropic" ? "selected" : ""}>anthropic</option>
+            <option value="openai" ${prov.protocol === "openai" ? "selected" : ""}>OpenAI 兼容协议</option>
+            <option value="anthropic" ${prov.protocol === "anthropic" ? "selected" : ""}>Anthropic 协议</option>
           </select>
         </div>
         <div>
@@ -165,7 +165,7 @@
         <label class="field-label">API 密钥 <span class="muted">— 粘贴 ${esc(display(prov.name))} 的密钥</span></label>
         <input class="input" type="password" name="${esc(prov.name)}_api_key" placeholder="sk-..." autocomplete="new-password" />
         <div class="mt-2">
-          <button type="button" class="save-key-btn btn-primary-small" data-provider="${esc(prov.name)}">保存此密钥</button>
+          <button type="button" class="save-key-btn btn-primary-small" data-provider="${esc(prov.name)}">保存</button>
         </div>
       </div>
     `;
@@ -190,7 +190,7 @@
   // Provider 操作事件绑定 (事件委托)
   // ============================================================
   function bindProviderActions() {
-    // 防重复绑定：renderProviders 每次调用（load / 切换 / 保存 Key /
+    // 防重复绑定：renderProviders 每次调用（load / 切换 / 保存密钥 /
     // 添加 provider 后）都会走到这里，直接 addEventListener 会叠加 N 个
     // handler → 第二次交互起按钮"点了没反应"或双请求。用克隆替换丢弃
     // 旧节点上的 listener（子元素全部走委托、无直接绑定，克隆安全）。
@@ -238,11 +238,11 @@
       const providerName = row.dataset.provider;
 
       if (saveBtn) {
-        await saveProviderKey(providerName, row);
+        await saveProviderConfig(providerName, row);
       } else if (clearBtn) {
         await clearProviderKey(providerName, row);
       } else if (cancelBtn) {
-        // 取消更换 Key: 隐藏 input 区域
+        // 取消更换密钥: 隐藏 input 区域
         const replaceSection = row.querySelector(".key-replace-section");
         if (replaceSection) replaceSection.classList.add("hidden");
       }
@@ -289,7 +289,7 @@
   }
 
   // ============================================================
-  // toggleProviderBody — "更换 Key"/"展开" 按钮
+  // toggleProviderBody — "更换密钥"/"展开" 按钮
   // ============================================================
   function toggleProviderBody(row, btn) {
     const body = row.querySelector(".provider-body");
@@ -297,7 +297,7 @@
     if (body.classList.contains("hidden")) {
       body.classList.remove("hidden");
       btn.textContent = "折叠";
-      // 已配置的 provider: 自动展开"更换 Key"输入区
+      // 已配置的 provider: 自动展开"更换密钥"输入区
       if (replaceSection) replaceSection.classList.remove("hidden");
     } else {
       body.classList.add("hidden");
@@ -307,9 +307,12 @@
   }
 
   // ============================================================
-  // S5: saveProviderKey — 单 provider 保存 Key (立即生效)
+  // S5: saveProviderConfig — 单 provider 保存全字段 (立即生效)
+  // T2.1 统一保存语义：Key + 协议 + Base URL + 模型 一次性提交。
+  // 此前"保存此密钥"只存 Key，而底部"保存全部设置"跳过 api_key —
+  // 两条路径各管一半，用户改 base_url 后点保存密钥 会静默丢失。
   // ============================================================
-  async function saveProviderKey(providerName, row) {
+  async function saveProviderConfig(providerName, row) {
     const input = row.querySelector(`input[name="${CSS.escape(providerName)}_api_key"]`);
     if (!input) return;
     const keyValue = input.value.trim();
@@ -333,10 +336,20 @@
         llm_provider: activeProvider,
         [`${providerName}_api_key`]: keyValue,
       };
+      // 同卡片内的协议 / 模型 / Base URL 一并保存（非空值才提交，
+      // 空值保持后端现有值 —— 与底部保存的空值跳过语义一致）
+      for (const suffix of ["_protocol", "_base_url", "_model"]) {
+        const el = row.querySelector(
+          `[name="${CSS.escape(providerName + suffix)}"]`,
+        );
+        if (el && el.value.trim() !== "") {
+          body[`${providerName}${suffix}`] = el.value.trim();
+        }
+      }
       // 若该 provider 是本次会话刚添加、尚未保存注册表的（pendingAdds），
       // 必须同批提交 llm_providers_add — 否则后端写 Key 时注册表里没有它，
       // 随后的自动激活 404 "not in registry"，刷新后 provider 消失
-      // （对抗审查：此前"保存此密钥"对新 provider 必然失败）。
+      // （对抗审查：此前"保存"对新 provider 必然失败）。
       if (pendingAdds.has(providerName)) {
         body.llm_providers_add = providerName;
       }
@@ -348,6 +361,9 @@
       const data = await r.json();
       if (r.ok && data.ok) {
         pendingAdds.delete(providerName); // 已注册成功，后续保存不再带 add
+        const skippedNote = data.skipped?.length
+          ? `（未修改: ${data.skipped.join("、")}）`
+          : "";
         // Auto-activate (业界做法 — OpenAI/Anthropic/Linear):
         // 若当前 active provider 未配置 Key，保存新 provider 的 Key 后自动切到它。
         // 根除"配置了 SiliconFlow 但测试报 deepseek 未配置 Key"的死亡陷阱。
@@ -357,13 +373,13 @@
         const activeUnconfigured = !(activeProv && activeProv.configured);
         if (providerName !== activeProvider && activeUnconfigured) {
           showMsg(
-            `✓ ${display(providerName)} 的密钥已保存，并自动设为当前提供商`,
+            `✓ ${display(providerName)} 的密钥已保存，并自动设为当前提供商${skippedNote}`,
             "info",
           );
           await setActiveProvider(providerName, { silent: true });
         } else {
           showMsg(
-            `✓ ${display(providerName)} 的密钥已保存并立即生效`,
+            `✓ ${display(providerName)} 的密钥已保存并立即生效${skippedNote}`,
             "info",
           );
           // 用后端返回的 providers 列表刷新（避免 stale configured 标志）
@@ -445,7 +461,7 @@
         // 非 200 (如 403 Forbidden) 或 ok=false — 优先显示后端 reason，其次 detail
         const reason = data.reason || data.detail || `HTTP ${r.status}`;
         if (reason.includes("not configured") || reason.includes("API key")) {
-          resultEl.innerHTML = `<span class="badge-no">✗ 未配置 API 密钥 — 请点击"更换 Key"或"展开"输入</span>`;
+          resultEl.innerHTML = `<span class="badge-no">✗ 未配置 API 密钥 — 请点击"更换密钥"或"展开"输入</span>`;
         } else {
           resultEl.innerHTML = `<span class="badge-no">✗ ${esc(reason)}</span>`;
         }
@@ -562,6 +578,8 @@
       if (mineruToken && mineruToken.value.trim()) {
         body.mineru_token = mineruToken.value.trim();
       }
+      const mineruBaseUrl = document.getElementById("mineru_base_url");
+      if (mineruBaseUrl) body.mineru_base_url = mineruBaseUrl.value.trim();
       const mineruVersion = document.getElementById("mineru_model_version");
       if (mineruVersion) body.mineru_model_version = mineruVersion.value;
       const mineruLang = document.getElementById("mineru_language");
@@ -575,7 +593,13 @@
       const slicesEl = document.getElementById("ocr_slices");
       if (slicesEl) {
         const n = parseInt(slicesEl.value, 10);
-        body.ocr_slices = Number.isFinite(n) && n >= 1 ? n : 1;
+        body.ocr_slices = Number.isFinite(n) && n >= 1 ? Math.min(n, 20) : 1;
+      }
+
+      // P1 修复：新增 provider 注册随 OCR 保存一并提交 — 否则用户添加
+      // provider 后直接点"保存 OCR 设置"，刷新后 provider 丢失且无提示。
+      if (pendingAdds.size > 0) {
+        body.llm_providers_add = Array.from(pendingAdds).join(",");
       }
 
       log("saving OCR config", Object.keys(body));
@@ -685,7 +709,7 @@
     setSeg("ocr-backend-seg", current.ocr.backend);
     showBackendForm(current.ocr.backend);
     document.getElementById("paddle_ocr_token").placeholder =
-      current.ocr.paddle.token || "token";
+      current.ocr.paddle.token || "访问令牌（可选）";
     document.getElementById("paddle_ocr_api_url").value =
       current.ocr.paddle.api_url;
     document.getElementById("paddle_ocr_model").value =
@@ -695,6 +719,8 @@
     );
     document.getElementById("mineru_token").placeholder =
       current.ocr.mineru.token || "sk-...";
+    document.getElementById("mineru_base_url").value =
+      current.ocr.mineru.base_url || "";
     document.getElementById("mineru_model_version").value =
       current.ocr.mineru.model_version;
     document.getElementById("mineru_language").value =
@@ -832,6 +858,10 @@
     if (mobileEl && mobileEl.value.trim()) {
       body.feishu_mobile = mobileEl.value.trim();
     }
+    // P1 修复：新增 provider 注册随飞书保存一并提交（同 OCR 保存）
+    if (pendingAdds.size > 0) {
+      body.llm_providers_add = Array.from(pendingAdds).join(",");
+    }
     try {
       const r = await fetch("/api/settings", {
         method: "POST",
@@ -843,7 +873,12 @@
         feishuMsg(`✗ 保存失败: ${JSON.stringify(data.detail || data)}`, "err");
         return;
       }
-      feishuMsg(`✓ 已保存（${data.updated} 项）`);
+      // P2 修复：掩码值被跳过（未修改）时后端会回显 skipped —— 此前被
+      // 丢弃，用户把掩码复制回去提交会看到"已保存"但实际未变。
+      const skippedNote = data.skipped?.length
+        ? `（未修改: ${data.skipped.join("、")}）`
+        : "";
+      feishuMsg(`✓ 已保存（${data.updated} 项）${skippedNote}`);
       await load();
     } catch (err) {
       feishuMsg(`✗ 保存失败: ${err.message}`, "err");
@@ -981,7 +1016,11 @@
       log("rules loaded", { count: rules.length, lastSaved: ruleLastSaved });
       renderRules();
     } catch (err) {
+      // P3 修复：规则加载失败不再静默 — 区块直接可见提示，避免用户
+      // 误以为"没有规则"而重复添加。
       log.err("load rules failed", err);
+      const el = document.getElementById("rule-msg");
+      if (el) el.textContent = `✗ 规则加载失败: ${err.message}`;
     }
   }
 
@@ -1332,12 +1371,12 @@
     custom.classList.add("hidden");
     document.getElementById("llm-add-form").classList.add("hidden");
     document.getElementById("llm-add-toggle").classList.remove("hidden");
-    showMsg(`已添加 ${display(name)} — 请填写字段并保存 Key`, "info");
+    showMsg(`已添加 ${display(name)} — 请填写字段并保存密钥`, "info");
   });
 
   // ============================================================
-  // S7: 底部"保存通用设置" — 仅保存 OCR backend / enable_* 等通用字段
-  // (per-provider Key 已由"保存此密钥"按钮即时保存)
+  // S7: 底部"保存全部设置" — 保存 OCR backend / enable_* 等通用字段
+  // (per-provider Key 由卡片内"保存"按钮即时保存，此处仅做遗漏提醒)
   // ============================================================
   document
     .getElementById("settings-form")
@@ -1346,18 +1385,28 @@
       const fd = new FormData(e.target);
       const body = {};
 
-      // 收集所有非空字段(排除 per-provider api_key — 已独立保存)
+      // 收集所有非空字段(排除 per-provider api_key — 卡片内独立保存)
+      const unsavedKeys = [];
       for (const [k, v] of fd.entries()) {
         if (v === "") continue;
-        if (k.endsWith("_api_key")) continue; // per-provider Key 由独立按钮处理
+        if (k.endsWith("_api_key")) {
+          // T2.1: 非空填写的 Key 若未被独立保存，显式提醒（旧行为静默丢弃）
+          // 已掩码值（形如 abcd****）— 正则覆盖 %-decoded / 原始两种形态
+          const masked = /^[\w-]{4}\*{4}/.test(v) || /^.{4}\*{4}$/.test(v);
+          if (!masked) {
+            const prov = k.replace(/_api_key$/, "");
+            unsavedKeys.push(prov);
+          }
+          continue;
+        }
         body[k] = v;
       }
-
-      // 收集 per-provider 的 protocol/base_url/model (允许批量更新)
-      for (const [k, v] of fd.entries()) {
-        if (k.endsWith("_protocol") || k.endsWith("_base_url") || k.endsWith("_model")) {
-          if (v !== "") body[k] = v;
-        }
+      if (unsavedKeys.length > 0) {
+        showMsg(
+          `⚠ 检测到 ${unsavedKeys.join("、")} 已填写但未保存的 API 密钥，` +
+            "请点击对应卡片内的「保存」按钮（通用设置已保存）",
+          "warn",
+        );
       }
 
       body.llm_provider = activeProvider;
@@ -1446,8 +1495,15 @@
       showMsg(`正在检测 OCR + ${providers.length} 个 LLM 提供商…`, "info");
       try {
         // 并行: downstream (用于 OCR) + 每个 provider 的 test_provider
+        // P2 修复：health 探测失败（网络异常/后端 500）不应拖垮整个结果 —
+        // 单项失败降级为 ✗ 条目，已完成的其他 provider 结果保留。
         const [healthData, ...providerTests] = await Promise.all([
-          fetch("/api/health/downstream").then((r) => r.json()),
+          fetch("/api/health/downstream")
+            .then((r) => r.json())
+            .catch((e) => ({
+              ok: false,
+              ocr: { ok: false, reason: `探测请求失败: ${e.message}` },
+            })),
           ...providers.map(async (p) => {
             const r = await fetch("/api/settings/test_provider", {
               method: "POST",
@@ -1485,7 +1541,7 @@
             parts.push(`✓ ${display(name)}${lat}${tag}`);
           } else {
             const reason = data.reason || data.detail || "失败";
-            if (reason.includes("not configured") || reason.includes("API key")) {
+if (reason.includes("未配置") || reason.includes("密钥")) {
               parts.push(`○ ${display(name)}：未配置${tag}`);
             } else {
               parts.push(`✗ ${display(name)}:${reason}${tag}`);

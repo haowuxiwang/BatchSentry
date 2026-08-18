@@ -11,6 +11,7 @@ from pathlib import Path
 import requests
 
 from config import config
+from core.security import redact_urls
 from logging_config import ocr_job_id_var, JobIdFilter
 
 logger = logging.getLogger(__name__)
@@ -65,23 +66,23 @@ def submit_pdf(pdf_path: str, retries: int = 3) -> str:
                     timeout=upload_timeout,
                 )
                 if resp.status_code != 200:
-                    raise RuntimeError(f"Submit failed HTTP {resp.status_code}: {resp.text[:300]}")
+                    raise RuntimeError(f"Submit failed HTTP {resp.status_code}: {redact_urls(resp.text[:300])}")
                 result = resp.json()
                 job_id = result.get("data", {}).get("jobId") or result.get("jobId")
                 if not job_id:
-                    raise RuntimeError(f"No jobId in response: {result}")
+                    raise RuntimeError(f"No jobId in response: {redact_urls(str(result))}")
                 logger.info(f"OCR job submitted: jobId={job_id}")
                 return job_id
             except Exception as e:
                 last_error = e
                 logger.warning(
-                    f"Submit attempt {attempt}/{retries} failed: {type(e).__name__}: {e}"
+                    f"Submit attempt {attempt}/{retries} failed: {type(e).__name__}: {redact_urls(str(e))}"
                 )
                 if attempt < retries:
                     backoff = 2 * attempt
                     logger.info(f"Submit retry: backing off {backoff}s before attempt {attempt + 1}")
                     time.sleep(backoff)
-        raise RuntimeError(f"Submit failed after {retries} attempts: {last_error}")
+        raise RuntimeError(f"Submit failed after {retries} attempts: {redact_urls(str(last_error))}")
     finally:
         pdf_file.close()
 
@@ -140,13 +141,15 @@ def poll_job(job_id: str, progress_callback=None) -> dict:
                 logger.info(f"Poll done: job_id={job_id} elapsed={elapsed}s pages={extracted}/{total}")
                 return j
             if state in ("failed", "error"):
-                raise RuntimeError(f"Job failed: {j}")
+                raise RuntimeError(f"Job failed: {redact_urls(str(j))}")
             time.sleep(POLL_INTERVAL)
         except requests.exceptions.RequestException as e:
             consecutive_errors += 1
-            logger.warning(f"Poll network error ({consecutive_errors}/5): {e}")
+            logger.warning(f"Poll network error ({consecutive_errors}/5): {redact_urls(str(e))}")
             if consecutive_errors >= 5:
-                raise RuntimeError(f"Poll failed after {consecutive_errors} consecutive network errors: {e}")
+                raise RuntimeError(
+                    f"Poll failed after {consecutive_errors} consecutive network errors: {redact_urls(str(e))}"
+                )
             time.sleep(POLL_INTERVAL * 2)  # 网络错误时退避更久
     elapsed = int(time.time() - start)
     raise RuntimeError(
@@ -154,11 +157,70 @@ def poll_job(job_id: str, progress_callback=None) -> dict:
     )
 
 
+def _extract_block_text(block) -> str:
+    """深度提取 parsing_res_list 块中的可见文本（dict/list 递归）。
+
+    只认 text/content 类语义键与子块递归，跳过 box/points/words 坐标类键 —
+    坐标数字对 LLM 无意义，混入会放大噪音。
+    """
+    if isinstance(block, str):
+        return block.strip()
+    if isinstance(block, list):
+        parts = [_extract_block_text(b) for b in block]
+        return "\n".join(p for p in parts if p)
+    if isinstance(block, dict):
+        for key in ("text", "content", "text_content"):
+            v = block.get(key)
+            if v is None:
+                continue
+            t = _extract_block_text(v)
+            if t:
+                return t
+        parts = []
+        for v in block.values():
+            if isinstance(v, (dict, list, str)):
+                t = _extract_block_text(v)
+                if t:
+                    parts.append(t)
+        return "\n".join(parts)
+    return ""
+
+
+def _ensure_page_text(pages: list[dict]) -> None:
+    """P0 级兜底（对抗审查 cr-19）：服务端 markdown.text 可能为空/过短，
+    而 prunedResult.parsing_res_list（块级文本）此前从不被读取 — 表格外
+    文本/图片文字会在 OCR 服务端 HTML 组装失败时静默丢失，且无任何
+    校验可自证。此处以块级文本组装纯文本兜底并改写 markdown.text，
+    pipeline 无感知。
+    """
+    for p in pages:
+        md = p.get("markdown")
+        if not isinstance(md, dict):
+            continue
+        text = (md.get("text") or "").strip()
+        if len(text) >= 20:
+            continue
+        pl = (p.get("prunedResult") or {}).get("parsing_res_list") or []
+        fallback = "\n".join(t for t in (_extract_block_text(b) for b in pl) if t)
+        if fallback.strip():
+            logger.warning(
+                f"Page markdown.text empty/short ({len(text)} chars) — "
+                f"built fallback from parsing_res_list ({len(fallback)} chars)"
+            )
+            # P1-3: 显式降级标记 — 块级文本兜底丢失表格结构，LLM 与规则层
+            # 必须知道输入已降级（否则把纯文本当完整表格分析，结论失真）。
+            md["text"] = (
+                "[OCR 警告: 服务端表格组装失败，以下为块级文本兜底，"
+                "表格结构已丢失，各行内容可能串行]\n\n" + fallback
+            )
+
+
 def download_result(poll_response: dict) -> list[dict]:
     """Download OCR result JSON from the URL in poll response.
 
     Returns a list of page dicts, each containing:
-      - markdown.text (HTML table string)
+      - markdown.text (HTML table string; falls back to parsing_res_list text
+        when the server-side HTML assembly is empty/short)
       - prunedResult.parsing_res_list (block-level structure)
     """
     result_url_obj = poll_response.get("data", {}).get("resultUrl") or poll_response.get("resultUrl")
@@ -169,13 +231,17 @@ def download_result(poll_response: dict) -> list[dict]:
         json_url = result_url_obj
 
     if not json_url:
-        raise RuntimeError(f"No result URL in poll response: {poll_response}")
+        raise RuntimeError(f"No result URL in poll response: {redact_urls(str(poll_response))}")
 
-    # 对抗审查（cr-16）：resultUrl 是服务端签名 CDN 地址，query 可能带
-    # 签名 token — 日志只记 pathname，不落完整 URL（pipeline.log 可查排障）。
+    # 对抗审查（cr-16）+ P1-7：resultUrl 是服务端签名 CDN 地址，query 可能带
+    # 签名 token — 日志只记 pathname；网络异常消息脱敏（requests 异常回显
+    # 完整 URL，冒泡进 jobs.error_message → 报告/通知反刍泄露）。
     from urllib.parse import urlsplit
     logger.info(f"Downloading OCR result from {urlsplit(json_url).path}...")
-    resp = requests.get(json_url, timeout=180, verify=True)
+    try:
+        resp = requests.get(json_url, timeout=180, verify=True)
+    except requests.exceptions.RequestException as e:
+        raise RuntimeError(f"Download network error: {redact_urls(str(e))}") from e
     if resp.status_code != 200:
         raise RuntimeError(f"Download failed HTTP {resp.status_code}")
 
@@ -195,7 +261,7 @@ def download_result(poll_response: dict) -> list[dict]:
             logger.error(
                 f"OCR result JSON parsed but layoutParsingResults is empty. "
                 f"top_keys={list(obj.keys())} result_keys={list(result_obj.keys()) if isinstance(result_obj, dict) else type(result_obj).__name__} "
-                f"raw_first_500={raw[:500]!r}"
+                f"raw_first_500={redact_urls(raw[:500])!r}"
             )
             raise RuntimeError(
                 "OCR 返回空结果: layoutParsingResults 为空。"
@@ -211,6 +277,7 @@ def download_result(poll_response: dict) -> list[dict]:
         logger.info(
             f"OCR download complete (single JSON): {len(pages)} pages, {raw_size_kb:.1f}KB"
         )
+        _ensure_page_text(pages)
         return pages
     except json.JSONDecodeError:
         pass
@@ -253,6 +320,7 @@ def download_result(poll_response: dict) -> list[dict]:
     logger.info(
         f"OCR download complete (JSONL): {len(pages)} pages, {raw_size_kb:.1f}KB"
     )
+    _ensure_page_text(pages)
     return pages
 
 

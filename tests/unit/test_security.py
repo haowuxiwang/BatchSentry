@@ -11,6 +11,7 @@ from core.security import (
     _is_blocked_host,
     validate_external_url,
     is_local_request,
+    redact_urls,
 )
 
 
@@ -242,3 +243,53 @@ class TestIsLocalRequest:
         """无 Origin header + Host=127.0.0.1 应允许。"""
         req = self._make_request(host="127.0.0.1:8000", origin="")
         assert is_local_request(req) is True
+
+
+# ── redact_urls（P1-7）：签名 URL 反刍脱敏 ──────────────────────────────
+
+
+class TestRedactUrls:
+    """redact_urls — 异常消息/日志中的签名 URL 反刍脱敏。"""
+
+    def test_query_string_redacted(self):
+        out = redact_urls(
+            "ConnectionError: GET https://cdn.example.com/down/abc123.zip"
+            "?sign=xyz&expires=9999"
+        )
+        assert "?sign=xyz" not in out
+        assert "sign=xyz" not in out
+        assert "abc123.zip?<redacted>" in out
+
+    def test_plain_url_kept(self):
+        out = redact_urls("https://api.example.com/v1/extract")
+        assert out == "https://api.example.com/v1/extract"
+
+    def test_long_path_truncated(self):
+        url = "https://cdn.example.com/" + "x" * 200
+        out = redact_urls(url)
+        assert "x" * 200 not in out
+        assert "..." in out
+
+    def test_json_text_redacted(self):
+        payload = (
+            '{"data": {"resultUrl": {"jsonUrl": '
+            '"https://res.example.com/out?token=SECRET"}}}'
+        )
+        out = redact_urls(payload)
+        assert "token=SECRET" not in out
+        assert "<redacted>" in out
+
+    def test_no_url_passthrough(self):
+        assert redact_urls("") == ""
+        assert redact_urls("纯中文无 URL 消息") == "纯中文无 URL 消息"
+
+    def test_urls_in_pipeline_error_message(self):
+        msg = (
+            "MinerU poll failed: 5 consecutive network errors: "
+            "HTTPSConnectionPool(host=res.example.com): Max retries exceeded "
+            "with url: /zip/out.zip?X-Amz-Signature=deadbeef "
+            "(Caused by ConnectionError)"
+        )
+        out = redact_urls(msg)
+        assert "X-Amz-Signature=deadbeef" not in out
+        assert "Max retries exceeded" in out

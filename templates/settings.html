@@ -203,14 +203,14 @@
                         type="password"
                         name="paddle_ocr_token"
                         id="paddle_ocr_token"
-                        placeholder="访问令牌（可选）"
+                        placeholder="请输入访问令牌（必填）"
                         autocomplete="new-password"
                       />
                       <button
                         type="button"
                         class="ocr-clear-btn btn-danger-small"
                         data-target="paddle_ocr_token"
-                        title="清除已保存的 Token"
+                        title="清除已保存的访问令牌"
                       >移除</button>
                     </div>
                     <p class="field-hint" id="paddle-status"></p>
@@ -237,14 +237,14 @@
                         type="password"
                         name="mineru_token"
                         id="mineru_token"
-                        placeholder="sk-..."
+                        placeholder="请输入访问令牌（必填）"
                         autocomplete="new-password"
                       />
                       <button
                         type="button"
                         class="ocr-clear-btn btn-danger-small"
                         data-target="mineru_token"
-                        title="清除已保存的 Token"
+                        title="清除已保存的访问令牌"
                       >移除</button>
                     </div>
                     <p class="field-hint" id="mineru-status"></p>
@@ -253,8 +253,8 @@
                     <div>
                       <label class="field-label">模型版本</label>
                       <select class="input" name="mineru_model_version" id="mineru_model_version">
-                        <option value="vlm">vlm（推荐）</option>
-                        <option value="pipeline">pipeline（默认）</option>
+                        <option value="vlm">VLM（推荐，精度更高）</option>
+                        <option value="pipeline">Pipeline（默认，通用解析）</option>
                         <option value="MinerU-HTML">MinerU-HTML（HTML 结构输出）</option>
                       </select>
                       <p class="field-hint">pipeline=通用解析（默认）；vlm=精度更高（推荐）；MinerU-HTML=HTML 结构输出，左侧 OCR 原文以 HTML 表格展示，适合批记录。</p>
@@ -266,6 +266,19 @@
                         <option value="en">英文</option>
                       </select>
                     </div>
+                  </div>
+                  <div class="mt-3">
+                    <label class="field-label">接口地址（Base URL）</label>
+                    <input
+                      class="input"
+                      type="text"
+                      name="mineru_base_url"
+                      id="mineru_base_url"
+                      placeholder="https://mineru.net/api/v4"
+                      autocomplete="off"
+                      spellcheck="false"
+                    />
+                    <p class="field-hint">默认官方地址；私有化部署 / 代理场景可覆盖，留空即恢复默认。</p>
                   </div>
                   <div class="flex items-center gap-4 mt-1">
                     <label class="flex items-center gap-2 text-[12px] cursor-pointer">
@@ -461,7 +474,7 @@
                   </p>
                 </div>
                 <div class="flex flex-col gap-1">
-                  <label class="text-[12px] text-muted-foreground" for="feishu-events">触发事件（逗号分隔，可多选）</label>
+                  <label class="text-[12px] text-muted-foreground" for="feishu-events">触发事件（勾选需要通知的事项，至少勾选一项，否则通知不会发送）</label>
                   <div id="feishu-events" class="flex flex-wrap gap-2"></div>
                 </div>
                 <div class="flex items-center gap-2 pt-2">
@@ -496,8 +509,8 @@
             <span id="save-msg" class="text-[12px]"></span>
           </div>
           <p class="text-[11px] text-muted-foreground/70">
-            每个 LLM 提供商的 API Key 请在对应卡片中独立保存（即时生效，首次保存会自动设为当前）。
-            "测试连接"会并行检测 OCR + 所有已配置的 LLM 提供商。协议 / 模型 / Base URL 修改请使用底部"保存全部设置"。
+            每个 LLM 提供商的 API Key、协议、Base URL、模型请在对应卡片内点击「保存」一次性提交（即时生效，首次保存会自动设为当前）。底部"保存全部设置"用于 OCR 与飞书通知等通用字段。
+            "测试连接"会并行检测 OCR + 所有已配置的 LLM 提供商。
           </p>
         </div>
       </form>

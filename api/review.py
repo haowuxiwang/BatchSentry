@@ -2,7 +2,7 @@
 import json
 import logging
 from typing import Optional
-from fastapi import APIRouter, HTTPException, Form
+from fastapi import APIRouter, HTTPException, Form, Request
 
 from db.client import get_db
 from core.pipeline import db_lock
@@ -18,12 +18,17 @@ async def list_findings(
     page: Optional[int] = None,
     limit: int = 50,
     offset: int = 0,
+    request: Request = None,
 ):
     """List findings for a job, optionally filtered by status and/or page.
 
     统一端点：支持 status 和 page 过滤（AJAX 翻页用 page 参数）。
     分页：limit（默认 50，max 200）+ offset，防止 100+ findings 一次返回卡顿。
     """
+    # P2-1: GET 读端点守卫统一（request=None 时跳过，兼容单元测试直接调用）
+    from core.security import is_local_request
+    if request is not None and not is_local_request(request):
+        raise HTTPException(403, "Forbidden (non-local request)")
     # 钳制 limit 防止滥用
     limit = max(1, min(limit, 200))
     offset = max(0, offset)
@@ -82,8 +87,12 @@ async def list_findings(
 
 
 @router.get("/jobs/{job_id}/findings/{finding_id}")
-async def get_finding(job_id: str, finding_id: int):
+async def get_finding(job_id: str, finding_id: int, request: Request = None):
     """Get a single finding detail."""
+    # P2-1: GET 读端点守卫统一
+    from core.security import is_local_request
+    if request is not None and not is_local_request(request):
+        raise HTTPException(403, "Forbidden (non-local request)")
     db = await get_db()
     cursor = await db.execute(
         "SELECT * FROM findings WHERE id = ? AND job_id = ?", (finding_id, job_id)
@@ -98,6 +107,7 @@ async def get_finding(job_id: str, finding_id: int):
 async def update_finding(
     job_id: str,
     finding_id: int,
+    request: Request = None,
     status: Optional[str] = Form(default=None),
     reviewer_note: Optional[str] = Form(default=None),
     corrected_text: Optional[str] = Form(default=None),
@@ -108,6 +118,11 @@ async def update_finding(
     application/x-www-form-urlencoded. Without Form(), FastAPI treats them as
     query params and returns 400 'No fields to update'.
     """
+    # 对抗审查（cr-18）：Form 编码为 CORS 简单请求（无 preflight），
+    # 恶意网页可跨站篡改 findings 状态/意见，污染 GMP 审计。与上传端点对齐。
+    from core.security import is_local_request
+    if request is not None and not is_local_request(request):
+        raise HTTPException(403, "Forbidden (non-local request)")
     db = await get_db()
 
     # Validate status value
@@ -191,8 +206,12 @@ async def update_finding(
 
 
 @router.get("/jobs/{job_id}/audit")
-async def get_audit_log(job_id: str, limit: int = 50):
+async def get_audit_log(job_id: str, limit: int = 50, request: Request = None):
     """Get audit log entries for a job."""
+    # P2-1: GET 读端点守卫统一
+    from core.security import is_local_request
+    if request is not None and not is_local_request(request):
+        raise HTTPException(403, "Forbidden (non-local request)")
     db = await get_db()
     cursor = await db.execute(
         "SELECT * FROM audit_log WHERE job_id = ? ORDER BY id DESC LIMIT ?",
@@ -210,6 +229,10 @@ async def get_llm_audit_log(job_id: str, limit: int = 100):
     provider / model / prompt_version / token usage / latency / success.
     Used to answer "which model version produced this finding?".
     """
+    # P2-1: GET 读端点守卫统一
+    from core.security import is_local_request
+    if request is not None and not is_local_request(request):
+        raise HTTPException(403, "Forbidden (non-local request)")
     db = await get_db()
     cursor = await db.execute(
         "SELECT * FROM llm_call_audit WHERE job_id = ? ORDER BY id ASC LIMIT ?",
@@ -220,13 +243,17 @@ async def get_llm_audit_log(job_id: str, limit: int = 100):
 
 
 @router.get("/jobs/{job_id}/pages/{page}")
-async def get_page(job_id: str, page: int):
+async def get_page(job_id: str, page: int, request: Request = None):
     """Get raw OCR HTML and structured data for a page.
 
     全项目唯一单页数据端点（jobs.py 曾有一个路径冲突的 get_page_data
     死端点，已合并删除）。structured 返回完整 JSON，前端自行提取
     overall_confidence / _parse_error（review.js updatePageLevelUI）。
     """
+    # P2-1: GET 读端点守卫统一
+    from core.security import is_local_request
+    if request is not None and not is_local_request(request):
+        raise HTTPException(403, "Forbidden (non-local request)")
     db = await get_db()
     cursor = await db.execute(
         "SELECT raw_html, structured_json FROM page_cache WHERE job_id = ? AND page = ?",
@@ -250,7 +277,7 @@ async def get_page(job_id: str, page: int):
 
 
 @router.get("/jobs/{job_id}/pages/{page}/measurements")
-async def get_page_measurements(job_id: str, page: int):
+async def get_page_measurements(job_id: str, page: int, request: Request = None):
     """Return measurement matrix for rendering on review page (Phase 3).
 
     Extracts all step[].measurements[] from the page's structured_json so the
@@ -264,6 +291,10 @@ async def get_page_measurements(job_id: str, page: int):
     row = await cursor.fetchone()
     if not row:
         raise HTTPException(404, "Page not found")
+    # P2-1: GET 读端点守卫统一
+    from core.security import is_local_request
+    if request is not None and not is_local_request(request):
+        raise HTTPException(403, "Forbidden (non-local request)")
     # 对抗审查(cr-6): 同 get_page_data — 非 JSON 的 structured_json 降级为空。
     try:
         data = json.loads(row["structured_json"]) if row["structured_json"] else {}

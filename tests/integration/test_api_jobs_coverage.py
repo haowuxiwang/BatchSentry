@@ -932,7 +932,16 @@ class TestDeleteJobEdgeCases:
 
 
 class TestCorsPreflight:
-    """CORS 预检 — allow_methods 必须覆盖前端全部 fetch 方法（含 PUT）。"""
+    """CORS 预检 — allow_methods 必须覆盖前端全部 fetch 方法（含 PUT）。
+
+    白名单 Origin 由 config["app"].port 动态生成（B8 端口常量集中），
+    测试用同一来源构造 Origin，避免硬编码 58765/8000 与实现脱节。
+    """
+
+    @staticmethod
+    def _origin() -> str:
+        from config import config as _cfg
+        return f"http://127.0.0.1:{_cfg['app'].port}"
 
     @pytest.mark.asyncio
     async def test_preflight_allows_put(self, client):
@@ -941,7 +950,7 @@ class TestCorsPreflight:
             "OPTIONS",
             "/api/settings/rules",
             headers={
-                "Origin": "http://127.0.0.1:58765",
+                "Origin": self._origin(),
                 "Access-Control-Request-Method": "PUT",
                 "Access-Control-Request-Headers": "content-type",
             },
@@ -967,6 +976,7 @@ class TestCorsPreflight:
     @pytest.mark.asyncio
     async def test_actual_request_echoes_allow_origin(self, client):
         """白名单 Origin 的实际 GET 响应应回显 allow-origin。"""
-        r = await client.get("/health", headers={"Origin": "http://127.0.0.1:58765"})
+        origin = self._origin()
+        r = await client.get("/health", headers={"Origin": origin})
         assert r.status_code == 200
-        assert r.headers.get("access-control-allow-origin") == "http://127.0.0.1:58765"
+        assert r.headers.get("access-control-allow-origin") == origin

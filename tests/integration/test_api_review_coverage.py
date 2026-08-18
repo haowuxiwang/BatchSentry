@@ -54,7 +54,7 @@ async def review_client(test_db):
 
     from main import app
     async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
+        transport=ASGITransport(app=app), base_url="http://localhost:8000"
     ) as c:
         yield c
 
