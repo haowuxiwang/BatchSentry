@@ -670,8 +670,9 @@ class TestStuckJobRecovery:
         )
         await pipeline_db.commit()
 
-        # cutoff = 现在 +1min：old-1（created_at=now）早于 cutoff，new-1 晚于
-        cutoff = (datetime.utcnow() + timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S")
+        # cutoff = 现在 +1min（本地口径 — P0-5 后 created_at 统一本地时间）：
+        # old-1（created_at=now）早于 cutoff，new-1 晚于
+        cutoff = (datetime.now() + timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S")
         count = await recover_stuck_jobs(process_started_at=cutoff)
         assert count == 1  # 只恢复 old-1
 

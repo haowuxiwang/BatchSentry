@@ -47,6 +47,9 @@ def _mask_secrets(text: str) -> str:
             (re.compile(r"sk-[A-Za-z0-9_-]{8,}"), "sk-***"),
             (re.compile(r"(?<![0-9a-fA-F])[0-9a-fA-F]{32}(?![0-9a-fA-F])"), "***"),
             (re.compile(r"cli_[A-Za-z0-9_-]{8,}"), "cli_***"),
+            # 飞书 app_id 是 cli- 连字符格式（此前只有 cli_ 下划线模式，
+            # health 探测异常回显 URL 中的 app_id 未被脱敏）
+            (re.compile(r"cli-[A-Za-z0-9]{10,}"), "cli-***"),
             (re.compile(r"Bearer\s+[A-Za-z0-9._-]{8,}", re.IGNORECASE), "Bearer ***"),
         ]
     for regex, repl in _MASK_PATTERNS:
@@ -392,8 +395,9 @@ async def _record_llm_call(
                 """INSERT INTO llm_call_audit
                    (job_id, page, stage, provider, protocol, model,
                     prompt_version, prompt_tokens, completion_tokens,
-                    total_tokens, latency_ms, success, error)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    total_tokens, latency_ms, success, error, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                           datetime('now','localtime'))""",
                 (
                     ctx.get("job_id", ""),
                     ctx.get("page"),

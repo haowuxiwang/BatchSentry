@@ -139,7 +139,7 @@ async def _migrate_v1(db: aiosqlite.Connection):
                 finding_id INTEGER,
                 action TEXT NOT NULL,
                 detail TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                created_at TIMESTAMP DEFAULT (datetime('now','localtime'))
             )
         """)
         await db.execute("CREATE INDEX IF NOT EXISTS idx_audit_log_job ON audit_log(job_id)")

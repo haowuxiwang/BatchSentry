@@ -64,9 +64,12 @@ async def lifespan(app: FastAPI):
     # 竞态防护（B7）：process_started_at = 本进程启动时刻 — 仅恢复 created_at
     # 早于该时刻的 job；lifespan yield 后马上可接收新上传（pending job 活着，
     # pipeline 即将运行），若按"全部非终态"恢复会把这些新任务误标为 error。
-    from datetime import datetime, timezone as _tz
+    # B7 竞态防护 cutoff + P0-5 时区统一：created_at 现存本地时间
+    # （datetime('now','localtime')），cutoff 必须同口径（此前 utcnow 会
+    # 让本地时间的新任务全部晚于 cutoff——方向恰好安全，但统一后消除歧义）。
+    from datetime import datetime
 
-    process_started_at = datetime.now(_tz.utc).strftime("%Y-%m-%d %H:%M:%S")
+    process_started_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     async def _recover_bg():
         try:

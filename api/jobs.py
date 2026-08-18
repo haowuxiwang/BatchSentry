@@ -427,12 +427,12 @@ async def create_job(
                     f"确需重新分析请先删除旧任务或重新上传（将创建新任务）。",
                 )
             await db.execute(
-                "INSERT INTO jobs (id, filename, status, pdf_path, total_pages, md5) "
-                "VALUES (?, ?, 'pending', ?, ?, ?)",
+                "INSERT INTO jobs (id, filename, status, pdf_path, total_pages, md5, created_at) "
+                "VALUES (?, ?, 'pending', ?, ?, ?, datetime('now','localtime'))",
                 (job_id, safe_name, str(pdf_path), pdf_page_count or None, content_md5),
             )
             await db.execute(
-                "INSERT INTO audit_log (job_id, action, detail) VALUES (?, 'pipeline_start', ?)",
+                "INSERT INTO audit_log (job_id, action, detail, created_at) VALUES (?, 'pipeline_start', ?, datetime(\'now\',\'localtime\'))",
                 (job_id, f"Uploaded {safe_name} ({total_bytes} bytes, {pdf_page_count} pages, source={ 'image' if is_image else 'pdf' })"),
             )
             await db.commit()
@@ -516,7 +516,7 @@ async def _live_jobs_snapshot(db) -> list[dict]:
         f"SELECT id FROM jobs WHERE status IN ({placeholders}) "
         "OR (status NOT IN ('archived') "
         "AND finished_at IS NOT NULL "
-        "AND finished_at > datetime('now', '-10 minutes'))",
+        "AND finished_at > datetime('now', 'localtime', '-10 minutes'))",
         _ACTIVE_STATUSES,
     )
     rows = await cursor.fetchall()
@@ -548,13 +548,26 @@ async def stream_all_live_jobs(request: Request = None):
         db = await get_db()
         seq = 0
         yield "retry: 2000\n\n"
-        while True:
-            if await request.is_disconnected():
-                return
-            snapshots = await _live_jobs_snapshot(db)
-            seq += 1
-            yield f"id: {seq}\ndata: {json.dumps({'jobs': snapshots}, ensure_ascii=False)}\n\n"
-            await asyncio.sleep(3)
+        try:
+            while True:
+                if await request.is_disconnected():
+                    return
+                try:
+                    snapshots = await _live_jobs_snapshot(db)
+                except Exception as e:
+                    # P0-4 修复：与单 job 流同款守卫 — DB 异常记录后跳过本轮，
+                    # 不让聚合流静默中断（多任务进度全断）。
+                    logger.error(f"SSE live snapshot query failed: {e!r}")
+                    await asyncio.sleep(3)
+                    continue
+                seq += 1
+                yield f"id: {seq}\ndata: {json.dumps({'jobs': snapshots}, ensure_ascii=False)}\n\n"
+                await asyncio.sleep(3)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error(f"SSE live stream crashed: {e!r}", exc_info=True)
+            raise
 
     return StreamingResponse(
         event_generator(),
@@ -803,32 +816,50 @@ async def stream_job_progress(job_id: str, request: Request = None):
         db = await get_db()
         seq = 0
         yield "retry: 2000\n\n"
-        while True:
-            if await request.is_disconnected():
-                logger.info(f"[{job_id}] SSE client disconnected, stopping progress stream")
-                return
-            progress = await _get_job_progress(db, job_id)
-            if progress is None:
+        try:
+            while True:
+                if await request.is_disconnected():
+                    logger.info(f"[{job_id}] SSE client disconnected, stopping progress stream")
+                    return
+                try:
+                    progress = await _get_job_progress(db, job_id)
+                except Exception as e:
+                    # P0-4 修复：DB 异常（连接断/锁）此前静默冒泡 → 流中断
+                    # 且服务端零日志，"进度卡住"无法定位。记录后推送错误帧
+                    # 让前端走重连逻辑。
+                    logger.error(f"[{job_id}] SSE progress query failed: {e!r}")
+                    seq += 1
+                    yield (f"id: {seq}\n"
+                           f"data: {json.dumps({'type': 'error', 'message': '进度查询失败'}, ensure_ascii=False)}\n\n")
+                    await asyncio.sleep(3)
+                    continue
+                if progress is None:
+                    seq += 1
+                    # 注意：不能用 `event: error` 帧 — SSE 规范中 error 是保留事件
+                    # 类型，浏览器收到后立即断开连接且不暴露 data，前端无法区分
+                    # "job 不存在" 与网络抖动。改用普通 message 帧携带 type 字段。
+                    yield (f"id: {seq}\n"
+                           f"data: {json.dumps({'type': 'error', 'message': 'Job not found'}, ensure_ascii=False)}\n\n")
+                    return
+
+                payload = json.dumps(progress, ensure_ascii=False)
                 seq += 1
-                # 注意：不能用 `event: error` 帧 — SSE 规范中 error 是保留事件
-                # 类型，浏览器收到后立即断开连接且不暴露 data，前端无法区分
-                # "job 不存在" 与网络抖动。改用普通 message 帧携带 type 字段。
-                yield (f"id: {seq}\n"
-                       f"data: {json.dumps({'type': 'error', 'message': 'Job not found'}, ensure_ascii=False)}\n\n")
-                return
+                # 每条事件带自增 id：EventSource 断线重连时自动携带
+                # Last-Event-ID；快照是幂等全量，重放/重连后立即自愈。
+                yield f"id: {seq}\ndata: {payload}\n\n"
 
-            payload = json.dumps(progress, ensure_ascii=False)
-            seq += 1
-            # 每条事件带自增 id：EventSource 断线重连时自动携带
-            # Last-Event-ID；快照是幂等全量，重放/重连后立即自愈。
-            yield f"id: {seq}\ndata: {payload}\n\n"
+                if progress["status"] in _TERMINAL_STATUSES:
+                    seq += 1
+                    yield f"id: {seq}\nevent: done\ndata: {payload}\n\n"
+                    return
 
-            if progress["status"] in _TERMINAL_STATUSES:
-                seq += 1
-                yield f"id: {seq}\nevent: done\ndata: {payload}\n\n"
-                return
-
-            await asyncio.sleep(3)
+                await asyncio.sleep(3)
+        except asyncio.CancelledError:
+            # 客户端断开时 Starlette 取消生成器 — 正常路径，不算错误
+            raise
+        except Exception as e:
+            logger.error(f"[{job_id}] SSE stream crashed: {e!r}", exc_info=True)
+            raise
 
     return StreamingResponse(
         event_generator(),
@@ -913,7 +944,7 @@ async def retry_job(job_id: str, request: Request = None):
                 (job_id,),
             )
             await db.execute(
-                "INSERT INTO audit_log (job_id, action, detail) VALUES (?, 'analysis_reset', ?)",
+                "INSERT INTO audit_log (job_id, action, detail, created_at) VALUES (?, 'analysis_reset', ?, datetime(\'now\',\'localtime\'))",
                 (job_id, "Retry from review: findings + structured_json cleared "
                          "(full re-analysis, raw_html kept)"),
             )
@@ -1068,7 +1099,7 @@ async def delete_job(job_id: str, keep_pdf: bool = False, request: Request = Non
         # Record deletion in a separate audit row (survives cascade delete)
         # GMP traceability: record destruction must itself be traceable
         await db.execute(
-            "INSERT INTO audit_log (job_id, action, detail) VALUES (?, ?, ?)",
+            "INSERT INTO audit_log (job_id, action, detail, created_at) VALUES (?, ?, ?, datetime('now','localtime'))",
             ("_system", "job_deleted", f"job_id={job_id} filename={row['filename']} status={row['status']} keep_pdf={keep_pdf}"),
         )
         logger.info(f"[{job_id}] Delete requested: filename={row['filename']} keep_pdf={keep_pdf}")

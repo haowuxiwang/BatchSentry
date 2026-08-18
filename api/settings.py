@@ -639,7 +639,7 @@ async def update_settings(req: SettingsUpdate, request: Request):
     try:
         db = await get_db()
         await db.execute(
-            "INSERT INTO audit_log (job_id, action, detail) VALUES (?, ?, ?)",
+            "INSERT INTO audit_log (job_id, action, detail, created_at) VALUES (?, ?, ?, datetime(\'now\',\'localtime\'))",
             ("system", "settings_update",
              "fields=" + ",".join(sorted(env_updates.keys()))),
         )
@@ -786,7 +786,7 @@ async def update_user_rules(req: UserRulesUpdate, request: Request):
         try:
             db = await get_db()
             await db.execute(
-                "INSERT INTO audit_log (job_id, action, detail) VALUES (?, ?, ?)",
+                "INSERT INTO audit_log (job_id, action, detail, created_at) VALUES (?, ?, ?, datetime(\'now\',\'localtime\'))",
                 ("system", "user_rules_update_failed", "; ".join(errors)[:500]),
             )
             await db.commit()
@@ -801,7 +801,7 @@ async def update_user_rules(req: UserRulesUpdate, request: Request):
     try:
         db = await get_db()
         await db.execute(
-            "INSERT INTO audit_log (job_id, action, detail) VALUES (?, ?, ?)",
+            "INSERT INTO audit_log (job_id, action, detail, created_at) VALUES (?, ?, ?, datetime(\'now\',\'localtime\'))",
             ("system", "user_rules_update",
              f"{len(cleaned)} rules (active={sum(1 for r in cleaned if r['active'])})"),
         )
@@ -885,7 +885,7 @@ async def set_active_provider(req: SetActiveRequest, request: Request):
     try:
         db = await get_db()
         await db.execute(
-            "INSERT INTO audit_log (job_id, action, detail) VALUES (?, ?, ?)",
+            "INSERT INTO audit_log (job_id, action, detail, created_at) VALUES (?, ?, ?, datetime(\'now\',\'localtime\'))",
             ("system", "provider_switch", f"active_provider={name}"),
         )
         await db.commit()
@@ -930,7 +930,7 @@ async def _audit_llm_test(provider: str, action: str, detail: str) -> None:
     try:
         db = await get_db()
         await db.execute(
-            "INSERT INTO audit_log (job_id, action, detail) VALUES ('system', ?, ?)",
+            "INSERT INTO audit_log (job_id, action, detail, created_at) VALUES ('system', ?, ?, datetime(\'now\',\'localtime\'))",
             (action, detail),
         )
         await db.commit()
@@ -1074,7 +1074,7 @@ async def test_feishu(req: TestFeishuRequest, request: Request):
             from db.client import get_db
             db = await get_db()
             await db.execute(
-                "INSERT INTO audit_log (job_id, action, detail) VALUES ('system', 'feishu_test', ?)",
+                "INSERT INTO audit_log (job_id, action, detail, created_at) VALUES ('system', 'feishu_test', ?, datetime(\'now\',\'localtime\'))",
                 (f"mode=app_bot ok={ok} {detail}",),
             )
             await db.commit()
@@ -1105,7 +1105,7 @@ async def test_feishu(req: TestFeishuRequest, request: Request):
         from db.client import get_db
         db = await get_db()
         await db.execute(
-            "INSERT INTO audit_log (job_id, action, detail) VALUES ('system', 'feishu_test', ?)",
+            "INSERT INTO audit_log (job_id, action, detail, created_at) VALUES ('system', 'feishu_test', ?, datetime(\'now\',\'localtime\'))",
             (f"mode=webhook ok={ok} {detail}",),
         )
         await db.commit()

@@ -171,7 +171,7 @@ async def update_finding(
         sets.append("corrected_text = ?")
         params.append(corrected_text)
     if status in ("confirmed", "rejected", "corrected"):
-        sets.append("reviewed_at = CURRENT_TIMESTAMP")
+        sets.append("reviewed_at = datetime('now','localtime')")
     elif status == "pending":
         sets.append("reviewed_at = NULL")
 

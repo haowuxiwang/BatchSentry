@@ -15,7 +15,7 @@ import time
 import requests
 
 from config import config
-from llm.client import get_llm_client
+from llm.client import _mask_secrets, get_llm_client
 
 logger = logging.getLogger(__name__)
 
@@ -115,7 +115,10 @@ async def probe_llm() -> dict:
             "ok": False,
             "model": model,
             "provider": provider,
-            "reason": f"{e.__class__.__name__}: {str(e)[:200]}",
+            # P1 修复：SDK/代理异常消息可能回显带 API key 的 URL（全项目
+            # 唯一未过 _mask_secrets 的对外错误路径）— reason 直接进
+            # /api/health/downstream 响应展示给前端，必须脱敏。
+            "reason": _mask_secrets(f"{e.__class__.__name__}: {str(e)[:200]}"),
         }
 
 

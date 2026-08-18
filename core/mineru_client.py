@@ -247,7 +247,7 @@ def poll_job(batch_id: str, progress_callback=None) -> dict:
     raise RuntimeError(f"[MinerU] 轮询超时 ({POLL_TIMEOUT}s) batch={batch_id}")
 
 
-def download_result(task_result: dict) -> list[dict]:
+def download_result(task_result: dict, pdf_path: str = "") -> list[dict]:
     """下载结果 zip 并按页拆分。
 
     MinerU zip 包含:
@@ -258,12 +258,26 @@ def download_result(task_result: dict) -> list[dict]:
 
     我们用 content_list.json 的 page_idx 字段按页分组，生成每页的
     Markdown 文本，返回与 PaddleOCR 兼容的格式。
+
+    pdf_path 用于降级拆分时的页数校验（P0-2）：full.md 无分页符且
+    PDF 实际多页 → 抛错触发 failover，而非并 1 页丢内容。
     """
     zip_url = task_result.get("full_zip_url")
     if not zip_url:
         raise RuntimeError(
             f"[MinerU] 结果中无 full_zip_url: {redact_urls(str(task_result))}"
         )
+
+    # P0-2：降级拆分的期望页数（fitz 读物理页数；失败则不校验）
+    expected_pages: int | None = None
+    if pdf_path:
+        try:
+            import fitz
+
+            with fitz.open(pdf_path) as _doc:
+                expected_pages = _doc.page_count
+        except Exception:
+            expected_pages = None
 
     # 对抗审查（cr-16）+ P1-7：zip_url 是签名 CDN 地址，query 可能带签名
     # token — 日志只记 pathname；异常消息同样脱敏（requests 网络异常会
@@ -313,14 +327,14 @@ def download_result(task_result: dict) -> list[dict]:
                         f"[MinerU] content_list 结构不完整（{reason}），"
                         f"回退 full.md 拆分 — 防止静默丢失页面内容"
                     )
-                    pages = _split_pages_by_separator(full_md)
+                    pages = _split_pages_by_separator(full_md, expected_pages)
         elif full_md_name:
             # 降级：content_list 不存在时，按分页符拆分 full.md
             logger.warning(
                 "[MinerU] 未找到 content_list.json, 降级按分页符拆分 full.md"
             )
             full_md = zf.read(full_md_name).decode("utf-8", errors="replace")
-            pages = _split_pages_by_separator(full_md)
+            pages = _split_pages_by_separator(full_md, expected_pages)
         else:
             raise RuntimeError(
                 f"[MinerU] zip 中未找到 content_list.json 或 full.md: {names}"
@@ -704,18 +718,31 @@ def _content_text(block: dict) -> str:
     return " ".join(parts).strip()
 
 
-def _split_pages_by_separator(full_md: str) -> list[dict]:
+def _split_pages_by_separator(
+    full_md: str, expected_pages: int | None = None
+) -> list[dict]:
     """降级方案：按分页符拆分 full.md。
 
     MinerU 的 full.md 在页面间通常有 '\\f' (form feed) 分页符。
     若无分页符，则将整个文档作为单页返回。
+
+    P0-2 修复：无分页符且 expected_pages > 1 时抛错而非返回单页 —
+    多页文档并成 1 页后，Stage 2 的 12000 字符截断会静默丢弃约 3/4
+    内容且页边界全毁（页码与 PDF 原文对不上）。抛错让上层 failover
+    到备用 OCR 后端（Paddle），保内容完整性。
     """
     if "\f" in full_md:
         parts = full_md.split("\f")
     elif "\n---\n" in full_md:
         parts = full_md.split("\n---\n")
     else:
-        # 无分页符：无法按页拆分，作为单页返回
+        # 无分页符：无法按页拆分
+        if expected_pages and expected_pages > 1:
+            raise RuntimeError(
+                f"[MinerU] full.md 无分页符且 PDF 为 {expected_pages} 页 — "
+                f"无法按页拆分（返回单页会导致截断丢内容），请检查 "
+                f"MinerU 输出或切换 OCR 后端"
+            )
         return [{"markdown": {"text": full_md}, "page_count": 1, "_source": "mineru"}]
 
     pages = []
@@ -748,7 +775,7 @@ def run_ocr(pdf_path: str, progress_callback=None, job_id: str = "") -> list[dic
     try:
         batch_id, _ = submit_pdf(pdf_path)
         task_result = poll_job(batch_id, progress_callback=progress_callback)
-        return download_result(task_result)
+        return download_result(task_result, pdf_path=pdf_path)
     finally:
         if job_id:
             ocr_job_id_var.reset(_token)
@@ -953,7 +980,7 @@ def run_ocr_sliced(
 
                 batch_id, _ = submit_pdf(path)
                 task = poll_job(batch_id, progress_callback=_cb)
-                pages = download_result(task)
+                pages = download_result(task, pdf_path=path)
                 # page_count 重映射为全局页号（download_result 返回片内 1-based）
                 for p in pages:
                     p["page_count"] = start_page + p["page_count"] - 1

@@ -215,13 +215,15 @@ def _ensure_page_text(pages: list[dict]) -> None:
             )
 
 
-def download_result(poll_response: dict) -> list[dict]:
+def download_result(poll_response: dict, pdf_path: str = "") -> list[dict]:
     """Download OCR result JSON from the URL in poll response.
 
     Returns a list of page dicts, each containing:
       - markdown.text (HTML table string; falls back to parsing_res_list text
         when the server-side HTML assembly is empty/short)
       - prunedResult.parsing_res_list (block-level structure)
+
+    pdf_path 与 MinerU 版签名对齐（当前未用于解析，保留扩展位）。
     """
     result_url_obj = poll_response.get("data", {}).get("resultUrl") or poll_response.get("resultUrl")
     json_url = None
@@ -284,6 +286,7 @@ def download_result(poll_response: dict) -> list[dict]:
 
     # JSONL (one JSON object per line, each with 4 pages)
     line_count = 0
+    bad_lines = 0
     # 对抗审查 P2-3：Windows 侧服务常发 UTF-8 BOM 的 JSONL，首行
     # \ufeff 前缀使 json.loads 失败 → 前 4 页静默丢弃（小文件直接 0 页）
     raw = raw.lstrip("\ufeff")
@@ -294,7 +297,20 @@ def download_result(poll_response: dict) -> list[dict]:
         line_count += 1
         try:
             obj = json.loads(line)
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as e:
+            # P0-3 修复：坏行 = 该行 4 页内容丢失。此前静默 continue →
+            # 后续行内容整体前移，页码张冠李戴（复核对不上 PDF 原图）且
+            # failed_pages 按尾部缺失计算标错页。现插入 4 个空占位 dict
+            # 保持页码对齐 — 占位页文本为空，走 pipeline 空页自愈
+            # （<100 字符判定）重新 OCR 恢复。
+            bad_lines += 1
+            logger.warning(
+                f"OCR JSONL 第 {line_count} 行解析失败（预期包含第 "
+                f"{(line_count - 1) * 4 + 1}-{line_count * 4} 页）: {e.msg} — "
+                f"已插入空占位页保持页码对齐，空页自愈将重试: "
+                f"line_first_200={line[:200]!r}"
+            )
+            pages.extend([{"markdown": {"text": ""}} for _ in range(4)])
             continue
         result = obj.get("result", obj)
         lpr = result.get("layoutParsingResults", [])
@@ -319,6 +335,7 @@ def download_result(poll_response: dict) -> list[dict]:
         )
     logger.info(
         f"OCR download complete (JSONL): {len(pages)} pages, {raw_size_kb:.1f}KB"
+        + (f" ({bad_lines} bad lines placeholdered)" if bad_lines else "")
     )
     _ensure_page_text(pages)
     return pages
@@ -336,7 +353,9 @@ def run_ocr(pdf_path: str, progress_callback=None, job_id: str = "") -> list[dic
     try:
         paddle_job_id = submit_pdf(pdf_path)
         poll_response = poll_job(paddle_job_id, progress_callback=progress_callback)
-        pages = download_result(poll_response)
+        # pdf_path 透传（与 MinerU 签名对齐；Paddle 解析暂不用它，留给
+        # 后续页数对齐校验扩展）
+        pages = download_result(poll_response, pdf_path=pdf_path)
         if not pages:
             # download_result 现在应在空结果时抛异常，此处为防御性兜底
             logger.warning(

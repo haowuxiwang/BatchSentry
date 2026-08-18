@@ -162,7 +162,8 @@ async def _audit_log(db, job_id: str, action: str, detail: str = ""):
     try:
         async with db_lock:
             await db.execute(
-                "INSERT INTO audit_log (job_id, action, detail) VALUES (?, ?, ?)",
+                "INSERT INTO audit_log (job_id, action, detail, created_at) "
+                "VALUES (?, ?, ?, datetime('now','localtime'))",
                 (job_id, action, detail),
             )
             await db.commit()
@@ -238,7 +239,8 @@ async def _transition_status_unlocked(db, job_id: str, new_status: str, detail: 
 
     await db.execute("UPDATE jobs SET status = ? WHERE id = ?", (new_status, job_id))
     await db.execute(
-        "INSERT INTO audit_log (job_id, action, detail) VALUES (?, ?, ?)",
+        "INSERT INTO audit_log (job_id, action, detail, created_at) "
+                "VALUES (?, ?, ?, datetime('now','localtime'))",
         (job_id, "status_transition", f"{current} → {new_status}: {detail}" if detail else f"{current} → {new_status}"),
     )
     await db.commit()
@@ -331,7 +333,7 @@ async def recover_stuck_jobs(process_started_at: str | None = None) -> int:
         placeholders = ",".join("?" * len(_STUCK_STATUSES))
         cursor = await db.execute(
             f"UPDATE jobs SET status = 'error', "
-            f"error_message = ?, finished_at = CURRENT_TIMESTAMP "
+            f"error_message = ?, finished_at = datetime('now','localtime') "
             f"WHERE id = ? AND status IN ({placeholders})",
             (f"应用重启恢复：原状态 {old_status} 非终态，标记为 error 供重试",
              job_id, *_STUCK_STATUSES),
@@ -605,7 +607,7 @@ async def _run_pipeline_impl(job_id: str, pdf_path: str, progress_futures: list)
                 err_msg = f"OCR 返回 0 页（backend={ocr_backend}, sliced）— 上游服务未返回任何页面内容"
                 logger.error(f"[{job_id}] {err_msg}")
                 await db.execute(
-                    "UPDATE jobs SET error_message = ?, finished_at = CURRENT_TIMESTAMP, "
+                    "UPDATE jobs SET error_message = ?, finished_at = datetime('now','localtime'), "
                     "stage1_ms = ? WHERE id = ?",
                     (err_msg, stage1_ms, job_id),
                 )
@@ -668,7 +670,7 @@ async def _run_pipeline_impl(job_id: str, pdf_path: str, progress_futures: list)
                 err_msg = "; ".join(err_parts)[:2000]
                 logger.error(f"[{job_id}] {err_msg}")
                 await db.execute(
-                    "UPDATE jobs SET error_message = ?, finished_at = CURRENT_TIMESTAMP, "
+                    "UPDATE jobs SET error_message = ?, finished_at = datetime('now','localtime'), "
                     "stage1_ms = ? WHERE id = ?",
                     (err_msg, stage1_ms, job_id),
                 )
@@ -737,6 +739,11 @@ async def _run_pipeline_impl(job_id: str, pdf_path: str, progress_futures: list)
                     "INSERT OR IGNORE INTO page_cache (job_id, page, raw_html) VALUES (?, ?, ?)",
                     (job_id, page_num, raw_html),
                 )
+                # P0-1 修复：回写内存 dict — Stage 2 (_analyze_one) 从内存
+                # page dict 读取文本，此前只写 DB 不回写 → 首次运行 LLM 收到
+                # 未 sanitize、无丢弃警告前缀的原始文本（警告注入/清洗仅在
+                # retry 复用 DB 的路径上生效）。回写后两路数据一致。
+                page["markdown"]["text"] = raw_html
                 new_pages += 1
             await db.execute(
                 "UPDATE jobs SET total_pages = ? WHERE id = ?",
@@ -795,6 +802,10 @@ async def _run_pipeline_impl(job_id: str, pdf_path: str, progress_futures: list)
                         db, job_id, "stage1_empty_pages",
                         f"pages={retry_targets} — retrying with per-page slices",
                     )
+                    # P0-1 修复配套：自愈 UPDATE page_cache 后同步回写内存
+                    # pages dict（Stage 2 从内存读取 — 若只更新 DB，首次运行
+                    # 时 LLM 仍收到自愈前的空文本，恢复白做）。
+                    pages_by_num = {i + 1: p for i, p in enumerate(pages)}
                     try:
                         if self_heal_backend == "mineru":
                             from core.mineru_client import run_ocr_pages
@@ -848,6 +859,8 @@ async def _run_pipeline_impl(job_id: str, pdf_path: str, progress_futures: list)
                                             "WHERE job_id = ? AND page = ?",
                                             (clean, job_id, pno),
                                         )
+                                        if pno in pages_by_num:
+                                            pages_by_num[pno]["markdown"]["text"] = clean
                                         recovered.append(pno)
                                     else:
                                         still_empty.append(pno)
@@ -888,12 +901,17 @@ async def _run_pipeline_impl(job_id: str, pdf_path: str, progress_futures: list)
                                     out.save(str(slice_path))
                                     out.close()
                                     try:
-                                        pages = await asyncio.to_thread(
+                                        # P0-7 修复：变量遮蔽 — 此前
+                                        # `pages = ...` 覆盖外层整份 OCR 结果
+                                        # 列表，Paddle 自愈触发后 Stage 2 的
+                                        # enumerate(pages) 只遍历到最后一个
+                                        # 自愈单页，其余页全部漏分析。
+                                        slice_pages = await asyncio.to_thread(
                                             ocr_client.run_ocr, str(slice_path)
                                         )
                                         md = (
-                                            pages[0]["markdown"]["text"]
-                                            if pages and len(pages) > 0
+                                            slice_pages[0]["markdown"]["text"]
+                                            if slice_pages and len(slice_pages) > 0
                                             else ""
                                         )
                                     except Exception as slice_err:
@@ -913,6 +931,8 @@ async def _run_pipeline_impl(job_id: str, pdf_path: str, progress_futures: list)
                                             "WHERE job_id = ? AND page = ?",
                                             (clean, job_id, pno),
                                         )
+                                        if pno in pages_by_num:
+                                            pages_by_num[pno]["markdown"]["text"] = clean
                                         recovered.append(pno)
                                     else:
                                         still_empty.append(pno)
@@ -1111,8 +1131,8 @@ async def _run_pipeline_impl(job_id: str, pdf_path: str, progress_futures: list)
             async with db_lock:
                 await db.executemany(
                     "INSERT OR IGNORE INTO findings "
-                    "(job_id, page, type, severity, description, ocr_text, operator, source, user_rule_id) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "(job_id, page, type, severity, description, ocr_text, operator, source, user_rule_id, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','localtime'))",
                     batch_rows,
                 )
                 await db.commit()
@@ -1126,7 +1146,7 @@ async def _run_pipeline_impl(job_id: str, pdf_path: str, progress_futures: list)
         final_status = "partial_review" if failed_pages else "review"
 
         await db.execute(
-            "UPDATE jobs SET finished_at = CURRENT_TIMESTAMP, "
+            "UPDATE jobs SET finished_at = datetime('now','localtime'), "
             "stage1_ms = ?, stage2_ms = ?, stage3_ms = ?, failed_pages = ? "
             "WHERE id = ?",
             (stage1_ms, stage2_ms, stage3_ms,
@@ -1179,7 +1199,7 @@ async def _run_pipeline_impl(job_id: str, pdf_path: str, progress_futures: list)
                 # 其他非预期状态 → error（直接 UPDATE，与 recover_stuck_jobs 同模式）
                 await db.execute(
                     "UPDATE jobs SET status = 'error', error_message = ?, "
-                    "finished_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    "finished_at = datetime('now','localtime') WHERE id = ?",
                     (f"Pipeline failed: invalid transition {e}", job_id),
                 )
                 await db.commit()
@@ -1209,7 +1229,7 @@ async def _run_pipeline_impl(job_id: str, pdf_path: str, progress_futures: list)
             await transition_status(db, job_id, "error", f"Pipeline failed: {redact_urls(str(e))[:100]}")
             # transition_status 只更新 status 字段，还需显式写入 error_message + finished_at
             await db.execute(
-                "UPDATE jobs SET error_message = ?, finished_at = CURRENT_TIMESTAMP WHERE id = ?",
+                "UPDATE jobs SET error_message = ?, finished_at = datetime('now','localtime') WHERE id = ?",
                 (error_msg, job_id),
             )
             await db.commit()
@@ -1226,7 +1246,7 @@ async def _run_pipeline_impl(job_id: str, pdf_path: str, progress_futures: list)
             logger.warning(f"[{job_id}] {ie}")
             try:
                 await db.execute(
-                    "UPDATE jobs SET error_message = ?, finished_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    "UPDATE jobs SET error_message = ?, finished_at = datetime('now','localtime') WHERE id = ?",
                     (error_msg, job_id),
                 )
                 await db.commit()
@@ -1294,7 +1314,7 @@ async def _analyze_one(
                 }
                 async with db_lock:
                     await db.execute(
-                        "UPDATE page_cache SET structured_json = ?, analyzed_at = CURRENT_TIMESTAMP "
+                        "UPDATE page_cache SET structured_json = ?, analyzed_at = datetime('now','localtime') "
                         "WHERE job_id = ? AND page = ?",
                         (json.dumps(error_data, ensure_ascii=False), job_id, page_num),
                     )
@@ -1316,7 +1336,7 @@ async def _analyze_one(
             )
             async with db_lock:
                 await db.execute(
-                    "UPDATE page_cache SET structured_json = ?, analyzed_at = CURRENT_TIMESTAMP "
+                    "UPDATE page_cache SET structured_json = ?, analyzed_at = datetime('now','localtime') "
                     "WHERE job_id = ? AND page = ?",
                     (payload, job_id, page_num),
                 )
@@ -1337,8 +1357,8 @@ async def _analyze_one(
                 if llm_page_rows:
                     await db.executemany(
                         "INSERT OR IGNORE INTO findings "
-                        "(job_id, page, type, severity, description, ocr_text, operator, source) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, 'llm_page')",
+                        "(job_id, page, type, severity, description, ocr_text, operator, source, created_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, 'llm_page', datetime('now','localtime'))",
                         llm_page_rows,
                     )
                 await db.commit()
@@ -1370,7 +1390,7 @@ async def _analyze_one(
                         f"[{job_id}] Stage 2: rollback failed (page={page_num}): {rb_err}"
                     )
                 await db.execute(
-                    "UPDATE page_cache SET structured_json = ?, analyzed_at = CURRENT_TIMESTAMP "
+                    "UPDATE page_cache SET structured_json = ?, analyzed_at = datetime('now','localtime') "
                     "WHERE job_id = ? AND page = ?",
                     (json.dumps(error_data, ensure_ascii=False), job_id, page_num),
                 )
@@ -1477,6 +1497,9 @@ async def _run_sliced_stage1_2(
                     "INSERT OR IGNORE INTO page_cache (job_id, page, raw_html) VALUES (?, ?, ?)",
                     (job_id, page_num, raw_html),
                 )
+                # P0-1 修复（与整份路径一致）：回写内存，_analyze_one 读取
+                # 清洗+警告版而非原始文本。
+                page["markdown"]["text"] = raw_html
                 new_pages += 1
             await db.execute(
                 # 对抗审查 P1-1 关联：必须用 split_pdf 的权威总数 total_pages，
@@ -1596,7 +1619,7 @@ async def _is_cancelled(job_id: str) -> bool:
                     logger.warning(f"[{job_id}] Cancel transition race: {e}")
             # Always set finished_at (transition_status doesn't set this column)
             await db.execute(
-                "UPDATE jobs SET finished_at = CURRENT_TIMESTAMP WHERE id = ?",
+                "UPDATE jobs SET finished_at = datetime('now','localtime') WHERE id = ?",
                 (job_id,),
             )
             await db.commit()

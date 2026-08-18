@@ -461,7 +461,10 @@ class TestPaddleOCRRunOCR:
 
         mock_submit.assert_called_once_with(fake_pdf)
         mock_poll.assert_called_once_with("job-e2e", progress_callback=None)
-        mock_download.assert_called_once_with({"data": {"state": "done"}})
+        # P0-2: download_result 现在接收 pdf_path 做降级拆分页数校验
+        mock_download.assert_called_once_with(
+            {"data": {"state": "done"}}, pdf_path=fake_pdf
+        )
 
     @patch('core.ocr_client.download_result')
     @patch('core.ocr_client.poll_job')
@@ -1159,11 +1162,12 @@ class TestMinerURunOCR:
 
         mock_submit.assert_called_once_with(fake_pdf)
         mock_poll.assert_called_once_with("batch-e2e", progress_callback=None)
+        # P0-2: download_result 现在接收 pdf_path 做降级拆分页数校验
         mock_download.assert_called_once_with({
             "task_id": "t1",
             "state": "done",
             "full_zip_url": "https://zip.test/e2e",
-        })
+        }, pdf_path=fake_pdf)
 
     @patch('core.mineru_client.download_result')
     @patch('core.mineru_client.poll_job')

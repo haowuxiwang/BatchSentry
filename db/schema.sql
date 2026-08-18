@@ -4,7 +4,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     id TEXT PRIMARY KEY,
     filename TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'pending',
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMP DEFAULT (datetime('now','localtime')),
     finished_at TIMESTAMP,
     total_pages INTEGER,
     md5 TEXT,                       -- MD5 content hash of uploaded PDF (duplicate-upload detection)
@@ -42,7 +42,7 @@ CREATE TABLE IF NOT EXISTS findings (
     corrected_text TEXT,
     source TEXT DEFAULT 'rule',  -- Phase 3: rule | llm_page | llm_fallback | llm_cross
     user_rule_id TEXT,           -- Phase 11: 命中的用户规则 id（source='user_rule' 时，GMP 溯源）
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMP DEFAULT (datetime('now','localtime')),
     reviewed_at TIMESTAMP,
     FOREIGN KEY (job_id) REFERENCES jobs(id)
 );
@@ -53,7 +53,7 @@ CREATE TABLE IF NOT EXISTS audit_log (
     finding_id INTEGER,
     action TEXT NOT NULL,
     detail TEXT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP DEFAULT (datetime('now','localtime'))
 );
 
 CREATE TABLE IF NOT EXISTS llm_call_audit (
@@ -73,7 +73,7 @@ CREATE TABLE IF NOT EXISTS llm_call_audit (
     latency_ms INTEGER,
     success INTEGER NOT NULL DEFAULT 1, -- 0 = exception occurred
     error TEXT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMP DEFAULT (datetime('now','localtime')),
     FOREIGN KEY (job_id) REFERENCES jobs(id)
 );
 

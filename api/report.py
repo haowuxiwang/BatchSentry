@@ -36,7 +36,7 @@ async def _audit_report_export(job_id: str, fmt: str, size: int) -> None:
     try:
         db = await get_db()
         await db.execute(
-            "INSERT INTO audit_log (job_id, action, detail) VALUES (?, ?, ?)",
+            "INSERT INTO audit_log (job_id, action, detail, created_at) VALUES (?, ?, ?, datetime(\'now\',\'localtime\'))",
             (job_id, "report_export", f"format={fmt} size={size}"),
         )
         await db.commit()
