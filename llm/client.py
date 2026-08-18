@@ -152,8 +152,12 @@ class LLMClient:
                 # pipeline 被拖死。直接失败 → 该页归入 failed_pages 转人工，
                 # 符合"快速失败、不阻塞主线"的容错原则。
                 if isinstance(e, TimeoutError) or "timeout" in type(e).__name__.lower():
+                    # 对抗审查（中文化收尾）：此路径是唯一未脱敏的 LLM 异常
+                    # 日志 — 超时异常消息可能携带响应体（偶发回显 key），
+                    # 与其他 error 路径对齐 _mask_secrets
                     logger.warning(
-                        f"LLM call timed out{ctx_tag}: {type(e).__name__}: {e} "
+                        f"LLM call timed out{ctx_tag}: {type(e).__name__}: "
+                        f"{_mask_secrets(str(e))} "
                         f"(skipping client-side retries)"
                     )
                     if audit_ctx is not None:

@@ -16,7 +16,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Round 3 audit round 3 (A1/B1/B2/C1/C2/C3/D3/A3)**: empty-page self-heal extended to Paddle (fitz single-page re-submit), `[OCR 警告]` prefix moved OUT of the fenced OCR data zone into the system-warning zone (`_OCR_WARNING_RE` in page_analyzer + `_ocr_warning` result key → review banner), schema-validation-failure fix-hint retry (1 retry with error echo, `_schema_warn` marker if still invalid), `run_ocr_pages` returns `(page, text, discarded_count)` so self-healed pages re-attach the OCR warning prefix, severity counts moved after dedup (log matches real DB writes), archive-nonexistent test corrected to 404 (unified guard behavior).
 
-**Test status**: 974 passed, 93.63% coverage (target ≥90%). Note: test_config/test_health share the process-global config singleton — both now restore original values (order-independent).
+**Round 3 localization wrap-up (竞价收尾 / adversarial #2)**: `core/zh_map.py` single source for Chinese enums (severity/finding-status/job-status/finding-type) consumed by report.md / Feishu notify / InvalidTransitionError messages; `api/jobs.py` upload error messages + image edge cases (multi-page TIFF / animated WEBP → 400 explicit reject, transparent PNG composited on white background, pixel check on HEADER size before decode to avoid full-decode DoS); MinerU `full.md` separator split keeps empty pages as `（此页无文本内容）` placeholders (page numbers no longer shift); table truncation regex widened to `<table[\s>]` (attribute tables) + open table gets synthetic `</table>` in plain-truncation fallback (closed-table count uses anchored regex — `str.count("<table")` double-counts `</table>` substrings); OCR token masked write-back protection in settings (paddle_ocr_token/mineru_token, was feishu + api_key only); `recover_stuck_jobs` UPDATE now guarded by `status IN (...)` (stale snapshot can't clobber a job a concurrent path already advanced); SSE `_get_job_progress` projects columns instead of `SELECT *`; LLM timeout log path masked with `_mask_secrets`; protocol dropdown labels Chinese.
+
+**Test status**: 983 passed, 93.68% coverage (target ≥90%). Note: test_config/test_health share the process-global config singleton — both now restore original values (order-independent).
 
 ---
 
@@ -48,7 +50,7 @@ npx tailwindcss -i ./static/input.css -o ./static/app.css --minify
 # API docs (Swagger): http://127.0.0.1:8000/docs
 ```
 
-Test coverage target: ≥90%. Current: 90.19% (928 tests, see `tests/` with unit + integration suites).
+Test coverage target: ≥90%. Current: 93.68% (983 tests, see `tests/` with unit + integration suites).
 
 ---
 

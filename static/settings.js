@@ -114,8 +114,8 @@
           <div>
             <label class="field-label">协议</label>
             <select class="input" name="${esc(prov.name)}_protocol">
-              <option value="openai" ${prov.protocol === "openai" ? "selected" : ""}>openai</option>
-              <option value="anthropic" ${prov.protocol === "anthropic" ? "selected" : ""}>anthropic</option>
+              <option value="openai" ${prov.protocol === "openai" ? "selected" : ""}>OpenAI 兼容协议</option>
+              <option value="anthropic" ${prov.protocol === "anthropic" ? "selected" : ""}>Anthropic 协议</option>
             </select>
           </div>
           <div>

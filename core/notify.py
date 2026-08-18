@@ -47,6 +47,8 @@ import time
 
 import requests
 
+from core.zh_map import zh_severity
+
 logger = logging.getLogger(__name__)
 
 _API_BASE = "https://open.feishu.cn/open-apis"
@@ -152,10 +154,13 @@ def build_text_message(
         lines.append(f"页数：{total_pages} 页")
         if findings:
             lines.append(
-                "发现：{} critical / {} warning / {} info".format(
+                "发现：{} {} / {} {} / {} {}".format(
                     findings.get("critical", 0),
+                    zh_severity("critical"),
                     findings.get("warning", 0),
+                    zh_severity("warning"),
                     findings.get("info", 0),
+                    zh_severity("info"),
                 )
             )
     else:

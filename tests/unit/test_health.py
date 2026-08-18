@@ -24,7 +24,7 @@ async def test_probe_paddle_ocr_not_configured():
         from core.health import probe_paddle_ocr
         result = probe_paddle_ocr()
         assert result["ok"] is False
-        assert "not configured" in result["reason"].lower()
+        assert "未配置" in result["reason"]
     finally:
         _cfg["paddle_ocr"].api_url = orig_url
         _cfg["paddle_ocr"].token = orig_token
@@ -81,7 +81,7 @@ async def test_probe_mineru_no_token():
         from core.health import probe_mineru
         result = probe_mineru()
         assert result["ok"] is False
-        assert "not configured" in result["reason"].lower()
+        assert "未配置" in result["reason"]
     finally:
         _cfg["mineru"].token = orig
 

@@ -224,6 +224,91 @@ class TestImageUpload:
         assert "text/markdown" in r.headers["content-type"]
 
     @pytest.mark.asyncio
+    async def test_upload_multipage_tiff_rejected(self, client):
+        """多页 TIFF → 400（对抗性审查 H1：此前静默只保留首帧，扫描件
+        多页被无声砍掉 — GMP 数据完整性风险）。"""
+        img = Image.new("RGB", (100, 80), "white")
+        buf = io.BytesIO()
+        img.save(buf, format="TIFF", save_all=True, append_images=[img])
+        data = buf.getvalue()
+        r = await client.post(
+            "/api/jobs",
+            files={"file": ("multi.tif", data, "image/tiff")},
+        )
+        assert r.status_code == 400
+        assert "多页" in r.text and "拆分" in r.text
+
+    @pytest.mark.asyncio
+    async def test_upload_animated_webp_rejected(self, client):
+        """动画 WEBP → 400（对抗性审查 H3：与多页 TIFF 同源，只留首帧）。"""
+        frames = []
+        for color in ("red", "blue"):
+            frames.append(Image.new("RGB", (100, 80), color))
+        buf = io.BytesIO()
+        frames[0].save(
+            buf,
+            format="WEBP",
+            save_all=True,
+            append_images=frames[1:],
+            duration=100,
+            loop=0,
+        )
+        data = buf.getvalue()
+        r = await client.post(
+            "/api/jobs",
+            files={"file": ("anim.webp", data, "image/webp")},
+        )
+        assert r.status_code == 400
+        assert "多页" in r.text and "拆分" in r.text
+
+    @pytest.mark.asyncio
+    async def test_upload_transparent_png_gets_white_background(self, client, test_db):
+        """透明 PNG → 200 + 转换 PDF 白底合成（对抗性审查 H2：全透明黑像素
+        之前直接变黑块，OCR 误认为内容）。"""
+        img = Image.new("RGBA", (200, 150), (0, 0, 0, 0))  # 全透明黑
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        data = buf.getvalue()
+        with patch("api.jobs.launch_pipeline") as mock_pipe:
+            r = await client.post(
+                "/api/jobs", files={"file": ("alpha.png", data, "image/png")}
+            )
+            assert r.status_code == 200, r.text
+        job_id = mock_pipe.call_args.args[0]
+        cursor = await test_db.execute(
+            "SELECT pdf_path FROM jobs WHERE id = ?", (job_id,)
+        )
+        pdf_path = (await cursor.fetchone())["pdf_path"]
+        import fitz
+        with fitz.open(pdf_path) as doc:
+            pix = doc[0].get_pixmap()
+        sample = pix.pixel(pix.width // 2, pix.height // 2)
+        assert sample == (255, 255, 255), f"expected white bg, got {sample}"
+
+    @pytest.mark.asyncio
+    async def test_upload_cmyk_jpeg_supported(self, client, test_db):
+        """CMYK JPEG → 200 + convert("RGB") 路径（对抗性审查 M1 覆盖）。"""
+        img = Image.new("CMYK", (120, 90), (0, 0, 0, 0))
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG")
+        data = buf.getvalue()
+        with patch("api.jobs.launch_pipeline") as mock_pipe:
+            r = await client.post(
+                "/api/jobs", files={"file": ("cmyk.jpg", data, "image/jpeg")}
+            )
+            assert r.status_code == 200, r.text
+        job_id = mock_pipe.call_args.args[0]
+        import fitz
+        cursor = await test_db.execute(
+            "SELECT pdf_path FROM jobs WHERE id = ?", (job_id,)
+        )
+        pdf_path = (await cursor.fetchone())["pdf_path"]
+        assert pdf_path.endswith(f"{job_id}.pdf")
+        # 转换 PDF 真实可读（1 页）
+        with fitz.open(pdf_path) as doc:
+            assert doc.page_count == 1
+
+    @pytest.mark.asyncio
     async def test_image_job_delete_cleans_converted_files(self, client, test_db):
         """删除图片 job：原图 + 转换 PDF + job 目录全部清理。"""
         import os

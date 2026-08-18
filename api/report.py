@@ -16,6 +16,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import PlainTextResponse
 
 from db.client import get_db
+from core.zh_map import zh_finding_status, zh_severity
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["report"])
@@ -208,11 +209,11 @@ def _generate_markdown(job: dict, findings: list[dict], total_pages: int) -> str
         if not sev_findings:
             continue
         icon = SeverityIcon.get(sev, "")
-        lines.append(f"### {icon} {sev.upper()} ({len(sev_findings)})")
+        lines.append(f"### {icon} {zh_severity(sev)} ({len(sev_findings)})")
         lines.append("")
         for f in sev_findings:
             st_icon = StatusIcon.get(f["status"], "")
-            lines.append(f"- **第{f['page']}页** | `{esc(f['type'])}` {st_icon} {f['status']}")
+            lines.append(f"- **第{f['page']}页** | `{esc(f['type'])}` {st_icon} {zh_finding_status(f['status'])}")
             lines.append(f"  - {esc(f['description'])}")
             if f.get("ocr_text"):
                 # P2: 先截原始文本再转义 — 反过来的话实体（如 &#33;）会被

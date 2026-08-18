@@ -529,7 +529,7 @@ def _truncate_tables_first(cleaned: str, orig_len: int) -> str:
       - 多表超限 → 按序保留放得下的表格，超预算的表整表跳过（不切开，
         语义完整）+ 标记告知
     """
-    table_re = re.compile(r"<table>.*?</table>", re.S)
+    table_re = re.compile(r"<table[\s>].*?</table>", re.S)
     matches = list(table_re.finditer(cleaned))
     if not matches:
         # 无表格页 — 保留 P2-5 安全对齐截断逻辑
@@ -604,6 +604,15 @@ def _truncate_plain(cleaned: str, orig_len: int) -> str:
         line_boundary = max(tr_boundary, td_boundary)
         if line_boundary > _MAX_HTML_CHARS * 0.6:
             cut = cut[:line_boundary]
+    # B3 修复（对抗性审查）：截断后若表格未闭合（<table 出现次数 >
+    # </table>，单行超长表/行边界在预算前段都可能触发），补 </table>
+    # 让 LLM 收到结构合法的 HTML — 不依赖 <tr 位置阈值。
+    # 注意不能用 str.count("<table")：</table> 内含子串 "<table"，会把
+    # 完整闭合的表误判为未闭合。用带后缀的锚定正则只匹配开标签。
+    open_tables = len(re.findall(r"<table[\s>]", cut))
+    close_tables = cut.count("</table>")
+    if open_tables > close_tables:
+        cut += "</table>"
     cut += f"\n[HTML 已截断：原文 {orig_len} 字符，超过上限 {_MAX_HTML_CHARS}，"
     cut += "本页信息可能不完整]"
     return cut

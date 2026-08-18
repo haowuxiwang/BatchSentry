@@ -318,6 +318,40 @@ class TestHtmlCleaning:
         assert "跳过" in out
         assert len(out) <= _MAX_HTML_CHARS
 
+    def test_truncation_matches_table_with_attributes(self):
+        """B3 修复（对抗性审查）：带属性表格（<table border=...>）不再落入
+        非对齐截断 — 正则放宽为 <table[\s>]，带属性表也按表格优先策略处理。"""
+        from core.page_analyzer import _clean_html, _MAX_HTML_CHARS
+        html = '<table border="1" cellspacing="0"><tr><td>关键数据</td></tr></table>'
+        out = _clean_html(html)
+        assert "关键数据" in out  # 表格内容完整保留
+        assert out.count("<tr") == 1  # 行未被切开
+
+    def test_truncation_plain_closes_open_table(self):
+        """B3 修复：单表超预算走表内对齐截断时，补齐 </table> 闭合标签 —
+        LLM 收到结构合法 HTML（此前截断点是未闭合的 <table> 开头）。"""
+        from core.page_analyzer import _truncate_plain, _MAX_HTML_CHARS
+        huge = "<table><tr><td>" + "x" * (_MAX_HTML_CHARS + 300) + "</td></tr></table>"
+        out = _truncate_plain(huge, len(huge))
+        assert "</table>\n[HTML 已截断" in out  # 闭合标签在截断标记前补齐
+        assert "<tr" in out  # 前半数据保留
+
+    def test_truncation_plain_no_extra_close_for_complete_table(self):
+        """B3 回归防护：已完整闭合的表不得被追加多余 </table>。
+
+        防子串陷阱：str.count("<table") 会把 </table> 里的 "<table"
+        子串也算进去，导致完整闭合的表被误判为未闭合、多补闭合标签。
+        断言闭合计数守恒。
+        """
+        from core.page_analyzer import _truncate_plain, _MAX_HTML_CHARS
+        t1 = "<table><tr><td>" + "a" * 2000 + "</td></tr></table>"
+        t2 = "<table><tr><td>" + "b" * 2000 + "</td></tr></table>"
+        body = "<p>正文</p>" * 5000  # 远超预算 → 表在截断点前均完整闭合
+        out = _truncate_plain(t1 + t2 + body, len(t1 + t2 + body))
+        open_tables = len(re.findall(r"<table[\s>]", out))
+        close_tables = out.count("</table>")
+        assert open_tables == close_tables == 2  # 两表完整，无多余闭合
+
 
 class TestEmptyPageShortCircuit:
     """robustness-D1: 空/无内容页短路 — 不调 LLM，返回 _ocr_empty 标记。"""

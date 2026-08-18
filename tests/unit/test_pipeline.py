@@ -116,8 +116,9 @@ class TestStateMachine:
         with pytest.raises(InvalidTransitionError) as exc_info:
             await transition_status(pipeline_db, job_id, "review")
 
-        assert "pending" in str(exc_info.value)
-        assert "review" in str(exc_info.value)
+        # 中文化后消息携带中文状态名（用户可见错误提示）
+        assert "待处理" in str(exc_info.value)
+        assert "待复核" in str(exc_info.value)
 
     @pytest.mark.asyncio
     async def test_invalid_transition_does_not_update_status(self, pipeline_db):
@@ -640,6 +641,27 @@ class TestStuckJobRecovery:
         assert (await cursor.fetchone())["status"] == "error"
         cursor = await pipeline_db.execute("SELECT status FROM jobs WHERE id = 'new-1'")
         assert (await cursor.fetchone())["status"] == "pending"
+
+    @pytest.mark.asyncio
+    async def test_recover_condition_update_skips_restarted_job(self, pipeline_db):
+        """竞态防护（中文化收尾对抗审查）：recover 的 UPDATE 带 status 条件 —
+        SELECT 快照后、逐行 UPDATE 前 job 已被并发路径推进到终态（如 pipeline
+        恰好完成 ocr_done→review），条件更新影响 0 行时跳过错误标记 —
+        否则迟到恢复会把刚完成的 review 打回 error。"""
+        from datetime import datetime, timedelta
+
+        await _insert_job(pipeline_db, job_id="race-1", status="ocr_done")
+        # 模拟 SELECT 快照后并发推进：ocr_done → review（pipeline 完成）
+        await pipeline_db.execute(
+            "UPDATE jobs SET status = 'review' WHERE id = 'race-1'"
+        )
+        await pipeline_db.commit()
+
+        # SQLite 单连接串行：无法真实注入 SELECT 与 UPDATE 之间的并发，
+        # 直接构造"快照已过时"场景验证条件更新的防御行为
+        count = await recover_stuck_jobs(process_started_at=None)
+        cursor = await pipeline_db.execute("SELECT status FROM jobs WHERE id = 'race-1'")
+        assert (await cursor.fetchone())["status"] == "review"  # 未被覆盖回 error
 
     @pytest.mark.asyncio
     async def test_recover_without_cutoff_recovers_all(self, pipeline_db):

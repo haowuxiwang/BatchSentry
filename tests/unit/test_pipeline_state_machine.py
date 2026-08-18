@@ -144,8 +144,9 @@ class TestTransitionStatus:
         with pytest.raises(InvalidTransitionError) as exc_info:
             await transition_status(db, "test-job", "review")
 
-        assert "pending" in str(exc_info.value)
-        assert "review" in str(exc_info.value)
+        # 中文化后消息携带中文状态名（用户可见错误提示）
+        assert "待处理" in str(exc_info.value)
+        assert "待复核" in str(exc_info.value)
 
         # 验证状态未变
         cursor = await db.execute("SELECT status FROM jobs WHERE id = ?", ("test-job",))

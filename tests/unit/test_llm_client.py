@@ -14,6 +14,7 @@ Phase 7 架构变更：
 """
 import pytest
 import asyncio
+import logging
 from unittest.mock import patch, AsyncMock, MagicMock
 
 from llm.client import LLMClient, get_llm_client, reset_llm_client
@@ -190,7 +191,7 @@ class TestChatMethod:
             assert result == "LLM response text"
 
     @pytest.mark.asyncio
-    async def test_chat_timeout_skips_retries(self):
+    async def test_chat_timeout_skips_retries(self, caplog):
         """Timeout 类异常应跳过客户端重试直接失败（SDK 已内部重试）。
 
         重试 3 次 × 240s 会让单页卡 12 分钟拖死 pipeline；快速失败让
@@ -199,12 +200,15 @@ class TestChatMethod:
         mock_cfg = _mock_config("deepseek")
         with patch("llm.client.config", mock_cfg):
             client = LLMClient(provider="deepseek")
+            # 异常消息携带疑似 key 文本 — 日志与 RuntimeError 必须脱敏
             client.adapter.chat = AsyncMock(
-                side_effect=asyncio.TimeoutError("read timed out")
+                side_effect=asyncio.TimeoutError("read timed out sk-abcdef1234567890")
             )
-            with pytest.raises(RuntimeError, match="timed out"):
-                await client.chat("system", "user", retries=3)
+            with caplog.at_level(logging.WARNING, logger="llm.client"):
+                with pytest.raises(RuntimeError, match="sk-\\*\\*\\*"):
+                    await client.chat("system", "user", retries=3)
             assert client.adapter.chat.call_count == 1  # 未重试
+            assert "sk-abcdef1234567890" not in caplog.text  # 日志已脱敏
 
     @pytest.mark.asyncio
     async def test_chat_retries_on_failure(self):

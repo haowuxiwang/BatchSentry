@@ -63,7 +63,7 @@ class TestBuildTextMessage:
         assert "BatchSentry" in text
         assert "FS-001.pdf" in text
         assert "51 页" in text
-        assert "3 critical / 5 warning / 2 info" in text
+        assert "3 严重 / 5 警告 / 2 信息" in text
 
     def test_error_message_includes_error_detail(self):
         payload = build_text_message("FS-002.pdf", "error", 0, None, "OCR timeout after 600s")

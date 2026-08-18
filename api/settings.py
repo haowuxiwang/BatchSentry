@@ -288,14 +288,22 @@ def _build_env_updates(
         if field not in raw:
             continue
         value = raw[field]
-        # 飞书敏感字段：掩码回写保护 — 收到与当前掩码相同的值视为未修改，跳过
-        if field in ("feishu_webhook_url", "feishu_secret", "feishu_app_secret"):
-            saved = load_feishu_config()
-            current = saved.get(
-                "webhook_url" if field == "feishu_webhook_url"
-                else "secret" if field == "feishu_secret" else "app_secret",
-                "",
-            )
+        # 敏感字段：掩码回写保护 — 收到与当前掩码相同的值视为未修改，跳过
+        # （feishu 三字段 + OCR token 两个 — T2.3 只覆盖了 per-provider
+        # api_key；OCR token 同样会被用户从页面复制掩码粘贴回来，静默写入
+        # 后 OCR 全部失败且难排查）
+        if field in ("feishu_webhook_url", "feishu_secret", "feishu_app_secret",
+                     "paddle_ocr_token", "mineru_token"):
+            if field == "feishu_webhook_url":
+                current = load_feishu_config().get("webhook_url", "")
+            elif field == "feishu_secret":
+                current = load_feishu_config().get("secret", "")
+            elif field == "feishu_app_secret":
+                current = load_feishu_config().get("app_secret", "")
+            elif field == "paddle_ocr_token":
+                current = config["paddle_ocr"].token or ""
+            else:
+                current = config["mineru"].token or ""
             if str(value).strip() == _mask(current):
                 skipped.append(field)
                 continue

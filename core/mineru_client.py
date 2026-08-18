@@ -721,12 +721,18 @@ def _split_pages_by_separator(full_md: str) -> list[dict]:
     pages = []
     for i, part in enumerate(parts):
         text = part.strip()
-        if text:
-            pages.append({
-                "markdown": {"text": text},
-                "page_count": i + 1,
-                "_source": "mineru",
-            })
+        if not text:
+            # B2 修复（对抗性审查）：空部分不再跳过 — 空白扫描页/分隔页是
+            # GMP 记录常见页，跳过会让后续所有页的 page_count 前移、与 PDF
+            # 物理页错位 → 跨页分析页边界错误 + 复核导航对不上 PDF 原文。
+            # 保留空页占位（与 _compose_page_markdown 空块页同款文案），
+            # 上游空页自愈（切片重试）或 _ocr_empty 人工复核路径兜底。
+            text = "（此页无文本内容）"
+        pages.append({
+            "markdown": {"text": text},
+            "page_count": i + 1,
+            "_source": "mineru",
+        })
     return pages if pages else [{"markdown": {"text": full_md}, "page_count": 1, "_source": "mineru"}]
 
 

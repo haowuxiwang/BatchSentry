@@ -26,7 +26,7 @@ def probe_paddle_ocr() -> dict:
     """Probe PaddleOCR service: GET the base URL with auth header."""
     cfg = config["paddle_ocr"]
     if not cfg.api_url or not cfg.token:
-        return {"ok": False, "reason": "PADDLE_OCR_API_URL or TOKEN not configured"}
+        return {"ok": False, "reason": "未配置 PaddleOCR API URL 或 Token"}
     try:
         start = time.time()
         # Use OPTIONS or HEAD to minimize side effects; fall back to GET.
@@ -42,9 +42,9 @@ def probe_paddle_ocr() -> dict:
             "reason": "" if reachable else f"HTTP {resp.status_code}",
         }
     except requests.exceptions.Timeout:
-        return {"ok": False, "reason": f"Timeout after {_PROBE_TIMEOUT}s"}
+        return {"ok": False, "reason": f"探测超时（{_PROBE_TIMEOUT}s）"}
     except requests.exceptions.ConnectionError as e:
-        return {"ok": False, "reason": f"Connection failed: {e.__class__.__name__}"}
+        return {"ok": False, "reason": f"连接失败: {e.__class__.__name__}"}
     except Exception as e:
         return {"ok": False, "reason": f"{e.__class__.__name__}: {e}"}
 
@@ -53,10 +53,10 @@ def probe_mineru() -> dict:
     """Probe MinerU service: just verify token is configured."""
     cfg = config["mineru"]
     if not cfg.token:
-        return {"ok": False, "reason": "MINERU_TOKEN not configured"}
+        return {"ok": False, "reason": "未配置 MinerU Token"}
     # MinerU has no simple health endpoint; configured is the best we can check
     # without submitting a real job.
-    return {"ok": True, "reason": "Token configured (reachability checked on first job)"}
+    return {"ok": True, "reason": "Token 已配置（连通性在首个任务时探测）"}
 
 
 async def probe_llm() -> dict:
@@ -81,7 +81,7 @@ async def probe_llm() -> dict:
                 "model": client.model,
                 "provider": client.provider,
                 "protocol": info.get("protocol", "?"),
-                "reason": "API key not configured",
+                "reason": "未配置 API Key",
             }
         start = time.time()
         # Tiny prompt to verify auth + connectivity. Goes through adapter.chat

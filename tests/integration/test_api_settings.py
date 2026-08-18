@@ -715,6 +715,37 @@ class TestFeishuNotifySettings:
         assert config.load_feishu_config()["webhook_url"] == "https://open.feishu.cn/open-apis/bot/v2/hook/realtoken"
 
     @pytest.mark.asyncio
+    async def test_ocr_token_masked_not_overwritten(self, settings_client):
+        """OCR token 掩码回写保护（中文化 P1）：回传与掩码相同的
+        paddle_ocr_token / mineru_token → 跳过写入，真值保留 —
+        此前只有 feishu 字段 + per-provider api_key 有保护，OCR token
+        被掩码覆盖后所有任务 OCR 失败且难排查。"""
+        import config as config_mod
+        orig_p = config_mod.config["paddle_ocr"].token
+        orig_m = config_mod.config["mineru"].token
+        try:
+            depth = await settings_client.post("/api/settings", json={
+                "paddle_ocr_token": "real-paddle-token-abc",
+                "mineru_token": "real-mineru-token-abc",
+            })
+            assert depth.status_code == 200
+            cfg = (await settings_client.get("/api/settings")).json()
+            masked_p = cfg["ocr"]["paddle"]["token"]
+            masked_m = cfg["ocr"]["mineru"]["token"]
+            r = await settings_client.post("/api/settings", json={
+                "paddle_ocr_token": masked_p,
+                "mineru_token": masked_m,
+            })
+            data = r.json()
+            assert data.get("skipped") == ["paddle_ocr_token", "mineru_token"]
+            assert data.get("updated") == 0
+            assert config_mod.config["paddle_ocr"].token == "real-paddle-token-abc"
+            assert config_mod.config["mineru"].token == "real-mineru-token-abc"
+        finally:
+            config_mod.config["paddle_ocr"].token = orig_p
+            config_mod.config["mineru"].token = orig_m
+
+    @pytest.mark.asyncio
     async def test_masked_value_reports_skipped_in_response(self, settings_client):
         """T2.3：掩码值回传被跳过时，响应须显式列出 skipped 字段（此前静默跳过）。"""
         import config

@@ -20,6 +20,7 @@ from db.client import get_db
 from core.page_analyzer import analyze_page
 from core.cross_page_analyzer import analyze_cross_page
 from core.security import redact_urls
+from core.zh_map import zh_job_status
 
 logger = logging.getLogger(__name__)
 
@@ -228,9 +229,11 @@ async def _transition_status_unlocked(db, job_id: str, new_status: str, detail: 
             await db.commit()
         except Exception as audit_err:
             logger.warning(f"[{job_id}] Audit log write failed: {audit_err}")
+        # 中文化：异常消息直达 HTTP 400 detail + 前端错误提示，英文状态码
+        # 对用户无意义（换算 zh_map 中文状态名）
         raise InvalidTransitionError(
-            f"Cannot transition from '{current}' to '{new_status}'. "
-            f"Allowed: {allowed}"
+            f"不能从「{zh_job_status(current)}」转换到「{zh_job_status(new_status)}」，"
+            f"允许的转换：{', '.join(sorted(zh_job_status(s) for s in allowed))}"
         )
 
     await db.execute("UPDATE jobs SET status = ? WHERE id = ?", (new_status, job_id))
@@ -321,11 +324,24 @@ async def recover_stuck_jobs(process_started_at: str | None = None) -> int:
         # 之外的路径（如 pending→error 是允许的），但 ocr_done→error 不在
         # VALID_TRANSITIONS 中。这里属于"崩溃恢复"场景，绕过状态机校验，
         # 直接标记 + 审计日志记录。
-        await db.execute(
-            "UPDATE jobs SET status = 'error', "
-            "error_message = ?, finished_at = CURRENT_TIMESTAMP WHERE id = ?",
-            (f"应用重启恢复：原状态 {old_status} 非终态，标记为 error 供重试", job_id),
+        # 对抗审查（中文化收尾）：UPDATE 带 status IN (...) 条件 — SELECT
+        # 快照与逐行 UPDATE 之间可能被并发路径改写状态（如用户 retry 已恢复
+        # 的 job），无条件覆盖会把新状态打回 error。条件更新影响 0 行时跳过
+        # 通知，避免对已恢复的 job 误发"应用重启恢复"失败通知。
+        placeholders = ",".join("?" * len(_STUCK_STATUSES))
+        cursor = await db.execute(
+            f"UPDATE jobs SET status = 'error', "
+            f"error_message = ?, finished_at = CURRENT_TIMESTAMP "
+            f"WHERE id = ? AND status IN ({placeholders})",
+            (f"应用重启恢复：原状态 {old_status} 非终态，标记为 error 供重试",
+             job_id, *_STUCK_STATUSES),
         )
+        if cursor.rowcount == 0:
+            logger.info(
+                f"[{job_id}] Recovery skipped: status already changed "
+                f"(expected {old_status}) — no longer stuck"
+            )
+            continue
         await _audit_log(
             db, job_id, "stuck_recovery",
             f"recovered on startup: {old_status} → error",
@@ -881,7 +897,6 @@ async def _run_pipeline_impl(job_id: str, pdf_path: str, progress_futures: list)
                                             else ""
                                         )
                                     except Exception as slice_err:
-                                        from core.security import redact_urls
                                         logger.warning(
                                             f"[{job_id}] Paddle self-heal p{pno} "
                                             f"failed: "

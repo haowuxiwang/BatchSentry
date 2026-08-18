@@ -222,7 +222,9 @@ async def create_job(
                 if total_bytes > _MAX_PDF_BYTES:
                     f.close()
                     pdf_path.unlink(missing_ok=True)
-                    raise HTTPException(400, "PDF too large (max 200MB)")
+                    # H5（对抗性审查）：原消息写死 "PDF too large"，图片超限
+                    # 时误导用户；统一为"文件"表述
+                    raise HTTPException(400, "文件过大（上限 200MB）")
                 f.write(chunk)
                 file_md5.update(chunk)
     except HTTPException:
@@ -231,14 +233,14 @@ async def create_job(
         pdf_path.unlink(missing_ok=True)
         # Don't leak internal paths/exception details to client
         logger.error(f"Upload write failed: {e}", exc_info=True)
-        raise HTTPException(500, "Upload failed (disk write error)")
+        raise HTTPException(500, "上传失败（磁盘写入错误）")
     content_md5 = file_md5.hexdigest()
 
     # Magic bytes check: PDF 以 %PDF- 开头；图片按格式白名单匹配。
     # 真实文件头校验独立于扩展名 — 伪装扩展名的图片不得绕过校验。
     if total_bytes < 5:
         pdf_path.unlink(missing_ok=True)
-        raise HTTPException(400, "File too small to be a valid file")
+        raise HTTPException(400, "文件过小，不是有效文件")
     try:
         with open(pdf_path, "rb") as f:
             header = f.read(12)
@@ -255,17 +257,17 @@ async def create_job(
         elif not header.startswith(b"%PDF-"):
             pdf_path.unlink(missing_ok=True)
             logger.warning(f"[{job_id}] Upload rejected: bad magic bytes {header[:8]!r}")
-            raise HTTPException(400, "File is not a valid PDF (missing %PDF- header)")
+            raise HTTPException(400, "文件不是有效的 PDF（缺少 %PDF- 文件头）")
     except HTTPException:
         raise
     except Exception as e:
         pdf_path.unlink(missing_ok=True)
         logger.error(f"Magic bytes check failed: {e}", exc_info=True)
-        raise HTTPException(500, "Upload validation failed")
+        raise HTTPException(500, "上传校验失败")
 
     if total_bytes == 0:
         pdf_path.unlink(missing_ok=True)
-        raise HTTPException(400, "Empty file")
+        raise HTTPException(400, "文件为空")
 
     # 上传后立即读取 PDF 总页数 — OCR/分析期间 review 页面就能显示正确的
     # "X / Y" 页码（之前 total_pages 在 OCR 完成后才写入，导致显示 "1 / 0"）。
@@ -296,13 +298,35 @@ async def create_job(
         png_bytes = b""
         try:
             with Image.open(src) as img:
-                img = ImageOps.exif_transpose(img)
+                # H4（对抗性审查）：像素上限在解码前用头部尺寸检查 — exif_transpose
+                # 会触发全量解码（1 亿像素图峰值 ~300MB），先检查可拒绝超大图，
+                # 避免 DoS 面；转置只交换宽高，像素总数不变，头部检查等价。
                 img_w, img_h = img.size
                 if img_w * img_h > _MAX_IMAGE_PIXELS:
                     raise ValueError(
                         f"图片过大（{img_w}x{img_h} 像素，上限 1 亿像素）"
                     )
-                if img.mode not in ("RGB", "L"):
+                # H1/H3（对抗性审查）：多页 TIFF / 动画 WEBP 之前静默只保留首帧
+                # （Pillow 默认仅解码第一帧）— 扫描件多页被无声砍掉，OCR/LLM/
+                # 复核/报告全部残缺且无警告。GMP 场景宁缺勿滥：明确拒绝并提示。
+                if getattr(img, "n_frames", 1) > 1:
+                    raise ValueError(
+                        "暂不支持多页 TIFF / 动画 WEBP，请拆分为单页文件"
+                        "或转换为 PDF 后上传"
+                    )
+                img = ImageOps.exif_transpose(img)
+                img_w, img_h = img.size
+                # H2（对抗性审查）：透明 PNG 直接 convert("RGB") 会保留原始
+                # RGB 值（全透明像素 (0,0,0) → 黑块），OCR 视作内容。先合成
+                # 白底 — 扫描文件语义=白纸黑字。
+                if img.mode in ("RGBA", "LA") or (
+                    img.mode == "P" and "transparency" in img.info
+                ):
+                    rgba = img.convert("RGBA")
+                    background = Image.new("RGB", rgba.size, (255, 255, 255))
+                    background.paste(rgba, mask=rgba.split()[-1])
+                    img = background
+                elif img.mode not in ("RGB", "L"):
                     img = img.convert("RGB")
                 import io as _io
                 buf = _io.BytesIO()
@@ -682,8 +706,15 @@ async def _get_job_progress(db, job_id: str) -> dict:
     """获取 job 进度快照（SSE 推送用）。
 
     复用 get_job_status 的查询逻辑，但返回精简字段。
+    对抗审查（中文化收尾）：每 3 秒一次的 SSE 轮询此前 SELECT * 全列 —
+    pdf_path / md5 / error_message 全文等无关字段随每次推送传输；
+    改为投影到推送实际使用的列（jobs 表行内多数列从不用于进度）。
     """
-    cursor = await db.execute("SELECT * FROM jobs WHERE id = ?", (job_id,))
+    cursor = await db.execute(
+        "SELECT id, status, total_pages, error_message, failed_pages, "
+        "stage1_ms, stage2_ms, stage3_ms, ocr_progress, ocr_backend_used "
+        "FROM jobs WHERE id = ?", (job_id,)
+    )
     job = await cursor.fetchone()
     if not job:
         return None

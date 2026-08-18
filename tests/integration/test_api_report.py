@@ -66,10 +66,10 @@ class TestReportMarkdown:
         """报告应按严重度分组并显示每组的数量。"""
         r = await report_client.get("/api/jobs/report-job/report.md")
         text = r.text
-        # 三种严重度各 1 条
-        assert "🔴 CRITICAL (1)" in text
-        assert "🟡 WARNING (1)" in text
-        assert "🔵 INFO (1)" in text
+        # 三种严重度各 1 条（中文化，zh_map）
+        assert "🔴 严重 (1)" in text
+        assert "🟡 警告 (1)" in text
+        assert "🔵 信息 (1)" in text
 
     @pytest.mark.asyncio
     async def test_report_md_contains_job_id(self, report_client):

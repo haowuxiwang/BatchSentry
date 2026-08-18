@@ -123,7 +123,7 @@ npm run dev
 $env:PBC_NO_FILE_LOG='1'
 python -m pytest tests/ --cov=. --cov-report=term --timeout=30
 
-# 当前状态：928 passed, 90.19% coverage（目标 ≥90%）
+# 当前状态：983 passed, 93.68% coverage（目标 ≥90%）
 ```
 
 ## 安全设计
