@@ -22,3 +22,18 @@ html, body {
 @media (max-width: 1000px) { .review-grid { grid-template-columns: 120px 1fr 340px; } }
 @media (max-width: 860px) { .review-grid { grid-template-columns: 96px 1fr 300px; } }
 @media (max-width: 700px) { .review-grid { grid-template-columns: 1fr; } }
+
+/* finding 定位高亮 — 点击 finding 卡片后在 OCR 面板标记对应片段。
+   琥珀色底 + 描边，在灰色 OCR 文本中醒目且不刺眼。 */
+mark.finding-locate-mark {
+    background: hsl(45 100% 82% / 0.9);
+    color: inherit;
+    border-radius: 2px;
+    padding: 0 1px;
+    box-shadow: 0 0 0 1px hsl(38 92% 50% / 0.45);
+    animation: locate-flash 1.2s ease-out;
+}
+@keyframes locate-flash {
+    0% { background: hsl(38 95% 55%); }
+    100% { background: hsl(45 100% 82% / 0.9); }
+}

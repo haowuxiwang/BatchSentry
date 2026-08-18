@@ -25,6 +25,57 @@
   // total_pages=0 表示 OCR 尚未完成（真实页数未知），显示 "?" 而非 1
   let totalPages = ctx.total_pages || 0;
   const pageFindingCounts = ctx.page_finding_counts || {};
+  // UX P1-4: PDF 预览缩放状态（1.0 = fit-width 原样）。渲染用 CSS width
+  // 百分比实现，滚动容器 #pdf-scroll 已有 overflow-auto 承接放大溢出。
+  let pdfZoom = 1.0;
+  const PDF_ZOOM_MIN = 0.5;
+  const PDF_ZOOM_MAX = 2.0;
+
+  function applyZoom() {
+    const img = document.getElementById("pdf-page-img");
+    if (img) img.style.width = Math.round(pdfZoom * 100) + "%";
+    const label = document.getElementById("pdf-zoom-label");
+    if (label) label.textContent = Math.round(pdfZoom * 100) + "%";
+  }
+
+  function zoomPdf(delta) {
+    pdfZoom = Math.min(
+      PDF_ZOOM_MAX,
+      Math.max(PDF_ZOOM_MIN, Math.round((pdfZoom + delta) * 100) / 100),
+    );
+    applyZoom();
+    log("zoomPdf", { zoom: pdfZoom });
+  }
+
+  function resetZoom() {
+    pdfZoom = 1.0;
+    applyZoom();
+  }
+
+  // UX P1-3: 终态自动刷新保护 — 分析完成时的自动 reload 不得打断用户
+  // 正在进行的输入（修正弹窗的 textarea / prompt 输入框）。检测焦点在
+  // 可编辑元素或对话框打开 → 跳过自动刷新，仅 toast 提示；否则延迟后刷新。
+  function safeAutoReload(delay) {
+    const a = document.activeElement;
+    const typing =
+      a &&
+      (a.tagName === "TEXTAREA" ||
+        a.tagName === "INPUT" ||
+        a.isContentEditable);
+    const dialogOpen = document.querySelector('[role="dialog"]:not([hidden])');
+    if (typing || dialogOpen) {
+      log.warn("safeAutoReload — user busy, skipping auto reload", {
+        typing: !!typing,
+        dialogOpen: !!dialogOpen,
+      });
+      window.PBC.showToast(
+        "分析已完成 — 当前有未完成的输入，请完成后手动刷新查看最终结果",
+        "info",
+      );
+      return;
+    }
+    setTimeout(() => location.reload(), delay);
+  }
 
   // 页面初始化信息（一次性 dump 上下文）
   log("review.html loaded", {
@@ -246,7 +297,7 @@
           log("SSE done — closing stream, reloading page");
           es.close();
           // 终态：1.5s 后自动刷新页面，加载最终 findings
-          setTimeout(() => location.reload(), 1500);
+          safeAutoReload(1500);
         });
 
         es.onerror = () => {
@@ -269,7 +320,7 @@
                 const d = await r.json();
                 if (terminalStatuses.includes(d.status)) {
                   clearInterval(pollTimer);
-                  setTimeout(() => location.reload(), 500);
+                  safeAutoReload(500);
                 }
               } catch (err) {
                 log.warn("poll failed", err);
@@ -550,8 +601,9 @@
           : "（此页无 OCR 内容，请以 PDF 原图为准）";
       }
 
-      // 更新 findings 列表（重新渲染）
-      renderFindings(findingsData.findings || []);
+      // 更新 findings 列表（重新渲染）— P2-3: has_more 提示（后端默认
+      // limit=50，超出部分静默截断会让复核者误以为全部问题就这些）
+      renderFindings(findingsData.findings || [], findingsData.has_more);
 
       // 更新页面级 UI 元素：置信度 / parse-error / critical banner / measurements
       updatePageLevelUI(
@@ -597,7 +649,7 @@
       const findings = findingsData.findings || [];
 
       // 重新渲染 findings 列表
-      renderFindings(findings);
+      renderFindings(findings, findingsData.has_more);
       // 更新页面级 UI（置信度/critical banner 等）
       const mr = await fetch(
         `/api/jobs/${jobId}/pages/${page}/measurements`,
@@ -638,6 +690,17 @@
     const parseBanner = document.getElementById("parse-error-banner");
     if (parseBanner) {
       parseBanner.classList.toggle("hidden", !pageParseError);
+    }
+
+    // 2b. 幻觉防护横幅 — LLM 提取数值未在 OCR 原文找到（疑似臆造）
+    const groundingWarn = structured._grounding_warn || [];
+    const groundingBanner = document.getElementById("grounding-warn-banner");
+    if (groundingBanner) {
+      groundingBanner.classList.toggle("hidden", groundingWarn.length === 0);
+      const textEl = groundingBanner.querySelector(".grounding-warn-text");
+      if (textEl && groundingWarn.length > 0) {
+        textEl.textContent = groundingWarn.join("；");
+      }
     }
 
     // 3. critical 横幅 — 按当前页 findings 重新计算 critical 数量
@@ -727,7 +790,7 @@
   }
 
   // 渲染 findings 列表
-  function renderFindings(findings) {
+  function renderFindings(findings, hasMore) {
     const list = document.getElementById("findings-list");
     if (!list) return;
     const severityZh = { critical: "严重", warning: "警告", info: "信息" };
@@ -804,6 +867,16 @@
         const ocrSnippet = f.ocr_text
           ? `<p class="text-[11px] text-muted-foreground/70 font-mono mt-1 truncate">OCR：${esc(f.ocr_text.slice(0, 100))}</p>`
           : "";
+        // UX P1-2: AJAX 渲染补齐人工复核信息 — SSR 模板有 corrected_text /
+        // reviewer_note（review.html:359-364），JS 渲染此前缺失：用户修正
+        // 或备注后详情从视图中消失，复核记录审计不可见。
+        const correctedInfo =
+          f.status === "corrected" && f.corrected_text
+            ? `<p class="text-[11px] text-foreground mt-1">修正：${esc(f.corrected_text)}</p>`
+            : "";
+        const noteInfo = f.reviewer_note
+          ? `<p class="text-[11px] text-muted-foreground mt-1">备注：${esc(f.reviewer_note)}</p>`
+          : "";
         // f.id is INTEGER from DB; coerce to Number to prevent string injection
         const fid = Number(f.id);
         const actionBtns =
@@ -818,7 +891,7 @@
                 </div>`
             : "";
         return `
-                <div id="finding-${fid}" class="finding-card stagger-in hover-lift border-b border-border last:border-b-0 ${statusOpacity} py-2.5 px-1" style="--i: ${i}">
+                <div id="finding-${fid}" class="finding-card stagger-in hover-lift border-b border-border last:border-b-0 ${statusOpacity} py-2.5 px-1" data-ocr="${esc(f.ocr_text || "")}" style="--i: ${i}">
                     <div class="flex items-start gap-2">
                         <span class="w-1.5 h-1.5 rounded-full ${sevDot} mt-[7px] shrink-0"></span>
                         <div class="flex-1 min-w-0">
@@ -830,12 +903,21 @@
                             </div>
                             <p class="text-[13px] text-muted-foreground leading-relaxed">${esc(f.description)}</p>
                             ${ocrSnippet}
+                            ${correctedInfo}
+                            ${noteInfo}
                             ${actionBtns}
                         </div>
                     </div>
                 </div>`;
       })
-      .join("");
+      .join("")
+      // P2-3: has_more 时追加提示 — 后端默认 limit=50，超出部分被截断；
+      // 静默截断会让复核者误以为本页全部问题就是这些（GMP 漏检风险）
+      .concat(
+        hasMore
+          ? '<div class="py-2 px-1 text-[11px] text-muted-foreground/70 text-center">本页 findings 超过 50 条，其余未显示（请逐页翻页或处理后刷新）</div>'
+          : "",
+      );
   }
 
   function goPage(p) {
@@ -976,6 +1058,85 @@
     log("toggleOcr —", collapsed ? "expanded" : "collapsed");
   }
 
+  // === finding 定位（用户核心诉求第一步：减少复核查找时间） ===
+  // 点击 finding 卡片 → OCR 面板中高亮对应的原文片段并滚到可视区。
+  // 零后端改动：f.ocr_text（LLM 摘录）在 htmlToText 后的面板文本中
+  // 做 token 匹配。LLM 摘录可能改写个别字 → 按 token 逐个降级查找。
+  // 高亮用 TextRange + <mark> 包装（不 innerHTML 注入，无 XSS 面）。
+
+  function clearLocateMarks() {
+    document.querySelectorAll("mark.finding-locate-mark").forEach((m) => {
+      const parent = m.parentNode;
+      while (m.firstChild) parent.insertBefore(m.firstChild, m);
+      parent.removeChild(m);
+    });
+  }
+
+  function locateFinding(card) {
+    const ocrText = card.dataset.ocr || "";
+    const ocrEl = document.getElementById("ocr-text");
+    if (!ocrEl || !ocrText) {
+      log.warn("locateFinding — no target", { hasOcrText: !!ocrText });
+      return;
+    }
+    // 折叠态先展开（max-height:360px 下滚动/高亮不可见）
+    if (ocrEl.style.maxHeight !== "none") toggleOcr();
+    clearLocateMarks();
+
+    const text = ocrEl.textContent || "";
+    if (!text) {
+      window.PBC.showToast("OCR 面板无文本可定位", "info");
+      return;
+    }
+    // 摘录 token（≥4 字符，避免 "的/是" 之类噪音 token 误定位）
+    const tokens = String(ocrText)
+      .split(/[\s|；;，,]+/)
+      .filter((t) => t.length >= 4);
+    let needle = null;
+    let idx = -1;
+    for (const t of tokens) {
+      const i = text.indexOf(t);
+      if (i >= 0) {
+        needle = t;
+        idx = i;
+        break;
+      }
+    }
+    if (!needle) {
+      window.PBC.showToast(
+        "OCR 文本中未找到对应内容（原文可能被折叠/改写），请直接核对 PDF 原图",
+        "info",
+      );
+      return;
+    }
+
+    // 文本节点内定位（textContent 通常来自单文本节点；跨节点时跳 style 兜底）
+    const walker = document.createTreeWalker(ocrEl, NodeFilter.SHOW_TEXT);
+    let acc = 0;
+    let node;
+    while ((node = walker.nextNode())) {
+      const nl = (node.textContent || "").length;
+      if (idx < acc + nl) {
+        try {
+          const range = document.createRange();
+          range.setStart(node, idx - acc);
+          range.setEnd(node, idx - acc + needle.length);
+          const mark = document.createElement("mark");
+          mark.className = "finding-locate-mark";
+          range.surroundContents(mark);
+          mark.scrollIntoView({ behavior: "smooth", block: "center" });
+        } catch (err) {
+          // 跨文本节点边界等异常 → 无高亮滚动兜底
+          log.warn("locateFinding — surroundContents failed", err);
+          node.parentElement.scrollIntoView({ behavior: "smooth", block: "center" });
+        }
+        break;
+      }
+      acc += nl;
+    }
+    log("locateFinding", { needle: needle.slice(0, 30), at: idx });
+  }
+
   function updateFinding(e, findingId, status) {
     log("updateFinding() called", { findingId, status });
     const btn = e && e.currentTarget ? e.currentTarget : null;
@@ -1103,6 +1264,8 @@
   // 暴露到全局（onclick 处理器需要）
   window.goPage = goPage;
   window.navPage = navPage;
+  window.zoomPdf = zoomPdf;
+  window.resetZoom = resetZoom;
   window.cancelJob = cancelJob;
   window.retryJob = retryJob;
   window.toggleOcr = toggleOcr;
@@ -1132,6 +1295,19 @@
     if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
     if (e.key === "ArrowLeft") goPage(currentPage - 1);
     else if (e.key === "ArrowRight") goPage(currentPage + 1);
+  });
+
+  // finding 定位：findings-list 事件委托（AJAX 重渲染后监听仍生效）。
+  // 点击卡片（非操作按钮）→ OCR 面板高亮定位对应原文。
+  document.addEventListener("DOMContentLoaded", () => {
+    const listEl = document.getElementById("findings-list");
+    if (listEl) {
+      listEl.addEventListener("click", (e) => {
+        if (e.target.closest("button")) return; // 确认/拒绝/修正按钮不触发
+        const card = e.target.closest(".finding-card");
+        if (card) locateFinding(card);
+      });
+    }
   });
 
   // 捕获全局错误，便于发现模板/Jinja 渲染或异步异常

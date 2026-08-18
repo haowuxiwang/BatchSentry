@@ -37,6 +37,7 @@ _MAX_PDF_BYTES = 200 * 1024 * 1024  # 200 MB
 #   - 原图留档在 job 目录（GMP 追溯），jobs.pdf_path 指向转换后的 PDF。
 _IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
 _MAX_IMAGE_PIXELS = 100_000_000  # ~31623x31623 — 超大图解码内存保护（防 DoS）
+_IMAGE_CONVERT_TIMEOUT_S = 120  # 图片→PDF 转换超时（P2-2）
 # 图片 magic bytes 白名单（独立于扩展名校验 — 防伪装扩展名绕过后端解码路径）
 _IMAGE_MAGIC_PREFIXES = (
     (b"\xff\xd8\xff", "JPEG"),
@@ -354,12 +355,25 @@ async def create_job(
     if is_image:
         try:
             converted_pdf = job_dir / f"{job_id}.pdf"
-            pdf_page_count = await asyncio.to_thread(
-                _image_to_pdf_sync, str(pdf_path), str(converted_pdf)
+            # P2-2: 图片转换无超时 — Pillow 解码 + PNG 编码 + PDF 压缩对
+            # 接近上限（1 亿像素）的合法大图可能耗时数分钟，请求挂起、线程池
+            # 被长期占用。wait_for 保证调用方到时返回明确错误（to_thread 取消
+            # 后后台线程仍会跑完，但不阻塞事件循环与用户感知）。
+            pdf_page_count = await asyncio.wait_for(
+                asyncio.to_thread(
+                    _image_to_pdf_sync, str(pdf_path), str(converted_pdf)
+                ),
+                timeout=_IMAGE_CONVERT_TIMEOUT_S,
             )
             # 转换成功后 jobs.pdf_path 指向转换 PDF；原图保留在 job 目录留档
             pdf_path = converted_pdf
             logger.info(f"[{job_id}] Image converted to PDF: {safe_name} -> {converted_pdf.name}")
+        except asyncio.TimeoutError:
+            pdf_path.unlink(missing_ok=True)
+            shutil.rmtree(job_dir, ignore_errors=True)
+            detail = f"图片转换超时（超过 {_IMAGE_CONVERT_TIMEOUT_S} 秒），请降低分辨率后重试。"
+            logger.warning(f"[{job_id}] Upload rejected: {detail}")
+            raise HTTPException(408, detail)
         except _PdfStructuralError as e:
             pdf_path.unlink(missing_ok=True)
             shutil.rmtree(job_dir, ignore_errors=True)
@@ -970,6 +984,13 @@ async def archive_job(job_id: str, keep_pdf: bool = True, request: Request = Non
                     )
                 elif pdf.exists():
                     import shutil
+                    # 对抗审查（P1-3）：归档删除 PDF 前必须先失效
+                    # _get_pdf_doc 的 fitz 文档句柄缓存 — 用户在 review 页
+                    # 预览过该 PDF 后缓存句柄持有文件锁（Windows），
+                    # rmtree(ignore_errors=True) 静默失败 → "删除 PDF"实际
+                    # 未删除（GMP 数据卫生 + 磁盘不释放）。delete_job 已有
+                    # 此调用（jobs.py:1069），归档路径此前漏了。
+                    _invalidate_pdf_doc(job_id)
                     shutil.rmtree(job_dir, ignore_errors=True)
                     logger.info(f"[{job_id}] Archived + PDF removed: {job_dir}")
             except (ValueError, RuntimeError) as e:
@@ -1031,7 +1052,9 @@ async def delete_job(job_id: str, keep_pdf: bool = False, request: Request = Non
             f"[{job_id}] Delete blocked: job is active (status={row['status']})"
         )
         if row["status"] == "cancelling":
-            msg = "任务正在取消中，请等待取消完成（可能需要数秒等 LLM 调用返回）后再删除。"
+            # P1-2: 文案与实现一致 — 单次 LLM 调用最长 240s（4 分钟），
+            # 取消检查点位于调用之间，取消后还需等当前调用自然结束
+            msg = "任务正在取消中，请等待当前 LLM 调用结束（最长约 4 分钟）后再删除。"
         else:
             msg = f"任务正在处理中（状态: {row['status']}），请先取消并等待任务进入终态后再删除。"
         raise HTTPException(409, msg)

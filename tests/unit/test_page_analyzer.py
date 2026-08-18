@@ -14,11 +14,17 @@ from core.page_analyzer import (
     analyze_page,
     CURRENT_PROMPT_VERSION,
     PROMPTS,
+    _grounding_check,
 )
 
 
-def _ok_payload():
-    """构造一份 v3 schema 合规的 LLM 返回字典。"""
+def _ok_payload(page=1):
+    """构造一份 v3 schema 合规的 LLM 返回字典。
+
+    page: findings[0].page 的页码 — 默认 1 与多数测试的 page_num 一致；
+    P1-页码 后校验器强制 findings[].page == page_num，非 1 页的测试
+    需传匹配页码避免误触发 C1 修复重试。
+    """
     return {
         "page_info": {
             "title": "提取工序",
@@ -50,7 +56,7 @@ def _ok_payload():
         ],
         "findings": [
             {
-                "page": 1,
+                "page": page,
                 "type": "time_reversal",
                 "severity": "warning",
                 "description": "测试 finding",
@@ -88,7 +94,7 @@ class TestAnalyzePageReturnsStructure:
     @pytest.mark.asyncio
     async def test_injects_page_number_and_prompt_version(self):
         """返回值应附加 page_number 与 _prompt_version 元数据。"""
-        mock_client = _make_mock_client(_ok_payload())
+        mock_client = _make_mock_client(_ok_payload(page=7))
         with patch("core.page_analyzer.get_llm_client", return_value=mock_client):
             result = await analyze_page("<table></table>", page_num=7)
 
@@ -153,6 +159,8 @@ class TestPromptConstruction:
 
         # 前缀
         assert user_prompt.startswith("提取以下 HTML 表格中的结构化数据：\n\n")
+        # P1-页码: prompt 注入物理页码
+        assert "这是本批记录的第 1 页（PDF 物理页码，1-indexed）" in user_prompt
         # Prompt-injection 防护：OCR 内容被标记为不可信数据
         assert "<PBC_UNTRUSTED_OCR>" in user_prompt
         assert "</PBC_UNTRUSTED_OCR>" in user_prompt
@@ -179,6 +187,77 @@ class TestPromptConstruction:
 
 class TestErrorHandling:
     """LLM 返回异常数据时的错误处理。"""
+
+    async def _always_cancelled(self) -> bool:
+        return True
+
+    @pytest.mark.asyncio
+    async def test_cancel_check_aborts_before_llm_call(self):
+        """P1-2：cancel_check 在调用前返回 True → 抛 AnalysisCancelled，
+        不发起 LLM 调用（取消后不再消耗配额）。"""
+        from core.page_analyzer import AnalysisCancelled
+        mock_client = _make_mock_client(_ok_payload())
+        with patch("core.page_analyzer.get_llm_client", return_value=mock_client):
+            with pytest.raises(AnalysisCancelled):
+                await analyze_page(
+                    "<table></table>", page_num=1,
+                    cancel_check=self._always_cancelled,  # 已取消
+                )
+        mock_client.chat_json.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_cancel_check_aborts_after_llm_call(self):
+        """P1-2：cancel_check 在首个调用后变为 True → 抛 AnalysisCancelled，
+        不进入 schema 修复重试。"""
+        from core.page_analyzer import AnalysisCancelled
+
+        calls = {"n": 0}
+
+        async def cancel_after_first():
+            calls["n"] += 1
+            return calls["n"] > 1  # 第一次返回 False，之后 True
+
+        # 构造 schema 校验失败的结果 → 触发修复重试路径
+        payload = {"page_info": {}, "steps": [], "findings": []}
+        mock_client = _make_mock_client(payload)
+        with patch("core.page_analyzer.get_llm_client", return_value=mock_client):
+            with pytest.raises(AnalysisCancelled):
+                await analyze_page(
+                    "<table></table>", page_num=1,
+                    cancel_check=cancel_after_first,
+                )
+        # 仅一次调用（未进入 schema 修复重试）
+        assert mock_client.chat_json.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_finding_page_mismatch_fixed_by_retry(self):
+        """P1-页码：LLM 填错 findings[].page（页码漂移）→ 校验失败触发
+        C1 修复重试；retry 填对页码 → 采用 retry 结果且无 _schema_warn。"""
+        wrong = _ok_payload(page=3)   # 漂移到第 3 页
+        fixed = _ok_payload(page=7)   # 修复重试填对
+
+        client = MagicMock()
+        client.chat_json = AsyncMock(side_effect=[wrong, fixed])
+        with patch("core.page_analyzer.get_llm_client", return_value=client):
+            result = await analyze_page("<table></table>", page_num=7)
+
+        assert client.chat_json.await_count == 2
+        assert result["findings"][0]["page"] == 7
+        assert "_schema_warn" not in result
+
+    @pytest.mark.asyncio
+    async def test_finding_page_mismatch_forced_when_retry_fails(self):
+        """P1-页码：LLM 两次都填错页码 → 保留结果 + _schema_warn 标记，
+        且后端强制修正 findings[].page == page_num（库存数据永不错页）。"""
+        wrong = _ok_payload(page=3)
+        client = MagicMock()
+        client.chat_json = AsyncMock(return_value=wrong)
+        with patch("core.page_analyzer.get_llm_client", return_value=client):
+            result = await analyze_page("<table></table>", page_num=7)
+
+        assert client.chat_json.await_count == 2  # 原调用 + 1 次修复重试
+        assert result["findings"][0]["page"] == 7
+        assert "_schema_warn" in result
 
     @pytest.mark.asyncio
     async def test_parse_error_returns_low_confidence(self):
@@ -398,7 +477,7 @@ class TestSparsePageShortCircuit:
     @pytest.mark.asyncio
     async def test_sparse_text_gets_warning_and_marker(self):
         """短文本无表格 → prompt 含系统警告 + _ocr_sparse 标记。"""
-        mock_client = _make_mock_client(_ok_payload())
+        mock_client = _make_mock_client(_ok_payload(page=4))
         with patch("core.page_analyzer.get_llm_client", return_value=mock_client):
             result = await analyze_page("日期：2024-01-01", page_num=4)
 
@@ -435,7 +514,7 @@ class TestSparsePageShortCircuit:
     async def test_long_text_page_not_marked_sparse(self):
         """长文本（无表格）不判定为稀疏。"""
         long_text = "工序记录" * 60  # 300 chars > threshold
-        mock_client = _make_mock_client(_ok_payload())
+        mock_client = _make_mock_client(_ok_payload(page=7))
         with patch("core.page_analyzer.get_llm_client", return_value=mock_client):
             result = await analyze_page(long_text, page_num=7)
 
@@ -593,3 +672,112 @@ class TestSanitizePageResult:
         assert result["steps"] == [{"step_no": 1, "parameters": [{"name": "pH", "spec_range": "5-9", "value": "7"}], "measurements": [{"time": "10:00", "values": {"温度": {"actual": "25"}}}], "signatures": [{"role": "operator", "name": "张三", "sign_time": "10:30"}]}]
         assert result["event_year_groups"] == {"draft": [2021], "production": []}
         assert len(result["findings"]) == 1
+
+
+class TestGroundingCheck:
+    """幻觉防护：LLM 提取数值必须能在 OCR 原文中找到（零 LLM 成本）。"""
+
+    def _data(self, actual="0.974", param_value="12.50"):
+        params = [] if param_value is None else [{"name": "温度", "value": param_value}]
+        return {
+            "page_info": {"title": "x"},
+            "steps": [{
+                "step_no": 1,
+                "measurements": [{"time": "11:04", "values": {
+                    "设备A_流速": {"actual": actual, "spec": "0.5-1.0", "unit": "m³/h"},
+                }}],
+                "parameters": params,
+            }],
+            "findings": [],
+        }
+
+    def test_grounded_values_pass(self):
+        """原文包含全部数值 → 无警告。"""
+        html = "<table><tr><td>流速 0.974 m³/h</td><td>温度 12.50 ℃</td></tr></table>"
+        assert _grounding_check(html, self._data()) == []
+
+    def test_hallucinated_value_flagged(self):
+        """actual 在原文中找不到 → 可疑项列入警告。"""
+        html = "<table><tr><td>流速 0.974 m³/h</td><td>温度 12.50 ℃</td></tr></table>"
+        suspects = _grounding_check(html, self._data(actual="0.988"))
+        assert len(suspects) == 1
+        assert "0.988" in suspects[0]
+        assert "流速" in suspects[0]
+
+    def test_parameter_value_flagged(self):
+        """参数 value 找不到 → 警告（上下文含参数名）。"""
+        html = "<table><tr><td>流速 0.974 m³/h</td><td>温度 12.50 ℃</td></tr></table>"
+        suspects = _grounding_check(html, self._data(param_value="99.99"))
+        assert len(suspects) == 1
+        assert "99.99" in suspects[0]
+        assert "温度" in suspects[0]
+
+    def test_short_number_inside_longer_not_grounded(self):
+        """短数字（2 位）嵌在长数字内（"25" ⊂ "250.0"）→ 边界检查拒绝：
+        文本中不存在独立的 "25"，应判未 grounded（严格边界防误命中）。"""
+        html = "<table><tr><td>250.0</td><td>温度 12.50 ℃</td></tr></table>"
+        data = self._data()
+        data["steps"][0]["measurements"][0]["values"]["设备A_流速"]["actual"] = "25"
+        suspects = _grounding_check(html, data)
+        assert len(suspects) == 1
+        assert "25" in suspects[0]
+
+    def test_short_number_with_boundary_matches(self):
+        """短数字带边界（逗号/空格分隔）仍可命中。"""
+        html = "<table><tr><td>流速 25, 30</td><td>温度 12.50 ℃</td></tr></table>"
+        data = self._data()
+        data["steps"][0]["measurements"][0]["values"]["设备A_流速"]["actual"] = "25"
+        assert _grounding_check(html, data) == []
+
+    def test_unit_suffix_tolerated(self):
+        """值带单位（"25.5℃"）→ 数字分量 25.5 命中即通过。"""
+        html = "<table><tr><td>25.5℃</td><td>温度 12.50 ℃</td></tr></table>"
+        data = self._data(actual="25.5℃")
+        assert _grounding_check(html, data) == []
+
+    def test_empty_html_skipped(self):
+        """原文过短（空页）→ 不做核对（避免噪声）。"""
+        assert _grounding_check("", self._data()) == []
+        assert _grounding_check("<table></table>", self._data()) == []
+
+    def test_sanitized_type_pollution_tolerated(self):
+        """非 dict 污染元素（steps 里的乱值）不炸检查器。"""
+        data = {"steps": ["污染", None], "findings": []}
+        assert _grounding_check("<table><tr><td>0.974</td></tr></table>", data) == []
+
+    @pytest.mark.asyncio
+    async def test_analyze_page_sets_grounding_warn(self):
+        """analyze_page 端到端：数值找不到 → _grounding_warn 随结果透出。"""
+        html = "<table><tr><td>流速 0.974 m³/h</td></tr></table>"
+        payload = _ok_payload()
+        payload["steps"] = [{
+            "step_no": 1,
+            "measurements": [{"time": "11:04", "values": {
+                "设备A_流速": {"actual": "9.999", "spec": "0.5-1.0", "unit": "m³/h"},
+            }}],
+            "parameters": [],
+        }]
+        mock_client = _make_mock_client(payload)
+        with patch("core.page_analyzer.get_llm_client", return_value=mock_client):
+            result = await analyze_page(html, page_num=1)
+
+        assert "_grounding_warn" in result
+        assert "9.999" in result["_grounding_warn"][0]
+
+    @pytest.mark.asyncio
+    async def test_analyze_page_no_warn_when_grounded(self):
+        """数值都能找到 → 无 _grounding_warn 键（干净页不打扰复核者）。"""
+        html = "<table><tr><td>流速 0.974 m³/h</td></tr></table>"
+        payload = _ok_payload()
+        payload["steps"] = [{
+            "step_no": 1,
+            "measurements": [{"time": "11:04", "values": {
+                "设备A_流速": {"actual": "0.974", "spec": "0.5-1.0", "unit": "m³/h"},
+            }}],
+            "parameters": [],
+        }]
+        mock_client = _make_mock_client(payload)
+        with patch("core.page_analyzer.get_llm_client", return_value=mock_client):
+            result = await analyze_page(html, page_num=1)
+
+        assert "_grounding_warn" not in result

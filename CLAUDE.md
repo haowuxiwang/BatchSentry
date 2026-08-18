@@ -18,7 +18,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Round 3 localization wrap-up (竞价收尾 / adversarial #2)**: `core/zh_map.py` single source for Chinese enums (severity/finding-status/job-status/finding-type) consumed by report.md / Feishu notify / InvalidTransitionError messages; `api/jobs.py` upload error messages + image edge cases (multi-page TIFF / animated WEBP → 400 explicit reject, transparent PNG composited on white background, pixel check on HEADER size before decode to avoid full-decode DoS); MinerU `full.md` separator split keeps empty pages as `（此页无文本内容）` placeholders (page numbers no longer shift); table truncation regex widened to `<table[\s>]` (attribute tables) + open table gets synthetic `</table>` in plain-truncation fallback (closed-table count uses anchored regex — `str.count("<table")` double-counts `</table>` substrings); OCR token masked write-back protection in settings (paddle_ocr_token/mineru_token, was feishu + api_key only); `recover_stuck_jobs` UPDATE now guarded by `status IN (...)` (stale snapshot can't clobber a job a concurrent path already advanced); SSE `_get_job_progress` projects columns instead of `SELECT *`; LLM timeout log path masked with `_mask_secrets`; protocol dropdown labels Chinese.
 
-**Test status**: 983 passed, 93.68% coverage (target ≥90%). Note: test_config/test_health share the process-global config singleton — both now restore original values (order-independent).
+**Round 4 (UX + robustness)**: cancel checkpoint injection (`AnalysisCancelled` + `cancel_check` three checkpoints in `page_analyzer.analyze_page`, cancelled pages not counted as failed — single HTTP call remains uninterruptible), prompt page-number injection + `findings[].page` backend enforcement (`_validate_page_result` + force-overwrite after sanitize), LLM hallucination grounding check (`_grounding_check`/`_value_grounded`: ≥4-digit substring match, shorter numbers boundary-checked; `_grounding_warn` → review banner), UX P1 set (no `target="_blank"` in Electron, corrected/note info in AJAX finding cards, `safeAutoReload` skips reload while typing or in dialog, PDF zoom 0.5-2.0x buttons), finding locate v1 (click card → OCR panel mark + scroll), P2 quick wins (empty report.md explicit "no findings" text + total_pages from `jobs.total_pages` instead of page_cache COUNT which undercounts failed-OCR pages, image→PDF conversion 120s timeout via `asyncio.wait_for` → 408, review.js `has_more` notice when >50 findings truncated).
+
+**Test status**: 998 passed, 93.67% coverage (target ≥90%). Note: test_config/test_health share the process-global config singleton — both now restore original values (order-independent).
 
 ---
 
@@ -50,7 +52,7 @@ npx tailwindcss -i ./static/input.css -o ./static/app.css --minify
 # API docs (Swagger): http://127.0.0.1:8000/docs
 ```
 
-Test coverage target: ≥90%. Current: 93.68% (983 tests, see `tests/` with unit + integration suites).
+Test coverage target: ≥90%. Current: 93.67% (998 tests, see `tests/` with unit + integration suites).
 
 ---
 

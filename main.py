@@ -209,11 +209,14 @@ def render_page_links(text: str, job_id: str) -> str:
     from markupsafe import escape as _escape
     escaped = _escape(str(text))
     # Step 2: insert clickable links on the escaped text
+    # UX P1-1: 去掉 target="_blank" — Electron 中 target=_blank 会经
+    # setWindowOpenHandler 把 http(s) 交给系统浏览器打开（跳出应用，
+    # 用户回不来原复核上下文）；应用内同页跳转保持复核流不断。
     def repl(m):
         page = m.group(1)
         return (
             f'<a href="/jobs/{job_id}/review?page={page}" '
-            f'class="page-link" target="_blank">第{page}页</a>'
+            f'class="page-link">第{page}页</a>'
         )
     return Markup(re.sub(r"第(\d+)页", repl, escaped))
 
@@ -401,6 +404,8 @@ async def review_page(job_id: str, request: Request, page: int = 1):
         # C3 修复（Round 3）：OCR 不完整警告（MinerU 低置信度丢弃块）透出
         # 到 review 横幅 — LLM 已被系统警告降级置信度，复核者需知道缺失原因
         page_ocr_warning = str(data.get("_ocr_warning") or "")
+        # 幻觉防护：LLM 提取数值未在 OCR 原文找到 — 横幅提醒复核重点核对
+        page_grounding_warn = data.get("_grounding_warn") or []
         page_confidence = data.get("overall_confidence") or ""
         col_set: dict[str, None] = {}
         for step in data.get("steps", []) or []:
@@ -419,6 +424,7 @@ async def review_page(job_id: str, request: Request, page: int = 1):
         page_ocr_empty = False
         page_ocr_sparse = False
         page_ocr_warning = ""
+        page_grounding_warn = []
         page_confidence = ""
 
     # Count findings by severity (all pages, for status bar)
@@ -478,6 +484,7 @@ async def review_page(job_id: str, request: Request, page: int = 1):
         "page_ocr_empty": page_ocr_empty,
         "page_ocr_sparse": page_ocr_sparse,
         "page_ocr_warning": page_ocr_warning,
+        "page_grounding_warn": page_grounding_warn,
         "page_confidence": page_confidence,
         # cr-19: 实际 OCR 后端（failover 后与配置不同 — GMP 复核可见性）
         "ocr_backend_used": job["ocr_backend_used"] if "ocr_backend_used" in job.keys() else None,

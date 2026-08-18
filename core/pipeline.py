@@ -17,7 +17,7 @@ from pathlib import Path
 
 from config import config
 from db.client import get_db
-from core.page_analyzer import analyze_page
+from core.page_analyzer import analyze_page, AnalysisCancelled
 from core.cross_page_analyzer import analyze_cross_page
 from core.security import redact_urls
 from core.zh_map import zh_job_status
@@ -1264,13 +1264,22 @@ async def _analyze_one(
     raw_html = page.get("markdown", {}).get("text", "")
     async with sem:
         try:
-            page_start = time.time()
-            structured = await analyze_page(
-                raw_html, page_num=page_num, job_id=job_id
-            )
-            page_ms = int((time.time() - page_start) * 1000)
+            try:
+                page_start = time.time()
+                # P1-2: 取消检查点注入 — analyze_page 在 LLM 调用之间（chat_json
+                # 后 / schema 修复重试前）轮询 cancel_check，取消后不再发起新的
+                # LLM 调用（此前重试链最长 ~12 分钟，cancel 后 job 迟迟不终态，
+                # delete/archive 被拒且文案"数秒"严重不符）。
+                structured = await analyze_page(
+                    raw_html, page_num=page_num, job_id=job_id,
+                    cancel_check=lambda: _is_cancelled(job_id),
+                )
+                page_ms = int((time.time() - page_start) * 1000)
+            except AnalysisCancelled:
+                # 用户取消：该页不计 failed_pages（取消是用户动作，不是分析缺陷）
+                logger.info(f"[{job_id}] Stage 2: Page {page_num} analysis cancelled")
+                return
 
-            # robustness-B3: JSON 解析失败（_parse_error）不抛异常而是返回
             # 标记 dict（见 page_analyzer.analyze_page），此前此类页既不进
             # failed_pages 也不触发 partial_review，job 显示"成功"但实际
             # 缺页。此处与异常路径一致地归入 failed_pages（不 completed++）。

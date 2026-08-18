@@ -64,9 +64,18 @@ async def _generate_report_md_cached(job_id: str) -> str:
     findings = [dict(r) for r in await cursor.fetchall()]
 
     cursor = await db.execute(
-        "SELECT COUNT(*) FROM page_cache WHERE job_id = ?", (job_id,)
+        "SELECT total_pages FROM jobs WHERE id = ?", (job_id,)
     )
-    total_pages = (await cursor.fetchone())[0]
+    row = await cursor.fetchone()
+    # 总页数以 jobs.total_pages 为准（OCR 时写入的物理页数，P1-4 保证
+    # 缺页时也保持物理页数）；page_cache 行数可能因 OCR 失败而偏少，
+    # 旧实现用它导致报告页数比真实 PDF 少（GMP 报告信息失真）。
+    total_pages = row["total_pages"] if row and row["total_pages"] else 0
+    if not total_pages:
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM page_cache WHERE job_id = ?", (job_id,)
+        )
+        total_pages = (await cursor.fetchone())[0]
 
     # 缓存 key：findings 数量 + 最后一条 finding 的 id
     last_id = findings[-1]["id"] if findings else 0
@@ -202,6 +211,21 @@ def _generate_markdown(job: dict, findings: list[dict], total_pages: int) -> str
         "## Findings 列表",
         "",
     ]
+
+    # 空报告文案：无 findings 时明确告知"未发现问题"，而不是只输出
+    # 空分组（复核者导出空报告会困惑是否数据丢失）
+    if not findings:
+        lines.append("## Findings 列表")
+        lines.append("")
+        lines.append("未发现问题。")
+        lines.append("")
+        lines.append("---")
+        lines.append("")
+        lines.append("## 汇总")
+        lines.append("")
+        lines.append("✅ 未发现问题，无需人工复核。")
+        lines.append("")
+        return "\n".join(lines)
 
     # Group by severity
     for sev in ["critical", "warning", "info"]:

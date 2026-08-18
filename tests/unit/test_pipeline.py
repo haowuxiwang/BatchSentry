@@ -22,6 +22,7 @@ from core.pipeline import (
     recover_stuck_jobs,
     launch_pipeline,
     _pipeline_tasks,
+    _analyze_one,
 )
 from config import config
 
@@ -508,12 +509,12 @@ class TestPipelineCancellation:
 
         captured = {}
 
-        async def slow_page(html, page_num, *, job_id=""):
+        async def slow_page(html, page_num, *, job_id="", cancel_check=None):
             # 慢页：捕获当前任务后挂起 300s（模拟慢 LLM 调用）
             captured["slow_task"] = asyncio.current_task()
             await asyncio.sleep(300)
 
-        async def fast_page(html, page_num, *, job_id=""):
+        async def fast_page(html, page_num, *, job_id="", cancel_check=None):
             return {"steps": [], "findings": [], "overall_confidence": "high"}
 
         async def analyze_side(html, page_num, **kw):
@@ -546,6 +547,43 @@ class TestPipelineCancellation:
         slow = captured.get("slow_task")
         assert slow is not None, "slow page task should have been created"
         assert slow.cancelled(), "in-flight page task must be cancelled on cancel"
+
+    @pytest.mark.asyncio
+    async def test_analyze_one_cancelled_page_not_counted_failed(
+        self, pipeline_db
+    ):
+        """P1-2：analyze_page 抛 AnalysisCancelled（cancel_check 命中）时，
+        _analyze_one 应静默跳过该页：不进 failed_pages、不写 page_cache、
+        completed 不 +1（取消是用户动作，不是分析缺陷）。"""
+        from core.page_analyzer import AnalysisCancelled
+
+        db = pipeline_db  # fixture 已 yield 连接对象
+        job_id = "cancel-skip-page"
+        await _insert_job(pipeline_db, job_id=job_id)
+
+        failed_pages: list[int] = []
+        sem = asyncio.Semaphore(1)
+        state_lock = asyncio.Lock()
+        completed = {"n": 0}
+        page = {"markdown": {"text": "page content"}}
+
+        with patch(
+            "core.pipeline._is_cancelled", new=AsyncMock(return_value=False)
+        ), patch(
+            "core.pipeline.analyze_page",
+            new=AsyncMock(side_effect=AnalysisCancelled(1)),
+        ):
+            await _analyze_one(
+                pipeline_db, job_id, 1, page, sem, failed_pages,
+                state_lock, completed, total_pages=2,
+            )
+
+        assert failed_pages == []
+        assert completed["n"] == 0
+        cursor = await pipeline_db.execute(
+            "SELECT COUNT(*) AS c FROM page_cache WHERE job_id = ?", (job_id,)
+        )
+        assert (await cursor.fetchone())["c"] == 0
 
         # Stage 3 不应执行
         # （analyze_cross_page mock 调用检查在 patch 作用域外无法断言，

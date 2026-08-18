@@ -149,6 +149,21 @@
                     PDF 原图 · 第 <span id="page-num" class="text-foreground font-mono">{{ page }}</span> / <span id="page-total" class="text-foreground font-mono">{{ total_pages if total_pages else '?' }}</span> 页
                 </h2>
                 <div class="flex items-center gap-2">
+                    {# UX P1-4: PDF 预览缩放控制 — 原图 w-full 固定 100%，复核
+                       手写签名/小字数值时无法放大细节。zoom 步进 0.25，
+                       范围 50%-200%，DOM 更新不走 reload。 #}
+                    <button id="btn-zoom-out" onclick="zoomPdf(-0.25)" title="缩小"
+                            class="btn-press focus-ring inline-flex items-center justify-center h-8 w-8 rounded-md border border-border bg-card hover:bg-accent">
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor" class="w-4 h-4"><path stroke-linecap="round" stroke-linejoin="round" d="M5 12h14"/></svg>
+                    </button>
+                    <button id="btn-zoom-reset" onclick="resetZoom()" title="重置缩放 100%"
+                            class="btn-press focus-ring inline-flex items-center justify-center h-8 px-2 rounded-md border border-border bg-card hover:bg-accent">
+                        <span id="pdf-zoom-label" class="text-[11px] text-muted-foreground font-mono tabular-nums">100%</span>
+                    </button>
+                    <button id="btn-zoom-in" onclick="zoomPdf(0.25)" title="放大"
+                            class="btn-press focus-ring inline-flex items-center justify-center h-8 w-8 rounded-md border border-border bg-card hover:bg-accent">
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor" class="w-4 h-4"><path stroke-linecap="round" stroke-linejoin="round" d="M12 5v14M5 12h14"/></svg>
+                    </button>
                     <button id="btn-prev-page" onclick="navPage(-1)" {% if page <= 1 %}disabled{% endif %}
                             class="btn-press focus-ring inline-flex items-center justify-center h-8 w-8 rounded-md border border-border bg-card hover:bg-accent disabled:opacity-40 disabled:pointer-events-none">
                         <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor" class="w-4 h-4"><path stroke-linecap="round" stroke-linejoin="round" d="M15.75 19.5L8.25 12l7.5-7.5"/></svg>
@@ -303,6 +318,26 @@
             </div>
             {% endif %}
 
+            {# 幻觉防护横幅：LLM 提取的实测数值在 OCR 原文中找不到（疑似
+               臆造）。只提醒、不自动裁决 — 数字字符串匹配存在误报可能，
+               复核者应以 PDF 原图为准。 #}
+            {% if page_grounding_warn %}
+            <div id="grounding-warn-banner" class="grounding-warn-banner rounded-md border-l-2 border-destructive bg-card px-3 py-2 flex items-start gap-2">
+                <span class="w-1.5 h-1.5 rounded-full bg-destructive mt-[5px] shrink-0"></span>
+                <div class="flex-1 min-w-0">
+                    <p class="text-xs font-medium text-foreground">此页部分实测数值未能在 OCR 原文中找到，疑似提取错误，请以 PDF 原图重点核对：</p>
+                    <p class="text-xs text-muted-foreground mt-0.5 font-mono grounding-warn-text">{{ page_grounding_warn|join('；') }}</p>
+                </div>
+            </div>
+            {% else %}
+            <div id="grounding-warn-banner" class="grounding-warn-banner rounded-md border-l-2 border-destructive bg-card px-3 py-2 flex items-start gap-2 hidden">
+                <span class="w-1.5 h-1.5 rounded-full bg-destructive mt-[5px] shrink-0"></span>
+                <div class="flex-1 min-w-0">
+                    <p class="text-xs font-medium text-foreground">此页部分实测数值未能在 OCR 原文中找到，疑似提取错误，请以 PDF 原图重点核对</p>
+                </div>
+            </div>
+            {% endif %}
+
             <!-- Findings list — Linear 风格扁平列表，无外层卡片包裹 -->
             <div class="flex flex-col">
                 <!-- 列表 header — 仅标题 + 计数，无卡片背景 -->
@@ -316,6 +351,7 @@
                         {% set sev_dot = 'bg-destructive' if f.severity == 'critical' else ('bg-warning' if f.severity == 'warning' else 'bg-info') %}
                         <div id="finding-{{ f.id }}"
                              class="finding-card stagger-in hover-lift border-b border-border last:border-b-0 {% if f.status == 'confirmed' %}opacity-50{% elif f.status == 'rejected' %}opacity-40{% endif %} py-2.5 px-1"
+                             data-ocr="{{ f.ocr_text | e }}"
                              style="--i: {{ loop.index0 }}">
                             <div class="flex items-start gap-2">
                                 <span class="w-1.5 h-1.5 rounded-full {{ sev_dot }} mt-[7px] shrink-0"></span>
