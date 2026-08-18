@@ -8,27 +8,34 @@
     <link rel="stylesheet" href="/static/app.css?v={{ asset_ver('app.css') }}" />
     <link rel="stylesheet" href="/static/upload.css?v={{ asset_ver('upload.css') }}" />
   </head>
-  <body class="h-full min-h-screen">
-    <div class="relative max-w-3xl mx-auto px-6 py-10">
-      <!-- ═══════════════════════════════════════════════════
-           顶部导航 — Notion 风格:简洁标题 + 设置入口
-           ═══════════════════════════════════════════════════ -->
-      <header
-        class="stagger-in flex items-center justify-between mb-8"
-        style="--i: 0"
-      >
-        <div>
-          <div class="flex items-center gap-2 mb-0.5">
-            <span
-              class="text-[11px] font-medium text-muted-foreground tracking-wide uppercase"
-              >BatchSentry</span
-            >
-          </div>
-          <h1 class="text-xl font-semibold tracking-tight">批记录辅助审查</h1>
-          <p class="text-[12px] text-muted-foreground mt-0.5">
-            上传 PDF 批生产记录，自动完成结构化分析
-          </p>
-        </div>
+  <body class="h-full flex flex-col">
+    <a href="#main-content" class="skip-link">跳到主要内容</a>
+    <!-- ═══════════════════════════════════════════════════
+         顶部 App Bar — 与 review 页同构的 48px sticky 顶栏
+         （P2-2: 三页头部统一，滚动时始终可见）
+         ═══════════════════════════════════════════════════ -->
+    <header
+      class="border-b border-border bg-background/80 backdrop-blur-sm sticky top-0 z-40"
+    >
+      <div class="max-w-[1700px] mx-auto px-6 h-12 flex items-center gap-3">
+        <span
+          class="text-[11px] font-medium text-muted-foreground tracking-wide uppercase"
+          >BatchSentry</span
+        >
+        <span class="text-muted-foreground/40">/</span>
+        <span class="text-[13px] font-medium text-foreground">批记录辅助审查</span>
+        <div class="flex-1"></div>
+        <button
+          type="button"
+          id="cmd-palette-btn"
+          class="btn-press focus-ring inline-flex items-center gap-1.5 px-2 py-1 text-[12px] text-muted-foreground hover:text-foreground rounded-md transition-colors"
+          title="命令面板 (Ctrl+K)"
+        >
+          <kbd
+            class="text-[10px] px-1 py-0.5 rounded border border-border bg-muted font-mono"
+            >Ctrl K</kbd
+          >
+        </button>
         <a
           href="/settings"
           class="btn-press focus-ring inline-flex items-center gap-1.5 px-3 py-1.5 text-[12px] text-muted-foreground hover:text-foreground rounded-md transition-colors"
@@ -50,6 +57,19 @@
           </svg>
           设置
         </a>
+      </div>
+    </header>
+
+    <div class="flex-1 overflow-y-auto" id="main-content">
+      <div class="relative max-w-3xl mx-auto px-6 py-10">
+      <!-- ═══════════════════════════════════════════════════
+           页面标题 — Notion 风格:简洁标题
+           ═══════════════════════════════════════════════════ -->
+      <header class="stagger-in mb-8" style="--i: 0">
+        <h1 class="text-xl font-semibold tracking-tight">批记录辅助审查</h1>
+        <p class="text-[12px] text-muted-foreground mt-0.5">
+          上传 PDF 批生产记录，自动完成结构化分析
+        </p>
       </header>
 
       {% if needs_setup %}
@@ -209,6 +229,7 @@
     <footer class="mt-6 pb-4 text-center text-[11px] text-muted-foreground/50">
       日志目录：<code class="font-mono">{{ log_dir }}</code>
     </footer>
+    </div>
 
     <script>
       window.__PBC__ = {
@@ -217,6 +238,7 @@
       };
     </script>
     <script src="/static/confirm-dialog.js?v={{ asset_ver('confirm-dialog.js') }}" defer></script>
+    <script src="/static/command-palette.js?v={{ asset_ver('command-palette.js') }}" defer></script>
     <script src="/static/upload.js?v={{ asset_ver('upload.js') }}" defer></script>
   </body>
 </html>

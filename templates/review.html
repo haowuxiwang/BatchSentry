@@ -19,6 +19,7 @@
     {% set type_zh = {'time_reversal': '时间倒序', 'year_contradiction': '年份矛盾', 'suspicious_date': '日期可疑', 'signature_time_anomaly': '签名时间异常', 'completeness': '信息缺失', 'batch_inconsistency': '批号不一致', 'param_out_of_spec': '参数超标', 'low_confidence': '低置信度', 'handwritten': '手写内容需核对', 'signature_mismatch': '签名不符', 'user_rule': '用户规则', 'ocr_noise': 'OCR 噪音', 'time_anomaly': '时间异常'} %}
 </head>
 <body class="h-full flex flex-col">
+    <a href="#main-content" class="skip-link">跳到主要内容</a>
     <!-- ============= Top App Bar — 48px, 无 logo, 纯文字 ============= -->
     <header class="border-b border-border bg-background/80 backdrop-blur-sm sticky top-0 z-40">
         <div class="max-w-[1700px] mx-auto px-6 h-12 flex items-center gap-3">
@@ -53,24 +54,24 @@
             <nav class="flex items-center gap-2">
                 {% if status in ['ocr_running', 'ocr_done', 'analyzing', 'pending'] %}
                 <button onclick="cancelJob(event)" id="cancel-btn"
-                        class="btn-press text-[12px] text-muted-foreground hover:text-destructive">
+                        class="btn-press focus-ring text-[12px] text-muted-foreground hover:text-destructive">
                     取消任务
                 </button>
                 {% endif %}
                 {% if status in ['error', 'cancelled', 'partial_review'] %}
                 <button onclick="retryJob(event)"
-                        class="btn-press text-[12px] text-muted-foreground hover:text-foreground">
+                        class="btn-press focus-ring text-[12px] text-muted-foreground hover:text-foreground">
                     重试
                 </button>
                 {% elif status == 'review' %}
                 <button onclick="retryJob(event)" data-full-retry="1"
-                        class="btn-press text-[12px] text-muted-foreground hover:text-foreground">
+                        class="btn-press focus-ring text-[12px] text-muted-foreground hover:text-foreground">
                     重新分析
                 </button>
                 {% endif %}
                 {% if status in ['review', 'partial_review', 'done'] %}
                 <a href="/api/jobs/{{ job_id }}/report.md"
-                   class="btn-press text-[12px] text-muted-foreground hover:text-foreground">
+                   class="btn-press focus-ring text-[12px] text-muted-foreground hover:text-foreground">
                     下载报告
                 </a>
                 {% endif %}
@@ -78,6 +79,11 @@
                    class="btn-press focus-ring text-[12px] text-muted-foreground hover:text-foreground px-2 py-1 rounded transition-colors">
                     设置
                 </a>
+                <button type="button" id="cmd-palette-btn"
+                        class="btn-press focus-ring text-[12px] text-muted-foreground hover:text-foreground px-2 py-1 rounded transition-colors"
+                        title="命令面板 (Ctrl+K)">
+                    <kbd class="text-[10px] px-1 py-0.5 rounded border border-border bg-muted font-mono">Ctrl K</kbd>
+                </button>
                 <a href="/"
                    class="btn-press focus-ring text-[12px] text-muted-foreground hover:text-foreground px-2 py-1 rounded transition-colors">
                     首页
@@ -87,7 +93,7 @@
     </header>
 
     <!-- ============= Main 3-column layout ============= -->
-    <div class="review-grid flex-1 max-w-[1700px] w-full mx-auto px-4 py-4 grid gap-4"
+    <div class="review-grid flex-1 max-w-[1700px] w-full mx-auto px-4 py-4 grid gap-4" id="main-content"
          style="min-height: calc(100vh - 48px);">
 
         <!-- LEFT: Page navigation sidebar — 扁平列表，无卡片包裹 -->
@@ -178,8 +184,9 @@
 
             <div class="flex-1 border-t border-border overflow-hidden relative bg-card">
                 {% if pdf_url %}
-                <div id="pdf-loading" class="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-background z-10">
-                    <div class="pdf-spinner"></div>
+                <div id="pdf-loading" class="absolute inset-0 flex flex-col items-center justify-center gap-4 bg-background z-10">
+                    {# P3-2: 页面形骨架 — 占位形状 = PDF 页面形状（A4 比例），无布局跳动 #}
+                    <div class="w-56 h-80 rounded-md bg-muted/70 animate-pulse"></div>
                     <p class="text-xs text-muted-foreground">正在渲染第 {{ page }} 页 ...</p>
                 </div>
                 {# PyMuPDF 后端渲染 PNG（/api/jobs/{id}/page/{n}）— 替代浏览器原生
@@ -490,6 +497,7 @@
       };
     </script>
     <script src="/static/confirm-dialog.js?v={{ asset_ver('confirm-dialog.js') }}" defer></script>
+    <script src="/static/command-palette.js?v={{ asset_ver('command-palette.js') }}" defer></script>
     <script src="/static/review.js?v={{ asset_ver('review.js') }}" defer></script>
 </body>
 </html>

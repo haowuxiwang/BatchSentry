@@ -355,17 +355,21 @@
     };
     log("DOMContentLoaded — DOM probe", probes);
 
-    // 验证 critical-pulse 3s 动画规则是否被浏览器解析
+    // 验证 critical-pulse 静态红晕规则是否被浏览器解析（P1-8: 3s 呼吸已移除）
     try {
       const sheets = [...document.styleSheets];
       let found = false;
       for (const s of sheets) {
         try {
           for (const rule of s.cssRules || []) {
-            if (rule.cssText && rule.cssText.includes("critical-pulse 3s")) {
+            if (
+              rule.cssText &&
+              rule.cssText.includes(".critical-pulse") &&
+              rule.cssText.includes("box-shadow")
+            ) {
               found = true;
               log(
-                "CSS rule matched: critical-pulse 3s",
+                "CSS rule matched: .critical-pulse static",
                 rule.cssText.slice(0, 120),
               );
             }
@@ -376,7 +380,7 @@
       }
       if (!found)
         log.warn(
-          "critical-pulse 3s 规则未在可访问样式表中找到（可能是跨域 CSS）",
+          "critical-pulse 静态规则未在可访问样式表中找到（可能是跨域 CSS）",
         );
     } catch (e) {
       log.warn("styleSheet 探测失败", e);
@@ -420,7 +424,9 @@
     pageLoadingOverlay = document.createElement("div");
     pageLoadingOverlay.className =
       "absolute inset-0 flex items-center justify-center bg-background/60 z-20 transition-opacity";
-    pageLoadingOverlay.innerHTML = '<div class="pdf-spinner"></div>';
+    // P3-2: 页面形骨架（形态 = 最终 PDF 页面形状）替代 spinner
+    pageLoadingOverlay.innerHTML =
+      '<div class="w-56 h-80 rounded-md bg-muted/70 animate-pulse"></div>';
     center.style.position = "relative";
     center.appendChild(pageLoadingOverlay);
   }
@@ -756,7 +762,7 @@
               "stagger-in border-b border-border/50 hover:bg-muted/50";
             tr.style.setProperty("--i", String(i));
             const timeTd = document.createElement("td");
-            timeTd.className = "px-3 py-1.5 font-mono text-foreground";
+            timeTd.className = "px-3 py-1.5 font-mono tabular-nums text-foreground";
             timeTd.textContent = m.time || "-";
             tr.appendChild(timeTd);
             for (const col of columns) {
@@ -779,6 +785,7 @@
         }
         if (matrixShape) {
           matrixShape.textContent = `${measurements.length} × ${columns.length}`;
+          matrixShape.className = (matrixShape.className || "") + " tabular-nums";
         }
         matrixSection.classList.remove("hidden");
       } else {

@@ -2,25 +2,123 @@
  * BatchSentry — Tailwind input
  *
  * Tailwind directives + custom component classes that depend on Tailwind
- * utilities (e.g. @apply). Design tokens (colors, motion, shadows) live in
- * design-tokens.css and are imported here so a single `app.css` build ships
- * everything the templates need.
+ * utilities (e.g. @apply). Design tokens (colors, motion, shadows) ship as
+ * design-tokens.css (loaded first in templates) — no @import needed.
  */
 
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
-/* === E2E-required class names — preserve verbatim === */
+/* === E2E-required class names — preserve verbatim ===
+   P1-8: 移除 3s 无限呼吸 — 复核界面读屏/癫痫/用户注意力均不被打断，
+   GxP 告警保持克制：critical 区域用静态红晕（1px 内描边）替代呼吸。 */
 .critical-banner {
-  animation: critical-pulse 3s ease-in-out infinite;
+  box-shadow: 0 0 0 1px hsl(var(--destructive) / 0.35);
 }
 .findings-list-critical {
-  animation: critical-pulse 3s ease-in-out infinite;
+  box-shadow: 0 0 0 1px hsl(var(--destructive) / 0.35);
 }
-@keyframes critical-pulse {
-  0%, 100% { box-shadow: 0 0 0 0 hsl(var(--destructive) / 0.55); }
-  50%      { box-shadow: 0 0 0 8px hsl(var(--destructive) / 0); }
+.critical-pulse {
+  box-shadow: 0 0 0 1px hsl(var(--destructive) / 0.35);
+}
+
+/* ─── Skip link — 键盘用户跳过导航直达主内容 (P2-4 a11y) ─── */
+.skip-link {
+  position: fixed;
+  top: 8px;
+  left: 8px;
+  z-index: 100;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  border-radius: 6px;
+  background: hsl(var(--foreground));
+  color: hsl(var(--background));
+  transform: translateY(-150%);
+  transition: transform var(--motion-hover);
+}
+.skip-link:focus {
+  transform: translateY(0);
+}
+
+/* ─── Command palette (P3-1) — Linear 风格 ⌘K ─── */
+.cmd-palette {
+  width: 560px;
+  max-width: calc(100vw - 32px);
+  border: 1px solid hsl(var(--border));
+  border-radius: 10px;
+  padding: 0;
+  background: hsl(var(--card));
+  box-shadow: 0 16px 48px hsl(var(--foreground) / 0.12);
+}
+.cmd-palette::backdrop {
+  background: hsl(var(--foreground) / 0.25);
+}
+.cmd-input {
+  width: 100%;
+  padding: 12px 16px;
+  border: none;
+  border-bottom: 1px solid hsl(var(--border));
+  background: transparent;
+  color: hsl(var(--foreground));
+  font-size: 14px;
+  outline: none;
+}
+.cmd-input::placeholder {
+  color: hsl(var(--muted-foreground) / 0.6);
+}
+.cmd-list {
+  max-height: 320px;
+  overflow-y: auto;
+  padding: 6px;
+}
+.cmd-group-title {
+  padding: 8px 10px 4px;
+  font-size: 11px;
+  font-weight: 500;
+  color: hsl(var(--muted-foreground));
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.cmd-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: hsl(var(--foreground));
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+.cmd-item.active {
+  background: hsl(var(--muted) / 0.5);
+}
+.cmd-item-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cmd-item-hint {
+  flex-shrink: 0;
+  padding: 1px 6px;
+  border: 1px solid hsl(var(--border));
+  border-radius: 4px;
+  background: hsl(var(--muted) / 0.4);
+  color: hsl(var(--muted-foreground));
+  font-size: 10px;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+}
+.cmd-empty {
+  padding: 16px 10px;
+  font-size: 12px;
+  color: hsl(var(--muted-foreground));
+  text-align: center;
 }
 
 .page-link {

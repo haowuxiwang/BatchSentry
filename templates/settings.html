@@ -8,15 +8,64 @@
     <link rel="stylesheet" href="/static/app.css?v={{ asset_ver('app.css') }}" />
     <link rel="stylesheet" href="/static/settings.css?v={{ asset_ver('settings.css') }}" />
   </head>
-  <body class="h-full min-h-screen">
-    <div class="relative max-w-5xl mx-auto px-6 py-10">
+<body class="h-full flex flex-col">
+    <a href="#main-content" class="skip-link">跳到主要内容</a>
+    <!-- ═══════════════════════════════════════════════════
+         顶部 App Bar — 与 review/upload 页同构的 48px sticky 顶栏
+         （P2-2: 三页头部统一，滚动时始终可见）
+         ═══════════════════════════════════════════════════ -->
+    <header
+      class="border-b border-border bg-background/80 backdrop-blur-sm sticky top-0 z-40"
+    >
+      <div class="max-w-[1700px] mx-auto px-6 h-12 flex items-center gap-3">
+        <a
+          href="/"
+          class="btn-press text-[11px] font-medium text-muted-foreground tracking-wide uppercase hover:text-foreground transition-colors"
+          >BatchSentry</a
+        >
+        <span class="text-muted-foreground/40">/</span>
+        <span class="text-[13px] font-medium text-foreground">设置</span>
+        <div class="flex-1"></div>
+        <button
+          type="button"
+          id="cmd-palette-btn"
+          class="btn-press focus-ring inline-flex items-center gap-1.5 px-2 py-1 text-[12px] text-muted-foreground hover:text-foreground rounded-md transition-colors"
+          title="命令面板 (Ctrl+K)"
+        >
+          <kbd
+            class="text-[10px] px-1 py-0.5 rounded border border-border bg-muted font-mono"
+            >Ctrl K</kbd
+          >
+        </button>
+        <a
+          href="/"
+          class="btn-press focus-ring inline-flex items-center gap-1.5 px-3 py-1.5 text-[12px] text-muted-foreground hover:text-foreground rounded-md transition-colors"
+          title="返回首页"
+        >
+          <svg
+            width="14"
+            height="14"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <path d="M19 12H5"></path>
+            <polyline points="12 19 5 12 12 5"></polyline>
+          </svg>
+          返回首页
+        </a>
+      </div>
+    </header>
+
+    <div class="flex-1 overflow-y-auto" id="main-content">
+      <div class="relative max-w-5xl mx-auto px-6 py-10">
       <!-- ═══════════════════════════════════════════════════
-           顶部导航 — Notion 风格面包屑
+           页面标题 — Notion 风格:简洁标题 + 面包屑
            ═══════════════════════════════════════════════════ -->
-      <header
-        class="stagger-in flex items-center justify-between mb-8"
-        style="--i: 0"
-      >
+      <header class="stagger-in mb-8" style="--i: 0">
         <div>
           <div class="flex items-center gap-2 mb-1">
             <span
@@ -33,31 +82,11 @@
             <span class="text-muted-foreground/40">/</span>
             <span class="text-[12px] text-muted-foreground">设置</span>
           </div>
-          <h1 class="text-xl font-semibold tracking-tight">服务配置</h1>
+          <h1 class="text-xl font-semibold tracking-tight">设置</h1>
           <p class="text-[12px] text-muted-foreground mt-0.5">
-            管理 LLM 大模型与 OCR 文档解析凭据
+            管理 LLM 大模型与 OCR 文档解析凭证
           </p>
         </div>
-        <a
-          href="/"
-          class="btn-press focus-ring inline-flex items-center gap-1.5 px-3 py-1.5 text-[12px] text-muted-foreground hover:text-foreground rounded-md transition-colors"
-          title="返回主页"
-        >
-          <svg
-            width="14"
-            height="14"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-          >
-            <path d="M19 12H5"></path>
-            <polyline points="12 19 5 12 12 5"></polyline>
-          </svg>
-          返回主页
-        </a>
       </header>
 
       <form id="settings-form" class="settings-layout flex gap-8">
@@ -187,9 +216,9 @@
               <div class="p-5 flex flex-col gap-4">
                 <div>
                   <label class="field-label">解析引擎</label>
-                  <div class="seg" id="ocr-backend-seg">
-                    <button type="button" data-value="paddle">PaddleOCR</button>
-                    <button type="button" data-value="mineru">MinerU</button>
+                  <div class="seg" id="ocr-backend-seg" role="radiogroup" aria-label="解析引擎">
+                    <button type="button" role="radio" data-value="paddle">PaddleOCR</button>
+                    <button type="button" role="radio" data-value="mineru">MinerU</button>
                   </div>
                 </div>
 
@@ -513,10 +542,12 @@
             "测试连接"会并行检测 OCR + 所有已配置的 LLM 提供商。
           </p>
         </div>
-      </form>
+  </form>
+      </div>
     </div>
 
     <script src="/static/confirm-dialog.js?v={{ asset_ver('confirm-dialog.js') }}" defer></script>
+    <script src="/static/command-palette.js?v={{ asset_ver('command-palette.js') }}" defer></script>
     <script src="/static/settings.js?v={{ asset_ver('settings.js') }}" defer></script>
   </body>
 </html>

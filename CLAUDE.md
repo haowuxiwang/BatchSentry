@@ -102,7 +102,7 @@ Templates, styles, and scripts are **strictly separated** — no inline CSS/JS e
 - `static/app.css` — locally built Tailwind output (15.8KB, do not edit directly)
 - `static/design-tokens.css` — shadcn HSL variables
 
-Design system: minimalist, white background, black primary, flat lists (no cards), `border-b` hairline separators, pill-shaped nav buttons. No dark mode.
+Design system: minimalist, white background, black primary, flat lists (no cards), `border-b` hairline separators, pill-shaped nav buttons. No dark mode. Round 4 P2/P3 additions: 48px sticky app bar on all three pages (breadcrumb + actions, content scrolls beneath), settings provider rows flattened to `border-b` list items (no nested cards) with left indicator for active, `tabular-nums` on all numeric data (times/pages/measurements), skip-link (`.skip-link` in input.css, all pages), Ctrl+K command palette (`static/command-palette.js` native `<dialog>`, G H/S goto-mode, job jump via `/api/jobs`, page-scoped actions), page-shaped skeleton screens for upload history list + PDF loading (no spinner). Critical banners use static red glow — no infinite pulse (E2E probe in review.js checks the static rule).
 
 Frontend logs use `[PBC]` prefix with color coding (blue=info, orange=warn, red=error).
 

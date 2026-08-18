@@ -199,20 +199,6 @@
   }
 }
 
-/* === 7. PDF spinner === */
-@keyframes pbc-spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
-.pdf-spinner {
-  width: 1.5rem;
-  height: 1.5rem;
-  border-radius: 9999px;
-  border: 2px solid hsl(var(--border));
-  border-top-color: hsl(var(--primary));
-  animation: pbc-spin 0.7s linear infinite;
-}
 #pdf-loading {
   z-index: 10;
   transition: opacity var(--ms-300) var(--ease-entrance);

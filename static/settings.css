@@ -216,22 +216,33 @@ body {
 }
 
 /* ============================================================
-   Provider 卡片 — 每个 provider 独立卡片
+   Provider 行 — Notion 风格扁平列表（P2-1: 去嵌套卡片）
+   外层 section 已是卡片容器，行内不再做边框/圆角/阴影 —
+   border-bottom 细分隔 + hover 背景，active 用左侧指示条
    ============================================================ */
 .provider-row {
-  border: 1px solid hsl(var(--border));
-  border-radius: 8px;
-  background: hsl(var(--card));
-  overflow: hidden;
-  transition: border-color var(--motion-hover), box-shadow var(--motion-hover);
+  border-bottom: 1px solid hsl(var(--border));
+}
+.provider-row:last-child {
+  border-bottom: none;
 }
 .provider-row:hover {
-  border-color: hsl(var(--muted-foreground) / 0.3);
-  box-shadow: var(--shadow-subtle);
+  background: hsl(var(--muted) / 0.25);
 }
 .provider-row.is-active {
-  border-color: hsl(var(--foreground) / 0.4);
-  box-shadow: var(--shadow-subtle);
+  background: hsl(var(--muted) / 0.25);
+}
+.provider-row.is-active::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: hsl(var(--foreground));
+}
+.provider-row {
+  position: relative;
 }
 .provider-head {
   display: flex;

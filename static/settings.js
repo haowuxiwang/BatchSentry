@@ -508,9 +508,12 @@
         s.classList.toggle("hidden", s.dataset.section !== target),
       );
       navs.forEach((n) =>
-        n.querySelectorAll(".settings-nav-link").forEach((l) =>
-          l.classList.toggle("active", l.dataset.target === target),
-        ),
+        n.querySelectorAll(".settings-nav-link").forEach((l) => {
+          const on = l.dataset.target === target;
+          l.classList.toggle("active", on);
+          if (on) l.setAttribute("aria-current", "page");
+          else l.removeAttribute("aria-current");
+        }),
       );
     }
 
@@ -740,7 +743,9 @@
 
   function setSeg(id, value) {
     document.querySelectorAll(`#${id} button`).forEach((b) => {
-      b.classList.toggle("active", b.dataset.value === value);
+      const on = b.dataset.value === value;
+      b.classList.toggle("active", on);
+      b.setAttribute("aria-checked", String(on));
     });
   }
 

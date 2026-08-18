@@ -329,8 +329,21 @@
     const listEl = document.getElementById("history-list");
     const pagEl = document.getElementById("history-pagination");
     const countEl = document.getElementById("history-count");
-    listEl.innerHTML =
-      '<li class="px-5 py-8 text-center text-[12px] text-muted-foreground">加载中…</li>';
+    listEl.innerHTML = "";
+    // P3-2: 行形骨架屏（Linear 风格 — 占位形态预测最终行形态，无布局跳动）
+    for (let i = 0; i < 3; i++) {
+      const li = document.createElement("li");
+      li.className = "animate-pulse";
+      li.innerHTML =
+        '<div class="flex items-center gap-4 px-5 py-3.5">' +
+        '<div class="flex-1 min-w-0">' +
+        '<div class="h-3 w-2/5 bg-muted rounded"></div>' +
+        '<div class="h-2.5 w-1/4 bg-muted/60 rounded mt-2"></div>' +
+        "</div>" +
+        '<div class="w-16 h-5 bg-muted rounded"></div>' +
+        "</div>";
+      listEl.appendChild(li);
+    }
     pagEl.classList.add("hidden");
     try {
       const r = await fetch(`/api/jobs?page=${page}&page_size=20`);
