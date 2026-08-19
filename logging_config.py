@@ -167,8 +167,10 @@ def setup_logging(log_dir: str = "", level: str = "INFO"):
     pipeline_handler.addFilter(RequestIdFilter())
 
     # Pipeline loggers write to pipeline.log too
+    # (module refactor: core.rules replaces the core.cross_page_analyzer shim;
+    #  core.pipeline prefix covers all core.pipeline.* submodules via inheritence)
     for name in ("core.pipeline", "core.ocr_client", "core.mineru_client",
-                 "core.page_analyzer", "core.cross_page_analyzer", "llm.client"):
+                 "core.page_analyzer", "core.rules", "llm.client"):
         lg = logging.getLogger(name)
         lg.addHandler(pipeline_handler)
 

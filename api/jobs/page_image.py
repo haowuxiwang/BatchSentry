@@ -102,7 +102,7 @@ async def get_job_page_image(job_id: str, page_num: int, request: Request = None
     cursor = await db.execute("SELECT pdf_path FROM jobs WHERE id = ?", (job_id,))
     row = await cursor.fetchone()
     if not row or not row["pdf_path"]:
-        raise HTTPException(404, "PDF not found")
+        raise HTTPException(404, "任务不存在或缺少 PDF")
     pdf_path = Path(row["pdf_path"]).resolve()
     output_root = Path(config["app"].output_dir).resolve()
     try:
@@ -111,18 +111,18 @@ async def get_job_page_image(job_id: str, page_num: int, request: Request = None
         logger.warning(
             f"Path traversal blocked: pdf_path={pdf_path} outside output_dir={output_root}"
         )
-        raise HTTPException(403, "Access denied")
+        raise HTTPException(403, "访问被拒绝")
     if not pdf_path.exists():
-        raise HTTPException(404, "PDF file missing")
+        raise HTTPException(404, "PDF 文件不存在（可能已删除或归档）")
     # Runtime resolution — tests monkeypatch api.jobs._get_pdf_doc.
     from api.jobs import _get_pdf_doc
     try:
         doc = _get_pdf_doc(job_id, str(pdf_path))
     except Exception as e:
         logger.error(f"[{job_id}] Failed to open PDF for rendering: {e}")
-        raise HTTPException(500, "PDF cannot be rendered")
+        raise HTTPException(500, "PDF 无法渲染（文件可能损坏）")
     if page_num < 1 or page_num > doc.page_count:
-        raise HTTPException(404, f"Page out of range (1-{doc.page_count})")
+        raise HTTPException(404, f"页码越界（有效范围 1-{doc.page_count}）")
     # 渲染在线程池执行：大扫描页 get_pixmap 需秒级，同步执行会阻塞整个
     # 事件循环（所有 API/SSE 请求排队，前端"正在渲染"卡住）。尺寸由
     # _pdf_render_zoom 限制（≤2000px 宽），输出 JPEG 体积再降 5-10x。
@@ -138,7 +138,7 @@ async def get_job_page_image(job_id: str, page_num: int, request: Request = None
         jpeg = await asyncio.to_thread(_render_sync)
     except Exception as e:
         logger.error(f"[{job_id}] Page render failed (p{page_num}): {e}")
-        raise HTTPException(500, "Page render failed")
+        raise HTTPException(500, "页面渲染失败，请重试")
     return Response(
         content=jpeg,
         media_type="image/jpeg",

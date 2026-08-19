@@ -52,7 +52,7 @@ class TestMinerUClient:
                     side_effect=mc.requests.exceptions.ConnectionError("connection reset")):
             with _patch("core.mineru_client.POLL_TIMEOUT", 1800):
                 with _patch("core.mineru_client.time.sleep") as mock_sleep:  # 消除 4×5s 真实睡眠
-                    with pytest.raises(RuntimeError, match="5 consecutive network errors"):
+                    with pytest.raises(RuntimeError, match="连续 5 次网络错误"):
                         mc.poll_job("batch-1", lambda done, total: None)
         assert mock_sleep.call_count >= 4
 

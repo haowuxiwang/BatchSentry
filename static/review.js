@@ -229,9 +229,18 @@
                 (total > 0 ? Math.round((analyzedCount / total) * 60) : 0);
               if (ocrTotal > 0) {
                 pct = Math.max(Math.round((ocrDone / ocrTotal) * 33), analyzePct);
-                label = analyzedCount > 0
-                  ? `OCR ${ocrDone}/${ocrTotal} · 分析 ${analyzedCount}/${total}`
-                  : `OCR ${ocrDone}/${ocrTotal}`;
+                const sh = d.self_heal_progress;
+                if (sh && sh.total > 0) {
+                  // 空页自愈阶段：主 OCR 进度已 done==total 但状态未前进 —
+                  // 不显示自愈进度的话用户会误判卡死
+                  label = `空页自愈 ${sh.done}/${sh.total}` + (
+                    analyzedCount > 0 ? ` · 分析 ${analyzedCount}/${total}` : ""
+                  );
+                } else {
+                  label = analyzedCount > 0
+                    ? `OCR ${ocrDone}/${ocrTotal} · 分析 ${analyzedCount}/${total}`
+                    : `OCR ${ocrDone}/${ocrTotal}`;
+                }
               } else if (total > 0) {
                 pct = total > 0 ? Math.round((d.pages_ocr_done / total) * 33) : 0;
                 label = analyzedCount > 0
@@ -240,14 +249,16 @@
               } else {
                 label = "OCR 处理中…";
               }
+            } else if (d.status === "analyzing" && d.phase === "cross") {
+              // Todo 13: stage3 阶段指示 — analyzing 含 Stage 2+3，
+              // 页分析完成后推断已进入跨页语义分析
+              pct = 93;
+              label = `跨页分析中（${analyzedCount}/${total} 页）`;
             } else if (d.status === "analyzing") {
               pct =
                 33 +
                 (total > 0 ? Math.round((analyzedCount / total) * 60) : 0);
               label = `分析 ${analyzedCount}/${total}`;
-            } else if (d.status === "review" || d.status === "partial_review") {
-              pct = 100;
-              label = "完成";
             } else if (d.status === "cancelling" || d.status === "cancelled") {
               pct = 0;
               label = d.status === "cancelling" ? "取消中…" : "已取消";
@@ -269,7 +280,7 @@
               cancelled: "已取消", cancelling: "取消中", done: "已完成", archived: "已归档",
             };
             const badgeEl = document.getElementById("status-badge");
-            if (badgeEl) badgeEl.textContent = statusZh[d.status] || d.status;
+            if (badgeEl) badgeEl.textContent = statusZh[d.status] || 未知();
             const cancelBtn = document.getElementById("cancel-btn");
             if (cancelBtn) {
               const canCancel = ["pending", "ocr_running", "ocr_done", "analyzing"].includes(d.status);
@@ -280,7 +291,7 @@
             const ocrBadge = document.getElementById("ocr-backend-badge");
             if (ocrBadge) {
               if (d.ocr_backend_used) {
-                ocrBadge.textContent = d.ocr_backend_used;
+                ocrBadge.textContent = d.ocr_backend_display || d.ocr_backend_used;
                 ocrBadge.classList.remove("hidden");
               }
             }
@@ -607,7 +618,7 @@
       if (ocrEl) {
         ocrEl.textContent = pageData.raw_html
           ? htmlToText(pageData.raw_html)
-          : "（此页无 OCR 内容，请以 PDF 原图为准）";
+          : "此页无 OCR 内容（空白页或扫描质量过低），未执行分析，请以 PDF 原图为准";
       }
 
       // 更新 findings 列表（重新渲染）— P2-3: has_more 提示（后端默认
@@ -688,7 +699,7 @@
     if (confEl) {
       if (pageConfidence && !pageParseError) {
         const confZh = { high: "高", medium: "中", low: "低" };
-        confEl.textContent = `置信度 ${confZh[pageConfidence] || pageConfidence}`;
+        confEl.textContent = `置信度 ${zhOrUnknown(confZh, pageConfidence)}`;
         confEl.classList.remove("hidden");
       } else {
         confEl.classList.add("hidden");
@@ -710,6 +721,12 @@
       if (textEl && groundingWarn.length > 0) {
         textEl.textContent = groundingWarn.join("；");
       }
+    }
+
+    // 2c. 截断透出横幅 — HTML 超上限被截，分析基于不完整输入
+    const truncatedBanner = document.getElementById("ocr-truncated-banner");
+    if (truncatedBanner) {
+      truncatedBanner.classList.toggle("hidden", !bool(structured._ocr_truncated));
     }
 
     // 3. critical 横幅 — 按当前页 findings 重新计算 critical 数量
@@ -800,6 +817,11 @@
   }
 
   // 渲染 findings 列表
+  // 未知枚举中文兜底（后端/LLM 新枚举不更新映射表也不显示裸英文）
+  function zhOrUnknown(map, key) {
+    return map[key] || (key ? `未知(${key})` : "");
+  }
+
   function renderFindings(findings, hasMore) {
     const list = document.getElementById("findings-list");
     if (!list) return;
@@ -868,7 +890,7 @@
               : "";
         const statusTag =
           f.status !== "pending"
-            ? `<span class="text-[10px] text-muted-foreground">· ${esc(statusZh[f.status] || f.status)}</span>`
+            ? `<span class="text-[10px] text-muted-foreground">· ${esc(zhOrUnknown(statusZh, f.status))}</span>`
             : "";
         const sourceTag =
           f.source && f.source !== "rule"
@@ -906,10 +928,10 @@
                         <span class="w-1.5 h-1.5 rounded-full ${sevDot} mt-[7px] shrink-0"></span>
                         <div class="flex-1 min-w-0">
                             <div class="flex items-center gap-2 mb-0.5">
-                                <span class="text-[13px] font-medium text-foreground">${esc(typeZh[f.type] || f.type)}</span>
+                                <span class="text-[13px] font-medium text-foreground">${esc(zhOrUnknown(typeZh, f.type))}</span>
                                 ${statusTag}
                                 ${sourceTag}
-                                <span class="text-[10px] text-muted-foreground uppercase tracking-wider ml-auto">${esc(severityZh[f.severity] || f.severity)}</span>
+                                <span class="text-[10px] text-muted-foreground uppercase tracking-wider ml-auto">${esc(zhOrUnknown(severityZh, f.severity))}</span>
                             </div>
                             <p class="text-[13px] text-muted-foreground leading-relaxed">${esc(f.description)}</p>
                             ${ocrSnippet}
@@ -925,7 +947,7 @@
       // 静默截断会让复核者误以为本页全部问题就是这些（GMP 漏检风险）
       .concat(
         hasMore
-          ? '<div class="py-2 px-1 text-[11px] text-muted-foreground/70 text-center">本页 findings 超过 50 条，其余未显示（请逐页翻页或处理后刷新）</div>'
+          ? '<div class="py-2 px-1 text-[11px] text-muted-foreground/70 text-center">本页问题超过 50 条，其余未显示（请逐页翻页或处理后刷新）</div>'
           : "",
       );
   }

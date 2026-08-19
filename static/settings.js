@@ -439,6 +439,8 @@
 
   // ============================================================
   // S4+S8: testProvider — 单独测试指定 provider
+  // 收集表单中"未保存"的配置一并测试（填了字段但没点保存也能先验证连通性）；
+  // 空字段回落到后端已保存配置。
   // ============================================================
   async function testProvider(providerName, row) {
     const resultEl = row.querySelector(".provider-test-result");
@@ -448,15 +450,35 @@
     resultEl.innerHTML = `<span class="muted">检测中…</span>`;
 
     try {
+      // 收集未保存的候选配置（掩码不传 — 后端会拒绝掩码当密钥）
+      const body = { provider: providerName };
+      let overridden = false;
+      const collect = (suffix) => {
+        const el = row.querySelector(`[name="${providerName}${suffix}"]`);
+        return el ? el.value.trim() : "";
+      };
+      const apiKey = collect("_api_key");
+      const baseUrl = collect("_base_url");
+      const model = collect("_model");
+      const protocol = collect("_protocol");
+      if (apiKey && !apiKey.includes("****")) {
+        body.api_key = apiKey;
+        overridden = true;
+      }
+      if (baseUrl) { body.base_url = baseUrl; overridden = true; }
+      if (model) { body.model = model; overridden = true; }
+      if (protocol) { body.protocol = protocol; overridden = true; }
+
       const r = await fetch("/api/settings/test_provider", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ provider: providerName }),
+        body: JSON.stringify(body),
       });
       const data = await r.json().catch(() => ({}));
       if (r.ok && data.ok) {
         const latency = data.latency_ms ? ` ${data.latency_ms}ms` : "";
-        resultEl.innerHTML = `<span class="badge-ok">✓ 连通正常${latency} · 模型：${esc(data.model || "")}</span>`;
+        const fromForm = overridden ? "（按表单未保存配置测试）" : "";
+        resultEl.innerHTML = `<span class="badge-ok">✓ 连通正常${latency} · 模型：${esc(data.model || "")}${fromForm}</span>`;
       } else {
         // 非 200 (如 403 Forbidden) 或 ok=false — 优先显示后端 reason，其次 detail
         const reason = data.reason || data.detail || `HTTP ${r.status}`;
@@ -760,8 +782,11 @@
   ];
 
   function applyFeishuModeUI(mode) {
+    // 默认 webhook — 与后端 load_feishu_config 的默认一致（config.py / notify.py
+    // / read.py / probe.py 全链都是 webhook；此前前端兜底 app_bot 导致未配置时
+    // UI 显示自建应用表单但实际默认是 webhook，测试连接报"未配置 App ID"误导）
     const modeEl = document.getElementById("feishu-mode");
-    if (modeEl) modeEl.value = mode || "app_bot";
+    if (modeEl) modeEl.value = mode || "webhook";
     const appBot = document.querySelectorAll(".feishu-app-bot");
     const webhook = document.querySelectorAll(".feishu-webhook");
     appBot.forEach((el) => (el.style.display = mode === "app_bot" ? "" : "none"));
@@ -841,7 +866,7 @@
     const mobileEl = document.getElementById("feishu-mobile");
     const body = {
       feishu_enabled: document.getElementById("feishu-enabled").checked,
-      feishu_mode: modeEl ? modeEl.value : "app_bot",
+      feishu_mode: modeEl ? modeEl.value : "webhook",
       feishu_events: feishuSelectedEvents().join(","),
     };
     // 掩码/空白输入不回写（保持已保存的值）
@@ -891,6 +916,53 @@
     }
   }
 
+  async function clearFeishu() {
+    const modeEl = document.getElementById("feishu-mode");
+    const mode = modeEl ? modeEl.value : "webhook";
+    const cleared = mode === "app_bot"
+      ? ["App ID", "App Secret", "open_id", "手机号"]
+      : ["Webhook 地址", "签名密钥"];
+    const ok = await window.PBC.confirmDialog({
+      title: `确认清除飞书通知凭据（${mode === "app_bot" ? "自建应用" : "Webhook"}）？`,
+      message: `将清空：${cleared.join("、")}。清除后立即生效，通知将停止发送。`,
+      confirmText: "确认清除",
+      cancelText: "取消",
+      danger: true,
+    });
+    if (!ok) return;
+
+    const body = {
+      feishu_enabled: document.getElementById("feishu-enabled").checked,
+      feishu_mode: mode,
+      feishu_events: feishuSelectedEvents().join(","),
+    };
+    if (mode === "app_bot") {
+      for (const f of ["feishu_app_id", "feishu_app_secret", "feishu_open_id", "feishu_mobile"]) {
+        body[f] = "__CLEAR__";
+      }
+    } else {
+      body.feishu_webhook_url = "__CLEAR__";
+      body.feishu_secret = "__CLEAR__";
+    }
+    try {
+      const r = await fetch("/api/settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await r.json();
+      if (!r.ok) {
+        feishuMsg(`✗ 清除失败: ${JSON.stringify(data.detail || data)}`, "err");
+        return;
+      }
+      feishuMsg(`✓ 已清除（${data.updated} 项）`);
+      await load();
+    } catch (err) {
+      feishuMsg(`✗ 清除失败: ${err.message}`, "err");
+      log.err("feishu clear failed", err);
+    }
+  }
+
   async function testFeishu() {
     const modeEl = document.getElementById("feishu-mode");
     const urlEl = document.getElementById("feishu-url");
@@ -904,7 +976,7 @@
     const original = btn.textContent;
     btn.disabled = true;
     btn.textContent = "发送中…";
-    const body = { mode: modeEl ? modeEl.value : "app_bot" };
+    const body = { mode: modeEl ? modeEl.value : "webhook" };
     if (urlEl && urlEl.value.trim() && !urlEl.value.includes("…")) {
       body.webhook_url = urlEl.value.trim();
     }
@@ -948,6 +1020,8 @@
   if (feishuSaveBtn) feishuSaveBtn.addEventListener("click", saveFeishu);
   const feishuTestBtn = document.getElementById("feishu-test-btn");
   if (feishuTestBtn) feishuTestBtn.addEventListener("click", testFeishu);
+  const feishuClearBtn = document.getElementById("feishu-clear-btn");
+  if (feishuClearBtn) feishuClearBtn.addEventListener("click", clearFeishu);
 
   // ============================================================
   // 合规规则编辑器 — 用户自定义规则注入跨页 LLM 分析
@@ -1053,6 +1127,7 @@
     const listEl = document.getElementById("rules-list");
     const countEl = document.getElementById("rules-count");
     renderRuleSavedBadge();
+    updateRuleTotalChars();
     if (!listEl) return;
     listEl.innerHTML = "";
     if (countEl) countEl.textContent = `${rules.length} 条`;
@@ -1134,6 +1209,22 @@
   function ruleDirty() {
     const msg = document.getElementById("rule-msg");
     if (msg) msg.textContent = "有未保存的修改";
+    updateRuleTotalChars();
+  }
+
+  // 总字数实时统计（后端 _USER_RULES_TOTAL_MAX=8000：全部规则注入跨页分析
+  // 提示词，过长超出模型上下文）
+  function updateRuleTotalChars() {
+    const el = document.getElementById("rules-total-chars");
+    if (!el) return;
+    const total = rules.reduce((n, r) => n + (r.text || "").length, 0);
+    const MAX = 8000;
+    el.textContent = `${total} / ${MAX} 字`;
+    el.className =
+      "ml-1.5 px-1.5 py-0.5 rounded text-[10px] font-normal " +
+      (total > MAX
+        ? "bg-destructive/10 text-destructive"
+        : "bg-muted text-muted-foreground");
   }
 
   async function saveRules() {

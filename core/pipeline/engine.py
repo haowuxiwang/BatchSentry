@@ -169,7 +169,7 @@ async def _run_pipeline_impl(job_id: str, pdf_path: str, progress_futures: list)
         await db.commit()
 
         # ── Stage 1: OCR ────────────────────────────────────────
-        await transition_status(db, job_id, "ocr_running", "Stage 1 start")
+        await transition_status(db, job_id, "ocr_running", "开始 OCR 识别")
         ocr_backend = config["app"].ocr_backend
         await _audit_log(db, job_id, "pipeline_start",
                          f"pdf={Path(pdf_path).name} ocr_backend={ocr_backend}")
@@ -220,7 +220,7 @@ async def _run_pipeline_impl(job_id: str, pdf_path: str, progress_futures: list)
                     "stage1_ms = ? WHERE id = ?",
                     (err_msg, stage1_ms, job_id),
                 )
-                await transition_status(db, job_id, "error", "OCR returned 0 pages")
+                await transition_status(db, job_id, "error", "OCR 返回 0 页")
                 await db.commit()
                 await _audit_log(db, job_id, "stage1_empty", err_msg)
                 return
@@ -252,7 +252,7 @@ async def _run_pipeline_impl(job_id: str, pdf_path: str, progress_futures: list)
         # 将 job 标记为 error（带"中断"标记），允许用户重试
         logger.warning(f"[{job_id}] Pipeline cancelled (app shutdown or task revoke)")
         try:
-            await transition_status(db, job_id, "error", "Pipeline cancelled (interrupted)")
+            await transition_status(db, job_id, "error", "流水线中断（应用退出或任务撤销）")
         except InvalidTransitionError:
             # 已是终态（review/cancelled），保持不变
             pass
@@ -271,16 +271,21 @@ async def _run_pipeline_impl(job_id: str, pdf_path: str, progress_futures: list)
             cur_row = await cur.fetchone()
             cur_status = cur_row["status"] if cur_row else None
             if cur_status == "cancelling":
-                await transition_status(db, job_id, "cancelled", "cancelled during stage 3")
+                await transition_status(db, job_id, "cancelled", "第 3 阶段执行期间收到取消")
                 final_recovery_status = "cancelled"
             else:
                 # 其他非预期状态 → error（直接 UPDATE，与 recover_stuck_jobs 同模式）
+                force_msg = f"任务处理失败: 状态转换异常 {e}"
                 await db.execute(
                     "UPDATE jobs SET status = 'error', error_message = ?, "
                     "finished_at = datetime('now','localtime') WHERE id = ?",
-                    (f"Pipeline failed: invalid transition {e}", job_id),
+                    (force_msg, job_id),
                 )
                 await db.commit()
+                # GMP 审计链：强制置 error 属关键状态变更，必须留痕
+                await _audit_log(
+                    db, job_id, "status_forced_error", force_msg[:200]
+                )
                 final_recovery_status = "error"
         except Exception as recover_err:
             # 恢复失败也不抛出，避免异常逃逸导致 job 卡死；记日志供排查
@@ -304,7 +309,7 @@ async def _run_pipeline_impl(job_id: str, pdf_path: str, progress_futures: list)
         # （requests MaxRetryError），error_message 会出现在报告/飞书通知中
         error_msg = redact_urls(str(e))[:500]
         try:
-            await transition_status(db, job_id, "error", f"Pipeline failed: {redact_urls(str(e))[:100]}")
+            await transition_status(db, job_id, "error", f"任务处理失败: {redact_urls(str(e))[:100]}")
             # transition_status 只更新 status 字段，还需显式写入 error_message + finished_at
             await db.execute(
                 "UPDATE jobs SET error_message = ?, finished_at = datetime('now','localtime') WHERE id = ?",
@@ -508,7 +513,7 @@ async def _run_sliced_stage1_2(
     )
     await _audit_log(db, job_id, "stage1_complete",
                      f"pages={total_pages} duration={stage1_ms}ms")
-    await transition_status(db, job_id, "ocr_done", f"Stage 1 (sliced) complete: {total_pages} pages")
+    await transition_status(db, job_id, "ocr_done", f"分片 OCR 完成：共 {total_pages} 页")
     await db.commit()
     if await _run_is_cancelled(job_id):
         # 与片内取消分支一致：先取消并等待已排队分析任务再退出
@@ -519,7 +524,7 @@ async def _run_sliced_stage1_2(
         return stage1_ms, 0, failed_pages, total_pages
 
     # Stage 2 收尾：等待所有已排队的分析任务（含最后一片刚入队的）
-    await transition_status(db, job_id, "analyzing", "Stage 2 (sliced) start")
+    await transition_status(db, job_id, "analyzing", "分片模式开始逐页分析")
     stage2_start = time.time()
     await asyncio.gather(*analysis_tasks)
     stage2_ms = int((time.time() - stage2_start) * 1000)

@@ -171,7 +171,7 @@ def poll_job(batch_id: str, progress_callback=None) -> dict:
             logger.warning(f"[MinerU] 轮询请求异常, 重试: {redact_urls(str(e))}")
             if consecutive_errors >= 5:
                 raise RuntimeError(
-                    f"MinerU poll failed: 5 consecutive network errors: {redact_urls(str(e))}"
+                    f"MinerU 轮询失败: 连续 5 次网络错误: {redact_urls(str(e))}"
                 )
             time.sleep(POLL_INTERVAL)
             continue
@@ -180,7 +180,7 @@ def poll_job(batch_id: str, progress_callback=None) -> dict:
             consecutive_errors += 1
             logger.warning(f"[MinerU] 轮询 HTTP {resp.status_code}, 重试...")
             if consecutive_errors >= 5:
-                raise RuntimeError(f"MinerU poll failed: 5 consecutive HTTP {resp.status_code}")
+                raise RuntimeError(f"MinerU 轮询失败: 连续 5 次 HTTP {resp.status_code} 状态码异常")
             time.sleep(POLL_INTERVAL)
             continue
 
@@ -196,7 +196,7 @@ def poll_job(batch_id: str, progress_callback=None) -> dict:
                 f"{resp.text[:200]} (parse_err: {e})"
             )
             if consecutive_errors >= 5:
-                raise RuntimeError("MinerU poll failed: 5 consecutive non-JSON responses")
+                raise RuntimeError("MinerU 轮询失败: 连续 5 次非 JSON 响应")
             time.sleep(POLL_INTERVAL)
             continue
         if j.get("code") != 0:
@@ -204,7 +204,7 @@ def poll_job(batch_id: str, progress_callback=None) -> dict:
             logger.warning(f"[MinerU] 轮询返回错误码: {redact_urls(str(j.get('msg')))}")
             if consecutive_errors >= 5:
                 raise RuntimeError(
-                    f"MinerU poll failed: 5 consecutive error codes: {redact_urls(str(j.get('msg')))}"
+                    f"MinerU 轮询失败: 连续 5 次错误码: {redact_urls(str(j.get('msg')))}"
                 )
             time.sleep(POLL_INTERVAL)
             continue
@@ -496,9 +496,9 @@ def _compose_page_markdown(page_num: int, blocks: list[dict]) -> tuple[str, int]
         被 MinerU 丢弃的块数，供上游生成"OCR 不完整"警告。
     """
     if not blocks:
-        return f"<!-- 第 {page_num} 页 -->\n\n（此页无文本内容）", 0
+        return f"## 第 {page_num} 页\n\n（此页无文本内容）", 0
 
-    parts: list[str] = [f"<!-- 第 {page_num} 页 -->"]
+    parts: list[str] = [f"## 第 {page_num} 页"]
     current_paragraph: list[str] = []
     discarded_count = 0
 
@@ -754,7 +754,7 @@ def _split_pages_by_separator(
             # 物理页错位 → 跨页分析页边界错误 + 复核导航对不上 PDF 原文。
             # 保留空页占位（与 _compose_page_markdown 空块页同款文案），
             # 上游空页自愈（切片重试）或 _ocr_empty 人工复核路径兜底。
-            text = "（此页无文本内容）"
+            text = f"## 第 {i + 1} 页\n\n（此页无文本内容）"
         pages.append({
             "markdown": {"text": text},
             "page_count": i + 1,

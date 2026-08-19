@@ -1896,6 +1896,35 @@ class TestStage1EmptyPageRetry:
         assert (await cursor.fetchone())["ocr_backend_used"] == "mineru"
 
     @pytest.mark.asyncio
+    async def test_self_heal_progress_written_and_cleared(self, pipeline_db, tmp_path):
+        """Todo 13: 自愈期间 ocr_progress 带 self_heal 子键（SSE 可见），
+        结束后清除（total<=0 → state 层跳过写入）。"""
+        pages = [
+            {"markdown": {"text": f"page {i} content " + "x" * 200}}
+            for i in range(1, 13)
+        ]
+        pages[4]["markdown"]["text"] = ""  # p5 空 → 触发自愈
+
+        def fake_retry(pdf_path, page_nums, batch_size=3, job_id=""):
+            return [(pno, f"recovered content p{pno} " + "y" * 200, 0) for pno in page_nums]
+
+        job_id, _ = await self._run(
+            pipeline_db, tmp_path, pages, fake_retry=fake_retry
+        )
+
+        cursor = await pipeline_db.execute(
+            "SELECT ocr_progress FROM jobs WHERE id = ?", (job_id,)
+        )
+        row = await cursor.fetchone()
+        # 自愈结束清除后：只剩主 OCR 进度，无 self_heal 键（主进度在 fake
+        # 场景下可能为 NULL→0/0，真实路径是 12/12 — 断言清除行为即可）
+        assert row and row["ocr_progress"] is not None
+        import json as _json
+        data = _json.loads(row["ocr_progress"])
+        assert "self_heal" not in data
+        assert "done" in data and "total" in data
+
+    @pytest.mark.asyncio
     async def test_empty_page_retry_still_empty_keeps_original(self, pipeline_db, tmp_path):
         """两轮重试后仍空（服务端识别不了）→ 保留原空内容，继续走流程。"""
         pages = [

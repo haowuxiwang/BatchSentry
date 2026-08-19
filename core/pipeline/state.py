@@ -243,7 +243,7 @@ async def _is_cancelled(job_id: str) -> bool:
                 # Use _transition_status_unlocked so audit_log captures the transition
                 # （已持 db_lock，不能再调用会加锁的 transition_status）
                 try:
-                    await _transition_status_unlocked(db, job_id, "cancelled", "Pipeline acknowledged cancel")
+                    await _transition_status_unlocked(db, job_id, "cancelled", "取消已确认")
                 except InvalidTransitionError as e:
                     # Race: another caller already transitioned; log and treat as cancelled
                     logger.warning(f"[{job_id}] Cancel transition race: {e}")
@@ -276,4 +276,34 @@ async def _update_ocr_progress(job_id: str, done: int, total: int) -> None:
             await db.commit()
     except Exception as e:
         logger.warning(f"[{job_id}] OCR progress update failed: {e}")
+
+
+async def _update_self_heal_progress(
+    job_id: str, main_done: int, main_total: int, done: int, total: int, pages: list[int]
+) -> None:
+    """更新空页自愈进度 — 独立子对象合并进 ocr_progress JSON。
+
+    主 OCR 完成后自愈切片重跑期间，SSE 客户端看到 ocr_progress
+    done==total 且状态不前进，误以为卡死。self_heal 键让前端能
+    显示"空页自愈 2/6"，不干扰 _parse_ocr_progress 对主进度的解析。
+    """
+    from core.pipeline import db_lock
+    db = await get_db()
+    # total<=0 → 自愈结束，清除 self_heal 子键（保留主 OCR 进度）
+    if total <= 0:
+        payload = json.dumps({"done": main_done, "total": main_total})
+    else:
+        payload = json.dumps({
+            "done": main_done,
+            "total": main_total,
+            "self_heal": {"done": done, "total": total, "pages": pages},
+        })
+    try:
+        async with db_lock:
+            await db.execute(
+                "UPDATE jobs SET ocr_progress = ? WHERE id = ?", (payload, job_id)
+            )
+            await db.commit()
+    except Exception as e:
+        logger.warning(f"[{job_id}] Self-heal progress update failed: {e}")
 

@@ -106,8 +106,30 @@ class TestGetJobStatus:
             "failed_pages",
             "ocr_progress",
             "page_finding_counts",
+            "phase",
         ):
             assert field in data, f"missing field: {field}"
+
+    @pytest.mark.asyncio
+    async def test_get_status_ocr_backend_display(self, client_with_job, test_db):
+        """Todo 7: ocr_backend_used → 中文显示名（zh_map 单一来源）。"""
+        await test_db.execute(
+            "UPDATE jobs SET ocr_backend_used = ? WHERE id = ?",
+            ("mineru", "coverage-job"),
+        )
+        await test_db.commit()
+        c, _ = client_with_job
+        data = (await c.get("/api/jobs/coverage-job")).json()
+        assert data["ocr_backend_used"] == "mineru"
+        assert data["ocr_backend_display"] == "MinerU"
+        # cached（重试复用 OCR 缓存）也有中文名
+        await test_db.execute(
+            "UPDATE jobs SET ocr_backend_used = ? WHERE id = ?",
+            ("cached", "coverage-job"),
+        )
+        await test_db.commit()
+        data = (await c.get("/api/jobs/coverage-job")).json()
+        assert data["ocr_backend_display"] == "缓存复用"
 
     @pytest.mark.asyncio
     async def test_get_status_ocr_progress_parsed(self, client_with_job, test_db):
@@ -728,6 +750,48 @@ class TestGetJobProgress:
         result = await _get_job_progress(test_db, "no-such-job")
         assert result is None
 
+    @pytest.mark.asyncio
+    async def test_phase_and_self_heal_progress_fields(self, test_db):
+        """Todo 13/14: SSE 快照带 phase 阶段指示 + self_heal_progress 子进度。"""
+        await test_db.execute(
+            "INSERT INTO jobs (id, filename, pdf_path, status, total_pages, ocr_progress) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            ("phase-job", "t.pdf", "/tmp/t.pdf", "analyzing", 3,
+             '{"done": 3, "total": 3, "self_heal": {"done": 2, "total": 6, "pages": [3, 8]}}'),
+        )
+        await test_db.execute(
+            "INSERT INTO page_cache (job_id, page, raw_html, structured_json) "
+            "VALUES (?, ?, ?, ?)",
+            ("phase-job", 1, "<p>html</p>", '{"overall_confidence":"high"}'),
+        )
+        await test_db.commit()
+
+        from api.jobs import _get_job_progress
+        result = await _get_job_progress(test_db, "phase-job")
+        # 阶段指示：页分析 1/3 未完成 → "analyze"（未进入跨页分析）
+        assert result["phase"] == "analyze"
+        # 自愈子进度透出
+        assert result["self_heal_progress"] == {
+            "done": 2, "total": 6, "pages": [3, 8],
+        }
+        # 主 OCR 进度不受 self_heal 子键影响
+        assert result["ocr_progress"] == {"done": 3, "total": 3}
+
+        # 页分析全完成后（推断进入 Stage 3）→ phase="cross"
+        await test_db.execute(
+            "INSERT INTO page_cache (job_id, page, raw_html, structured_json) "
+            "VALUES (?, ?, ?, ?)",
+            ("phase-job", 2, "<p>html</p>", '{"overall_confidence":"high"}'),
+        )
+        await test_db.execute(
+            "INSERT INTO page_cache (job_id, page, raw_html, structured_json) "
+            "VALUES (?, ?, ?, ?)",
+            ("phase-job", 3, "<p>html</p>", '{"overall_confidence":"high"}'),
+        )
+        await test_db.commit()
+        result = await _get_job_progress(test_db, "phase-job")
+        assert result["phase"] == "cross"
+
 
 class TestStreamJobProgress:
     """GET /api/jobs/{id}/stream — SSE 端点（lines 228-248）。"""
@@ -766,7 +830,7 @@ class TestStreamJobProgress:
                 if '"type": "error"' in body:
                     break
         assert '"type": "error"' in body
-        assert '"message": "Job not found"' in body
+        assert '"message": "任务不存在"' in body
         # 不得使用保留类型 event: error（浏览器强制断连语义）
         assert "event: error" not in body
 

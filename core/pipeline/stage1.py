@@ -78,7 +78,7 @@ async def _run_stage1_full(
             "stage1_ms = ? WHERE id = ?",
             (err_msg, stage1_ms, job_id),
         )
-        await transition_status(db, job_id, "error", "OCR failed (all backends)")
+        await transition_status(db, job_id, "error", "OCR 失败（所有后端）")
         await db.commit()
         await _audit_log(db, job_id, "stage1_failed", err_msg)
         return
@@ -158,8 +158,10 @@ async def _run_stage1_full(
     # 在大文件里输出空、小切片后完整识别（51 页实测丢 6 页，单页
     # 切片 1111-1702 字符全部完整）。对空页做小批量切片重跑并替换
     # page_cache，重跑仍空则保留原样（服务端也识别不了，走既有
-    # _ocr_empty 提示路径）。只对 mineru 且页数 >= 10 的文件触发，
-    # 避免小文件多余开销；sliced 路径（OCR_SLICES>1）本身就按片跑。
+    # _ocr_empty 提示路径）。对 mineru/paddle 且大小不限的文件触发
+    # （小文件 <10 页也启用 — 单页切片重跑仅一次调用，收益大于
+    # 直接静默空页的成本，见 self_heal.py）；sliced 路径（OCR_SLICES>1）
+    # 本身就按片跑。
     # F5d 覆盖面修复：原实现只检查本次 OCR 新返回的 pages 且要求
     # used_backend=="mineru" — retry 复用缓存（F3, used_backend=
     # "cached"）时空页检测被跳过，丢页缺陷时期遗留的历史空页永远
@@ -178,7 +180,7 @@ async def _run_stage1_full(
         from core.pipeline import _self_heal_empty_pages as _run_heal
         await _run_heal(db, job_id, pdf_path, pages, self_heal_backend)
 
-    await transition_status(db, job_id, "ocr_done", f"Stage 1 complete: {len(pages)} pages")
+    await transition_status(db, job_id, "ocr_done", f"OCR 识别完成：共 {len(pages)} 页")
     await db.commit()
     logger.info(
         f"[{job_id}] DB: page_cache inserted {new_pages} new pages, "

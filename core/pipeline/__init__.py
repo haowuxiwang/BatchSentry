@@ -31,6 +31,7 @@ from core.pipeline.state import (
     recover_stuck_jobs,
     _is_cancelled,
     _update_ocr_progress,
+    _update_self_heal_progress,
 )
 from core.pipeline.ocr_support import (
     _get_ocr_backend,

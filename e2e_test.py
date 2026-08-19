@@ -120,6 +120,16 @@ def verify(job_data: dict):
     print(f"  Total pages: {total_pages}")
     print(f"  Findings:    {len(findings)}")
 
+    # Round 5 新字段软断言（真实环境自愈/后端依赖真实服务，仅告警不 FAIL）
+    ocr_disp = job_data.get("ocr_backend_display")
+    phase = job_data.get("phase")
+    if ocr_disp:
+        print(f"  OCR backend: {ocr_disp}")
+    else:
+        print("[E2E] WARN: ocr_backend_display missing (backend not recorded?)")
+    if phase != "done":
+        print(f"[E2E] WARN: phase={phase!r}, expected 'done' at terminal state")
+
     # 状态必须是成功的终态
     if status not in ("review", "partial_review"):
         print(f"\n[E2E] FAIL: status={status} is not a success state")

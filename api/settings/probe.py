@@ -1,8 +1,9 @@
-"""Downstream probes — test_provider / test_feishu."""
+﻿"""Downstream probes — test_provider / test_feishu."""
 from __future__ import annotations
 
 import logging
 import time
+from dataclasses import replace
 from typing import Optional
 
 from fastapi import HTTPException, Request
@@ -18,8 +19,17 @@ logger = logging.getLogger(__name__)
 
 
 class TestProviderRequest(BaseModel):
-    """测试指定 provider 请求。"""
+    """测试指定 provider 请求。
+
+    provider 必填；api_key/base_url/model/protocol 可选 — 用于测试表单中
+    尚未保存的配置（填了字段但没点"保存"也能先测连通性），缺省回落到
+    已保存配置。
+    """
     provider: str
+    api_key: Optional[str] = None
+    base_url: Optional[str] = None
+    model: Optional[str] = None
+    protocol: Optional[str] = None
 
 
 async def _audit_llm_test(provider: str, action: str, detail: str) -> None:
@@ -50,9 +60,28 @@ async def test_provider(req: TestProviderRequest, request: Request):
     name = req.provider.strip().lower()
     providers = config["providers"]
     if name not in providers:
-        raise HTTPException(404, f"Provider {name!r} not found")
+        raise HTTPException(404, f"提供商 {name!r} 不存在")
+    logger.info(f"[settings] test_provider: provider={name} "
+                f"override={'yes' if (req.api_key or req.base_url or req.model or req.protocol) else 'no'}")
 
-    cfg = providers[name]
+    # 表单未保存配置覆盖（测试"填了但没保存"的候选配置）。
+    # api_key 掩码判定：已保存密钥以 sk-abcd…wxyz 形式回读，用户未粘贴新值
+    # 时 input 为空、不会走到这里；若前端误传掩码则明确拒绝（与 test_feishu
+    # 的掩码保护一致，避免用占位符当真实密钥发请求）。ProviderConfig 是
+    # dataclass — 用 replace 生成副本，不污染 config 单例。
+    saved_cfg = providers[name]
+    cfg = replace(saved_cfg)
+    if req.api_key:
+        if req.api_key.strip() == _mask(saved_cfg.api_key):
+            return {"ok": False, "provider": name, "reason": "密钥为掩码，请粘贴完整值"}
+        cfg.api_key = req.api_key.strip()
+    if req.base_url:
+        cfg.base_url = req.base_url.strip()
+    if req.model:
+        cfg.model = req.model.strip()
+    if req.protocol:
+        cfg.protocol = req.protocol.strip()
+
     if not cfg.api_key:
         return {
             "ok": False,
@@ -60,12 +89,13 @@ async def test_provider(req: TestProviderRequest, request: Request):
             "reason": "API 密钥未配置",
         }
 
-    # 用临时 client 测试，不影响全局单例
-    from llm.client import LLMClient
+    # 用临时 adapter 测试，不影响全局单例（LLMClient 从 config 读配置，
+    # 无法注入覆盖值 — 这里直接用覆盖后的 cfg 构建 adapter）
+    from llm.adapters import get_adapter
     try:
-        probe_client = LLMClient(provider=name)
+        probe_adapter = get_adapter(cfg)
         start = time.time()
-        await probe_client.adapter.chat(
+        await probe_adapter.chat(
             system_prompt="",
             user_content="ping",
             max_tokens=1,
@@ -137,6 +167,8 @@ async def test_feishu(req: TestFeishuRequest, request: Request):
 
     saved = load_feishu_config()
     mode = (req.mode or "").strip().lower() or saved.get("mode", "webhook")
+    logger.info(f"[settings] test_feishu: mode={mode} "
+                f"override={'yes' if (req.webhook_url or req.app_id or req.app_secret) else 'no'}")
     if mode not in ("webhook", "app_bot"):
         return {"ok": False, "reason": f"未知模式 {mode!r}"}
 

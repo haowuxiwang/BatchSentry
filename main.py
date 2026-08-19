@@ -1,4 +1,4 @@
-"""BatchSentry — FastAPI entry point."""
+﻿"""BatchSentry — FastAPI entry point."""
 import logging
 import sys
 from contextlib import asynccontextmanager
@@ -47,6 +47,7 @@ from api.jobs import router as jobs_router
 from api.review import router as review_router
 from api.report import router as report_router
 from api.settings import router as settings_router
+from core.zh_map import zh_ocr_backend
 
 
 @asynccontextmanager
@@ -371,7 +372,7 @@ async def review_page(job_id: str, request: Request, page: int = 1):
     cursor = await db.execute("SELECT * FROM jobs WHERE id = ?", (job_id,))
     job = await cursor.fetchone()
     if not job:
-        raise HTTPException(404, "Job not found")
+        raise HTTPException(404, "任务不存在")
 
     total_pages = job["total_pages"] or 0
 
@@ -426,6 +427,8 @@ async def review_page(job_id: str, request: Request, page: int = 1):
         page_parse_error = bool(data.get("_parse_error"))
         page_ocr_empty = bool(data.get("_ocr_empty"))
         page_ocr_sparse = bool(data.get("_ocr_sparse"))
+        # Todo 11: 截断透出 — HTML 超上限被截 → 复核横幅提示以 PDF 原图为准
+        page_ocr_truncated = bool(data.get("_ocr_truncated"))
         # C3 修复（Round 3）：OCR 不完整警告（MinerU 低置信度丢弃块）透出
         # 到 review 横幅 — LLM 已被系统警告降级置信度，复核者需知道缺失原因
         page_ocr_warning = str(data.get("_ocr_warning") or "")
@@ -448,6 +451,7 @@ async def review_page(job_id: str, request: Request, page: int = 1):
         page_parse_error = False
         page_ocr_empty = False
         page_ocr_sparse = False
+        page_ocr_truncated = False
         page_ocr_warning = ""
         page_grounding_warn = []
         page_confidence = ""
@@ -508,11 +512,16 @@ async def review_page(job_id: str, request: Request, page: int = 1):
         "page_parse_error": page_parse_error,
         "page_ocr_empty": page_ocr_empty,
         "page_ocr_sparse": page_ocr_sparse,
+        "page_ocr_truncated": page_ocr_truncated,
         "page_ocr_warning": page_ocr_warning,
         "page_grounding_warn": page_grounding_warn,
         "page_confidence": page_confidence,
         # cr-19: 实际 OCR 后端（failover 后与配置不同 — GMP 复核可见性）
         "ocr_backend_used": job["ocr_backend_used"] if "ocr_backend_used" in job.keys() else None,
+        "ocr_backend_display": (
+            zh_ocr_backend(job["ocr_backend_used"])
+            if ("ocr_backend_used" in job.keys() and job["ocr_backend_used"]) else None
+        ),
     })
 
 
@@ -528,7 +537,7 @@ async def serve_pdf(job_id: str):
     cursor = await db.execute("SELECT pdf_path FROM jobs WHERE id = ?", (job_id,))
     row = await cursor.fetchone()
     if not row or not row["pdf_path"]:
-        raise HTTPException(404, "PDF not found")
+        raise HTTPException(404, "PDF 不存在")
     pdf_path = Path(row["pdf_path"]).resolve()
     # 路径遍历防护：pdf_path 必须在 output_dir 内
     output_root = Path(config["app"].output_dir).resolve()
@@ -540,7 +549,7 @@ async def serve_pdf(job_id: str):
         )
         raise HTTPException(403, "Access denied")
     if not pdf_path.exists():
-        raise HTTPException(404, "PDF file missing")
+        raise HTTPException(404, "PDF 文件缺失")
     return FileResponse(
         pdf_path,
         media_type="application/pdf",

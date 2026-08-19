@@ -1,4 +1,4 @@
-"""Active provider switch + display names."""
+﻿"""Active provider switch + display names."""
 from __future__ import annotations
 
 import json
@@ -63,13 +63,13 @@ async def set_active_provider(req: SetActiveRequest, request: Request):
 
     name = req.provider.strip().lower()
     if not _validate_provider_name(name):
-        raise HTTPException(400, f"Invalid provider name: {name!r}")
+        raise HTTPException(400, f"无效提供商名称: {name!r}")
 
     providers = config["providers"]
     if name not in providers:
         raise HTTPException(
             404,
-            f"Provider {name!r} not in registry (available: {sorted(providers)})",
+            f"提供商 {name!r} 不在注册表中 (可用: {sorted(providers)})",
         )
 
     # 1. 持久化到 config.json

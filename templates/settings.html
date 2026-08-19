@@ -334,6 +334,7 @@
                 <p class="text-[11px] text-muted-foreground mt-0.5">
                   用户自定义规则注入跨页 LLM 分析
                   <span class="ml-1.5 px-1.5 py-0.5 rounded bg-muted text-[10px] font-normal" id="rules-count">0 条</span>
+                  <span class="ml-1.5 px-1.5 py-0.5 rounded bg-muted text-[10px] font-normal" id="rules-total-chars">0 / 8000 字</span>
                   <span id="rule-last-saved" class="ml-1.5 px-1.5 py-0.5 rounded bg-muted text-[10px] font-normal"></span>
                 </p>
               </div>
@@ -398,8 +399,8 @@
                     id="feishu-mode"
                     class="rounded-md border border-border bg-background px-2 py-1.5 text-[13px] focus:outline-none focus:ring-2 focus:ring-foreground/40"
                   >
+                    <option value="webhook" selected>群机器人 Webhook</option>
                     <option value="app_bot">自建应用私聊（推荐）</option>
-                    <option value="webhook">群机器人 Webhook</option>
                   </select>
                 </div>
                 <div class="feishu-app-bot flex flex-col gap-2">
@@ -493,6 +494,13 @@
                     class="btn-press focus-ring inline-flex items-center px-3 py-1.5 text-[12px] text-foreground border border-border rounded-md hover:bg-muted/40 transition-colors"
                   >
                     发送测试消息
+                  </button>
+                  <button
+                    type="button"
+                    id="feishu-clear-btn"
+                    class="btn-press focus-ring inline-flex items-center px-3 py-1.5 text-[12px] text-destructive border border-destructive/40 rounded-md hover:bg-destructive/10 transition-colors"
+                  >
+                    清除凭据
                   </button>
                   <span id="feishu-msg" class="text-[12px]"></span>
                 </div>

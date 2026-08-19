@@ -65,9 +65,21 @@ async def get_job_status(job_id: str, request: Request = None):
         "stage2_ms": job["stage2_ms"],
         "stage3_ms": job["stage3_ms"],
         "ocr_progress": _parse_ocr_progress(job["ocr_progress"] if "ocr_progress" in job.keys() else None),
+        "self_heal_progress": _parse_self_heal_progress(job["ocr_progress"] if "ocr_progress" in job.keys() else None),
+        "phase": _derive_phase(job["status"], pages_analyzed, job["total_pages"] or 0),
         "page_finding_counts": page_finding_counts,
         "ocr_backend_used": job["ocr_backend_used"] if "ocr_backend_used" in job.keys() else None,
+        "ocr_backend_display": _ocr_backend_display(job),
     }
+
+def _ocr_backend_display(job) -> str | None:
+    """ocr_backend_used → 中文显示名（zh_map 单一来源）。"""
+    raw = job["ocr_backend_used"] if "ocr_backend_used" in job.keys() else None
+    if not raw:
+        return None
+    from core.zh_map import zh_ocr_backend
+    return zh_ocr_backend(raw)
+
 
 async def _get_job_progress(db, job_id: str) -> dict:
     """获取 job 进度快照（SSE 推送用）。
@@ -117,8 +129,11 @@ async def _get_job_progress(db, job_id: str) -> dict:
         "stage2_ms": job["stage2_ms"],
         "stage3_ms": job["stage3_ms"],
         "ocr_progress": _parse_ocr_progress(job["ocr_progress"] if "ocr_progress" in job.keys() else None),
+        "self_heal_progress": _parse_self_heal_progress(job["ocr_progress"] if "ocr_progress" in job.keys() else None),
+        "phase": _derive_phase(job["status"], pages_analyzed, job["total_pages"] or 0),
         "page_finding_counts": page_finding_counts,
         "ocr_backend_used": job["ocr_backend_used"] if "ocr_backend_used" in job.keys() else None,
+        "ocr_backend_display": _ocr_backend_display(job),
     }
 
 def _parse_ocr_progress(raw) -> dict:
@@ -135,6 +150,44 @@ def _parse_ocr_progress(raw) -> dict:
     except (ValueError, TypeError):
         pass
     return {}
+
+
+def _parse_self_heal_progress(raw) -> dict | None:
+    """解析 ocr_progress JSON 中的 self_heal 子键（空页自愈进度）。
+
+    主 OCR 完成后自愈期间 done==total 不变，客户端靠该子键显示
+    "空页自愈 x/y"；无自愈/未进行中返回 None（前端不显示）。
+    """
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+        sh = data.get("self_heal") if isinstance(data, dict) else None
+        if isinstance(sh, dict) and sh.get("total"):
+            return {
+                "done": int(sh.get("done", 0)),
+                "total": int(sh.get("total", 0)),
+                "pages": [int(p) for p in (sh.get("pages") or [])],
+            }
+    except (ValueError, TypeError):
+        pass
+    return None
+
+
+def _derive_phase(status: str, pages_analyzed: int, total_pages: int) -> str:
+    """派生阶段指示（SSE 前端进度文案用）。
+
+    translating 覆盖 Stage 2 + Stage 3 两段 — stages 之间无状态位，
+    用"页分析完成数 == 总页数"推断已进入跨页分析（stage2 完成后才
+    启动 stage3，毫秒级边界误差可接受）。
+    """
+    if status == "ocr_running":
+        return "ocr"
+    if status == "analyzing":
+        return "cross" if total_pages > 0 and pages_analyzed >= total_pages else "analyze"
+    if status in _TERMINAL_STATUSES:
+        return "done"
+    return "idle"
 
 @router.get("/{job_id}/stream")
 async def stream_job_progress(job_id: str, request: Request = None):
@@ -177,7 +230,7 @@ async def stream_job_progress(job_id: str, request: Request = None):
                     # 类型，浏览器收到后立即断开连接且不暴露 data，前端无法区分
                     # "job 不存在" 与网络抖动。改用普通 message 帧携带 type 字段。
                     yield (f"id: {seq}\n"
-                           f"data: {json.dumps({'type': 'error', 'message': 'Job not found'}, ensure_ascii=False)}\n\n")
+                           f"data: {json.dumps({'type': 'error', 'message': '任务不存在'}, ensure_ascii=False)}\n\n")
                     return
 
                 payload = json.dumps(progress, ensure_ascii=False)

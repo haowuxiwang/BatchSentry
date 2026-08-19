@@ -109,7 +109,7 @@
       !IMAGE_EXTS.some((e) => file.name.toLowerCase().endsWith(e))
     ) {
       log.warn("uploadFile — rejected (not pdf/image)", file.name);
-      setStatus("仅支持 PDF 或图片（jpg/png/webp/bmp/tif）", "err");
+      setStatus("仅支持 PDF 或图片（jpg/jpeg/png/webp/bmp/tif/tiff）", "err");
       return;
     }
     if (file.size > 200 * 1024 * 1024) {
@@ -281,6 +281,11 @@
     done: "已完成",
     archived: "已归档",
   };
+
+  // 未知状态兜底中文（后端新增枚举时若不更新此表也不会显示裸英文）
+  function statusZh(st) {
+    return STATUS_ZH[st] || (st ? `未知(${st})` : "");
+  }
 
   function statusDotClass(st) {
     if (["review", "partial_review", "done"].includes(st)) return "bg-success";
@@ -481,15 +486,25 @@
     const err = li.querySelector(".job-error");
     const ocrTag = li.querySelector(".job-ocr-backend");
     if (dot) dot.className = `w-1.5 h-1.5 rounded-full ${statusDotClass(st)}`;
-    if (stText) stText.textContent = STATUS_ZH[st] || st;
+    if (stText) stText.textContent = statusZh(st);
     if (pages) {
       const prog = d.ocr_progress || {};
-      if ((st === "ocr_running" || st === "ocr_done") && prog.total > 0) {
+      const sh = d.self_heal_progress;
+      if (
+        (st === "ocr_running" || st === "ocr_done") &&
+        sh && sh.total > 0
+      ) {
+        // Todo 13: 空页自愈 — 主 OCR 进度已满但状态未前进，防止"卡死"误判
+        pages.textContent = `空页自愈 ${sh.done}/${sh.total}`;
+      } else if ((st === "ocr_running" || st === "ocr_done") && prog.total > 0) {
         // 分片模式（MinerU + OCR_SLICES>1）下分析与 OCR 并行 — 同时显示两路进度
         pages.textContent =
           d.pages_analyzed > 0
             ? `OCR ${prog.done}/${prog.total} · 分析 ${d.pages_analyzed}/${d.total_pages || "?"}`
             : `OCR ${prog.done}/${prog.total}`;
+      } else if (st === "analyzing" && d.phase === "cross") {
+        // Todo 14: stage3 阶段指示 — 页分析完成后已进入跨页语义分析
+        pages.textContent = `跨页分析中 · ${d.pages_analyzed || 0}/${d.total_pages || "?"} 页`;
       } else if (st === "analyzing") {
         pages.textContent = `分析 ${d.pages_analyzed || 0}/${d.total_pages || "?"}`;
       } else if (st === "partial_review" && d.error_message) {
@@ -510,7 +525,7 @@
     // cr-19：实际使用的 OCR 后端（failover/自愈后留痕，GMP 追溯可见）
     if (ocrTag) {
       if (d.ocr_backend_used) {
-        ocrTag.textContent = `OCR: ${d.ocr_backend_used}`;
+        ocrTag.textContent = `OCR: ${d.ocr_backend_display || d.ocr_backend_used}`;
         ocrTag.classList.remove("hidden");
       } else {
         ocrTag.classList.add("hidden");
@@ -528,8 +543,11 @@
       status: d.status,
       total_pages: d.total_pages || 0,
       ocr_progress: d.ocr_progress || {},
+      self_heal_progress: d.self_heal_progress || null,
+      phase: d.phase || "",
       pages_analyzed: d.pages_analyzed || 0,
       ocr_backend_used: d.ocr_backend_used || "",
+      ocr_backend_display: d.ocr_backend_display || d.ocr_backend_used || "",
       error_message: d.error_message || "",
     };
     return renderJobRow(job, 0);
@@ -547,7 +565,7 @@
 
   function renderJobRow(job, i) {
     const st = job.status;
-    const stZh = STATUS_ZH[st] || st;
+    const stZh = statusZh(st);
     const dotCls = statusDotClass(st);
     const canArchive = [
       "review",
@@ -616,12 +634,20 @@
       "text-[11px] text-muted-foreground/70 tabular-nums job-pages";
     // OCR 进行中且有实时进度时显示 "OCR 12/51"（后端 jobs.ocr_progress）
     const prog = job.ocr_progress || {};
-    if ((st === "ocr_running" || st === "ocr_done") && prog.total > 0) {
+    const sh = job.self_heal_progress;
+    if (
+      (st === "ocr_running" || st === "ocr_done") &&
+      sh && sh.total > 0
+    ) {
+      pagesEl.textContent = `空页自愈 ${sh.done}/${sh.total}`;
+    } else if ((st === "ocr_running" || st === "ocr_done") && prog.total > 0) {
       // 分片模式（MinerU + OCR_SLICES>1）下分析与 OCR 并行 — 同时显示两路进度
       pagesEl.textContent =
         (job.pages_analyzed || 0) > 0
           ? `OCR ${prog.done}/${prog.total} · 分析 ${job.pages_analyzed || 0}/${job.total_pages || "?"}`
           : `OCR ${prog.done}/${prog.total}`;
+    } else if (st === "analyzing" && job.phase === "cross") {
+      pagesEl.textContent = `跨页分析中 · ${job.pages_analyzed || 0}/${job.total_pages || "?"} 页`;
     } else {
       pagesEl.textContent = `${job.total_pages || "?"} 页`;
     }
@@ -630,7 +656,7 @@
     ocrTagEl.className =
       "job-ocr-backend text-[10px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground ml-2";
     ocrTagEl.textContent = job.ocr_backend_used
-      ? `OCR: ${job.ocr_backend_used}`
+      ? `OCR: ${job.ocr_backend_display || job.ocr_backend_used}`
       : "";
     if (!job.ocr_backend_used) ocrTagEl.classList.add("hidden");
     statusWrap.appendChild(statusEl);
@@ -755,10 +781,10 @@
   }
 
   async function deleteJob(jobId, filename, status) {
-    const stZh = STATUS_ZH[status] || status || "";
+    const stZh = statusZh(status);
     const ok = await confirmDialog({
       title: `彻底删除 "${filename}"？`,
-      message: `此操作不可恢复，将删除：\n• PDF 原文件\n• 所有 OCR 数据\n• 所有 findings\n• 审计日志`,
+      message: `此操作不可恢复，将删除：\n• PDF 原文件\n• 所有 OCR 数据\n• 所有问题记录\n• 审计日志`,
       confirmText: "删除",
       danger: true,
       statusBadge: stZh

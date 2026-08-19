@@ -1,4 +1,4 @@
-"""Review API — list/update findings with audit logging."""
+﻿"""Review API — list/update findings with audit logging."""
 import json
 import logging
 from typing import Optional
@@ -99,7 +99,7 @@ async def get_finding(job_id: str, finding_id: int, request: Request = None):
     )
     row = await cursor.fetchone()
     if not row:
-        raise HTTPException(404, "Finding not found")
+        raise HTTPException(404, "问题记录不存在")
     return dict(row)
 
 
@@ -129,7 +129,7 @@ async def update_finding(
     valid_statuses = {"confirmed", "rejected", "corrected", "pending"}
     if status and status not in valid_statuses:
         logger.warning(f"[{job_id}] Invalid status update: finding={finding_id} status={status}")
-        raise HTTPException(400, f"Invalid status: {status}. Must be one of {valid_statuses}")
+        raise HTTPException(400, f"无效状态: {status}. 只能是 {valid_statuses} 之一")
 
     # GMP 数据卫生（对抗审查）：复核意见/修正文本无上限会推高 DB 体积，
     # 且多 MB 表单文本经 aiosqlite 单连接无缓冲写入易卡顿。上限 2000 字符。
@@ -138,8 +138,8 @@ async def update_finding(
         if val is not None and len(val) > _MAX_NOTE_LEN:
             raise HTTPException(
                 400,
-                f"{label} exceeds {_MAX_NOTE_LEN} chars "
-                f"(got {len(val)}, truncated to {val[:_MAX_NOTE_LEN]!r}...)",
+                f"{label} 超过 {_MAX_NOTE_LEN} 字符上限 "
+                f"(实际 {len(val)} 字符, 截断示例 {val[:_MAX_NOTE_LEN]!r}...)",
             )
 
     # Check finding exists
@@ -149,7 +149,7 @@ async def update_finding(
     row = await cursor.fetchone()
     if not row:
         logger.warning(f"[{job_id}] Finding not found: {finding_id}")
-        raise HTTPException(404, "Finding not found")
+        raise HTTPException(404, "问题记录不存在")
 
     old_status = row["status"]
     logger.info(
@@ -176,7 +176,7 @@ async def update_finding(
         sets.append("reviewed_at = NULL")
 
     if not sets:
-        raise HTTPException(400, "No fields to update")
+        raise HTTPException(400, "没有需要更新的字段")
 
     params.extend([finding_id, job_id])
 

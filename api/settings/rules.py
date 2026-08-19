@@ -34,6 +34,10 @@ class UserRulesUpdate(BaseModel):
 
 _USER_RULES_MAX = USER_RULES_MAX
 _USER_RULES_TEXT_MAX = USER_RULES_TEXT_MAX
+# 全部规则总字符数上限 — 规则文本整份注入跨页分析 LLM prompt（core/rules
+# __init__），100×1000 字符 ≈ 10 万字符会撑爆上下文窗口。按中文 1 字 ≈ 1-2
+# token 估算，8000 字符 ≈ 1.6 万 token，给 prompt 固定部分留足空间。
+_USER_RULES_TOTAL_MAX = 8000
 
 
 def _read_raw_config() -> dict:
@@ -129,6 +133,12 @@ async def update_user_rules(req: UserRulesUpdate, request: Request):
         })
     if len(cleaned) > _USER_RULES_MAX:
         errors.append(f"规则总数超过 {_USER_RULES_MAX} 条上限")
+    total_chars = sum(len(r["text"]) for r in cleaned)
+    if total_chars > _USER_RULES_TOTAL_MAX:
+        errors.append(
+            f"规则总字数超过 {_USER_RULES_TOTAL_MAX} 字符上限（当前 {total_chars} 字符，"
+            f"全部规则会注入分析提示词，过长会超出模型上下文）"
+        )
     if errors:
         # 校验失败也写 audit_log（GMP：规则变更事件需留痕，否则用户保存
         # 失败无任何记录 — 真实故障：用户误以为规则已生效但 config 从未

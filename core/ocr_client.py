@@ -1,4 +1,4 @@
-"""PaddleOCR-VL async OCR client.
+﻿"""PaddleOCR-VL async OCR client.
 
 Logic derived from OCR_BAIDU/core/api_client.py (submitted/polled/extracted there).
 Kept minimal: submit, poll, download result JSONL.
@@ -66,23 +66,23 @@ def submit_pdf(pdf_path: str, retries: int = 3) -> str:
                     timeout=upload_timeout,
                 )
                 if resp.status_code != 200:
-                    raise RuntimeError(f"Submit failed HTTP {resp.status_code}: {redact_urls(resp.text[:300])}")
+                    raise RuntimeError(f"提交失败 HTTP {resp.status_code}: {redact_urls(resp.text[:300])}")
                 result = resp.json()
                 job_id = result.get("data", {}).get("jobId") or result.get("jobId")
                 if not job_id:
-                    raise RuntimeError(f"No jobId in response: {redact_urls(str(result))}")
-                logger.info(f"OCR job submitted: jobId={job_id}")
+                    raise RuntimeError(f"响应中缺少 jobId: {redact_urls(str(result))}")
+                logger.info(f"OCR 任务已提交: jobId={job_id}")
                 return job_id
             except Exception as e:
                 last_error = e
                 logger.warning(
-                    f"Submit attempt {attempt}/{retries} failed: {type(e).__name__}: {redact_urls(str(e))}"
+                    f"提交尝试 {attempt}/{retries} 失败: {type(e).__name__}: {redact_urls(str(e))}"
                 )
                 if attempt < retries:
                     backoff = 2 * attempt
-                    logger.info(f"Submit retry: backing off {backoff}s before attempt {attempt + 1}")
+                    logger.info(f"提交重试: 退避 {backoff}s 后尝试第 {attempt + 1} 次")
                     time.sleep(backoff)
-        raise RuntimeError(f"Submit failed after {retries} attempts: {redact_urls(str(last_error))}")
+        raise RuntimeError(f"提交失败: 重试 {retries} 次后放弃: {redact_urls(str(last_error))}")
     finally:
         pdf_file.close()
 
@@ -104,10 +104,10 @@ def poll_job(job_id: str, progress_callback=None) -> dict:
         try:
             resp = requests.get(url, headers=headers, timeout=30)
             if resp.status_code != 200:
-                logger.warning(f"Poll HTTP {resp.status_code}, retrying...")
+                logger.warning(f"轮询 HTTP {resp.status_code}, 重试...")
                 consecutive_errors += 1
                 if consecutive_errors >= 5:
-                    raise RuntimeError(f"Poll failed after {consecutive_errors} consecutive HTTP errors")
+                    raise RuntimeError(f"轮询失败: 连续 {consecutive_errors} 次 HTTP 状态异常")
                 time.sleep(POLL_INTERVAL)
                 continue
             try:
@@ -118,10 +118,10 @@ def poll_job(job_id: str, progress_callback=None) -> dict:
                 # 捕获 → 轮询中断整单失败（mineru 端 P-W6 已修，此处同构未修）。
                 # 计为重试错误，与网络错误同一退避路径。
                 consecutive_errors += 1
-                logger.warning(f"Poll non-JSON response ({consecutive_errors}/5): {e}")
+                logger.warning(f"轮询非 JSON 响应 ({consecutive_errors}/5): {e}")
                 if consecutive_errors >= 5:
                     raise RuntimeError(
-                        f"Poll failed after {consecutive_errors} consecutive non-JSON responses: {e}"
+                        f"轮询失败: 连续 {consecutive_errors} 次非 JSON 响应: {e}"
                     )
                 time.sleep(POLL_INTERVAL * 2)
                 continue
@@ -135,25 +135,25 @@ def poll_job(job_id: str, progress_callback=None) -> dict:
             total = progress.get("totalPages", "?")
             if progress_callback and isinstance(extracted, int) and isinstance(total, int):
                 progress_callback(extracted, total)
-            logger.info(f"Poll state={state} pages={extracted}/{total}")
+            logger.info(f"轮询 state={state} pages={extracted}/{total}")
             if state in ("done", "success"):
                 elapsed = int(time.time() - start)
-                logger.info(f"Poll done: job_id={job_id} elapsed={elapsed}s pages={extracted}/{total}")
+                logger.info(f"轮询完成: job_id={job_id} elapsed={elapsed}s pages={extracted}/{total}")
                 return j
             if state in ("failed", "error"):
-                raise RuntimeError(f"Job failed: {redact_urls(str(j))}")
+                raise RuntimeError(f"OCR 任务失败: {redact_urls(str(j))}")
             time.sleep(POLL_INTERVAL)
         except requests.exceptions.RequestException as e:
             consecutive_errors += 1
-            logger.warning(f"Poll network error ({consecutive_errors}/5): {redact_urls(str(e))}")
+            logger.warning(f"轮询网络错误 ({consecutive_errors}/5): {redact_urls(str(e))}")
             if consecutive_errors >= 5:
                 raise RuntimeError(
-                    f"Poll failed after {consecutive_errors} consecutive network errors: {redact_urls(str(e))}"
+                    f"轮询失败: 连续 {consecutive_errors} 次网络错误: {redact_urls(str(e))}"
                 )
             time.sleep(POLL_INTERVAL * 2)  # 网络错误时退避更久
     elapsed = int(time.time() - start)
     raise RuntimeError(
-        f"Polling timed out after {elapsed}s (limit={POLL_TIMEOUT}s) for job {job_id}"
+        f"轮询超时: {elapsed}s 内未收到 OCR 结果（上限 {POLL_TIMEOUT}s，任务 {job_id}）"
     )
 
 

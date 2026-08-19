@@ -1,4 +1,4 @@
-"""OCR 客户端单元测试 — 通过 mock HTTP 请求测试 PaddleOCR 和 MinerU 客户端。
+﻿"""OCR 客户端单元测试 — 通过 mock HTTP 请求测试 PaddleOCR 和 MinerU 客户端。
 
 覆盖：
 - PaddleOCR (core/ocr_client.py): submit_pdf / poll_job / download_result / run_ocr
@@ -114,7 +114,7 @@ class TestPaddleOCRSubmit:
         mock_resp.json.return_value = {"data": {}}
         mock_post.return_value = mock_resp
 
-        with pytest.raises(RuntimeError, match="Submit failed after 3"):
+        with pytest.raises(RuntimeError, match="提交失败: 重试 3 次后放弃"):
             ocr_client.submit_pdf(fake_pdf, retries=3)
         assert mock_post.call_count == 3
 
@@ -127,7 +127,7 @@ class TestPaddleOCRSubmit:
         mock_resp.text = "internal server error"
         mock_post.return_value = mock_resp
 
-        with pytest.raises(RuntimeError, match="Submit failed after 3"):
+        with pytest.raises(RuntimeError, match="提交失败: 重试 3 次后放弃"):
             ocr_client.submit_pdf(fake_pdf, retries=3)
         assert mock_post.call_count == 3
 
@@ -145,7 +145,7 @@ class TestPaddleOCRSubmit:
         mock_resp.text = "unauthorized: invalid token"
         mock_post.return_value = mock_resp
 
-        with pytest.raises(RuntimeError, match="Submit failed"):
+        with pytest.raises(RuntimeError, match="提交失败"):
             ocr_client.submit_pdf(fake_pdf)
         # 验证空 token 时 Authorization 头为 "bearer "
         _, kwargs = mock_post.call_args
@@ -242,7 +242,7 @@ class TestPaddleOCRPoll:
         mock_get.return_value = html_resp
 
         with patch("core.ocr_client.time.sleep"):
-            with pytest.raises(RuntimeError, match="non-JSON"):
+            with pytest.raises(RuntimeError, match="非 JSON"):
                 ocr_client.poll_job("job-123")
 
         assert mock_get.call_count == 5
@@ -255,7 +255,7 @@ class TestPaddleOCRPoll:
         mock_resp.json.return_value = {"data": {"state": "failed"}}
         mock_get.return_value = mock_resp
 
-        with pytest.raises(RuntimeError, match="Job failed"):
+        with pytest.raises(RuntimeError, match="OCR 任务失败"):
             ocr_client.poll_job("job-123")
 
     @patch('core.ocr_client.requests.get')
@@ -266,7 +266,7 @@ class TestPaddleOCRPoll:
         mock_resp.json.return_value = {"data": {"state": "error"}}
         mock_get.return_value = mock_resp
 
-        with pytest.raises(RuntimeError, match="Job failed"):
+        with pytest.raises(RuntimeError, match="OCR 任务失败"):
             ocr_client.poll_job("job-123")
 
     @patch('core.ocr_client.requests.get')
@@ -789,11 +789,11 @@ class TestMinerUDownload:
 
         assert len(pages) == 2
         # 第1页：标题 + 段落合并（"第1页文本" 和 "继续" 无句末标点，合并为一行）
-        assert pages[0]["markdown"]["text"] == "<!-- 第 1 页 -->\n第1页文本 继续"
+        assert pages[0]["markdown"]["text"] == "## 第 1 页\n第1页文本 继续"
         assert pages[0]["page_count"] == 1
         assert pages[0]["_source"] == "mineru"
         # 第2页：标题 + 文本 + 表格（前后空行分隔）
-        assert pages[1]["markdown"]["text"] == "<!-- 第 2 页 -->\n第2页文本\n\n| 列1 | 列2 |"
+        assert pages[1]["markdown"]["text"] == "## 第 2 页\n第2页文本\n\n| 列1 | 列2 |"
         assert pages[1]["page_count"] == 2
         assert pages[1]["_source"] == "mineru"
 

@@ -47,6 +47,19 @@ FINDING_TYPE_ZH = {
     "completeness": "内容不完整",
 }
 
+# OCR 后端显示名（jobs.ocr_backend_used，GMP 审计字段 — 前端徽章/任务行
+# 展示用。API 仍返回小写原始值 + ocr_backend_display 中文名，前端零映射）
+OCR_BACKEND_ZH = {
+    "mineru": "MinerU",
+    "paddle": "PaddleOCR",
+    "cached": "缓存复用",
+}
+
+
+def zh_ocr_backend(key: str) -> str:
+    """ocr_backend_used → 显示名；未知值原样返回（不掩盖新增后端）。"""
+    return OCR_BACKEND_ZH.get(key, key)
+
 
 def zh_severity(key: str) -> str:
     """severity → 中文；未知值原样返回（不掩盖未来新增枚举）。"""

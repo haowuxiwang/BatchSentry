@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 from pathlib import Path
@@ -12,6 +13,29 @@ from core.pipeline.state import _audit_log
 from core.security import redact_urls
 
 logger = logging.getLogger(__name__)
+
+async def _report_heal_progress(db, job_id: str, done: int, total: int, pages: list[int]) -> None:
+    """空页自愈进度上报：读当前 ocr_progress 主进度，合并 self_heal 子键。
+
+    自愈期间主 OCR 进度已 done==total，SSE 客户端看不到任何变化，
+    长自愈（几十秒）会被误判为卡死 — 该键让前端显示"空页自愈 x/y"。
+    """
+    from core.pipeline import _update_self_heal_progress as _run_update
+    main_done = main_total = 0
+    try:
+        cursor = await db.execute(
+            "SELECT ocr_progress FROM jobs WHERE id = ?", (job_id,)
+        )
+        row = await cursor.fetchone()
+        if row and row["ocr_progress"]:
+            data = json.loads(row["ocr_progress"])
+            main_done = int(data.get("done", 0))
+            main_total = int(data.get("total", 0))
+    except (ValueError, TypeError, json.JSONDecodeError):
+        pass
+    await _run_update(job_id, main_done, main_total, done, total, pages)
+
+
 async def _self_heal_empty_pages(
     db, job_id: str, pdf_path: str, pages: list[dict], backend: str
 ) -> None:
@@ -84,7 +108,8 @@ async def _self_heal_empty_pages(
                             job_id=job_id,
                             batch_size=batch_size,
                         )
-                        still_empty = []
+                        heal_total = len(retry_targets)
+                        heal_done = heal_total - len(still_empty)
                         for pno, md, discarded in retried:
                             if md and len(md.strip()) > 100:
                                 clean = _sanitize_ocr_text(md.strip())
@@ -109,6 +134,12 @@ async def _self_heal_empty_pages(
                                 recovered.append(pno)
                             else:
                                 still_empty.append(pno)
+                        # 每轮结束上报自愈进度（SSE 可见，防"卡死"误判）
+                        await _report_heal_progress(
+                            db, job_id,
+                            heal_total - len(still_empty), heal_total,
+                            still_empty,
+                        )
                         await db.commit()
                         if not still_empty:
                             break
@@ -126,7 +157,7 @@ async def _self_heal_empty_pages(
                     still_empty = []
                     src_doc = fitz.open(pdf_path)
                     try:
-                        for pno in retry_targets:
+                        for idx, pno in enumerate(retry_targets, 1):
                             if await _run_is_cancelled(job_id):
                                 logger.info(
                                     f"[{job_id}] Paddle empty-page retry "
@@ -181,6 +212,10 @@ async def _self_heal_empty_pages(
                                 recovered.append(pno)
                             else:
                                 still_empty.append(pno)
+                            await _report_heal_progress(
+                                db, job_id,
+                                idx, len(retry_targets), still_empty,
+                            )
                             await db.commit()
                     finally:
                         src_doc.close()
@@ -200,6 +235,8 @@ async def _self_heal_empty_pages(
                         f"after re-OCR — p{still_empty} truly "
                         f"unrecognizable by the OCR backend"
                     )
+                # 自愈结束：清除 self_heal 子键（total<=0 时 state 层跳过写入）
+                await _report_heal_progress(db, job_id, 0, 0, [])
             except Exception as retry_err:
                 logger.error(
                     f"[{job_id}] Empty-page retry failed: {retry_err}"

@@ -37,8 +37,8 @@
             <span class="text-[11px] text-muted-foreground font-mono">{{ job_id }}</span>
             {# cr-19: 实际 OCR 后端徽章 — failover/自愈后用户可见（GMP 追溯），
                SSR 一次性渲染，SSE 期间由 review.js 实时更新 #}
-            {% if ocr_backend_used %}
-            <span id="ocr-backend-badge" class="text-[10px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground">{{ ocr_backend_used }}</span>
+            {% if ocr_backend_display %}
+            <span id="ocr-backend-badge" class="text-[10px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground">{{ ocr_backend_display }}</span>
             {% else %}
             <span id="ocr-backend-badge" class="hidden text-[10px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground"></span>
             {% endif %}
@@ -302,6 +302,20 @@
             <div id="ocr-sparse-banner" class="ocr-sparse-banner rounded-md border-l-2 border-warning bg-card px-3 py-2 flex items-center gap-2 hidden">
                 <span class="w-1.5 h-1.5 rounded-full bg-warning shrink-0"></span>
                 <span class="text-xs text-foreground">此页 OCR 内容极少，分析结果可能不完整，请以 PDF 原图核对</span>
+            </div>
+            {% endif %}
+
+            {# Todo 11: 截断透出横幅 — HTML 超上限被截，LLM 分析基于不完整
+               输入；标记已注入 prompt（LLM 知情），复核者需同步以原图为准。 #}
+            {% if page_ocr_truncated %}
+            <div id="ocr-truncated-banner" class="ocr-truncated-banner rounded-md border-l-2 border-warning bg-card px-3 py-2 flex items-center gap-2">
+                <span class="w-1.5 h-1.5 rounded-full bg-warning shrink-0"></span>
+                <span class="text-xs text-foreground">此页 OCR 内容过长已截断，分析基于不完整输入，请以 PDF 原图核对</span>
+            </div>
+            {% else %}
+            <div id="ocr-truncated-banner" class="ocr-truncated-banner rounded-md border-l-2 border-warning bg-card px-3 py-2 flex items-center gap-2 hidden">
+                <span class="w-1.5 h-1.5 rounded-full bg-warning shrink-0"></span>
+                <span class="text-xs text-foreground">此页 OCR 内容过长已截断，分析基于不完整输入，请以 PDF 原图核对</span>
             </div>
             {% endif %}
 

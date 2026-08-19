@@ -1,4 +1,4 @@
-"""Page analyzer 单元测试 — Stage 2 单页 LLM 分析。
+﻿"""Page analyzer 单元测试 — Stage 2 单页 LLM 分析。
 
 覆盖 core/page_analyzer.py:
 - analyze_page 主入口（mock get_llm_client）
@@ -368,7 +368,7 @@ class TestHtmlCleaning:
         table2 = "<table><tr><td>含量</td><td>99.2%</td></tr></table>"
         huge_text = "<p>工序说明</p>" * 3000  # ~36K 字符，远超预算
         html = table1 + huge_text + table2
-        out = _clean_html(html)
+        out, _ = _clean_html(html)
         assert len(out) <= _MAX_HTML_CHARS
         assert table1 in out  # 表1 完整
         assert table2 in out  # 表2 完整（表格优先 — 即使它在正文后面）
@@ -378,7 +378,7 @@ class TestHtmlCleaning:
         """P1-5 单表超预算：回退 P2-5 表内安全截断（保留前半数据 + 不切标签）。"""
         from core.page_analyzer import _clean_html, _MAX_HTML_CHARS
         huge_table = "<table><tr><td>" + "x" * (_MAX_HTML_CHARS + 500) + "</td></tr></table>"
-        out = _clean_html(huge_table)
+        out, _ = _clean_html(huge_table)
         assert len(out) <= _MAX_HTML_CHARS + 80  # 标记少量溢出容忍
         # 不允许出现切开标签的残片（截断点后不应残留孤立的 <tr/></tr> 片段）
         assert not re.search(r"<tr[^>]*$", out)
@@ -390,7 +390,7 @@ class TestHtmlCleaning:
         t1 = "<table>" + row * 200 + "</table>"  # ~4K
         t2 = "<table>" + row * 200 + "</table>"  # ~4K（t1+t2 ≈ 8K < 预算）
         t3 = "<table>" + row * 300 + "</table>"  # ~6K — 加上后超预算
-        out = _clean_html(t1 + t2 + t3)
+        out, _ = _clean_html(t1 + t2 + t3)
         assert t1 in out  # 前表保留
         assert t2 in out  # 中表保留
         assert t3 not in out  # 后表整表跳过（不切开）
@@ -402,7 +402,7 @@ class TestHtmlCleaning:
         非对齐截断 — 正则放宽为 <table[\s>]，带属性表也按表格优先策略处理。"""
         from core.page_analyzer import _clean_html, _MAX_HTML_CHARS
         html = '<table border="1" cellspacing="0"><tr><td>关键数据</td></tr></table>'
-        out = _clean_html(html)
+        out, _ = _clean_html(html)
         assert "关键数据" in out  # 表格内容完整保留
         assert out.count("<tr") == 1  # 行未被切开
 
@@ -430,6 +430,36 @@ class TestHtmlCleaning:
         open_tables = len(re.findall(r"<table[\s>]", out))
         close_tables = out.count("</table>")
         assert open_tables == close_tables == 2  # 两表完整，无多余闭合
+
+    def test_truncation_returns_truncated_flag(self):
+        """Todo 11: _clean_html 返回 (cleaned, truncated) — 超上限截断时
+        truncated=True，正常时 False。"""
+        from core.page_analyzer import _clean_html, _MAX_HTML_CHARS
+        small = "<table><tr><td>X</td></tr></table>"
+        out, truncated = _clean_html(small)
+        assert truncated is False
+        assert out == small
+        huge = "<table><tr><td>" + "x" * (_MAX_HTML_CHARS + 500) + "</td></tr></table>"
+        _, truncated = _clean_html(huge)
+        assert truncated is True
+
+    @pytest.mark.asyncio
+    async def test_truncation_surfaces_ocr_truncated_marker(self):
+        """Todo 11: analyze_page 截断时返回 _ocr_truncated 标记（review 横幅）。"""
+        from core.page_analyzer import _MAX_HTML_CHARS
+        huge = "<table><tr><td>" + "x" * (_MAX_HTML_CHARS + 500) + "</td></tr></table>"
+        mock_client = _make_mock_client(_ok_payload())
+        with patch("core.page_analyzer.get_llm_client", return_value=mock_client):
+            result = await analyze_page(huge, page_num=1)
+        assert result["_ocr_truncated"] is True
+
+    @pytest.mark.asyncio
+    async def test_no_truncation_no_marker(self):
+        """Todo 11: 未截断时不设置 _ocr_truncated。"""
+        mock_client = _make_mock_client(_ok_payload())
+        with patch("core.page_analyzer.get_llm_client", return_value=mock_client):
+            result = await analyze_page("<table><tr><td>浓度 25.5</td></tr></table>", page_num=1)
+        assert not result.get("_ocr_truncated")
 
 
 class TestEmptyPageShortCircuit:

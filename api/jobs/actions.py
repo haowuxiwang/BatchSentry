@@ -1,4 +1,4 @@
-"""Job lifecycle actions — cancel / retry / archive / unarchive / delete."""
+﻿"""Job lifecycle actions — cancel / retry / archive / unarchive / delete."""
 from __future__ import annotations
 
 import logging
@@ -27,7 +27,7 @@ async def cancel_job(job_id: str, request: Request = None):
         raise HTTPException(403, "Forbidden (non-local request)")
     db = await get_db()
     try:
-        await transition_status(db, job_id, "cancelling", "User requested cancel")
+        await transition_status(db, job_id, "cancelling", "用户请求取消")
         logger.info(f"[{job_id}] Cancel requested by user")
     except InvalidTransitionError as e:
         logger.warning(f"[{job_id}] Cancel blocked: {e}")
@@ -57,7 +57,7 @@ async def retry_job(job_id: str, request: Request = None):
     cursor = await db.execute("SELECT * FROM jobs WHERE id = ?", (job_id,))
     job = await cursor.fetchone()
     if not job:
-        raise HTTPException(404, "Job not found")
+        raise HTTPException(404, "任务不存在")
 
     # Concurrency guard: retry must respect MAX_CONCURRENT_JOBS like upload.
     # Without this, mass-retrying failed jobs spawns unbounded pipelines,
@@ -76,10 +76,10 @@ async def retry_job(job_id: str, request: Request = None):
             )
 
     if not job["pdf_path"] or not Path(job["pdf_path"]).exists():
-        raise HTTPException(400, "PDF file not found on disk")
+        raise HTTPException(400, "PDF 文件不存在于磁盘")
 
     try:
-        await transition_status(db, job_id, "pending", f"Retry from {job['status']}")
+        await transition_status(db, job_id, "pending", f"从 {job['status']} 重试")
         # 清除上次的 error_message，避免 review 页面残留旧的错误提示
         # （recover_stuck_jobs / 之前失败会写入 error_message，重试应视为全新尝试）
         await db.execute(
@@ -100,8 +100,7 @@ async def retry_job(job_id: str, request: Request = None):
             )
             await db.execute(
                 "INSERT INTO audit_log (job_id, action, detail, created_at) VALUES (?, 'analysis_reset', ?, datetime(\'now\',\'localtime\'))",
-                (job_id, "Retry from review: findings + structured_json cleared "
-                         "(full re-analysis, raw_html kept)"),
+                (job_id, "从 review 重试：已清空 findings 与结构化分析（全量重新分析，保留 OCR 缓存）"),
             )
         await db.commit()
         logger.info(f"[{job_id}] Retry requested from status={job['status']}")
@@ -135,7 +134,7 @@ async def archive_job(job_id: str, keep_pdf: bool = True, request: Request = Non
     cursor = await db.execute("SELECT status FROM jobs WHERE id = ?", (job_id,))
     row = await cursor.fetchone()
     if not row:
-        raise HTTPException(404, "Job not found")
+        raise HTTPException(404, "任务不存在")
     if row["status"] in _ACTIVE_STATUSES:
         logger.warning(
             f"[{job_id}] Archive blocked: job is active (status={row['status']})"
@@ -145,7 +144,7 @@ async def archive_job(job_id: str, keep_pdf: bool = True, request: Request = Non
             f"任务正在处理中（状态: {row['status']}），请等待进入复核/终态后再归档。",
         )
     try:
-        await transition_status(db, job_id, "archived", "User archived")
+        await transition_status(db, job_id, "archived", "用户归档")
         logger.info(f"[{job_id}] Archived by user (keep_pdf={keep_pdf})")
     except InvalidTransitionError as e:
         logger.warning(f"[{job_id}] Archive blocked: {e}")
@@ -201,7 +200,7 @@ async def unarchive_job(job_id: str, request: Request = None):
     row = await cursor.fetchone()
     pdf_missing = bool(row and (not row["pdf_path"] or not Path(row["pdf_path"]).exists()))
     try:
-        await transition_status(db, job_id, "review", "User unarchived")
+        await transition_status(db, job_id, "review", "用户取消归档")
         logger.info(f"[{job_id}] Unarchived by user (pdf_missing={pdf_missing})")
     except InvalidTransitionError as e:
         logger.warning(f"[{job_id}] Unarchive blocked: {e}")
@@ -233,7 +232,7 @@ async def delete_job(job_id: str, keep_pdf: bool = False, request: Request = Non
     cursor = await db.execute("SELECT pdf_path, status, filename FROM jobs WHERE id = ?", (job_id,))
     row = await cursor.fetchone()
     if not row:
-        raise HTTPException(404, "Job not found")
+        raise HTTPException(404, "任务不存在")
 
     # 安全检查：拒绝删除正在运行的 job。运行中的 pipeline task 仍会
     # 向 DB / 文件系统写入，强行删除会留下孤儿 task 与不一致状态。

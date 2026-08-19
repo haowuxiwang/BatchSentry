@@ -411,7 +411,7 @@ function createWindow() {
     minWidth: 1024,
     minHeight: 700,
     backgroundColor: "#ffffff",
-    title: "BatchSentry",
+    title: "BatchSentry — GMP 批生产记录合规检查",
     show: false, // 隐藏直到内容加载完成，避免白屏
     webPreferences: {
       contextIsolation: true,

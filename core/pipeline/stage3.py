@@ -140,7 +140,7 @@ async def _run_stage3_cross_analysis(
          json.dumps(failed_pages) if failed_pages else None, job_id),
     )
     await transition_status(db, job_id, final_status,
-                            f"Pipeline complete: {len(findings)} findings, {len(failed_pages)} failed")
+                            f"流水线完成：{len(findings)} 条问题，{len(failed_pages)} 页失败")
 
     # 飞书通知（旁路：失败不影响主流程；成功/部分完成均推送）
     try:

@@ -257,6 +257,7 @@ def _build_env_updates(
             if str_val == "__CLEAR__" and field in (
                 "paddle_ocr_token", "mineru_token",
                 "feishu_webhook_url", "feishu_secret", "feishu_app_secret",
+                "feishu_app_id", "feishu_open_id", "feishu_mobile",
             ):
                 env_updates[env_key] = ""
                 mem_updates[field] = ""

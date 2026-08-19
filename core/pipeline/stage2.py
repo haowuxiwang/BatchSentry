@@ -22,7 +22,7 @@ async def _run_stage2_analysis(
         return 0
 
     # ── Stage 2: Per-page LLM analysis (concurrent) ─────────
-    await transition_status(db, job_id, "analyzing", "Stage 2 start")
+    await transition_status(db, job_id, "analyzing", "开始逐页分析")
     concurrency = config["app"].llm_concurrency
     logger.info(
         f"[{job_id}] Stage 2: Analyzing {len(pages)} pages (concurrency={concurrency})..."
