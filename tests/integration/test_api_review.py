@@ -152,3 +152,48 @@ class TestUpdateFinding:
             r = await c.post("/api/jobs/evil-job/findings/1", data={"status": "confirmed"})
         assert r.status_code == 403
         assert "non-local" in r.text
+
+
+class TestLlmAuditLog:
+    """GET /api/jobs/{id}/llm_audit — Phase 7 GMP 追溯 + P2-1 守卫。"""
+
+    @pytest.mark.asyncio
+    async def test_llm_audit_log_returns_entries(self, review_client, test_db):
+        """插入 audit 行后应返回全部记录（含 provider/model/tokens）。"""
+        await test_db.execute(
+            "INSERT INTO llm_call_audit (job_id, page, stage, provider, protocol, model, "
+            "prompt_version, prompt_tokens, completion_tokens) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ("review-job", 1, "page_analysis", "deepseek", "openai", "deepseek-chat",
+             "v3", 120, 80),
+        )
+        await test_db.commit()
+        r = await review_client.get("/api/jobs/review-job/llm_audit")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["count"] >= 1
+        assert data["entries"][0]["model"] == "deepseek-chat"
+
+    @pytest.mark.asyncio
+    async def test_llm_audit_log_empty(self, review_client):
+        """无 audit 行 → 200 + 空列表（不 500）。"""
+        r = await review_client.get("/api/jobs/review-job/llm_audit")
+        assert r.status_code == 200
+        assert r.json()["count"] == 0
+
+    @pytest.mark.asyncio
+    async def test_llm_audit_log_guard(self, test_db):
+        """P2-1：非本地 Host 读端点 → 403。"""
+        from main import app
+        from httpx import AsyncClient, ASGITransport
+        await test_db.execute(
+            "INSERT INTO jobs (id, filename, pdf_path, status, total_pages) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("audit-job", "test.pdf", "/tmp/test.pdf", "review", 1),
+        )
+        await test_db.commit()
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://evil.com:8000"
+        ) as c:
+            r = await c.get("/api/jobs/audit-job/llm_audit")
+        assert r.status_code == 403

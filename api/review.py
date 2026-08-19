@@ -222,7 +222,7 @@ async def get_audit_log(job_id: str, limit: int = 50, request: Request = None):
 
 
 @router.get("/jobs/{job_id}/llm_audit")
-async def get_llm_audit_log(job_id: str, limit: int = 100):
+async def get_llm_audit_log(job_id: str, limit: int = 100, request: Request = None):
     """Get LLM call audit log for a job (Phase 7 GMP traceability).
 
     Returns every LLM call made during this job's pipeline run, including

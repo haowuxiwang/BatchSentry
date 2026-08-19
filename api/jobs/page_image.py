@@ -3,13 +3,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import shutil
 import time
 from pathlib import Path
 
 import fitz  # PyMuPDF — 页码 PNG 渲染
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import HTTPException, Request
 from fastapi.responses import Response
 
 from config import config

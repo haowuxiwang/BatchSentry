@@ -1,17 +1,15 @@
 """Job lifecycle actions — cancel / retry / archive / unarchive / delete."""
 from __future__ import annotations
 
-import asyncio
 import logging
-import shutil
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import HTTPException, Request
 
 from config import config
 from db.client import get_db
 from api.jobs import router
-from api.jobs.page_image import _get_pdf_doc, _invalidate_pdf_doc
+from api.jobs.page_image import _invalidate_pdf_doc
 
 logger = logging.getLogger(__name__)
 
@@ -221,13 +219,10 @@ async def delete_job(job_id: str, keep_pdf: bool = False, request: Request = Non
     """
     # P2-1: DELETE 破坏性端点守卫（与 cancel/archive 等统一）。
     # request=None 时跳过守卫（单元测试直接调用路径）。
-    # Runtime resolution — tests monkeypatch api.jobs.{_ACTIVE_STATUSES,
-    # db_lock, transition_status, InvalidTransitionError}.
+    # Runtime resolution — tests monkeypatch api.jobs.{_ACTIVE_STATUSES, db_lock}.
     from api.jobs import (
         _ACTIVE_STATUSES,
-        InvalidTransitionError,
         db_lock,
-        transition_status,
     )
     from core.security import is_local_request
     if request is not None and not is_local_request(request):

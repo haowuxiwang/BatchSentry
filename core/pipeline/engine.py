@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import time
 from pathlib import Path
@@ -175,8 +174,6 @@ async def _run_pipeline_impl(job_id: str, pdf_path: str, progress_futures: list)
         await _audit_log(db, job_id, "pipeline_start",
                          f"pdf={Path(pdf_path).name} ocr_backend={ocr_backend}")
         logger.info(f"[{job_id}] Stage 1: Starting OCR (backend={ocr_backend})...")
-
-        stage1_start = time.time()
 
         # Stage 1 流式反馈：OCR 轮询线程（to_thread）中回调进度 →
         # run_coroutine_threadsafe 调度回主事件循环 → 更新 job.ocr_progress
@@ -354,10 +351,7 @@ async def _run_sliced_stage1_2(
     """
     # Runtime resolution — tests patch core.pipeline.{_is_cancelled,
     # _update_ocr_progress} and rebuild core.pipeline.db_lock.
-    from core.pipeline import (
-        _is_cancelled as _run_is_cancelled,
-        _update_ocr_progress as _run_update_ocr_progress,
-    )
+    from core.pipeline import _is_cancelled as _run_is_cancelled
     from core.pipeline import db_lock
     from core.mineru_client import run_ocr_sliced
 

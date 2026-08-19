@@ -8,10 +8,10 @@ import time
 import uuid
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import HTTPException, Request
 from pydantic import BaseModel
 
-from config import USER_RULES_MAX, USER_RULES_TEXT_MAX, config, load_user_rules
+from config import USER_RULES_MAX, USER_RULES_TEXT_MAX, load_user_rules
 from core.security import is_local_request
 from db.client import get_db
 from api.settings import router

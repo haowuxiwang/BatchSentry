@@ -2,18 +2,17 @@
 from __future__ import annotations
 
 import logging
-import re
 import time
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import HTTPException, Request
 from pydantic import BaseModel
 
 from config import config, load_feishu_config
 from core.security import is_local_request, validate_external_url
 from db.client import get_db
-from api.settings import _PROVIDER_NAME_RE, router
-from api.settings.read import _mask, _settings_config_path
+from api.settings import router
+from api.settings.read import _mask
 
 logger = logging.getLogger(__name__)
 

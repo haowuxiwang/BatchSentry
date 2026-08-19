@@ -4,14 +4,12 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
-import os
 import shutil
-import time
 import uuid
 
 import fitz  # PyMuPDF — 图片合成 PDF
 
-from fastapi import APIRouter, UploadFile, File, HTTPException, Request
+from fastapi import UploadFile, File, HTTPException, Request
 
 from config import config
 from db.client import get_db
@@ -42,7 +40,7 @@ async def create_job(
     """
     # Runtime resolution — tests monkeypatch api.jobs.{Path, open,
     # launch_pipeline, _MAX_CONCURRENT_JOBS, _ACTIVE_STATUSES,
-    # _MAX_IMAGE_PIXELS, db_lock, transition_status}.
+    # _MAX_IMAGE_PIXELS, db_lock}.
     from api.jobs import (
         Path,
         _ACTIVE_STATUSES,
@@ -50,7 +48,6 @@ async def create_job(
         _MAX_IMAGE_PIXELS,
         db_lock,
         launch_pipeline,
-        transition_status,
         open as _open,
     )
     # 对抗审查（cr-13）：上传端点是 multipart/form-data（CORS safelisted，

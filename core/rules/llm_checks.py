@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import logging
 
-from typing import Optional
-
 from llm.client import get_llm_client
 
 logger = logging.getLogger(__name__)

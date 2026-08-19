@@ -1,13 +1,10 @@
 """Job status + SSE progress stream."""
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
-import time
 
-from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi import HTTPException, Request
 
 from db.client import get_db
 from api.jobs import _TERMINAL_STATUSES, router

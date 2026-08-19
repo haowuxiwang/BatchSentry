@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import logging
 
-from typing import Optional
-
 from core.rules.parsing import _parse_time
 
 logger = logging.getLogger(__name__)

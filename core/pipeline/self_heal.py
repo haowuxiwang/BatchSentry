@@ -119,7 +119,7 @@ async def _self_heal_empty_pages(
                     # 真空白页（扫描件末页）重跑后仍空 → 保留
                     # _ocr_empty 标记走人工复核路径。
                     import fitz
-                    from core import ocr_client
+                    import core.ocr_client as ocr_client  # runtime-visible for PyInstaller
 
                     job_dir_p = Path(config["app"].output_dir) / job_id
                     recovered = []

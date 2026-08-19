@@ -4,11 +4,9 @@ from __future__ import annotations
 import json
 import logging
 import os
-import re
 import uuid
-from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import HTTPException, Request
 from pydantic import BaseModel
 
 from config import config, update_config
@@ -16,7 +14,7 @@ from core.security import is_local_request
 from db.client import get_db
 from llm.client import reset_llm_client
 from api.settings import router
-from api.settings.read import _providers_payload, _settings_config_path, _mask
+from api.settings.read import _providers_payload, _settings_config_path
 from api.settings.write import _validate_provider_name
 
 logger = logging.getLogger(__name__)

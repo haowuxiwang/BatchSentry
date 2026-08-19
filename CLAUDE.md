@@ -12,6 +12,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Current phase**: Phase 12 (Feishu job notifications) + 2 rounds of adversarial review (22 fixes incl. sliced-OCR callback arity P0, poll non-JSON retry, report cache correctness; round 2: cr-13 upload CSRF guard, cr-17 config precedence JSON-wins, MinerU footer selective retention, failover threshold max(2,10%), empty-page tag-strip detection + small-file self-heal, page-mark HTML comments, MINERU_BASE_URL), v0.1.0, local single-user deployment via PyInstaller exe + Electron wrapper.
 
+**Module refactor (2026-08, post round-4)**: large modules split into packages with zero behavior change (verified: 1015 tests, route table identical 37/37, perf regression-free): `api/jobs.py` (1236 lines) → `api/jobs/{upload,listings,page_image,status,actions}.py`, `api/settings.py` (1128 lines) → `api/settings/{read,write,rules,provider,probe}.py`, `core/pipeline.py` (1692 lines) → `core/pipeline/{locks,state,ocr_support,self_heal,stage1,stage2,stage3,engine}.py`, `core/cross_page_analyzer.py` (1700 lines) → `core/rules/{base,parsing,rule_time,rule_spec,rule_doc,llm_checks}.py` (old module kept as a noqa'd re-export shim). Pattern: `__init__` owns the router/constants and re-exports names tests monkeypatch (`api.jobs.{launch_pipeline,Path,open,db_lock,transition_status,...}`, `api.settings._config_path`); consumers resolve those at **call time** via `from api.jobs import X` inside the function body so monkeypatching keeps working. `api/settings` router has NO prefix (decorators carry full paths). `core/cross_page_analyzer.py` is a shim (noqa F401); new code imports from `core.rules`. PyInstaller hiddenimports in `pbc-server.spec` list every leaf module (packages don't recurse) + `core.notify` (function-body dynamic import).
+
 **Round 3 (P1-4~P1-8 + P2-1~P2-6)**: image upload (jpg/png/webp/bmp/tif/tiff → backend converts to PDF), MinerU structural completeness check, table-first truncation, review→pending full re-analysis state machine, signed-URL redaction, stuck-job recovery notifications + provider-test audit, unified GET/DELETE endpoint guards, recover_stuck_jobs process-start cutoff, CORS port constants.
 
 **Round 3 audit round 3 (A1/B1/B2/C1/C2/C3/D3/A3)**: empty-page self-heal extended to Paddle (fitz single-page re-submit), `[OCR 警告]` prefix moved OUT of the fenced OCR data zone into the system-warning zone (`_OCR_WARNING_RE` in page_analyzer + `_ocr_warning` result key → review banner), schema-validation-failure fix-hint retry (1 retry with error echo, `_schema_warn` marker if still invalid), `run_ocr_pages` returns `(page, text, discarded_count)` so self-healed pages re-attach the OCR warning prefix, severity counts moved after dedup (log matches real DB writes), archive-nonexistent test corrected to 404 (unified guard behavior).
@@ -20,7 +22,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Round 4 (UX + robustness)**: cancel checkpoint injection (`AnalysisCancelled` + `cancel_check` three checkpoints in `page_analyzer.analyze_page`, cancelled pages not counted as failed — single HTTP call remains uninterruptible), prompt page-number injection + `findings[].page` backend enforcement (`_validate_page_result` + force-overwrite after sanitize), LLM hallucination grounding check (`_grounding_check`/`_value_grounded`: ≥4-digit substring match, shorter numbers boundary-checked; `_grounding_warn` → review banner), UX P1 set (no `target="_blank"` in Electron, corrected/note info in AJAX finding cards, `safeAutoReload` skips reload while typing or in dialog, PDF zoom 0.5-2.0x buttons), finding locate v1 (click card → OCR panel mark + scroll), P2 quick wins (empty report.md explicit "no findings" text + total_pages from `jobs.total_pages` instead of page_cache COUNT which undercounts failed-OCR pages, image→PDF conversion 120s timeout via `asyncio.wait_for` → 408, review.js `has_more` notice when >50 findings truncated).
 
-**Test status**: 998 passed, 93.67% coverage (target ≥90%). Note: test_config/test_health share the process-global config singleton — both now restore original values (order-independent).
+**Test status**: 1015 passed, 90.40% coverage (target ≥90%). Note: test_config/test_health share the process-global config singleton — both now restore original values (order-independent).
 
 **Web 版（飞书入口）决策（2026-08-18）**: 调研已完成（WEB.md，D1~D5 已拍板），但 **Web 版暂缓实施** — 当前优先桌面端迭代，不主动开展 Web 化（auth_mode/守卫改造/移动端适配等）。后续若启动，按 WEB.md §6 实施路线推进，决策结论无需重开讨论。
 
@@ -152,10 +154,10 @@ SQLite via `aiosqlite` with WAL mode. Singleton connection in `db/client.py`.
 
 | Router | Prefix | Purpose |
 |---|---|---|
-| `jobs.py` | `/api/jobs` | Upload (8MB chunked, 200MB max; PDF or image), status, cancel, retry, archive, unarchive, delete, page data, findings |
+| `jobs/` (package) | `/api/jobs` | Upload (8MB chunked, 200MB max; PDF or image), status, cancel, retry, archive, unarchive, delete, page data, findings |
 | `review.py` | `/api/jobs/{id}/findings` | List/get/update findings (confirm/reject/correct) + audit log + page measurements |
 | `report.py` | `/api/jobs/{id}/report.{md,json}` | Export Markdown + JSON reports |
-| `settings.py` | `/api/settings` | Read (masked) / update `config.json` with live reload |
+| `settings/` (package, no prefix) | `/api/settings` | Read (masked) / update `config.json` with live reload |
 
 Server-rendered HTML pages:
 - `GET /` → upload + job list
@@ -246,8 +248,8 @@ The probe does NOT submit real OCR/LLM work — it just verifies auth + connecti
 
 ## Subdirectories
 
-- `api/` — FastAPI routers (jobs, review, report, settings)
-- `core/` — pipeline, OCR/LLM clients, analyzers
+- `api/` — FastAPI routers (jobs/ package, review, report, settings/ package)
+- `core/` — pipeline/ package, OCR/LLM clients, page analyzer, rules/ package
 - `db/` — schema + aiosqlite client
 - `llm/` — LLM client with retry + JSON recovery + GMP audit (`client.py`), protocol adapters (`adapters/`: `openai_adapter.py`, `anthropic_adapter.py`, `base.py`)
 - `models/` — Pydantic schemas

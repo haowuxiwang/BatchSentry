@@ -140,18 +140,43 @@ python -m pytest tests/ --cov=. --cov-report=term --timeout=30
 
 ```
 ├── api/                    # FastAPI 路由层
-│   ├── jobs.py             # 任务管理（上传、取消、重试、归档）
+│   ├── jobs/               # 任务管理（上传、列表、状态、页面渲染、动作）
+│   │   ├── upload.py       #   上传（8MB 分块、200MB 上限、图片转 PDF）
+│   │   ├── listings.py     #   任务历史列表 + 活跃快照
+│   │   ├── page_image.py   #   PDF 页码 PNG 渲染
+│   │   ├── status.py       #   任务状态 + SSE 进度流
+│   │   └── actions.py      #   取消、重试、归档、删除
 │   ├── review.py           # 复核操作（确认、驳回、纠正）
 │   ├── report.py           # 报告导出
-│   └── settings.py         # LLM/OCR 配置管理
+│   └── settings/           # LLM/OCR 配置管理
+│       ├── read.py         #   GET（脱敏）
+│       ├── write.py        #   POST 更新 + 热加载
+│       ├── rules.py        #   用户合规规则
+│       ├── provider.py     #   激活提供商切换
+│       └── probe.py        #   下游连通性探测
 ├── core/                    # 业务核心
-│   ├── pipeline.py         # 三阶段编排 + 状态机
+│   ├── pipeline/           # 三阶段编排 + 状态机
+│   │   ├── engine.py       #   主流程引擎（launch/run_pipeline）
+│   │   ├── stage1.py       #   OCR 阶段
+│   │   ├── stage2.py       #   逐页 LLM 分析
+│   │   ├── stage3.py       #   跨页分析落库
+│   │   ├── state.py        #   状态机 + 卡死恢复
+│   │   ├── locks.py        #   并发/任务注册表
+│   │   ├── ocr_support.py  #   双 OCR 后端 failover
+│   │   └── self_heal.py    #   空页自愈
 │   ├── page_analyzer.py    # 单页 LLM 分析（v3 prompt）
-│   ├── cross_page_analyzer.py  # 跨页规则 + LLM fallback
+│   ├── rules/              # 跨页规则引擎（原 cross_page_analyzer）
+│   │   ├── base.py         #   编排 + 页面归一化
+│   │   ├── parsing.py      #   数值/规格/时间解析
+│   │   ├── rule_time.py    #   时间倒挂、签名时间异常
+│   │   ├── rule_spec.py    #   参数越限判定
+│   │   ├── rule_doc.py     #   批次一致性、完整性
+│   │   └── llm_checks.py   #   LLM 语义异常 + fallback
 │   ├── ocr_client.py       # PaddleOCR 客户端
 │   ├── mineru_client.py    # MinerU 客户端
 │   ├── notify.py           # 飞书任务完成通知
 │   ├── security.py         # 本地访问校验
+│   ├── zh_map.py           # 中文枚举单一来源
 │   └── health.py           # 健康检查（含下游探测）
 ├── llm/                     # LLM 适配层
 │   ├── client.py           # 统一客户端（重试 + JSON 容错）

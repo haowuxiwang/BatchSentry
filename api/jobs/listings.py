@@ -1,15 +1,11 @@
 """Job listings — history list, live snapshots, archives, stats."""
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
-import os
-import time
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi import HTTPException, Request
 
 from config import config
 from db.client import get_db

@@ -1,11 +1,10 @@
 """Reading settings — GET /api/settings with masked secrets."""
 from __future__ import annotations
 
-import json
 import logging
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import HTTPException, Request
 
 from config import config, load_feishu_config, TEST_KEY_PATTERNS
 from core.security import is_local_request

@@ -69,7 +69,7 @@ async def _run_stage3_cross_analysis(
     # 无法指纹判重 → 每次 partial_review/error 重试都会重复插入。方案：
     # Stage 3 重算前删除本 job 待审（pending）的 LLM 生成型 findings
     # （含 user_rule），已人工裁决（confirmed/rejected/corrected）的保留。
-    cur = await db.execute(
+    await db.execute(
         "DELETE FROM findings WHERE job_id = ? "
         "AND source IN ('llm_cross', 'llm_fallback', 'user_rule') AND status = 'pending'",
         (job_id,),

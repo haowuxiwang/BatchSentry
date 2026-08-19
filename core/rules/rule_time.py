@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 import re
 from datetime import datetime
-from typing import Optional
 
 from core.rules.parsing import _extract_year, _parse_time
 
