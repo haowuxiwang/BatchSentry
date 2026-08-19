@@ -265,6 +265,15 @@ class LLMClient:
                 f"retrying with fix hint: response_length={len(raw)}, "
                 f"first_200={raw[:200]!r}"
             )
+            # C1: fix-hint 重试的 audit 记录单独标记 stage（stage:fix_hint）—
+            # 原样复用 audit_ctx 会在 llm_call_audit 留下两条无法区分的同
+            # stage/page 记录，GMP 追溯时看不出哪条是修复重试。
+            fix_audit_ctx = dict(audit_ctx) if audit_ctx else None
+            if fix_audit_ctx is not None:
+                base_stage = fix_audit_ctx.get("stage", "")
+                fix_audit_ctx["stage"] = (
+                    f"{base_stage}:fix_hint" if base_stage else "fix_hint"
+                )
             raw = await self.chat(
                 system_prompt,
                 user_content
@@ -278,7 +287,7 @@ class LLMClient:
                 temperature=temperature,
                 retries=1,
                 timeout=timeout,
-                audit_ctx=audit_ctx,
+                audit_ctx=fix_audit_ctx,
             )
             result = self._parse_json(raw)
 

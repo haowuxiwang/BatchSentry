@@ -327,7 +327,7 @@ async def analyze_page(
     # - Stage 3 跳过该页（不参与跨页规则/语义分析）
     # - review 页横幅提示"此页无 OCR 内容"
     if not cleaned or "此页无文本内容" in cleaned:
-        logger.info(f"Page {page_num}: empty OCR content, skipping LLM call")
+        logger.info(f"[{job_id}] Page {page_num}: empty OCR content, skipping LLM call")
         return {
             "page_number": page_num,
             "_parse_error": False,
@@ -364,7 +364,7 @@ async def analyze_page(
     )
     if is_sparse:
         logger.warning(
-            f"Page {page_num}: sparse OCR content "
+            f"[{job_id}] Page {page_num}: sparse OCR content "
             f"(chars={len(cleaned)}, table_rows={table_rows}), "
             f"analysis may be unreliable"
         )
@@ -411,7 +411,7 @@ async def analyze_page(
     # 240s 调用无法中途打断，但取消后不再发起新的 LLM 调用（此前重试链
     # 最长 ~12 分钟），也避免在已取消状态下启动首轮调用消耗配额。
     if cancel_check is not None and await cancel_check():
-        logger.info(f"Page {page_num}: analysis cancelled (before LLM call)")
+        logger.info(f"[{job_id}] Page {page_num}: analysis cancelled (before LLM call)")
         raise AnalysisCancelled(page_num)
 
     result = await client.chat_json(
@@ -439,12 +439,12 @@ async def analyze_page(
     # 内部 2 次 fix-hint 重试 + 下面 schema 修复重试）之间有检查点；取消后
     # 最多等完当前调用，不再启动新的调用。
     if cancel_check is not None and await cancel_check():
-        logger.info(f"Page {page_num}: analysis cancelled (after LLM call)")
+        logger.info(f"[{job_id}] Page {page_num}: analysis cancelled (after LLM call)")
         raise AnalysisCancelled(page_num)
 
     # Handle parse failure
     if isinstance(result, dict) and result.get("_parse_error"):
-        logger.warning(f"Page {page_num}: JSON parse failure, returning raw")
+        logger.warning(f"[{job_id}] Page {page_num}: JSON parse failure, returning raw")
         return {
             "page_number": page_num,
             "_parse_error": True,
@@ -474,7 +474,7 @@ async def analyze_page(
     # 保持"页失败但不炸 pipeline"的语义（触发面：LLM 推理异常/max_tokens 截断）。
     if not isinstance(result, dict):
         logger.warning(
-            f"Page {page_num}: LLM returned non-object JSON "
+            f"[{job_id}] Page {page_num}: LLM returned non-object JSON "
             f"({type(result).__name__}) — marking parse error"
         )
         return {
@@ -488,7 +488,7 @@ async def analyze_page(
     # Schema validation（P1-页码: 传入物理页码校验 findings[].page）
     errors = _validate_page_result(result, page_num=page_num)
     if errors:
-        logger.warning(f"Page {page_num}: schema validation issues: {errors}")
+        logger.warning(f"[{job_id}] Page {page_num}: schema validation issues: {errors}")
         # C1 修复（Round 3）：校验失败（缺字段/类型错）不再静默入库 —
         # 类型污染是 Stage 3 规则层崩溃的主因（P1-2 系列）。带错误回显
         # 重发一次（复用原 prompt + 原始 OCR 内容），仅限 1 次避免无限
@@ -502,7 +502,7 @@ async def analyze_page(
         )
         # P1-2: schema 修复重试前检查取消 — 取消后不再发起新的 LLM 调用
         if cancel_check is not None and await cancel_check():
-            logger.info(f"Page {page_num}: analysis cancelled (before schema fix retry)")
+            logger.info(f"[{job_id}] Page {page_num}: analysis cancelled (before schema fix retry)")
             raise AnalysisCancelled(page_num)
         retry = await client.chat_json(
             prompt_cfg["system"],
@@ -522,7 +522,7 @@ async def analyze_page(
                 retry_errors = _validate_page_result(retry, page_num=page_num)
                 if not retry_errors:
                     logger.info(
-                        f"Page {page_num}: schema fix retry produced valid result"
+                        f"[{job_id}] Page {page_num}: schema fix retry produced valid result"
                     )
                     result = retry
                     errors = []

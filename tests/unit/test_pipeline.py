@@ -8,6 +8,7 @@
 """
 import asyncio
 import json
+from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -2030,3 +2031,600 @@ class TestStage1EmptyPageRetry:
             assert (await cursor.fetchone())["ocr_backend_used"] == "mineru"
         finally:
             pipeline_mod.config["app"].ocr_backend = orig_backend
+
+
+async def _run_mineru_pipeline(
+    pipeline_db, tmp_path, pages, fake_retry=None, cancelled_fn=None
+):
+    """mineru 整份路径驱动（自愈缺口测试复用），支持重试 fake 与取消注入。"""
+    from core import pipeline as pipeline_mod
+
+    orig_backend = pipeline_mod.config["app"].ocr_backend
+    pipeline_mod.config["app"].ocr_backend = "mineru"
+    calls = []
+    try:
+        job_id = await _insert_job(pipeline_db, status="pending")
+        pdf_path = str(tmp_path / "fake.pdf")
+        Path(pdf_path).write_bytes(b"%PDF-1.4 fake")
+
+        with patch(
+            "core.pipeline._get_ocr_backend",
+            return_value=lambda p, cb: pages,
+        ), patch(
+            "core.pipeline.analyze_page",
+            new=AsyncMock(
+                return_value={
+                    "steps": [],
+                    "findings": [],
+                    "overall_confidence": "high",
+                }
+            ),
+        ), patch(
+            "core.pipeline.analyze_cross_page", new=AsyncMock(return_value=[])
+        ):
+            with ExitStack() as stack:
+                if fake_retry is not None:
+                    def _recording_retry(*a, **kw):
+                        calls.append(
+                            (list(kw.get("page_nums", a[1])), kw.get("batch_size", 3))
+                        )
+                        return fake_retry(*a, **kw)
+
+                    stack.enter_context(
+                        patch(
+                            "core.mineru_client.run_ocr_pages",
+                            side_effect=_recording_retry,
+                        )
+                    )
+                if cancelled_fn is not None:
+                    stack.enter_context(
+                        patch(
+                            "core.pipeline._is_cancelled",
+                            new=AsyncMock(side_effect=cancelled_fn),
+                        )
+                    )
+                await run_pipeline(job_id, pdf_path)
+        return job_id, calls
+    finally:
+        pipeline_mod.config["app"].ocr_backend = orig_backend
+
+
+class TestSelfHealCoverageGaps:
+    """self_heal.py 拆包后缺口补测：标签多文字少判定 / discarded 前缀 /
+    轮间取消 / Paddle 单页重提分支。"""
+
+    @pytest.mark.asyncio
+    async def test_tag_heavy_short_text_page_triggers_retry(self, pipeline_db, tmp_path):
+        """对抗审查 cr-17：HTML 标签多但真实文本 <100 字符的页也触发自愈。"""
+        pages = [
+            {"markdown": {"text": f"page {i} content " + "x" * 200}}
+            for i in range(1, 13)
+        ]
+        pages[4]["markdown"]["text"] = "<td>" * 40  # 160 字符标签，剥除后为空
+
+        def fake_retry(pdf_path, page_nums, batch_size=3, job_id=""):
+            return [(pno, f"recovered content p{pno} " + "y" * 200, 0) for pno in page_nums]
+
+        job_id, calls = await _run_mineru_pipeline(
+            pipeline_db, tmp_path, pages, fake_retry=fake_retry
+        )
+
+        assert calls, "tag-heavy short-text page should trigger self-heal"
+        cursor = await pipeline_db.execute(
+            "SELECT raw_html FROM page_cache WHERE job_id = ? AND page = 5",
+            (job_id,),
+        )
+        row = await cursor.fetchone()
+        assert "recovered content p5" in row["raw_html"]
+
+    @pytest.mark.asyncio
+    async def test_recovered_page_reinjects_ocr_warning_prefix(self, pipeline_db, tmp_path):
+        """D3: 自愈恢复页带 discarded>0 → 重新注入 [OCR 警告] 前缀。"""
+        pages = [
+            {"markdown": {"text": f"page {i} content " + "x" * 200}}
+            for i in range(1, 13)
+        ]
+        pages[4]["markdown"]["text"] = ""
+
+        def fake_retry(pdf_path, page_nums, batch_size=3, job_id=""):
+            return [(pno, f"recovered p{pno} " + "y" * 200, 7) for pno in page_nums]
+
+        job_id, _ = await _run_mineru_pipeline(
+            pipeline_db, tmp_path, pages, fake_retry=fake_retry
+        )
+
+        cursor = await pipeline_db.execute(
+            "SELECT raw_html FROM page_cache WHERE job_id = ? AND page = 5",
+            (job_id,),
+        )
+        row = await cursor.fetchone()
+        assert "[OCR 警告: 本页有 7 个内容块" in row["raw_html"]
+
+    @pytest.mark.asyncio
+    async def test_retry_cancelled_between_rounds_keeps_partial(self, pipeline_db, tmp_path):
+        """P2-9: 两轮重试之间收到取消 → 中断自愈，第二轮不执行。"""
+        pages = [
+            {"markdown": {"text": f"page {i} content " + "x" * 200}}
+            for i in range(1, 13)
+        ]
+        pages[4]["markdown"]["text"] = ""
+        pages[9]["markdown"]["text"] = ""
+
+        retry_count = {"n": 0}
+
+        def fake_retry(pdf_path, page_nums, batch_size=3, job_id=""):
+            retry_count["n"] += 1
+            return [(pno, "", 0) for pno in page_nums]
+
+        async def fake_cancelled(jid):
+            return retry_count["n"] >= 1  # 首轮重试完成后取消
+
+        job_id, calls = await _run_mineru_pipeline(
+            pipeline_db, tmp_path, pages,
+            fake_retry=fake_retry, cancelled_fn=fake_cancelled,
+        )
+
+        assert calls[0][1] == 3  # 首轮 3 页批确实执行
+        assert retry_count["n"] == 1  # 第二轮未启动
+
+    @pytest.mark.asyncio
+    async def test_paddle_selfheal_recovers_and_keeps_truly_empty(self, pipeline_db, tmp_path):
+        """Paddle 后端：fitz 单页重提恢复空页；重提失败/仍空的页保留原样。"""
+        from core import pipeline as pipeline_mod
+        import fitz
+
+        orig_backend = pipeline_mod.config["app"].ocr_backend
+        pipeline_mod.config["app"].ocr_backend = "paddle"
+        try:
+            job_id = await _insert_job(pipeline_db, status="pending")
+            pdf_path = str(tmp_path / "fake.pdf")
+            job_dir = Path(config["app"].output_dir) / job_id
+            job_dir.mkdir(parents=True, exist_ok=True)
+            doc = fitz.open()
+            for _ in range(12):
+                doc.new_page()
+            doc.save(pdf_path)
+            doc.close()
+
+            pages = [
+                {"markdown": {"text": f"page {i} content " + "x" * 200}}
+                for i in range(1, 13)
+            ]
+            pages[4]["markdown"]["text"] = ""  # p5 → 重提恢复
+            pages[9]["markdown"]["text"] = " "  # p10 → 重提抛异常/仍空
+
+            def fake_run_ocr(slice_path):
+                pno = int(Path(slice_path).stem.split("-", 1)[1].lstrip("p"))
+                if pno == 5:
+                    return [{"markdown": {"text": "recovered p5 " + "y" * 200}}]
+                raise RuntimeError("slice OCR failed")  # p10 → 异常兜底路径
+
+            with patch(
+                "core.pipeline._get_ocr_backend",
+                return_value=lambda p, cb: pages,
+            ), patch(
+                "core.ocr_client.run_ocr", side_effect=fake_run_ocr
+            ), patch(
+                "core.pipeline.analyze_page",
+                new=AsyncMock(
+                    return_value={
+                        "steps": [], "findings": [],
+                        "overall_confidence": "high",
+                    }
+                ),
+            ), patch(
+                "core.pipeline.analyze_cross_page", new=AsyncMock(return_value=[])
+            ):
+                await run_pipeline(job_id, pdf_path)
+
+            cursor = await pipeline_db.execute(
+                "SELECT raw_html FROM page_cache WHERE job_id = ? AND page = 5",
+                (job_id,),
+            )
+            assert "recovered p5" in (await cursor.fetchone())["raw_html"]
+            cursor = await pipeline_db.execute(
+                "SELECT raw_html FROM page_cache WHERE job_id = ? AND page = 10",
+                (job_id,),
+            )
+            assert (await cursor.fetchone())["raw_html"] == ""
+            cursor = await pipeline_db.execute(
+                "SELECT 1 FROM audit_log WHERE job_id = ? AND action = 'stage1_empty_recovered'",
+                (job_id,),
+            )
+            assert await cursor.fetchone() is not None
+        finally:
+            pipeline_mod.config["app"].ocr_backend = orig_backend
+
+
+class TestSlicedCoverageGaps:
+    """切片路径缺口补测：缓存页跳过 / 已分析页跳过 / discarded 前缀 /
+    中间缺页补记（覆盖 engine 内部分支）。"""
+
+    @pytest.mark.asyncio
+    async def test_sliced_skips_cached_analyzed_and_prefixes_discarded(self, pipeline_db, tmp_path):
+        """已缓存页跳过落库、已分析页跳过 LLM、_discarded_count 注入警告前缀。"""
+        from core import pipeline as pipeline_mod
+
+        pipeline_mod.db_lock = asyncio.Lock()
+
+        job_id = await _insert_job(pipeline_db, status="pending")
+        pdf_path = str(tmp_path / "fake.pdf")
+        Path(pdf_path).write_bytes(b"%PDF-1.4 fake")
+
+        await pipeline_db.execute(
+            "INSERT INTO page_cache (job_id, page, raw_html) VALUES (?, 1, 'cached p1')",
+            (job_id,),
+        )
+        await pipeline_db.execute(
+            "INSERT INTO page_cache (job_id, page, raw_html, structured_json) "
+            "VALUES (?, 3, 'cached p3', '{}')",
+            (job_id,),
+        )
+        await pipeline_db.commit()
+
+        def fake_run_sliced(pdf_path, slice_pages, on_batch, progress_cb, job_id=None):
+            on_batch(
+                1,
+                [
+                    {"markdown": {"text": "cached p1"}, "page_count": 1},
+                    {"markdown": {"text": "page 2"}, "page_count": 2,
+                     "_discarded_count": 3},
+                ],
+                3,
+            )
+            on_batch(3, [{"markdown": {"text": "page 3"}, "page_count": 3}], 3)
+            return []
+
+        analyzed_calls = []
+
+        async def fake_analyze(raw_html, page_num=None, job_id=None, cancel_check=None):
+            analyzed_calls.append(page_num)
+            return {"steps": [], "findings": [], "overall_confidence": "high"}
+
+        orig_backend = pipeline_mod.config["app"].ocr_backend
+        orig_slices = pipeline_mod.config["app"].ocr_slices
+        orig_timeout = pipeline_mod._SLICE_QUEUE_TIMEOUT
+        pipeline_mod.config["app"].ocr_backend = "mineru"
+        pipeline_mod.config["app"].ocr_slices = 2
+        pipeline_mod._SLICE_QUEUE_TIMEOUT = 0.05
+        try:
+            with patch(
+                "core.mineru_client.run_ocr_sliced", side_effect=fake_run_sliced
+            ), patch(
+                "core.pipeline.analyze_page",
+                new=AsyncMock(side_effect=fake_analyze),
+            ), patch(
+                "core.pipeline.analyze_cross_page", new=AsyncMock(return_value=[])
+            ):
+                await run_pipeline(job_id, pdf_path)
+        finally:
+            pipeline_mod.config["app"].ocr_backend = orig_backend
+            pipeline_mod.config["app"].ocr_slices = orig_slices
+            pipeline_mod._SLICE_QUEUE_TIMEOUT = orig_timeout
+
+        cursor = await pipeline_db.execute(
+            "SELECT page, raw_html FROM page_cache WHERE job_id = ? ORDER BY page",
+            (job_id,),
+        )
+        rows = await cursor.fetchall()
+        assert rows[0]["raw_html"] == "cached p1"  # 未被切片结果覆盖
+        assert "[OCR 警告: 本页有 3 个内容块" in rows[1]["raw_html"]
+        assert analyzed_calls == [2]  # p3 已分析跳过；p1 已缓存跳过
+        # p1 缓存保留、p3 已分析 → 无真实缺页 → review
+        cursor = await pipeline_db.execute(
+            "SELECT status FROM jobs WHERE id = ?", (job_id,)
+        )
+        assert (await cursor.fetchone())["status"] == "review"
+
+    @pytest.mark.asyncio
+    async def test_sliced_middle_gap_computed(self, pipeline_db, tmp_path):
+        """中间片缺页（片范围从 2 开始）→ 缺页循环覆盖范围区间补记。"""
+        from core import pipeline as pipeline_mod
+
+        pipeline_mod.db_lock = asyncio.Lock()
+
+        job_id = await _insert_job(pipeline_db, status="pending")
+        pdf_path = str(tmp_path / "fake.pdf")
+        Path(pdf_path).write_bytes(b"%PDF-1.4 fake")
+
+        def fake_run_sliced(pdf_path, slice_pages, on_batch, progress_cb, job_id=None):
+            on_batch(2, [{"markdown": {"text": "page 2"}, "page_count": 2}], 3)
+            on_batch(3, [{"markdown": {"text": "page 3"}, "page_count": 3}], 3)
+            return []
+
+        orig_backend = pipeline_mod.config["app"].ocr_backend
+        orig_slices = pipeline_mod.config["app"].ocr_slices
+        orig_timeout = pipeline_mod._SLICE_QUEUE_TIMEOUT
+        pipeline_mod.config["app"].ocr_backend = "mineru"
+        pipeline_mod.config["app"].ocr_slices = 2
+        pipeline_mod._SLICE_QUEUE_TIMEOUT = 0.05
+        try:
+            with patch(
+                "core.mineru_client.run_ocr_sliced", side_effect=fake_run_sliced
+            ), patch(
+                "core.pipeline.analyze_page",
+                new=AsyncMock(
+                    return_value={
+                        "steps": [], "findings": [],
+                        "overall_confidence": "high",
+                    }
+                ),
+            ), patch(
+                "core.pipeline.analyze_cross_page", new=AsyncMock(return_value=[])
+            ):
+                await run_pipeline(job_id, pdf_path)
+        finally:
+            pipeline_mod.config["app"].ocr_backend = orig_backend
+            pipeline_mod.config["app"].ocr_slices = orig_slices
+            pipeline_mod._SLICE_QUEUE_TIMEOUT = orig_timeout
+
+        cursor = await pipeline_db.execute(
+            "SELECT status, failed_pages FROM jobs WHERE id = ?", (job_id,)
+        )
+        row = await cursor.fetchone()
+        assert row["status"] == "partial_review"
+        assert "1" in str(row["failed_pages"])
+
+
+class TestStage2CoverageGaps:
+    """Stage 2 缺口：畸形 llm_page findings 过滤（非 dict / 缺必填 key）。"""
+
+    @pytest.mark.asyncio
+    async def test_stage2_filters_malformed_llm_findings(self, pipeline_db, tmp_path):
+        from core import pipeline as pipeline_mod
+
+        job_id = await _insert_job(pipeline_db, status="pending")
+        pdf_path = str(tmp_path / "fake.pdf")
+        Path(pdf_path).write_bytes(b"%PDF-1.4 fake")
+
+        good = {"type": "test", "severity": "warning", "description": "good finding"}
+        with patch(
+            "core.pipeline._get_ocr_backend",
+            return_value=lambda p, cb: [
+                {"markdown": {"text": "page 1 content " + "x" * 200}},
+                {"markdown": {"text": "page 2 content " + "x" * 200}},
+            ],
+        ), patch(
+            "core.pipeline.analyze_page",
+            new=AsyncMock(
+                return_value={
+                    "steps": [],
+                    "findings": ["junk", {"description": "missing keys"}, good],
+                    "overall_confidence": "high",
+                }
+            ),
+        ), patch(
+            "core.pipeline.analyze_cross_page", new=AsyncMock(return_value=[])
+        ):
+            await run_pipeline(job_id, pdf_path)
+
+        cursor = await pipeline_db.execute(
+            "SELECT description FROM findings WHERE job_id = ? ORDER BY page", (job_id,)
+        )
+        rows = await cursor.fetchall()
+        assert [r["description"] for r in rows] == ["good finding", "good finding"]
+
+
+class TestStage3CoverageGaps:
+    """Stage 3 缺口单测：取消检查点 / llm_page 跳过 / 指纹去重 / notify 兜底。"""
+
+    async def _prep_job(self, pipeline_db):
+        from core import pipeline as pipeline_mod
+
+        pipeline_mod.db_lock = asyncio.Lock()
+        job_id = await _insert_job(pipeline_db, status="analyzing")
+        await pipeline_db.execute(
+            "INSERT INTO page_cache (job_id, page, raw_html, structured_json) "
+            "VALUES (?, 1, 'html', '{}')",
+            (job_id,),
+        )
+        await pipeline_db.commit()
+        return job_id
+
+    @pytest.mark.asyncio
+    async def test_stage3_cancelled_before_cross_analysis(self, pipeline_db):
+        """analyze_cross_page 调用前取消 → 提前返回不分析。"""
+        from core.pipeline import _run_stage3_cross_analysis
+        from core import pipeline as pipeline_mod
+
+        job_id = await self._prep_job(pipeline_db)
+        calls = {"n": 0}
+
+        async def fake_cancelled(jid):
+            calls["n"] += 1
+            return calls["n"] >= 2
+
+        with patch(
+            "core.pipeline._is_cancelled", side_effect=fake_cancelled
+        ), patch(
+            "core.pipeline.analyze_cross_page",
+            new=AsyncMock(return_value=[{"page": 1, "type": "t",
+                                          "severity": "w", "description": "x"}]),
+        ):
+            await _run_stage3_cross_analysis(pipeline_db, job_id, 1, 2, [], 0.0)
+
+        cursor = await pipeline_db.execute(
+            "SELECT 1 FROM findings WHERE job_id = ?", (job_id,)
+        )
+        assert await cursor.fetchone() is None
+        assert calls["n"] == 2
+
+    @pytest.mark.asyncio
+    async def test_stage3_cancelled_after_cross_analysis(self, pipeline_db):
+        """analyze_cross_page 返回后取消 → 不写 findings 不转终态。"""
+        from core.pipeline import _run_stage3_cross_analysis
+        from core import pipeline as pipeline_mod
+
+        job_id = await self._prep_job(pipeline_db)
+        flag = {"cross_done": False}
+
+        async def fake_cancelled(jid):
+            return flag["cross_done"]
+
+        def fake_cross(page_structures, job_id=None):
+            flag["cross_done"] = True
+            return [{"page": 1, "type": "t", "severity": "w", "description": "x"}]
+
+        with patch(
+            "core.pipeline._is_cancelled", side_effect=fake_cancelled
+        ), patch(
+            "core.pipeline.analyze_cross_page", side_effect=fake_cross
+        ):
+            await _run_stage3_cross_analysis(pipeline_db, job_id, 1, 2, [], 0.0)
+
+        cursor = await pipeline_db.execute(
+            "SELECT status FROM jobs WHERE id = ?", (job_id,)
+        )
+        assert (await cursor.fetchone())["status"] == "analyzing"
+        cursor = await pipeline_db.execute(
+            "SELECT 1 FROM findings WHERE job_id = ?", (job_id,)
+        )
+        assert await cursor.fetchone() is None
+
+    @pytest.mark.asyncio
+    async def test_stage3_dedup_and_llm_page_skip_and_rule_id(self, pipeline_db):
+        """llm_page findings 跳过、重复指纹去重、user_rule 带 rule_id 入库。"""
+        from core.pipeline import _run_stage3_cross_analysis
+        from core import pipeline as pipeline_mod
+
+        job_id = await self._prep_job(pipeline_db)
+        with patch(
+            "core.pipeline._is_cancelled", new=AsyncMock(return_value=False)
+        ), patch(
+            "core.pipeline.analyze_cross_page",
+            new=AsyncMock(
+                return_value=[
+                    {"source": "llm_page", "page": 1, "type": "t",
+                     "severity": "w", "description": "skip me"},
+                    {"source": "rule", "page": 1, "type": "t",
+                     "severity": "w", "description": "r1"},
+                    {"source": "rule", "page": 1, "type": "t",
+                     "severity": "w", "description": "r1"},
+                    {"source": "user_rule", "page": 1, "type": "t",
+                     "severity": "info", "description": "ur", "rule_id": 5},
+                ]
+            ),
+        ):
+            await _run_stage3_cross_analysis(pipeline_db, job_id, 1, 2, [], 0.0)
+
+        cursor = await pipeline_db.execute(
+            "SELECT description, source, user_rule_id FROM findings "
+            "WHERE job_id = ? ORDER BY description",
+            (job_id,),
+        )
+        rows = await cursor.fetchall()
+        assert [r["description"] for r in rows] == ["r1", "ur"]
+        assert rows[1]["source"] == "user_rule"
+        assert int(rows[1]["user_rule_id"]) == 5
+        assert rows[0]["source"] == "rule"
+
+    @pytest.mark.asyncio
+    async def test_stage3_notify_failure_swallowed(self, pipeline_db):
+        """终态通知失败不阻断 Stage 3 收尾。"""
+        from core.pipeline import _run_stage3_cross_analysis
+        from core import pipeline as pipeline_mod
+
+        job_id = await self._prep_job(pipeline_db)
+        with patch(
+            "core.pipeline._is_cancelled", new=AsyncMock(return_value=False)
+        ), patch(
+            "core.pipeline.analyze_cross_page", new=AsyncMock(return_value=[])
+        ), patch(
+            "core.notify.notify_job",
+            new=AsyncMock(side_effect=Exception("notify down")),
+        ):
+            await _run_stage3_cross_analysis(pipeline_db, job_id, 1, 2, [], 0.0)
+
+        cursor = await pipeline_db.execute(
+            "SELECT status FROM jobs WHERE id = ?", (job_id,)
+        )
+        assert (await cursor.fetchone())["status"] == "review"
+
+
+class TestPipelineEngineGuards:
+    """engine.py 缺口：Per-job 锁竞争串行化 / launch 竞态回调 /
+    error 终态 notify 兜底。"""
+
+    @pytest.mark.asyncio
+    async def test_concurrent_run_pipeline_serializes_on_job_lock(self, pipeline_db, tmp_path):
+        """同一 job 并发进入 run_pipeline → 第二次等待锁后串行执行。"""
+        from core import pipeline as pipeline_mod
+
+        job_id = await _insert_job(pipeline_db, status="pending")
+        pdf_path = str(tmp_path / "fake.pdf")
+        Path(pdf_path).write_bytes(b"%PDF-1.4 fake")
+
+        entered = {"n": 0}
+
+        async def fake_impl(job_id, pdf_path, progress_futures):
+            entered["n"] += 1
+            await asyncio.sleep(0.1)
+
+        with patch(
+            "core.pipeline.engine._run_pipeline_impl", side_effect=fake_impl
+        ):
+            await asyncio.gather(
+                run_pipeline(job_id, pdf_path),
+                run_pipeline(job_id, pdf_path),
+            )
+
+        assert entered["n"] == 2  # 两个协程都拿到锁，串行执行
+
+    @pytest.mark.asyncio
+    async def test_launch_stale_done_callback_and_crashed_task(self, pipeline_db, tmp_path):
+        """旧 task 的 done 回调不得删除新 task 的注册表条目；崩溃 task 记录日志。"""
+        from core.pipeline.locks import _pipeline_tasks
+        from core.pipeline import launch_pipeline
+
+        job_id = "launch-race"
+        pdf_path = str(tmp_path / "fake.pdf")
+        Path(pdf_path).write_bytes(b"%PDF-1.4 fake")
+
+        call = {"n": 0}
+
+        async def fake_run(job_id, pdf_path):
+            call["n"] += 1
+            await asyncio.sleep(0.05)
+            if call["n"] == 1:
+                raise RuntimeError("boom")
+
+        with patch("core.pipeline.run_pipeline", side_effect=fake_run):
+            t1 = launch_pipeline(job_id, pdf_path)
+            await asyncio.sleep(0.01)
+            t2 = launch_pipeline(job_id, pdf_path)
+            await asyncio.gather(t1, t2, return_exceptions=True)
+
+        assert _pipeline_tasks.get(job_id) is None
+
+    @pytest.mark.asyncio
+    async def test_error_notify_failure_does_not_break_pipeline(self, pipeline_db, tmp_path):
+        """pipeline 异常路径：飞书通知失败不影响 error 终态。"""
+        job_id = await _insert_job(pipeline_db, status="pending")
+        pdf_path = str(tmp_path / "fake.pdf")
+        Path(pdf_path).write_bytes(b"%PDF-1.4 fake")
+
+        with patch(
+            "core.pipeline._get_ocr_backend",
+            return_value=lambda p, cb: [{"markdown": {"text": "page 1 xxxxxx"}}],
+        ), patch(
+            "core.pipeline.analyze_page",
+            new=AsyncMock(
+                return_value={
+                    "steps": [], "findings": [], "overall_confidence": "high",
+                }
+            ),
+        ), patch(
+            "core.pipeline.analyze_cross_page",
+            new=AsyncMock(side_effect=RuntimeError("stage3 boom")),
+        ), patch(
+            "core.notify.notify_job",
+            new=AsyncMock(side_effect=Exception("notify down")),
+        ):
+            await run_pipeline(job_id, pdf_path)
+
+        cursor = await pipeline_db.execute(
+            "SELECT status, error_message FROM jobs WHERE id = ?", (job_id,)
+        )
+        row = await cursor.fetchone()
+        assert row["status"] == "error"
+        assert "stage3 boom" in row["error_message"]
