@@ -1193,7 +1193,9 @@
     ruleDirty();
   });
 
-  // 模板库 dropdown — 分组展示内置合规规则模板，点选一键添加
+  // 模板库面板 — 分组展示内置合规规则模板，点选一键添加。
+  // 就地展开（文档流内）而非 absolute dropdown：父卡片 overflow-hidden
+  // 会裁剪 absolute 面板导致内容被遮挡，只能靠滚动查看部分模板。
   function renderTemplatePanel() {
     const panel = document.getElementById("rule-template-panel");
     if (!panel) return;
@@ -1204,6 +1206,8 @@
         "px-2 pt-2 pb-1 text-[10px] font-medium text-muted-foreground/60 uppercase tracking-wide";
       group.textContent = section.group;
       panel.appendChild(group);
+      const grid = document.createElement("div");
+      grid.className = "grid grid-cols-1 gap-px px-1";
       section.items.forEach((text) => {
         const item = document.createElement("button");
         item.type = "button";
@@ -1216,8 +1220,9 @@
           toggleTemplatePanel(false);
           ruleDirty();
         });
-        panel.appendChild(item);
+        grid.appendChild(item);
       });
+      panel.appendChild(grid);
     });
   }
 
@@ -1234,11 +1239,8 @@
     toggleTemplatePanel();
   });
 
-  document.addEventListener("click", (e) => {
-    const wrap = document.getElementById("rule-template-wrap");
-    if (wrap && !wrap.contains(e.target)) toggleTemplatePanel(false);
-  });
-
+  // 就地展开面板：Esc 关闭；点击面板外部不强制关闭（inline 面板与内容
+  // 同流，外部点击关闭会让用户选模板时误触关闭）
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") toggleTemplatePanel(false);
   });

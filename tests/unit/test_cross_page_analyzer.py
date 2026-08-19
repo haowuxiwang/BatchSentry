@@ -220,7 +220,7 @@ class TestAnalyzeCrossPage:
         """自动 mock get_llm_client，返回空结果，避免真实 API 调用。"""
         mock_client = MagicMock()
         mock_client.chat_json = AsyncMock(return_value=[])
-        with patch('core.cross_page_analyzer.get_llm_client',
+        with patch('core.rules.llm_checks.get_llm_client',
                    return_value=mock_client):
             yield mock_client
 
@@ -632,7 +632,7 @@ class TestNormalizePages:
         ]
         mock_client = MagicMock()
         mock_client.chat_json = AsyncMock(return_value=[])
-        with patch('core.cross_page_analyzer.get_llm_client', return_value=mock_client):
+        with patch('core.rules.llm_checks.get_llm_client', return_value=mock_client):
             findings = asyncio.run(analyze_cross_page(polluted, job_id="test"))
         assert isinstance(findings, list)
         # 消毒后 steps 只剩合法 dict → R1-a 正常判定/或跳过；不崩溃是核心断言
@@ -670,7 +670,7 @@ class TestNormalizePages:
         ]
         mock_client = MagicMock()
         mock_client.chat_json = AsyncMock(return_value=[])
-        with patch('core.cross_page_analyzer.get_llm_client', return_value=mock_client):
+        with patch('core.rules.llm_checks.get_llm_client', return_value=mock_client):
             findings = asyncio.run(analyze_cross_page(polluted, job_id="test"))
         assert isinstance(findings, list)
         assert all(isinstance(f, dict) for f in findings)
@@ -1597,7 +1597,7 @@ class TestUserRulesInjection:
                 return []
 
         with patch("config._config_path", return_value=cfg), \
-             patch("core.cross_page_analyzer.get_llm_client",
+             patch("core.rules.llm_checks.get_llm_client",
                    return_value=FakeClient()):
             asyncio.run(_llm_based_check("摘要内容", job_id="job-1"))
 
@@ -1622,7 +1622,7 @@ class TestUserRulesInjection:
                 return []
 
         with patch("config._config_path", return_value=cfg), \
-             patch("core.cross_page_analyzer.get_llm_client",
+             patch("core.rules.llm_checks.get_llm_client",
                    return_value=FakeClient()):
             asyncio.run(_llm_based_check("摘要内容", job_id="job-1"))
 
@@ -1645,7 +1645,7 @@ class TestUserRulesInjection:
                 ]
 
         with patch("config._config_path", return_value=cfg), \
-             patch("core.cross_page_analyzer.get_llm_client",
+             patch("core.rules.llm_checks.get_llm_client",
                    return_value=FakeClient()):
             findings = asyncio.run(_llm_based_check("摘要", job_id="job-1"))
 
@@ -1682,7 +1682,7 @@ class TestUserRulesInjection:
                 ]
 
         with patch("config._config_path", return_value=cfg), \
-             patch("core.cross_page_analyzer.get_llm_client",
+             patch("core.rules.llm_checks.get_llm_client",
                    return_value=FakeClient()):
             findings = asyncio.run(_llm_based_check("摘要", job_id="job-1"))
 

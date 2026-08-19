@@ -344,19 +344,13 @@
                 </p>
                 <div id="rules-list" class="flex flex-col gap-2"></div>
                 <div class="flex items-center gap-2 pt-2">
-                  <div id="rule-template-wrap" class="relative">
-                    <button
-                      type="button"
-                      id="rule-template-btn"
-                      class="btn-press focus-ring inline-flex items-center px-3 py-1.5 text-[12px] text-foreground border border-border rounded-md hover:bg-muted/40 transition-colors"
-                    >
-                      模板库
-                    </button>
-                    <div
-                      id="rule-template-panel"
-                      class="hidden absolute left-0 top-full mt-1 w-[420px] max-h-72 overflow-y-auto bg-card border border-border rounded-lg shadow-lg z-20 p-1"
-                    ></div>
-                  </div>
+                  <button
+                    type="button"
+                    id="rule-template-btn"
+                    class="btn-press focus-ring inline-flex items-center px-3 py-1.5 text-[12px] text-foreground border border-border rounded-md hover:bg-muted/40 transition-colors"
+                  >
+                    模板库
+                  </button>
                   <button
                     type="button"
                     id="rule-add-btn"
@@ -373,6 +367,13 @@
                   </button>
                   <span id="rule-msg" class="text-[12px]"></span>
                 </div>
+                <!-- 模板库就地展开（非 absolute dropdown）— 父卡片
+                     overflow-hidden 会裁剪 absolute 面板，改为文档流展开
+                     后完整可见、无需滚动 -->
+                <div
+                  id="rule-template-panel"
+                  class="hidden mt-2 border border-border rounded-lg p-1"
+                ></div>
               </div>
             </div>
           </section>

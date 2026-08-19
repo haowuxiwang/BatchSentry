@@ -68,12 +68,12 @@ def _make_step(step_no, start_time=None, end_time=None, operator="", reviewer=""
 def mock_llm():
     """Mock LLM 客户端 — 默认返回空 findings。
 
-    patch core.cross_page_analyzer.get_llm_client，使被测函数内部
+    patch core.rules.llm_checks.get_llm_client，使被测函数内部
     拿到的 client 完全可控。
     """
     mock_client = MagicMock()
     mock_client.chat_json = AsyncMock(return_value={"findings": []})
-    with patch('core.cross_page_analyzer.get_llm_client', return_value=mock_client):
+    with patch('core.rules.llm_checks.get_llm_client', return_value=mock_client):
         yield mock_client
 
 
@@ -883,7 +883,7 @@ class TestLlmFallbackFailClosed:
         llm_queue = [
             {"page": 1, "step_no": 1, "name": "温度", "spec": "≤25°C", "actual": "30", "unit": "°C"},
         ]
-        with patch("core.cross_page_analyzer.get_llm_client") as mock:
+        with patch("core.rules.llm_checks.get_llm_client") as mock:
             mock.return_value.chat_json.side_effect = RuntimeError("API down")
             findings = await _llm_fallback_check(llm_queue, job_id="test")
         assert len(findings) == 1
@@ -900,7 +900,7 @@ class TestLlmFallbackFailClosed:
             {"page": 2, "step_no": 3, "name": "外观", "spec": "应澄清", "actual": "浑浊", "unit": ""},
             {"page": 3, "step_no": 5, "name": "pH", "spec": "6.0-7.0", "actual": "5.5", "unit": ""},
         ]
-        with patch("core.cross_page_analyzer.get_llm_client") as mock:
+        with patch("core.rules.llm_checks.get_llm_client") as mock:
             mock.return_value.chat_json.side_effect = TimeoutError("timeout")
             findings = await _llm_fallback_check(llm_queue, job_id="test")
         assert len(findings) == 3
@@ -918,7 +918,7 @@ class TestLlmFallbackFailClosed:
         llm_queue = [
             {"page": 2, "step_no": 2, "name": "含量", "spec": "≥98.0%", "actual": "97.0", "unit": "%"},
         ]
-        with patch("core.cross_page_analyzer.get_llm_client") as mock:
+        with patch("core.rules.llm_checks.get_llm_client") as mock:
             mock.return_value.chat_json = AsyncMock(return_value={"_parse_error": True, "_raw": "not json"})
             findings = await _llm_fallback_check(llm_queue, job_id="test")
         assert len(findings) == 1
