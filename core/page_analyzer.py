@@ -14,6 +14,7 @@ from datetime import datetime
 from typing import Awaitable, Callable, Optional
 
 from llm.client import get_llm_client
+from core.hw_signal import _extract_low_conf_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -640,6 +641,13 @@ async def analyze_page(
         # 截断透出（Todo 11）：HTML 超上限被截 → LLM 分析基于不完整输入，
         # review 页横幅提示人工以 PDF 原图为准（此前仅 prompt 内标记）。
         result["_ocr_truncated"] = True
+    # Round 7: OCR 结构化手写信号 — MinerU 低置信度占位符（### →
+    # [手写内容未识别]）所在列/标签 → 列名 token 列表，随结果透传给
+    # 规则层（_backfill_value_source 强制 value_source=handwritten；
+    # 机器事实 > LLM 猜测）。仅在命中时写入，无信号结果不带该键。
+    low_conf_tokens = _extract_low_conf_tokens(cleaned)
+    if low_conf_tokens:
+        result["_ocr_low_conf_cols"] = low_conf_tokens
     # 幻觉防护：LLM 提取的实测数值必须在 OCR 原文中找到（零 LLM 成本，
     # 纯字符串检查）。命中 → review 横幅提醒人工重点核对，不自动生成
     # finding（字符串误报率高于 LLM 判定，只提示不裁决）。

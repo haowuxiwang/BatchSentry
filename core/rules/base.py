@@ -2,6 +2,16 @@ from __future__ import annotations
 
 import logging
 
+# Marker machinery lives in core.hw_signal (Round 7): MinerU renders
+# low-confidence handwritten cells as '###' → '[手写内容未识别]', and
+# _extract_low_conf_tokens turns those markers into deterministic
+# value_source evidence (column header / label tokens). Re-exported names
+# keep existing imports working.
+from core.hw_signal import (
+    _UNRECOGNIZED_MARKER as _UNRECOGNIZED_MARKER,
+    _has_unrecognized_marker as _has_unrecognized_marker,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -25,16 +35,24 @@ def _only_dicts(lst) -> list[dict]:
 
 _HANDWRITTEN_KEYWORDS = ("实际", "实测", "记录", "填写", "手写", "结果", "偏差")
 _PRINTED_KEYWORDS = ("规格", "标准", "范围", "指导", "要点", "要求", "检查项目", "项目")
-# MinerU 低置信度占位符（mineru_client._sanitize_unrecognized_handwriting 把
-# '###' 换成此标记）。单元格值若还带着它（LLM 原样保留），该单元格就是
-# 机器事实级"未识别内容"——value_source 必须 handwritten，优先级高于一切
-# 语义判断（LLM 标 printed 也要覆盖）。
-_UNRECOGNIZED_MARKER = "手写内容未识别"
 
 
-def _has_unrecognized_marker(text) -> bool:
-    """Cell value carries MinerU's low-confidence handwriting marker."""
-    return isinstance(text, str) and _UNRECOGNIZED_MARKER in text
+def _matches_low_conf(name, tokens) -> bool:
+    """Column/parameter name matches an OCR handwriting-signal token.
+
+    Machine-fact evidence (a marker cell in that column, or a marker directly
+    after the label) wins over any model guess, so matching is deliberately
+    generous: exact, or containment in either direction. Short generic tokens
+    (≥2 chars) are accepted — forcing a column handwritten is the conservative
+    direction (only downgrades edge-case severities, never escalates)."""
+    if not isinstance(name, str) or not name or not tokens:
+        return False
+    for t in tokens:
+        if not isinstance(t, str) or len(t) < 2:
+            continue
+        if t == name or t in name or name in t:
+            return True
+    return False
 
 
 def _infer_value_source(name: str, fallback: str = "unknown") -> str:
@@ -60,18 +78,23 @@ def _backfill_value_source(data: dict) -> None:
     """Fill missing value_source on parameters/measurements in-place.
 
     Resolution order (strongest signal first):
-      1. 机器事实：单元格值携带 MinerU 低置信度手写标记（含
-        「[手写内容未识别]」）→ 强制 handwritten，覆盖 LLM 标注。
+      0. OCR 结构化信号（_ocr_low_conf_cols，来自 core.hw_signal）：
+         单元格含低置信度手写标记的列/标签 → 强制 handwritten，
+         覆盖 LLM 标注（机器事实 > 模型猜测）。
+      1. 机器事实：单元格值自身携带 MinerU 低置信度手写标记 → 强制
+        handwritten，覆盖 LLM 标注。
       2. LLM 标注（value_source 已输出）→ 原文保留。
       3. 列名关键词启发（印刷表头 vs 手写填写列）→ 兜底。
     """
+    signal_cols = data.get("_ocr_low_conf_cols") or []
     for s in data.get("steps", []) or []:
         if not isinstance(s, dict):
             continue
         for p in s.get("parameters", []) or []:
             if not isinstance(p, dict):
                 continue
-            if _has_unrecognized_marker(p.get("value")) or \
+            if _matches_low_conf(p.get("name"), signal_cols) or \
+                    _has_unrecognized_marker(p.get("value")) or \
                     _has_unrecognized_marker(p.get("actual")):
                 p["value_source"] = "handwritten"
             elif not p.get("value_source"):
@@ -82,7 +105,8 @@ def _backfill_value_source(data: dict) -> None:
             for col, v in (m.get("values") or {}).items():
                 if not isinstance(v, dict):
                     continue
-                if _has_unrecognized_marker(v.get("value")) or \
+                if _matches_low_conf(col, signal_cols) or \
+                        _has_unrecognized_marker(v.get("value")) or \
                         _has_unrecognized_marker(v.get("actual")):
                     v["value_source"] = "handwritten"
                 elif not v.get("value_source"):

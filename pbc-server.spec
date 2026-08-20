@@ -123,6 +123,7 @@ hiddenimports = [
     "core.rules.rule_doc",
     "core.rules.llm_checks",
     "core.page_analyzer",
+    "core.hw_signal",  # Round 7 OCR handwriting-signal extraction
     "core.cross_page_analyzer",  # shim — kept for apps importing the old name
     "core.ocr_client",
     "core.mineru_client",  # pipeline.py 动态导入（_get_ocr_backend）

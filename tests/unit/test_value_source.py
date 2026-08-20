@@ -101,6 +101,94 @@ class TestBackfillValueSource:
         assert vals["实测流速"]["value_source"] == "handwritten"
 
 
+class TestLowConfSignal:
+    """Round 7：_ocr_low_conf_cols 列/标签信号是机器事实，优先级高于
+    LLM 标注（含显式 printed）与关键词启发。"""
+
+    def test_column_token_overrides_llm_printed(self):
+        data = {"_ocr_low_conf_cols": ["审核意见", "实测值"], "steps": [
+            {"parameters": [
+                {"name": "组织部门负责人审核意见", "value": "2022.05.07",
+                 "value_source": "printed"},
+            ]},
+            {"measurements": [
+                {"time": "10:00", "values": {
+                    "设备A_实测值": {"actual": "0.97", "value_source": "printed"},
+                }},
+            ]},
+        ]}
+        _backfill_value_source(data)
+        p = data["steps"][0]["parameters"][0]
+        assert p["value_source"] == "handwritten"
+        v = data["steps"][1]["measurements"][0]["values"]["设备A_实测值"]
+        assert v["value_source"] == "handwritten"
+
+    def test_exact_and_reverse_containment(self):
+        data = {"_ocr_low_conf_cols": ["实测值"], "steps": [
+            {"parameters": [
+                {"name": "实测值", "value": "5.4", "value_source": "printed"},
+                {"name": "设备B_实测值", "value": "6.1", "value_source": "printed"},
+            ]},
+            {"measurements": [
+                {"time": "9:00", "values": {
+                    "实测值记录": {"actual": "1.2", "value_source": "printed"},
+                }},
+            ]},
+        ]}
+        _backfill_value_source(data)
+        params = data["steps"][0]["parameters"]
+        assert params[0]["value_source"] == "handwritten"
+        assert params[1]["value_source"] == "handwritten"
+        v = data["steps"][1]["measurements"][0]["values"]["实测值记录"]
+        assert v["value_source"] == "handwritten"
+
+    def test_unrelated_column_untouched(self):
+        data = {"_ocr_low_conf_cols": ["审核意见"], "steps": [
+            {"parameters": [
+                {"name": "设备A_流速", "value": "0.95", "value_source": "printed"},
+            ]},
+            {"measurements": [
+                {"time": "10:00", "values": {
+                    "设备A_流速_标准": {"actual": "1.0", "value_source": "printed"},
+                }},
+            ]},
+        ]}
+        _backfill_value_source(data)
+        assert data["steps"][0]["parameters"][0]["value_source"] == "printed"
+        v = data["steps"][1]["measurements"][0]["values"]["设备A_流速_标准"]
+        assert v["value_source"] == "printed"
+
+    def test_keyword_would_print_but_signal_wins(self):
+        # '规格范围' 关键词 → printed；但 OCR 信号说该列有手写未识别单元格。
+        # 无 LLM 标注时信号层先于关键词兜底生效。
+        data = {"_ocr_low_conf_cols": ["规格范围"], "steps": [
+            {"parameters": [
+                {"name": "规格范围", "value": "20-30"},
+            ]},
+        ]}
+        _backfill_value_source(data)
+        assert data["steps"][0]["parameters"][0]["value_source"] == "handwritten"
+
+    def test_no_signal_key_unchanged(self):
+        data = {"steps": [
+            {"parameters": [
+                {"name": "规格范围", "value": "20-30", "value_source": "printed"},
+            ]},
+        ]}
+        _backfill_value_source(data)
+        assert data["steps"][0]["parameters"][0]["value_source"] == "printed"
+
+    def test_non_str_tokens_filtered(self):
+        data = {"_ocr_low_conf_cols": [None, 123, "审核意见"], "steps": [
+            {"parameters": [
+                {"name": "组织部门负责人审核意见", "value": "2022.05.07",
+                 "value_source": "printed"},
+            ]},
+        ]}
+        _backfill_value_source(data)
+        assert data["steps"][0]["parameters"][0]["value_source"] == "handwritten"
+
+
 class TestOutOfSpecValueSource:
     def _sev(self, spec, actual, vs):
         bounds = _parse_spec(spec)

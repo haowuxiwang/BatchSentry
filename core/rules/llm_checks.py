@@ -274,20 +274,38 @@ async def _llm_based_check(summary: str, *, job_id: str = "",
     return valid
 
 
-def _build_summary(pages: list[dict]) -> str:
+def _summary_max_chars(context_window: int) -> int:
+    """Derive the cross-page summary character cap from the model's context
+    window.
+
+    Budget rule (Round 7): the cross-page prompt must stay ≤ 35% of the
+    window so page-1/2 reruns, instructions and completions fit with margin
+    (context rot + attention degradation beyond ~30-40%; window×1.6 converts
+    tokens → CJK-heavy characters ≈ 1.6 chars/token). Floor 8K chars keeps
+    tiny windows usable instead of starving the prompt entirely.
+    """
+    if not isinstance(context_window, int) or context_window <= 0:
+        context_window = 128_000
+    return max(8_000, int(context_window * 0.35 * 1.6))
+
+
+def _build_summary(pages: list[dict], context_window: int | None = None) -> str:
     """Build compact text summary of all pages for LLM consumption.
 
-    Context-budget guarded: _SUMMARY_MAX_CHARS cap with two-stage degradation
-    (field compression, then whole-line preservation with an explicit
-    truncation marker so the LLM knows the input is incomplete).
+    Context-budget guarded: cap = _summary_max_chars(context_window) when a
+    window is provided (config.app.llm_context_window), else the fixed
+    _SUMMARY_MAX_CHARS default (128K-window equivalent). Two-stage
+    degradation (field compression, then whole-line preservation with an
+    explicit truncation marker so the LLM knows the input is incomplete).
     """
+    cap = _summary_max_chars(context_window) if context_window else _SUMMARY_MAX_CHARS
     text = "\n".join(_summary_lines(pages, op_len=_OP_LEN_FULL,
                                     meas_cols=_MEASURE_COLS_FULL,
                                     findings_n=_FINDINGS_FULL))
-    if len(text) <= _SUMMARY_MAX_CHARS:
+    if len(text) <= cap:
         return text
     logger.warning(
-        f"Cross-page summary {len(text)} chars > {_SUMMARY_MAX_CHARS} cap — "
+        f"Cross-page summary {len(text)} chars > {cap} cap — "
         f"compressing fields (op {_OP_LEN_FULL}→{_OP_LEN_COMPRESSED}, "
         f"cells {_MEASURE_COLS_FULL}→{_MEASURE_COLS_COMPRESSED}, "
         f"findings {_FINDINGS_FULL}→{_FINDINGS_COMPRESSED})"
@@ -296,14 +314,14 @@ def _build_summary(pages: list[dict]) -> str:
                            meas_cols=_MEASURE_COLS_COMPRESSED,
                            findings_n=_FINDINGS_COMPRESSED)
     text = "\n".join(lines)
-    if len(text) <= _SUMMARY_MAX_CHARS:
+    if len(text) <= cap:
         return text
     # 仍超限：逐行保留完整行（不切开半行），显式截断标记防 LLM 幻觉。
     kept, chars = [], 0
     marker_len = 0
     for i, ln in enumerate(lines):
         delta = len(ln) + 1
-        if chars + delta + marker_len > _SUMMARY_MAX_CHARS:
+        if chars + delta + marker_len > cap:
             break
         kept.append(ln)
         chars += delta

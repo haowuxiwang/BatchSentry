@@ -42,7 +42,7 @@ from core.rules.rule_time import (
     _check_time_reversal_in_page,
     _check_year_contradiction,
 )
-from core.rules.parsing import SpecBounds  # re-export for shim/tests
+from core.rules.parsing import SpecBounds as SpecBounds  # re-export for shim/tests
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +89,15 @@ async def analyze_cross_page(page_structures: list[dict], job_id: str = "") -> l
         logger.info(
             f"[{job_id}] value_source coverage: parameters {n_param_vs}/{n_param}, "
             f"cells {n_cell_vs}/{n_cell}"
+        )
+    # Round 7: OCR 结构化手写信号覆盖统计 — 携带 _ocr_low_conf_cols 的页数。
+    # 信号页少（或全无）说明 OCR 未产出低置信度占位符 → value_source 依赖
+    # LLM 标注/关键词兜底；信号页多则手写判定有机器事实支撑。
+    n_sig_pages = sum(1 for pg in pages if (pg["data"].get("_ocr_low_conf_cols")))
+    if n_sig_pages:
+        logger.info(
+            f"[{job_id}] OCR handwriting signal: {n_sig_pages}/{len(pages)} pages "
+            f"carry low-confidence column/label tokens"
         )
 
     rule_findings: list[dict] = []
@@ -168,9 +177,14 @@ async def analyze_cross_page(page_structures: list[dict], job_id: str = "") -> l
     # LLM semantic check (catches what rules missed)
     # 用户规则每 job 只读一次 config.json，避免 _user_rules_section /
     # enabled_rule_ids 各读一遍（每次文件 IO + JSON 解析，51 页大文件时浪费）。
-    from config import load_user_rules
+    from config import config as _app_config, load_user_rules
     user_rules = [r for r in load_user_rules() if r.get("active")]
-    summary = _build_summary(pages)
+    # Round 7: 跨页摘要按模型上下文窗口推导预算（config.app.llm_context_window，
+    # LLM_CONTEXT_WINDOW env / config.json 顶层键；缺失时 llm_checks 用默认值）。
+    summary = _build_summary(
+        pages,
+        context_window=getattr(_app_config["app"], "llm_context_window", None),
+    )
     llm_findings = await _llm_based_check(summary, job_id=job_id, user_rules=user_rules)
 
     all_findings = rule_findings + llm_findings

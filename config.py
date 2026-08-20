@@ -409,6 +409,7 @@ class AppConfig:
     ocr_backend: str  # "paddle" | "mineru"
     llm_concurrency: int  # Stage 2 并发 LLM 页面分析数
     ocr_slices: int  # MinerU 分片 OCR 页数/片（1=不分片，流式逐片分析）
+    llm_context_window: int  # LLM 上下文窗口（tokens）— Round 7 跨页摘要预算推导依据
 
 
 def _load_provider(name: str) -> ProviderConfig:
@@ -594,6 +595,11 @@ def load_config():
             # MinerU 分片 OCR：每片 N 页，片完成即分析（流式输出）。
             # 1 = 不分片（整份 PDF 一次提交，等全部 OCR 完成再分析）。
             ocr_slices=_env_int("OCR_SLICES", 1),
+            # Round 7: LLM 上下文窗口（tokens）。跨页分析摘要按窗口预算
+            # 推导（35% 窗口 × 1.6 字符/token），防止大 job（200 页+）
+            # 或小窗口模型（GLM/Kimi 32K）的提示词溢出。默认 128K
+            # （DeepSeek-V3.2 / 通用大窗口）。
+            llm_context_window=_env_int("LLM_CONTEXT_WINDOW", 128_000),
         ),
     }
 

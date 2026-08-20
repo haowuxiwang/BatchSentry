@@ -1294,3 +1294,26 @@ class TestSummaryTruncation:
         assert len("\n".join(comp)) < len("\n".join(full))
         assert any("... " in ln or ln.endswith("...") for ln in comp
                    if ln.strip().startswith("@"))
+
+    def test_summary_max_chars_derivation(self):
+        """窗口→摘要预算推导：35% 窗口 × 1.6 字符/token；非法输入回退默认。"""
+        from core.rules.llm_checks import _summary_max_chars
+        assert _summary_max_chars(128_000) == int(128_000 * 0.35 * 1.6)
+        assert _summary_max_chars(32_000) == int(32_000 * 0.35 * 1.6)
+        assert _summary_max_chars(None) == int(128_000 * 0.35 * 1.6)
+        assert _summary_max_chars(0) == int(128_000 * 0.35 * 1.6)
+        assert _summary_max_chars(-5) == int(128_000 * 0.35 * 1.6)
+        assert _summary_max_chars("bogus") == int(128_000 * 0.35 * 1.6)
+        assert _summary_max_chars(10_000) == 8_000  # floor 兜底，避免小窗饿死
+
+    def test_small_window_triggers_line_truncate_sooner(self):
+        """同一 400 页输入：32K 窗口 → 显式截断；默认窗口 → 仅字段压缩。"""
+        from core.rules.llm_checks import (
+            _build_summary, _summary_max_chars, _SUMMARY_MAX_CHARS)
+        pages = self._pages(400, 700)
+        cap32 = _summary_max_chars(32_000)
+        assert cap32 < _SUMMARY_MAX_CHARS
+        text = _build_summary(pages, context_window=32_000)
+        assert len(text) <= cap32 + 200
+        assert "内容过长已截断" in text
+        assert "内容过长已截断" not in _build_summary(pages)

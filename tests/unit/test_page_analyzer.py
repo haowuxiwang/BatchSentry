@@ -463,6 +463,35 @@ class TestHtmlCleaning:
         assert not result.get("_ocr_truncated")
 
 
+class TestLowConfSignalInjection:
+    """Round 7: analyze_page 从清洗后页文本提取 OCR 手写信号，命中时随
+    结果透传 _ocr_low_conf_cols（规则层强制 value_source=handwritten）。"""
+
+    @pytest.mark.asyncio
+    async def test_label_signal_injected(self):
+        html = "<table><tr><td>审核意见:[手写内容未识别] 2022.05.07</td></tr></table>"
+        mock_client = _make_mock_client(_ok_payload())
+        with patch("core.page_analyzer.get_llm_client", return_value=mock_client):
+            result = await analyze_page(html, page_num=4)
+        assert "审核意见" in result["_ocr_low_conf_cols"]
+
+    @pytest.mark.asyncio
+    async def test_column_signal_injected(self):
+        html = ("<table><tr><th>设备A</th><th>实测值</th></tr>"
+                "<tr><td>1</td><td>[手写内容未识别]</td></tr></table>")
+        mock_client = _make_mock_client(_ok_payload())
+        with patch("core.page_analyzer.get_llm_client", return_value=mock_client):
+            result = await analyze_page(html, page_num=5)
+        assert "实测值" in result["_ocr_low_conf_cols"]
+
+    @pytest.mark.asyncio
+    async def test_no_marker_no_key(self):
+        mock_client = _make_mock_client(_ok_payload())
+        with patch("core.page_analyzer.get_llm_client", return_value=mock_client):
+            result = await analyze_page("<table><tr><td>浓度 25.5</td></tr></table>", page_num=1)
+        assert "_ocr_low_conf_cols" not in result
+
+
 class TestEmptyPageShortCircuit:
     """robustness-D1: 空/无内容页短路 — 不调 LLM，返回 _ocr_empty 标记。"""
 
