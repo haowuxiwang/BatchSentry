@@ -4,7 +4,13 @@ import logging
 import re
 from datetime import datetime
 
-from core.rules.parsing import _extract_year, _parse_time
+from core.rules.parsing import (
+    _extract_year,
+    _interval_after,
+    _interval_before,
+    _parse_time,
+    _parse_time_interval,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -21,9 +27,12 @@ def _check_time_reversal_in_page(pages: list[dict]) -> list[dict]:
         pno = page["page"]
         fb_date = page["page_info"].get("production_date")
         for step in page["steps"]:
-            t_start = _parse_time(step.get("start_time"), fb_date)
-            t_end = _parse_time(step.get("end_time"), fb_date)
-            if t_start and t_end and t_start > t_end:
+            # Interval comparison: date-only values span the whole day, so a
+            # start "2024-01-01" (date-only) vs end "2024-01-01 14:30" is NOT
+            # a reversal — the start may fall anywhere that day.
+            iv_start = _parse_time_interval(step.get("start_time"), fb_date)
+            iv_end = _parse_time_interval(step.get("end_time"), fb_date)
+            if iv_start and iv_end and _interval_after(iv_start, iv_end):
                 findings.append({
                     "page": pno,
                     "type": "time_reversal",
@@ -89,6 +98,8 @@ def _check_time_reversal_cross_page(pages: list[dict]) -> list[dict]:
                     "end_time": step.get("end_time"),
                     "t_start": t_start,
                     "t_end": t_end,
+                    "iv_start": _parse_time_interval(step.get("start_time"), fb_date),
+                    "iv_end": _parse_time_interval(step.get("end_time"), fb_date),
                     "operator": step.get("operator") or "",
                 })
     for i in range(1, len(ordered)):
@@ -102,11 +113,12 @@ def _check_time_reversal_cross_page(pages: list[dict]) -> list[dict]:
         # against itself produces meaningless "start < end" findings.
         if curr["page"] == prev["page"] and curr["step_key"] == prev["step_key"]:
             continue
-        if curr["t_start"] >= prev["t_end"]:
+        if curr["iv_start"] and prev["iv_end"] and _interval_before(curr["iv_start"], prev["iv_end"]):
+            # Year-mismatch detection: if the two timestamps differ by >2 years,
+            # treat as extraction_error (warning) rather than time_reversal (critical).
+            year_delta = abs(curr["t_start"].year - prev["t_end"].year)
+        else:
             continue
-        # Year-mismatch detection: if the two timestamps differ by >2 years,
-        # treat as extraction_error (warning) rather than time_reversal (critical).
-        year_delta = abs(curr["t_start"].year - prev["t_end"].year)
         if year_delta > 2:
             findings.append({
                 "page": curr["page"],
@@ -258,26 +270,112 @@ def _check_signature_time_anomaly(pages: list[dict]) -> list[dict]:
         pno = page["page"]
         fb_date = page["page_info"].get("production_date")
         for step in page["steps"]:
-            op_time = _parse_time(step.get("start_time") or step.get("end_time"), fb_date)
+            iv_op = _parse_time_interval(
+                step.get("start_time") or step.get("end_time"), fb_date
+            )
             for sig in step.get("signatures", []) or []:
                 st = sig.get("sign_time")
                 if not st:
                     continue
-                sig_time = _parse_time(st, fb_date)
-                if sig_time is None or op_time is None:
+                # Interval comparison: a date-only signature time spans the
+                # whole day, so it is NOT "earlier than" an operation time on
+                # the same day (previous point-comparison falsely flagged
+                # sign "2024-01-01" vs op "2024-01-01 14:30" as anomalous).
+                iv_sig = _parse_time_interval(st, fb_date)
+                if iv_sig is None or iv_op is None:
                     continue
-                if sig_time < op_time:
+                if _interval_before(iv_sig, iv_op):
+                    # Year-mismatch hint (mirrors R1-b): sign_time and op_time
+                    # on the same page should be within ~2 years of each other.
+                    # A larger gap almost always means OCR misread the year
+                    # (e.g. 2015/2025), so the "earlier than" conclusion is
+                    # too strong — flag it as an extraction hint instead.
+                    year_delta = abs(iv_sig[0].year - iv_op[0].year)
+                    desc = (
+                        f"第{pno}页 {sig.get('role','')} {sig.get('name','')} "
+                        f"签名时间 {st} 早于操作时间 "
+                        f"{step.get('start_time') or step.get('end_time')}"
+                    )
+                    if year_delta > 2:
+                        desc += (
+                            f"，年份相差 {year_delta} 年，可能为 OCR 提取错误"
+                            "（原值 2015/2025 混淆等），请人工核对"
+                        )
                     findings.append({
                         "page": pno,
                         "type": "signature_time_anomaly",
                         "severity": "warning",
-                        "description": (
-                            f"第{pno}页 {sig.get('role','')} {sig.get('name','')} "
-                            f"签名时间 {st} 早于操作时间 "
-                            f"{step.get('start_time') or step.get('end_time')}"
-                        ),
+                        "description": desc,
                         "ocr_text": f"{sig.get('name','')} {st}",
                         "operator": sig.get("name") or "",
+                        "source": "rule",
+                    })
+    return findings
+
+
+# ---------------------------------------------------------------------------
+# R9: signature ORDER between roles on the same step — reviewer/QA must sign
+# AFTER the operator (GMP: 复核在操作之后). Interval comparison avoids
+# date-only false positives (a date-only reviewer "2024-01-01" spans the
+# whole day and is NOT earlier than operator "2024-01-01 14:30"). Year gaps
+# >2 years get the OCR-confusion hint (mirrors R5).
+# ---------------------------------------------------------------------------
+
+_ROLE_RANK = {
+    "operator": 0, "操作人": 0, "操作员": 0,
+    "reviewer": 1, "复核人": 1, "复核员": 1, "workshop_reviewer": 1,
+    "qa": 2, "qa_reviewer": 2, "质量保证": 2, "qa审核": 2, "批准人": 2, "放行人": 2,
+    "issuer": 1, "记录发放": 1,
+}
+
+
+def _check_signature_order(pages: list[dict]) -> list[dict]:
+    findings = []
+    for page in pages:
+        pno = page["page"]
+        fb_date = page["page_info"].get("production_date")
+        for step in page["steps"]:
+            sigs = step.get("signatures", []) or []
+            ranked = []
+            for s in sigs:
+                role = (s.get("role") or "").lower()
+                rk = _ROLE_RANK.get(role)
+                st = s.get("sign_time")
+                if rk is None or not st:
+                    continue
+                iv = _parse_time_interval(st, fb_date)
+                if iv is None:
+                    continue
+                ranked.append((rk, s, iv))
+            ranked.sort(key=lambda x: x[0])
+            for i in range(1, len(ranked)):
+                prev_iv = ranked[i - 1][2]
+                curr = ranked[i]
+                if _interval_before(curr[2], prev_iv):
+                    year_delta = abs(curr[2][0].year - prev_iv[0].year)
+                    desc = (
+                        f"第{pno}页 {curr[1].get('role','')} {curr[1].get('name','')} "
+                        f"签名时间({curr[1].get('sign_time')}) 早于 "
+                        f"{ranked[i-1][1].get('role','')} "
+                        f"{ranked[i-1][1].get('name','')}"
+                        f"({ranked[i-1][1].get('sign_time')})，"
+                        f"复核/审批顺序异常"
+                    )
+                    if year_delta > 2:
+                        desc += (
+                            f"，年份相差 {year_delta} 年，可能为 OCR 提取错误"
+                            "（原值 2015/2025 混淆等），请人工核对"
+                        )
+                    findings.append({
+                        "page": pno,
+                        "type": "signature_time_anomaly",
+                        "severity": "warning",
+                        "description": desc,
+                        "ocr_text": (
+                            f"{ranked[i-1][1].get('role','')}={ranked[i-1][1].get('sign_time')}"
+                            f" > {curr[1].get('role','')}={curr[1].get('sign_time')}"
+                        ),
+                        "operator": curr[1].get("name") or "",
                         "source": "rule",
                     })
     return findings

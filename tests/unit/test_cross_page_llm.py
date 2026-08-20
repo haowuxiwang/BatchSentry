@@ -23,6 +23,7 @@ from core.cross_page_analyzer import (
     _check_signature_time_anomaly,
     _normalize_pages,
 )
+from core.rules.rule_time import _check_signature_order
 
 
 def _make_page(page_no, steps, findings=None, page_info=None, event_year_groups=None):
@@ -44,7 +45,7 @@ def _norm(pages):
 
 
 def _make_step(step_no, start_time=None, end_time=None, operator="", reviewer="",
-               measurements=None, parameters=None, signatures=None):
+               measurements=None, parameters=None, signatures=None, checks=None):
     """构造 step 字典。"""
     s = {"step_no": step_no}
     if start_time:
@@ -61,6 +62,8 @@ def _make_step(step_no, start_time=None, end_time=None, operator="", reviewer=""
         s["parameters"] = parameters
     if signatures:
         s["signatures"] = signatures
+    if checks:
+        s["checks"] = checks
     return s
 
 
@@ -694,6 +697,36 @@ class TestSignatureTimeAnomaly:
         findings = _check_signature_time_anomaly(pages)
         assert findings == []
 
+    def test_date_only_sign_vs_datetime_op_same_day_no_finding(self):
+        """date-only 签名时间（整天）与同日带时间操作时间不应误报（年月日 vs
+        年月日小时分钟混比场景：修复前 sign=00:00 < op=14:30 误报）。"""
+        pages = _norm([
+            _make_page(1, [
+                _make_step(1, start_time="2024.01.01 14:30",
+                           signatures=[
+                               {"role": "operator", "name": "张三",
+                                "sign_time": "2024.01.01"},
+                           ]),
+            ]),
+        ])
+        findings = _check_signature_time_anomaly(pages)
+        assert findings == []
+
+    def test_date_only_sign_previous_day_vs_datetime_op_finding(self):
+        """date-only 签名时间（前一天整天）早于带时间操作时间应报异常。"""
+        pages = _norm([
+            _make_page(1, [
+                _make_step(1, start_time="2024.01.01 10:00",
+                           signatures=[
+                               {"role": "operator", "name": "张三",
+                                "sign_time": "2023.12.31"},
+                           ]),
+            ]),
+        ])
+        findings = _check_signature_time_anomaly(pages)
+        assert len(findings) == 1
+        assert findings[0]["type"] == "signature_time_anomaly"
+
     def test_time_only_sign_uses_fallback_date(self):
         """只有 HH:MM 的签名时间应使用 page_info.production_date 作为 fallback。"""
         pages = _norm([
@@ -741,6 +774,234 @@ class TestSignatureTimeAnomaly:
         assert len(findings) == 2
         names = {f["operator"] for f in findings}
         assert names == {"张三", "李四"}
+
+    def test_year_gap_over_2_flags_ocr_confusion(self):
+        """签名时间与操作时间年份相差 >2 年时（OCR 2015/2025 混淆，
+        签名真实为 2025 却被读成 2015），仍报异常但描述附带 OCR 混淆提示，
+        而非铁口断言时间矛盾。"""
+        pages = _norm([
+            _make_page(1, [
+                _make_step(1, start_time="2025.01.20 10:00",
+                           signatures=[
+                               {"role": "operator", "name": "张三",
+                                "sign_time": "2015.01.20"},
+                           ]),
+            ]),
+        ])
+        findings = _check_signature_time_anomaly(pages)
+        assert len(findings) == 1
+        assert "年份相差 10 年" in findings[0]["description"]
+        assert "OCR 提取错误" in findings[0]["description"]
+
+    def test_year_gap_within_2_no_ocr_hint(self):
+        """年份差 ≤2 时不附加 OCR 混淆提示（正常时间矛盾）。"""
+        pages = _norm([
+            _make_page(1, [
+                _make_step(1, start_time="2024.01.01 10:00",
+                           signatures=[
+                               {"role": "operator", "name": "张三",
+                                "sign_time": "2023.12.31"},
+                           ]),
+            ]),
+        ])
+        findings = _check_signature_time_anomaly(pages)
+        assert len(findings) == 1
+        assert "OCR 提取错误" not in findings[0]["description"]
+
+
+# ===========================================================================
+# R9a: 签名间顺序（复核/QA 必须晚于操作者签名）
+# ===========================================================================
+
+
+class TestSignatureOrder:
+    """签名顺序规则 — reviewer/QA 签名时间不得早于 operator。"""
+
+    def test_reviewer_before_operator_finding(self):
+        pages = _norm([
+            _make_page(1, [
+                _make_step(1, start_time="2024.01.01 08:00",
+                           signatures=[
+                               {"role": "operator", "name": "张三",
+                                "sign_time": "2024.01.01 10:00"},
+                               {"role": "reviewer", "name": "李四",
+                                "sign_time": "2024.01.01 09:00"},
+                           ]),
+            ]),
+        ])
+        findings = _check_signature_order(pages)
+        assert len(findings) == 1
+        f = findings[0]
+        assert f["type"] == "signature_time_anomaly"
+        assert "李四" in f["description"]
+        assert "早于" in f["description"]
+
+    def test_reviewer_after_operator_no_finding(self):
+        pages = _norm([
+            _make_page(1, [
+                _make_step(1, start_time="2024.01.01 08:00",
+                           signatures=[
+                               {"role": "operator", "name": "张三",
+                                "sign_time": "2024.01.01 09:00"},
+                               {"role": "reviewer", "name": "李四",
+                                "sign_time": "2024.01.01 10:00"},
+                           ]),
+            ]),
+        ])
+        assert _check_signature_order(pages) == []
+
+    def test_date_only_reviewer_same_day_no_finding(self):
+        """date-only 复核签名（整天）与同日操作签名点不误报。"""
+        pages = _norm([
+            _make_page(1, [
+                _make_step(1, start_time="2024.01.01 08:00",
+                           signatures=[
+                               {"role": "operator", "name": "张三",
+                                "sign_time": "2024.01.01 09:30"},
+                               {"role": "reviewer", "name": "李四",
+                                "sign_time": "2024.01.01"},
+                           ]),
+            ]),
+        ])
+        assert _check_signature_order(pages) == []
+
+    def test_unranked_role_ignored(self):
+        pages = _norm([
+            _make_page(1, [
+                _make_step(1, start_time="2024.01.01 08:00",
+                           signatures=[
+                               {"role": "witness", "name": "王五",
+                                "sign_time": "2024.01.01 07:00"},
+                               {"role": "operator", "name": "张三",
+                                "sign_time": "2024.01.01 10:00"},
+                           ]),
+            ]),
+        ])
+        assert _check_signature_order(pages) == []
+
+    def test_year_gap_over_2_flags_ocr(self):
+        pages = _norm([
+            _make_page(1, [
+                _make_step(1, start_time="2025.01.20 08:00",
+                           signatures=[
+                               {"role": "operator", "name": "张三",
+                                "sign_time": "2025.01.20 09:00"},
+                               {"role": "reviewer", "name": "李四",
+                                "sign_time": "2015.01.20"},
+                           ]),
+            ]),
+        ])
+        findings = _check_signature_order(pages)
+        assert len(findings) == 1
+        assert "年份相差 10 年" in findings[0]["description"]
+
+
+# ===========================================================================
+# R8b: 勾选一致性（复核项勾选"否"/无法识别）
+# ===========================================================================
+
+
+class TestCheckConsistency:
+    """勾选一致性 — 检查项勾选"否"必须提示偏差处理，勾选不清提示人工核对。"""
+
+    def test_checked_no_warning(self):
+        from core.rules.rule_doc import _check_check_consistency
+
+        pages = _norm([
+            _make_page(1, [
+                _make_step(1, checks=[
+                    {"item": "生产场地是否整洁", "selected": "否", "marker": "√"},
+                ]),
+            ]),
+        ])
+        findings = _check_check_consistency(pages)
+        assert len(findings) == 1
+        assert findings[0]["severity"] == "warning"
+        assert "偏差" in findings[0]["description"]
+
+    def test_checked_yes_no_finding(self):
+        from core.rules.rule_doc import _check_check_consistency
+
+        pages = _norm([
+            _make_page(1, [
+                _make_step(1, checks=[
+                    {"item": "生产场地是否整洁", "selected": "是", "marker": "☑"},
+                    {"item": "设备状态标志使用是否正确", "selected": "N/A", "marker": "☑"},
+                ]),
+            ]),
+        ])
+        assert _check_check_consistency(pages) == []
+
+    def test_unrecognizable_selection_info(self):
+        from core.rules.rule_doc import _check_check_consistency
+
+        pages = _norm([
+            _make_page(1, [
+                _make_step(1, checks=[
+                    {"item": "洁净区压差是否符合要求", "selected": "无法识别", "marker": "手绘"},
+                ]),
+            ]),
+        ])
+        findings = _check_check_consistency(pages)
+        assert len(findings) == 1
+        assert findings[0]["severity"] == "info"
+
+    def test_empty_checks_no_finding(self):
+        from core.rules.rule_doc import _check_check_consistency
+
+        pages = _norm([
+            _make_page(1, [
+                _make_step(1, checks=[]),
+                _make_step(2),
+            ]),
+        ])
+        assert _check_check_consistency(pages) == []
+
+
+# ===========================================================================
+# R3: 边缘超范围降噪（手写 OCR 误读可能）
+# ===========================================================================
+
+
+class TestOutOfSpecEdgeMargin:
+    """param_out_of_spec 边缘降噪：≤10% 偏差降 info，>10% 维持 warning。"""
+
+    def _run(self, spec, actual):
+        from core.rules.rule_spec import _check_param_out_of_spec
+
+        pages = _norm([
+            _make_page(1, [
+                _make_step(1, parameters=[
+                    {"name": "温度", "spec_range": spec, "value": actual},
+                ]),
+            ]),
+        ])
+        findings = _check_param_out_of_spec(pages, [])
+        return findings
+
+    def test_edge_deviation_info(self):
+        """5.4 vs ≤5（8% 超差）→ info + OCR 提示。"""
+        f = self._run("≤5.0℃", "5.4℃")
+        assert len(f) == 1
+        assert f[0]["severity"] == "info"
+        assert "手写 OCR 误读" in f[0]["description"]
+
+    def test_large_deviation_warning(self):
+        """25 vs ≤5（400% 超差）→ warning 铁口。"""
+        f = self._run("≤5.0℃", "25℃")
+        assert len(f) == 1
+        assert f[0]["severity"] == "warning"
+        assert "OCR 误读" not in f[0]["description"]
+
+    def test_between_edge_low_side_info(self):
+        """0.96 vs 1.0-2.0（4% 低于下限）→ info。"""
+        f = self._run("1.0-2.0", "0.96")
+        assert len(f) == 1
+        assert f[0]["severity"] == "info"
+
+    def test_exact_boundary_is_in_spec(self):
+        """恰好 5.0 vs ≤5 → 合格，无 finding。"""
+        assert self._run("≤5.0℃", "5.0℃") == []
 
 
 # ===========================================================================

@@ -19,6 +19,57 @@ def _only_dicts(lst) -> list[dict]:
     return [x for x in lst if isinstance(x, dict)]
 
 
+# ---------------------------------------------------------------------------
+# value_source inference (fallback when the LLM omits the field)
+# ---------------------------------------------------------------------------
+
+_HANDWRITTEN_KEYWORDS = ("实际", "实测", "记录", "填写", "手写", "结果", "偏差")
+_PRINTED_KEYWORDS = ("规格", "标准", "范围", "指导", "要点", "要求", "检查项目", "项目")
+
+
+def _infer_value_source(name: str, fallback: str = "unknown") -> str:
+    """Infer value_source from a column/parameter name when the LLM omitted it.
+
+    Column headers are printed text (high trust), so keyword matching on the
+    header is a reliable proxy: "实际/实测/记录…" headers → handwritten cell
+    values; "规格/标准/指导…" headers → printed reference values. No keyword
+    hit → unknown (rules treat unknown conservatively, like handwritten).
+    """
+    if not isinstance(name, str) or not name:
+        return fallback
+    for kw in _HANDWRITTEN_KEYWORDS:
+        if kw in name:
+            return "handwritten"
+    for kw in _PRINTED_KEYWORDS:
+        if kw in name:
+            return "printed"
+    return fallback
+
+
+def _backfill_value_source(data: dict) -> None:
+    """Fill missing value_source on parameters/measurements in-place.
+
+    Called from _normalize_pages before rules run; leaves LLM-provided values
+    untouched (LLM semantic judgment wins over the header heuristic).
+    """
+    for s in data.get("steps", []) or []:
+        if not isinstance(s, dict):
+            continue
+        for p in s.get("parameters", []) or []:
+            if not isinstance(p, dict):
+                continue
+            if not p.get("value_source"):
+                p["value_source"] = _infer_value_source(p.get("name", ""))
+        for m in s.get("measurements", []) or []:
+            if not isinstance(m, dict):
+                continue
+            for col, v in (m.get("values") or {}).items():
+                if not isinstance(v, dict):
+                    continue
+                if not v.get("value_source"):
+                    v["value_source"] = _infer_value_source(col)
+
+
 def _sanitize_year_groups(eyg):
     """Keep only year-group entries that are lists of int/parseable-int values.
 
@@ -56,6 +107,7 @@ def _normalize_pages(page_structures: list[dict]) -> list[dict]:
         data = ps.get("data") if isinstance(ps, dict) else None
         if not data or data.get("_parse_error"):
             continue
+        _backfill_value_source(data)
         # P1-2 兜底: 过滤 steps/findings 顶层非 dict 元素；对每个 step 再
         # 过滤 parameters/measurements/signatures 子元素（规则层对每个
         # 元素直接调 .get()，字符串元素会 AttributeError 崩掉整个 Stage 3）。
@@ -63,7 +115,7 @@ def _normalize_pages(page_structures: list[dict]) -> list[dict]:
         for s in data.get("steps", []) or []:
             if not isinstance(s, dict):
                 continue
-            for field in ("parameters", "measurements", "signatures"):
+            for field in ("parameters", "measurements", "signatures", "checks"):
                 if field in s and isinstance(s[field], list):
                     s[field] = [x for x in s[field] if isinstance(x, dict)]
             # P1-2 兜底(标量): 规则层对 step 标量字段 .lower()/[:40] 切片，
@@ -77,6 +129,11 @@ def _normalize_pages(page_structures: list[dict]) -> list[dict]:
                     v = sig.get(field)
                     if v is not None and not isinstance(v, str):
                         sig[field] = str(v)
+            for c in s.get("checks", []) or []:
+                for field in ("item", "selected", "marker"):
+                    v = c.get(field)
+                    if v is not None and not isinstance(v, str):
+                        c[field] = str(v)
             steps.append(s)
         # P1-2 兜底(标量): page_info 非 dict → {}；overall_confidence 非 str → str()
         page_info = data.get("page_info")

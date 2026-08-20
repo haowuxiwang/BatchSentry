@@ -18,11 +18,20 @@ if __name__ == "__main__":
     import time
     import traceback
     import uvicorn
-    from config import config
 
     # Use port 58765 by default (Electron's expected port), but allow
     # override via env var PORT for dev/testing.
     port = int(os.getenv("PORT", "58765"))
+    # CORS 一致性：config.py 的 app.port 也从 PORT env 派生（默认 8000），
+    # 若不显式同步，server.py 监听 58765 而 CORS allowlist 是 8000 →
+    # 浏览器访问设置页的 POST/PUT 会被 CORS 拦截。必须在 import config
+    # 之前 setdefault，否则 config 模块已按 8000 初始化（Electron
+    # main.js 已传 PORT=58765，天然一致；此兜底覆盖「直接运行
+    # python server.py」场景）。
+    os.environ.setdefault("PORT", str(port))
+
+    from config import config
+
     # Host 从 config 读取（APP_HOST env var），避免硬编码 127.0.0.1 与
     # config.py 脱节。默认值 127.0.0.1 由 config 提供。
     host = config["app"].host

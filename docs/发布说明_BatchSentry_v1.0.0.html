@@ -1,0 +1,542 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>BatchSentry 发布说明 v1.0.0</title>
+<style>
+  @page {
+    size: A4;
+    margin: 22mm 19mm 20mm 19mm;
+    @bottom-center {
+      content: counter(page);
+      font-family: "SimSun", serif;
+      font-size: 9pt;
+      color: #888;
+    }
+  }
+  @page :first {
+    @bottom-center { content: none; }
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: "SimSun", "宋体", serif;
+    font-size: 11pt;
+    line-height: 1.85;
+    color: #1a1a1a;
+  }
+  .no-break { page-break-inside: avoid; }
+
+  /* ---------- 封面 ---------- */
+  .cover { height: 100vh; display: flex; flex-direction: column; justify-content: center; }
+  .cover-kicker {
+    font-family: "Microsoft YaHei", sans-serif;
+    font-size: 10pt;
+    letter-spacing: 4px;
+    color: #1f4e79;
+    text-transform: uppercase;
+    margin-bottom: 26mm;
+  }
+  .cover-title {
+    font-family: "Microsoft YaHei", sans-serif;
+    font-size: 34pt;
+    font-weight: 600;
+    letter-spacing: 2px;
+    line-height: 1.3;
+  }
+  .cover-sub {
+    font-family: "Microsoft YaHei", sans-serif;
+    font-size: 14pt;
+    color: #444;
+    margin-top: 8mm;
+    letter-spacing: 1px;
+  }
+  .cover-rule { width: 60mm; border-top: 1.5pt solid #1f4e79; margin-top: 14mm; }
+  .cover-meta {
+    margin-top: 14mm;
+    font-size: 10.5pt;
+    color: #333;
+    line-height: 2.1;
+  }
+  .cover-meta b { font-family: "Microsoft YaHei", sans-serif; font-weight: 600; }
+  .cover-foot {
+    margin-top: 22mm;
+    font-size: 9.5pt;
+    color: #888;
+  }
+
+  /* ---------- 目录 ---------- */
+  .toc { page-break-after: always; }
+  .toc h1 {
+    font-family: "Microsoft YaHei", sans-serif;
+    font-size: 18pt;
+    border-bottom: 1pt solid #ccc;
+    padding-bottom: 4mm;
+    margin-bottom: 8mm;
+  }
+  .toc ol { list-style: none; }
+  .toc li { margin-bottom: 3.4mm; }
+  .toc a {
+    text-decoration: none;
+    color: #1a1a1a;
+    display: flex;
+    align-items: baseline;
+  }
+  .toc .num {
+    font-family: "Microsoft YaHei", sans-serif;
+    font-weight: 600;
+    width: 14mm;
+    color: #1f4e79;
+  }
+  .toc .lvl2 { margin-left: 14mm; font-size: 10.5pt; color: #444; }
+  .toc .lvl2 .num { width: 8mm; }
+
+  /* ---------- 章节 ---------- */
+  .chapter { page-break-before: always; }
+  h1.chap {
+    font-family: "Microsoft YaHei", sans-serif;
+    font-size: 17pt;
+    font-weight: 600;
+    margin-bottom: 6mm;
+    padding-bottom: 3mm;
+    border-bottom: 1.5pt solid #1f4e79;
+  }
+  h2 {
+    font-family: "Microsoft YaHei", sans-serif;
+    font-size: 13pt;
+    font-weight: 600;
+    margin: 7mm 0 3mm 0;
+    color: #1f4e79;
+  }
+  h3 {
+    font-family: "Microsoft YaHei", sans-serif;
+    font-size: 11.5pt;
+    font-weight: 600;
+    margin: 5mm 0 2mm 0;
+  }
+  p { text-indent: 2em; margin-bottom: 2.5mm; }
+  p.no-indent { text-indent: 0; }
+  ul, ol { margin: 2mm 0 3mm 2.5em; }
+  li { margin-bottom: 1.2mm; }
+  b.k { font-family: "Microsoft YaHei", sans-serif; font-weight: 600; }
+
+  .callout {
+    background: #f5f7fa;
+    border-left: 3pt solid #1f4e79;
+    padding: 3.5mm 5mm;
+    margin: 4mm 0;
+    page-break-inside: avoid;
+  }
+  .callout p { text-indent: 0; margin-bottom: 1mm; font-size: 10.5pt; }
+
+  .flow {
+    border: 1pt solid #d5d5d5;
+    border-radius: 2mm;
+    padding: 5mm 6mm;
+    margin: 4mm 0;
+    page-break-inside: avoid;
+    font-family: "Microsoft YaHei", sans-serif;
+  }
+  .flow .node {
+    background: #fafafa;
+    border: 1pt solid #bbb;
+    border-radius: 1.5mm;
+    padding: 2mm 4mm;
+    text-align: center;
+    font-size: 10pt;
+    margin: 1.5mm auto;
+    width: 88%;
+  }
+  .flow .node b { color: #1f4e79; }
+  .flow .arrow { text-align: center; color: #1f4e79; font-size: 10pt; line-height: 1.4; }
+  .flow .note { font-size: 8.5pt; color: #666; }
+
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 3mm 0 4mm 0;
+    font-size: 10pt;
+    page-break-inside: avoid;
+  }
+  th {
+    font-family: "Microsoft YaHei", sans-serif;
+    background: #1f4e79;
+    color: #fff;
+    padding: 2mm 3mm;
+    text-align: left;
+    font-weight: 600;
+  }
+  td { border: 1pt solid #d5d5d5; padding: 2mm 3mm; vertical-align: top; }
+  tr:nth-child(even) td { background: #fafafa; }
+
+  .signed { margin-top: 10mm; text-align: right; }
+  .signed .line { border-top: 0.75pt solid #999; width: 50mm; display: inline-block; margin-left: 4mm; }
+
+  .footer-note {
+    margin-top: 8mm;
+    padding-top: 3mm;
+    border-top: 0.75pt solid #ccc;
+    font-size: 9pt;
+    color: #777;
+  }
+</style>
+</head>
+<body>
+
+<!-- ==================== 封面 ==================== -->
+<div class="cover">
+  <div class="cover-kicker">BatchSentry &nbsp;·&nbsp; Release Notes &nbsp;·&nbsp; v1.0.0</div>
+  <div class="cover-title">BatchSentry&nbsp;·&nbsp;批哨兵</div>
+  <div class="cover-sub">GMP 批生产记录半自动合规检查系统</div>
+  <div class="cover-rule"></div>
+  <div class="cover-meta">
+    <b>发布说明</b> &nbsp;v1.0.0<br>
+    <b>发布日期</b> &nbsp;2026 年 8 月 20 日<br>
+    <b>作者</b> &nbsp;吴思潭 · DeepSeek V4 Flash · GLM 5.2
+  </div>
+  <div class="cover-foot">
+    本文档面向非技术背景的读者编写，尽量使用通俗语言说明系统的使用方法、构建思路与设计哲学。<br>
+    建议阅读时间：20 分钟。
+  </div>
+</div>
+
+<!-- ==================== 目录 ==================== -->
+<div class="toc">
+  <h1>目 录</h1>
+  <ol>
+    <li><a href="#ch1"><span class="num">一</span>写在前面：我们为什么要做这件事</a></li>
+    <li><a href="#ch2"><span class="num">二</span>它是什么：功能总览</a></li>
+    <li><a href="#ch3"><span class="num">三</span>如何使用：逐步操作指南</a>
+      <ol class="lvl2">
+        <li class="lvl2"><a href="#s31"><span class="num">3.1</span>安装与启动</a></li>
+        <li class="lvl2"><a href="#s32"><span class="num">3.2</span>首次配置</a></li>
+        <li class="lvl2"><a href="#s33"><span class="num">3.3</span>上传批记录</a></li>
+        <li class="lvl2"><a href="#s34"><span class="num">3.4</span>等待自动处理</a></li>
+        <li class="lvl2"><a href="#s35"><span class="num">3.5</span>复核界面</a></li>
+        <li class="lvl2"><a href="#s36"><span class="num">3.6</span>对发现项做裁决</a></li>
+        <li class="lvl2"><a href="#s37"><span class="num">3.7</span>导出报告</a></li>
+        <li class="lvl2"><a href="#s38"><span class="num">3.8</span>常见问题</a></li>
+      </ol>
+    </li>
+    <li><a href="#ch4"><span class="num">四</span>我们是如何构建的</a>
+      <ol class="lvl2">
+        <li class="lvl2"><a href="#s41"><span class="num">4.1</span>用什么语言与技术</a></li>
+        <li class="lvl2"><a href="#s42"><span class="num">4.2</span>数据如何流转</a></li>
+        <li class="lvl2"><a href="#s43"><span class="num">4.3</span>三个关键部件</a></li>
+        <li class="lvl2"><a href="#s44"><span class="num">4.4</span>容错设计：机器也会出错，我们怎么办</a></li>
+        <li class="lvl2"><a href="#s45"><span class="num">4.5</span>质量保障</a></li>
+      </ol>
+    </li>
+    <li><a href="#ch5"><span class="num">五</span>安全、性能与功能亮点</a>
+      <ol class="lvl2">
+        <li class="lvl2"><a href="#s51"><span class="num">5.1</span>安全</a></li>
+        <li class="lvl2"><a href="#s52"><span class="num">5.2</span>性能</a></li>
+        <li class="lvl2"><a href="#s53"><span class="num">5.3</span>功能亮点</a></li>
+      </ol>
+    </li>
+    <li><a href="#ch6"><span class="num">六</span>设计哲学：我们怎么想问题</a></li>
+    <li><a href="#ch7"><span class="num">七</span>未来展望</a>
+      <ol class="lvl2">
+        <li class="lvl2"><a href="#s71"><span class="num">7.1</span>降低噪音：减少误报</a></li>
+        <li class="lvl2"><a href="#s72"><span class="num">7.2</span>提升准确性与精确性</a></li>
+        <li class="lvl2"><a href="#s73"><span class="num">7.3</span>拓展与维护</a></li>
+        <li class="lvl2"><a href="#s74"><span class="num">7.4</span>更远的图景</a></li>
+      </ol>
+    </li>
+    <li><a href="#ch8"><span class="num">八</span>边界与声明（请务必阅读）</a></li>
+    <li><a href="#ch9"><span class="num">九</span>致谢与作者</a></li>
+  </ol>
+</div>
+
+<!-- ==================== 一 ==================== -->
+<div class="chapter" id="ch1">
+  <h1 class="chap">一、写在前面：我们为什么要做这件事</h1>
+  <p>在制药行业，每一批药品的生产过程都要被完整地记录在案，这就是"批生产记录"。它记载了从投料到成品每一步的操作、时间、参数和检验结果。按照 GMP（药品生产质量管理规范）的要求，这些记录必须被逐项核对——参数有没有超限、时间有没有矛盾、批号有没有写错、记录有没有缺失。这些核验直接关系到药品的质量与患者的用药安全。</p>
+  <p>而现实中的核对工作，主要依赖人工逐页翻阅。一位复核人员面对一本几十页、上百页的批记录，需要反复对照、查找、比对，既枯燥又费力。人不是机器，长时间重复工作难免疲劳、疏漏；出于时间成本的考虑，许多核对也只能是抽样进行，而非全量核验。</p>
+  <p>我们做 BatchSentry（批哨兵），就是想回答一个问题：<b class="k">能不能让机器先做一遍"机械性"的检查，把人从重复劳动中解放出来，让专业人员的精力集中在真正需要判断的事情上？</b></p>
+  <p>答案是一套"人机协同"的工作方式：机器负责"看"和"筛"——它逐页阅读、提取、比对，把可疑之处挑出来；人负责"审"和"定"——专业人员在机器的提示下逐条复核，做出最终裁决。机器不替代人，它只是让人的时间花在刀刃上。</p>
+  <div class="callout">
+    <p><b class="k">一句话概括：</b>上传批生产记录的 PDF，系统自动完成阅读、提取与初步检查，生成一份"待复核清单"，由专业人员逐条确认后导出正式报告。</p>
+  </div>
+</div>
+
+<!-- ==================== 二 ==================== -->
+<div class="chapter" id="ch2">
+  <h1 class="chap">二、它是什么：功能总览</h1>
+  <p>BatchSentry 是一款安装在你自己电脑上的桌面软件（单机应用），用一句话描述它的工作：<b class="k">把"批生产记录 PDF"变成"检查报告 + 待人工复核清单"</b>。</p>
+  <p>它的核心功能可以分为六步，这也是数据在系统里流动的完整路径：</p>
+
+  <div class="flow">
+    <div class="node"><b>① 上传</b><br><span class="note">支持 PDF 与常见图片（扫描件、照片均可）</span></div>
+    <div class="arrow">▼</div>
+    <div class="node"><b>② 文字识别（OCR）</b><br><span class="note">把扫描件里的字"读"成可编辑的文字——相当于机器先通读一遍</span></div>
+    <div class="arrow">▼</div>
+    <div class="node"><b>③ 智能提取（大语言模型）</b><br><span class="note">把文字整理成结构化数据：哪个工序、什么时间、什么参数、数值多少</span></div>
+    <div class="arrow">▼</div>
+    <div class="node"><b>④ 自动检查（两条线并行）</b><br><span class="note">规则线：硬性逻辑，如时间不能倒挂、参数不能超限、批号必须一致<br>智能线：语言模型理解语义，发现"看起来不对劲"的地方</span></div>
+    <div class="arrow">▼</div>
+    <div class="node"><b>⑤ 人工复核</b><br><span class="note">逐条查看机器发现的问题，对照 PDF 原件，确认 / 驳回 / 纠正</span></div>
+    <div class="arrow">▼</div>
+    <div class="node"><b>⑥ 导出报告</b><br><span class="note">生成正式检查报告，用于留档与后续处理</span></div>
+  </div>
+
+  <p>整个过程中，系统会实时显示进度（例如"OCR 12/51 页"），你不需要守着它；任务完成后可以随时回来复核。下面是各个能力的一览：</p>
+
+  <table>
+    <tr><th style="width:30%">能力</th><th>说明</th></tr>
+    <tr><td>上传与识别</td><td>PDF、图片（jpg/png/webp/bmp/tif 等）均可；自动识别重复文件防止重复分析；超大文件自动分块处理</td></tr>
+    <tr><td>自动检查</td><td>时间倒挂、参数越限、批号不一致、记录缺失、签名时间异常等检查项；也支持用户自定义合规规则</td></tr>
+    <tr><td>人工复核</td><td>三栏对照界面（页码导航 | PDF 原件 | 发现项清单），点击发现项可直接定位到原文位置</td></tr>
+    <tr><td>报告导出</td><td>一键导出 Markdown 或 JSON 格式报告，包含全部发现项与复核结论</td></tr>
+    <tr><td>消息通知（可选）</td><td>任务完成时可推送消息提醒（如飞书），无需守在电脑前</td></tr>
+  </table>
+</div>
+
+<!-- ==================== 三 ==================== -->
+<div class="chapter" id="ch3">
+  <h1 class="chap">三、如何使用：逐步操作指南</h1>
+
+  <h2 id="s31">3.1 安装与启动</h2>
+  <ul>
+    <li>拿到安装包后（Windows 系统，单文件可执行程序），<b class="k">双击</b>即可启动。无需安装、无需配置数据库、无需任何技术操作。</li>
+    <li>启动后会自动打开操作界面；关闭界面即退出程序。</li>
+    <li>程序的所有数据都保存在你自己的电脑里，不会上传到任何公共服务器（除你主动配置的 OCR / AI 服务外，见 3.2）。</li>
+  </ul>
+
+  <h2 id="s32">3.2 首次配置</h2>
+  <p>系统需要两类外部服务才能工作，它们都由你自己决定用哪一家、是否配置：</p>
+  <table>
+    <tr><th style="width:22%">服务</th><th style="width:34%">用途</th><th>说明</th></tr>
+    <tr><td>OCR 服务</td><td>把扫描件变成文字</td><td>支持两家常见服务商（如 MinerU、PaddleOCR），配置了哪家就用哪家；两家都配置时，一家出问题系统会自动切换到另一家</td></tr>
+    <tr><td>AI 大模型服务</td><td>理解记录内容、提取数据、语义检查</td><td>内置多家主流模型供应商（如 DeepSeek、SiliconFlow 等），也支持添加自定义供应商；填写密钥后即可使用</td></tr>
+  </table>
+  <p>操作路径：主界面右上角进入<b class="k">"设置"页面</b> → 选择服务商、填入密钥 → 点击<b class="k">"测试连接"</b>按钮，系统会验证服务可用后再开始使用。密钥只在本地保存，界面上只显示前后几位字符，防止偷看。</p>
+  <div class="callout">
+    <p><b class="k">小提示：</b>不配置任何服务，系统也可以正常打开，只是无法处理任务。配置完成后无需重启，立即生效。</p>
+  </div>
+
+  <h2 id="s33">3.3 上传批记录</h2>
+  <ul>
+    <li>在主界面上，把批记录文件<b class="k">拖进上传区域</b>，或点击选择文件。支持 PDF，也支持 jpg / png / webp / bmp / tif 等图片格式——纸质记录拍照后也能直接用。</li>
+    <li>单个文件上限 200MB，足够覆盖绝大多数批记录。</li>
+    <li>如果上传的文件与之前分析过的文件完全相同，系统会<b class="k">提醒你"该文件已分析过"</b>并给出旧任务的入口，避免重复花钱、重复等待。确需重新分析时，可以显式选择"强制重新分析"。</li>
+    <li>上传后任务自动开始，无需其他操作。</li>
+  </ul>
+
+  <h2 id="s34">3.4 等待自动处理</h2>
+  <ul>
+    <li>任务列表里可以看到每个任务的实时状态与进度，例如"OCR 12/51"、"正在分析第 18/51 页"，都是<b class="k">实时推送</b>的，不需要刷新页面。</li>
+    <li>一个批记录从上传到出结果，通常需要几分钟（取决于页数、服务商速度）。期间你可以关闭界面，完成后（若配置了通知）会收到提醒。</li>
+    <li>系统同时最多处理 3 个任务，其余任务排队等待，防止电脑内存耗尽。</li>
+    <li>如果某个任务中途失败（例如 OCR 服务临时不可用），状态会变为"错误"，界面上会显示原因；对"卡住"的任务系统也会自动检测并恢复。</li>
+  </ul>
+
+  <h2 id="s35">3.5 复核界面</h2>
+  <p>任务完成后，点击任务进入<b class="k">复核界面</b>。这是一个三栏布局，全部对照一目了然：</p>
+  <table>
+    <tr><th style="width:18%">区域</th><th>作用</th></tr>
+    <tr><td>左栏 · 页码导航</td><td>列出全部页码；有发现问题的页会带标记，点击直接跳转；显示整本记录的发现项数量统计</td></tr>
+    <tr><td>中栏 · PDF 原件</td><td>显示该页的原始扫描件，可缩放查看；这是复核的"证据"，一切判断以原件为准</td></tr>
+    <tr><td>右栏 · 发现项清单</td><td>机器发现的全部问题，按严重程度排序（重要 / 警告 / 提示）；点击任意一条，中栏会自动定位到对应原文位置</td></tr>
+  </table>
+  <p>系统还会在界面上提示每页的"识别置信度"——如果某页识别得不好（例如扫描质量差），会明确标注"此页识别可能不完整"，提醒你重点人工核对，绝不隐瞒机器的不足。</p>
+
+  <h2 id="s36">3.6 对发现项做裁决</h2>
+  <p>每条发现项都不是最终结论，而是<b class="k">待复核的建议</b>。你可以对每条做出三种处理：</p>
+  <ul>
+    <li><b class="k">确认</b>：认同该问题，它将被记入正式报告；</li>
+    <li><b class="k">驳回</b>：这是误报，记录被识别错了或判断不当，不会记入报告；</li>
+    <li><b class="k">纠正</b>：问题属实，但系统描述不准确，你可以修改描述后确认。</li>
+  </ul>
+  <p>每条裁决都可以附上复核意见与姓名，形成完整的"人审"痕迹，满足质量审计的追溯要求。</p>
+
+  <h2 id="s37">3.7 导出报告</h2>
+  <ul>
+    <li>复核完成后，一键导出<b class="k">检查报告</b>（Markdown 或 JSON 格式）。</li>
+    <li>报告包含：批次与文件信息、全部发现项（含严重程度、来源、页码、复核结论）、以及本次分析使用的服务记录（用于追溯：哪个模型、哪个版本、何时处理的）。</li>
+    <li>报告可直接用于内部留档，也可供后续流程（如偏差处理）使用。</li>
+  </ul>
+
+  <h2 id="s38">3.8 常见问题</h2>
+  <table>
+    <tr><th style="width:30%">问题</th><th>怎么办</th></tr>
+    <tr><td>任务显示"错误"</td><td>查看错误原因：通常是 OCR 或 AI 服务临时不可用（网络、密钥过期、服务商故障）。修复后在任务上点"重试"即可，已识别的部分不会重复处理</td></tr>
+    <tr><td>部分页面识别为空</td><td>系统会自动尝试"自愈"：把空页单独重新识别一遍；仍为空的会明确标记出来，供你人工核对原件</td></tr>
+    <tr><td>发现项太多、看着像误报</td><td>这是正常的：机器宁多勿漏。逐条驳回误报即可，最终报告只记录确认与纠正的内容</td></tr>
+    <tr><td>担心 AI 编造数值</td><td>系统内置"防编造"校验：AI 提取的每个数值都必须能在原文里找到，找不到会明确提示"该值未见原文，请重点核对"</td></tr>
+  </table>
+</div>
+
+<!-- ==================== 四 ==================== -->
+<div class="chapter" id="ch4">
+  <h1 class="chap">四、我们是如何构建的</h1>
+
+  <h2 id="s41">4.1 用什么语言与技术</h2>
+  <p>整个系统用一套非常主流、成熟的技术组合构建，我们不追求新奇，只追求稳妥：</p>
+  <ul>
+    <li><b class="k">Python（主要开发语言）</b>：当今应用最广泛的编程语言之一，在数据处理、人工智能生态上积累深厚，可靠性高。</li>
+    <li><b class="k">网页技术做界面</b>：操作界面用网页技术（HTML / CSS / JavaScript）编写——就是每个浏览器都认识的那套语言，界面渲染快、交互流畅。</li>
+    <li><b class="k">Electron 桌面外壳</b>：把"网页界面 + 后台程序"打包成一个双击即用的桌面应用，像普通软件一样使用，无需任何命令行操作。</li>
+    <li><b class="k">云服务（可选配置）</b>：文字识别与智能分析调用的是你配置的云服务（OCR 与 AI 大模型），这也是整个系统里唯一需要联网的部分。</li>
+  </ul>
+
+  <h2 id="s42">4.2 数据如何流转</h2>
+  <p>数据在系统中走一条"流水线"，每一步的产出是下一步的输入（详见第二章的流程图）。需要特别说明的是每个环节的状态都可查询、可追溯：</p>
+  <table>
+    <tr><th style="width:22%">阶段</th><th style="width:38%">做什么</th><th>产出物</th></tr>
+    <tr><td>① 上传</td><td>接收文件、校验格式与大小、防止重复</td><td>任务记录（含文件指纹）</td></tr>
+    <tr><td>② OCR</td><td>每页文字识别</td><td>每页的识别文本</td></tr>
+    <tr><td>③ 智能提取</td><td>逐页整理成结构化数据（工序、时间、参数、数值）</td><td>每页的数据表</td></tr>
+    <tr><td>④ 自动检查</td><td>规则线 + 智能线并行检查</td><td>发现项清单（带来源标注）</td></tr>
+    <tr><td>⑤ 人工复核</td><td>逐条裁决</td><td>复核结论（谁、何时、什么意见）</td></tr>
+    <tr><td>⑥ 报告导出</td><td>汇总生成</td><td>正式检查报告</td></tr>
+  </table>
+
+  <h2 id="s43">4.3 三个关键部件</h2>
+  <h3>OCR——"机器的眼睛"</h3>
+  <p>文字识别技术，把扫描件里的图像文字"读"成可编辑的文字。我们同时支持两家主流 OCR 服务，一家为主、另一家备用：主服务出问题时自动切换，识别结果太少时也会自动换用备用服务重新识别，尽量保证"机器读到的"与"纸上写的"一致。</p>
+  <h3>大语言模型——"机器的大脑"</h3>
+  <p>就是大家熟知的 AI 聊天助手背后的技术。在这里它不做对话，而是执行两项"阅读理解"任务：一是把 OCR 出来的杂排版文字整理成规整的数据表（哪一步、什么时间、什么参数、多少数值）；二是通读整本记录，发现需要跨页对比才能看出的语义问题（例如前后记录自相矛盾）。我们要求模型"只依据原文回答"，并校验它提取的数值必须能在原文中找到，防止它"自由发挥"。</p>
+  <h3>规则引擎——"机器的标尺"</h3>
+  <p>一系列由人预先定义好的、确定性的检查逻辑，例如：结束时间不能早于开始时间、温度不能超出工艺范围、批号必须前后一致、必备栏目不能空缺。规则检查是"铁面无私"的——同样的输入永远得到同样的结论，不消耗任何智能服务费用，速度极快。</p>
+  <div class="callout">
+    <p><b class="k">两条检查线的关系：</b>规则线保证"该查的必查到"（确定性），智能线负责"人一眼能看出的怪事也能被机器看出来"（灵活性）。两者互补，共同产出发现项清单。</p>
+  </div>
+
+  <h2 id="s44">4.4 容错设计：机器也会出错，我们怎么办</h2>
+  <p>做工程的人都知道：任何环节都可能出错，关键是出错后系统如何自处。我们把"容错"当作第一等设计原则：</p>
+  <ul>
+    <li><b class="k">双 OCR 自动切换</b>：主识别服务故障或结果明显不全时，自动换用备用服务重新识别；</li>
+    <li><b class="k">空页自愈</b>：某页识别结果为空时，自动把该页单独重新识别（大文件更容易出现这种问题）；</li>
+    <li><b class="k">AI 应答容错</b>：AI 偶发返回格式混乱时，自动重试并提示"上次格式有误，请按规范回答"；</li>
+    <li><b class="k">单点失败不拖垮整体</b>：某页分析失败，只标记该页，其余页面照常完成，任务进入"部分完成"状态并明确提示；</li>
+    <li><b class="k">卡死任务自动恢复</b>：程序异常退出后重启，会自动检测并标记未完成的任务，数据不会错乱；</li>
+    <li><b class="k">中断可恢复</b>：中途停止的任务，重试时已完成的页面不会重复处理，省钱省时。</li>
+  </ul>
+
+  <h2 id="s45">4.5 质量保障</h2>
+  <ul>
+    <li>整套系统带有一套<b class="k">1000+ 个自动化测试用例</b>（当前 1015 个），覆盖核心逻辑的 90% 以上代码路径，每次改动都会全量回归验证；</li>
+    <li>全部 37 项服务接口经过拆分重构前后的<b class="k">逐一对照回归</b>，确认行为完全一致；</li>
+    <li>真实文件全链路验证：使用真实批记录 PDF 跑通"上传 → 识别 → 提取 → 检查 → 复核 → 报告"完整流程。</li>
+  </ul>
+</div>
+
+<!-- ==================== 五 ==================== -->
+<div class="chapter" id="ch5">
+  <h1 class="chap">五、安全、性能与功能亮点</h1>
+
+  <h2 id="s51">5.1 安全</h2>
+  <p>药品生产数据属于敏感数据，我们把安全当作底线：</p>
+  <ul>
+    <li><b class="k">本地运行、不对外暴露</b>：程序只在本机工作，不向公网开放任何端口；除你主动配置的 OCR / AI 云服务外，数据不出本机；</li>
+    <li><b class="k">密钥保护</b>：AI / OCR 服务的密钥只在本地加密保存，界面展示时自动打码；</li>
+    <li><b class="k">防跨站攻击</b>：外界网页无法借用你的浏览器偷偷指挥本程序（跨站请求防护 + 来源校验）；</li>
+    <li><b class="k">文件防线</b>：上传文件校验真实格式（不只看后缀名）、限制大小、防止伪装文件与路径越权读取本机文件；</li>
+    <li><b class="k">GMP 审计追踪</b>：每一次 AI 调用（用了哪个模型、什么版本、消耗多少、成败与否）都有记录；每一个复核动作（谁、何时、什么结论）都有留痕——这正是制药行业审计所要求的可追溯性；</li>
+    <li><b class="k">接口全守卫</b>：所有读、写接口都校验来源，非本机请求一律拒绝。</li>
+  </ul>
+
+  <h2 id="s52">5.2 性能</h2>
+  <ul>
+    <li><b class="k">实时进度</b>：任务进度实时推送（OCR 页数、分析页数），无需轮询刷新；</li>
+    <li><b class="k">并发控制</b>：默认最多 3 个任务并行，防止大文件把内存占满；</li>
+    <li><b class="k">页面渲染缓存</b>：PDF 预览页渲染结果有缓存，翻页不重复渲染、不卡顿；</li>
+    <li><b class="k">断点续做</b>：已完成页面不重复处理（见 4.4）；</li>
+    <li><b class="k">重构零回退</b>：近期完成的大规模代码整理（模块化拆分），经过对比验证对运行性能无任何回退。</li>
+  </ul>
+
+  <h2 id="s53">5.3 功能亮点</h2>
+  <ul>
+    <li><b class="k">跨页关联检查</b>：不止检查单页，还能跨页比对——例如"第 9 页工序结束时间早于第 10 页工序开始时间"这类需要通读全册才能发现的问题；</li>
+    <li><b class="k">防"AI 编造"</b>：AI 提取的数值必须能在原文中找到，找不到即显式提示复核（见 3.8）；</li>
+    <li><b class="k">自定义合规规则</b>：企业自己的工艺标准、内控要求，可以写成规则注入系统，随批随检；</li>
+    <li><b class="k">识别质量透明</b>：每页的识别置信度、识别不完整的页面、AI 不确定的数值，都如实标注，绝不隐瞒；</li>
+    <li><b class="k">图片直传</b>：纸质记录拍照即可上传，自动转成标准格式处理；</li>
+    <li><b class="k">任务管理</b>：历史任务可归档、可删除、可重新分析，重复文件自动识别（防止重复花钱）。</li>
+  </ul>
+</div>
+
+<!-- ==================== 六 ==================== -->
+<div class="chapter" id="ch6">
+  <h1 class="chap">六、设计哲学：我们怎么想问题</h1>
+
+  <h2>6.1 界面：极简与克制</h2>
+  <p>我们的界面设计借鉴了现代工具软件（如 Notion 等）的<b class="k">极简主义风格</b>：白底、黑字、平直的列表、克制的配色、没有花哨的装饰和动画。为什么这么做？因为这是一款<b class="k">每天都要长时间使用的专业工具</b>——界面越安静，使用者越容易专注在内容本身（批记录、发现项、原件）。我们用"降低视觉噪音"的方式，帮助复核人员降低"认知负担"：信息层级一目了然（左页码、中原件、右问题），严重度用克制的颜色区分，操作路径不超过两级。好工具的设计哲学是"让人感觉不到工具的存在"。</p>
+
+  <h2>6.2 工程：可靠优先、可追溯、可维护</h2>
+  <ul>
+    <li><b class="k">可靠优先</b>：宁可慢一点，不可错一点。容错、重试、自愈（见 4.4）都是这一原则的落地；</li>
+    <li><b class="k">可追溯</b>：制药行业要求"可追溯"，所以每一次 AI 调用、每一个复核动作都留痕（见 5.1）；</li>
+    <li><b class="k">可维护</b>：代码坚持模块化——把大文件拆分成职责清晰的小模块，每段代码都写清楚用途，并配有 1000+ 自动化测试兜底。这样即使未来有新人接手，也能快速理解与改进，而不是"一个不敢动的黑盒子"。</li>
+  </ul>
+
+  <h2>6.3 人的位置：AI 永远只是"提建议的人"</h2>
+  <p>这是整个系统最重要的一条设计原则：<b class="k">AI 只提建议，人做裁决</b>。系统里没有任何一个环节会"替人做决定"——所有发现项都以"待复核"状态呈现，等待专业人员逐条确认；系统的不足（识别不全、数值存疑）全部如实标注。我们相信，技术最好的姿态是<b class="k">辅助人的判断，而不是替代人的判断</b>。</p>
+</div>
+
+<!-- ==================== 七 ==================== -->
+<div class="chapter" id="ch7">
+  <h1 class="chap">七、未来展望</h1>
+
+  <h2 id="s71">7.1 降低噪音：减少误报</h2>
+  <p>当前版本的原则是"宁多勿漏"，代价是会出现一定比例的误报（把正常记录判断为可疑）。这是刻意的保守选择，但也是我们下一步要持续优化的方向：</p>
+  <ul>
+    <li><b class="k">置信度分级</b>：为每条发现标注"系统有多确定"，让复核人员优先处理高置信度问题；</li>
+    <li><b class="k">区分"风格差异"与"真实异常"</b>：例如记录填写格式不规范但数值正确，不应与真实违规同等对待；</li>
+    <li><b class="k">反馈闭环</b>：人工驳回的记录将沉淀为经验（在保护隐私的前提下），让系统从"被纠正"中学习，同类误报越来越少。</li>
+  </ul>
+
+  <h2 id="s72">7.2 提升准确性与精确性</h2>
+  <ul>
+    <li><b class="k">识别层面</b>：优化扫描件预处理（倾斜校正、表格线识别、印章遮挡处理），让"机器读到的"更接近"纸上写的"；</li>
+    <li><b class="k">规则层面</b>：把更多专家经验固化为规则模板（如行业标准、工艺规程），形成可复用的规则库；</li>
+    <li><b class="k">智能层面</b>：探索"多模型交叉验证"——同一问题让多个模型独立判断，取共识结果，进一步降低单模型误判；</li>
+    <li><b class="k">数值层面</b>：更精细的数值校验，包括单位换算、有效数字、时间精度。</li>
+  </ul>
+
+  <h2 id="s73">7.3 拓展与维护</h2>
+  <p>我们在架构上为"可持续演进"做了准备：模块化设计意味着——新增一条检查规则、接入一家新的 OCR 服务、更换或增加一个 AI 模型供应商，都不需要改动系统主体，几小时内即可完成接入。这意味着系统可以跟着行业要求、跟着技术发展持续演进，而不是一次性用完就废。</p>
+
+  <h2 id="s74">7.4 更远的图景</h2>
+  <p>坦率地说，我们更期待这样一个未来：当批生产记录<b class="k">全流程电子化、系统化</b>——数据在生产线上实时生成、结构完整、天然合规——到那时，这类"半自动检查"工具的价值将自然消退。BatchSentry 的定位就是<b class="k">过渡期的桥梁</b>：在纸质记录与电子化之间，先用 AI 帮行业把"人海核对"的负担卸下来。如果有一天它不再被需要，那恰恰说明行业已经走到了更好的阶段。</p>
+</div>
+
+<!-- ==================== 八 ==================== -->
+<div class="chapter" id="ch8">
+  <h1 class="chap">八、边界与声明（请务必阅读）</h1>
+  <ol>
+    <li><b class="k">本应用是辅助工具，不是裁决工具。</b>所有检查结果均属"提示"性质，最终判断以具有资质的专业审核人员为准。本应用不构成任何质量合格证明，也不替代 GMP 法规要求的人工审核流程。</li>
+    <li><b class="k">本应用是过渡工具。</b>它的价值在于"当前阶段人机协同"：在批生产记录尚未全流程信息化的当下，帮助降低人工核对负担。若未来记录全流程电子化、结构化数据直接生成，本工具的使命即告完成，届时使用者应优先采用信息化的原生方案。</li>
+    <li><b class="k">我们保持谦虚。</b>本方案只是众多可行思路中的一种，绝不敢自称最优解；它的提出不阻碍、也不应阻碍任何更好的想法与方案的诞生。我们更希望它成为一块"垫脚石"。</li>
+    <li><b class="k">我们保持开放。</b>欢迎任何使用反馈、批评与建议；欢迎感兴趣的朋友一起参与构建与改进。每一个真实的业务场景，都比我们的想象更能定义"什么是好的工具"。</li>
+    <li><b class="k">数据与责任。</b>使用本应用处理的数据由使用者自行管理与负责；外部 OCR / AI 服务的数据处理政策以服务商声明为准。</li>
+  </ol>
+</div>
+
+<!-- ==================== 九 ==================== -->
+<div class="chapter" id="ch9">
+  <h1 class="chap">九、致谢与作者</h1>
+  <h2>作者</h2>
+  <table>
+    <tr><th style="width:30%">角色</th><th>署名</th></tr>
+    <tr><td>产品构想 · 需求定义 · 工程实现 · 测试验证</td><td><b>吴思潭</b></td></tr>
+    <tr><td>AI 协作编程伙伴 · 代码实现 · 测试编写 · 文档协助</td><td><b>DeepSeek V4 Flash</b></td></tr>
+    <tr><td>AI 协作编程伙伴 · 代码实现 · 测试编写 · 文档协助</td><td><b>GLM 5.2</b></td></tr>
+  </table>
+  <p class="no-indent">说明：本项目的代码由人类工程师与 AI 编程助手结对完成——人类负责产品判断、架构决策与最终验收，AI 负责具体编码、测试与文档的编写。我们相信这是当下一种诚实而高效的工作方式，也欢迎对这个工作方式本身的讨论。</p>
+  <h2>致谢</h2>
+  <p>感谢所有参与试用、提出反馈的朋友与同事，你们的每一次"这里不对劲""这里看不懂"都是这个工具前进的动力。也感谢开源社区与各服务提供商提供的优质基础设施。</p>
+  <h2>项目信息</h2>
+  <p class="no-indent">项目开源仓库：github.com/haowuxiwang/BatchSentry（欢迎提出 Issue 或建议）<br>
+  版本：v1.0.0（2026 年 8 月 20 日）</p>
+  <div class="signed">
+    <div>吴思潭 &nbsp;2026 年 8 月 20 日<div class="line"></div></div>
+  </div>
+  <div class="footer-note">
+    BatchSentry · 批哨兵 — GMP 批生产记录半自动合规检查系统 · 发布说明 v1.0.0<br>
+    本文档为辅助工具的说明材料，不构成任何专业审核结论或质量保证。最终判断请以专业审核人员为准。
+  </div>
+</div>
+
+</body>
+</html>

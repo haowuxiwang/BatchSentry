@@ -552,7 +552,28 @@ def _compose_page_markdown(page_num: int, blocks: list[dict]) -> tuple[str, int]
     # 输出最后一个段落
     flush_paragraph()
 
-    return "\n".join(parts).strip(), discarded_count
+    return _sanitize_unrecognized_handwriting("\n".join(parts)).strip(), discarded_count
+
+
+_HASHES_PLACEHOLDER_RE = re.compile(r"###")
+
+
+def _sanitize_unrecognized_handwriting(md: str) -> str:
+    """Replace MinerU's '###' placeholder for low-confidence (usually handwritten)
+    content with an explicit marker, so the LLM doesn't treat it as data.
+
+    MinerU emits bare '###' as a placeholder where it could not recognize
+    characters — most visibly in signature cells ('起草部门负责人审核:###').
+    Line-start '### ' is a legit markdown H3 from header blocks (kept intact);
+    inline '###' tokens are replaced with a clear Chinese marker.
+    """
+    out = []
+    for line in md.split("\n"):
+        if line.startswith("### "):
+            out.append(line)
+        else:
+            out.append(_HASHES_PLACEHOLDER_RE.sub("[手写内容未识别]", line))
+    return "\n".join(out)
 
 
 def _block_to_markdown(block: dict) -> str:
@@ -605,6 +626,13 @@ def _block_to_markdown(block: dict) -> str:
 
     if btype in ("header", "page_header"):
         txt = _content_text(block) or (block.get("text") or "").strip()
+        if not txt:
+            return ""
+        # 纯数字/符号页眉（"0.16"、"101025"）是手写噪音或页码被误分类为
+        # 页眉 — 丢弃；含文字/字母的页眉（公司名/记录名）保留为三级标题。
+        compact = txt.replace(" ", "").replace("\u00a0", "")
+        if re.fullmatch(r"[0-9./%\u00b0\-()]{1,20}", compact):
+            return ""
         return f"### {txt}" if txt else ""
 
     if btype == "title":
@@ -743,7 +771,8 @@ def _split_pages_by_separator(
                 f"无法按页拆分（返回单页会导致截断丢内容），请检查 "
                 f"MinerU 输出或切换 OCR 后端"
             )
-        return [{"markdown": {"text": full_md}, "page_count": 1, "_source": "mineru"}]
+        return [{"markdown": {"text": _sanitize_unrecognized_handwriting(full_md)},
+                 "page_count": 1, "_source": "mineru"}]
 
     pages = []
     for i, part in enumerate(parts):
@@ -755,6 +784,12 @@ def _split_pages_by_separator(
             # 保留空页占位（与 _compose_page_markdown 空块页同款文案），
             # 上游空页自愈（切片重试）或 _ocr_empty 人工复核路径兜底。
             text = f"## 第 {i + 1} 页\n\n（此页无文本内容）"
+        else:
+            # 与 content_list 路径一致：清洗 MinerU 的 '###' 低置信度
+            # 占位符（full.md 拆分的表格 HTML 中同样会出现）。此前本路径
+            # 不 sanitize，真实 51 页记录 14 页残留 '###'（实测 749ead79
+            # 走结构回退 → full.md 拆分 → 表格内 '###' 直达 LLM）。
+            text = _sanitize_unrecognized_handwriting(text)
         pages.append({
             "markdown": {"text": text},
             "page_count": i + 1,

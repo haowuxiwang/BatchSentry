@@ -404,6 +404,51 @@ class TestParseTime:
 # ===========================================================================
 
 
+class TestParseTimeInterval:
+    """_parse_time_interval 区间解析（date-only 整天 / 带时间精确点）。"""
+
+    def _iv(self, *args, **kwargs):
+        from core.rules.parsing import _parse_time_interval
+
+        return _parse_time_interval(*args, **kwargs)
+
+    def test_date_only_spans_whole_day(self):
+        from datetime import datetime
+
+        iv = self._iv("2024-01-01")
+        assert iv is not None
+        start, end, precise = iv
+        assert (start, precise) == (datetime(2024, 1, 1, 0, 0, 0), False)
+        assert end == datetime(2024, 1, 2, 0, 0, 0)  # 次日零点（开区间）
+
+    def test_datetime_is_precise_point(self):
+        from datetime import datetime
+
+        iv = self._iv("2024-01-01 14:30")
+        assert iv is not None
+        start, end, precise = iv
+        assert (start, end, precise) == (
+            datetime(2024, 1, 1, 14, 30, 0), datetime(2024, 1, 1, 14, 30, 0), True)
+
+    def test_time_only_with_fallback_is_precise(self):
+        from datetime import datetime
+
+        iv = self._iv("09:00", fallback_date="2024-01-01")
+        assert iv is not None
+        start, end, precise = iv
+        assert (start, end, precise) == (
+            datetime(2024, 1, 1, 9, 0, 0), datetime(2024, 1, 1, 9, 0, 0), True)
+
+    def test_chinese_datetime_is_precise(self):
+        iv = self._iv("2024年05月07日 14时30分")
+        assert iv is not None
+        assert iv[2] is True
+
+    def test_parse_failure_returns_none(self):
+        assert self._iv("无效时间") is None
+        assert self._iv("") is None
+
+
 class TestExtractYear:
     """_extract_year 年份提取。"""
 
@@ -772,6 +817,49 @@ class TestTimeReversalInPage:
         findings = _check_time_reversal_in_page(pages)
         assert findings == []
 
+    def test_date_only_start_vs_same_day_datetime_end_no_finding(self):
+        """date-only start（当天全天）与同日带时间 end 不应误报反转（用户报告的
+        年月日 vs 年月日小时分钟比较场景）。"""
+        pages = _norm([
+            _make_page(1, [
+                _make_step(1, start_time="2024-01-01", end_time="2024-01-01 14:30"),
+            ]),
+        ])
+        findings = _check_time_reversal_in_page(pages)
+        assert findings == []
+
+    def test_date_only_start_next_day_vs_datetime_end_finding(self):
+        """date-only start（次日全天）晚于前一日带时间 end 应报反转。"""
+        pages = _norm([
+            _make_page(1, [
+                _make_step(1, start_time="2024-01-02", end_time="2024-01-01 14:30"),
+            ]),
+        ])
+        findings = _check_time_reversal_in_page(pages)
+        assert len(findings) == 1
+        assert findings[0]["type"] == "time_reversal"
+
+    def test_date_only_both_same_day_no_finding(self):
+        """双方都是 date-only 且同一天：信息不足，不报反转。"""
+        pages = _norm([
+            _make_page(1, [
+                _make_step(1, start_time="2024-01-01", end_time="2024-01-01"),
+            ]),
+        ])
+        findings = _check_time_reversal_in_page(pages)
+        assert findings == []
+
+    def test_date_only_both_adjacent_days_finding(self):
+        """双方 date-only 且 start 整天在 end 整天之后（相邻天）应报反转。"""
+        pages = _norm([
+            _make_page(1, [
+                _make_step(1, start_time="2024-01-02", end_time="2024-01-01"),
+            ]),
+        ])
+        findings = _check_time_reversal_in_page(pages)
+        assert len(findings) == 1
+        assert findings[0]["type"] == "time_reversal"
+
 
 # ===========================================================================
 # R1-b: 跨页时间倒序
@@ -888,6 +976,37 @@ class TestTimeReversalCrossPage:
         ])
         findings = _check_time_reversal_cross_page(pages)
         assert findings == []
+
+    def test_date_only_curr_vs_same_day_datetime_prev_no_finding(self):
+        """curr date-only（1991-01-01 整天）与 prev 同日带时间不应误报（年月日 vs
+        年月日小时分钟混比场景）。"""
+        pages = _norm([
+            _make_page(1, [_make_step(1, start_time="2024-01-01 09:00", end_time="2024-01-01 14:30")]),
+            _make_page(2, [_make_step(2, start_time="2024-01-01", end_time="2024-01-01 18:00")]),
+        ])
+        findings = _check_time_reversal_cross_page(pages)
+        assert not any(f["type"] == "time_reversal" for f in findings)
+
+    def test_date_only_curr_after_prev_day_datetime_finding(self):
+        """curr date-only（前一天整天）vs prev 带时间（次日 14:30 结束）应报反转。"""
+        pages = _norm([
+            _make_page(1, [_make_step(1, start_time="2024-01-01 09:00", end_time="2024-01-02 14:30")]),
+            _make_page(2, [_make_step(2, start_time="2024-01-01", end_time="2024-01-02 09:00")]),
+        ])
+        findings = _check_time_reversal_cross_page(pages)
+        assert len([f for f in findings if f["type"] == "time_reversal"]) == 1
+
+    def test_precise_curr_dates_before_datetime_prev_finding(self):
+        """curr 精确时间早于 prev date-only 整天（下一天）应报反转。"""
+        pages = _norm([
+            _make_page(1, [_make_step(1, start_time="2024-01-01 09:00", end_time="2024-01-01 14:30")]),
+            _make_page(2, [_make_step(2, start_time="2021-12-31 10:00", end_time="2021-12-31 11:00")]),
+        ])
+        findings = _check_time_reversal_cross_page(pages)
+        rev = [f for f in findings if f["type"] == "time_reversal"]
+        assert len(rev) == 1
+        # 年份相差 >2 年 → warning 而非 critical（提取错误提示路径）
+        assert rev[0]["severity"] == "warning"
 
 
 # ===========================================================================
@@ -1438,6 +1557,46 @@ class TestBatchConsistency:
         findings = _check_batch_consistency(pages)
         assert findings == []
 
+    def test_ocr_variants_of_same_batch_merged(self):
+        """真实 51 页批记录：同一批号出现 15 种 OCR 变体
+        （空格/·/° 分隔符、截断提取、i→1 数字混淆、-02~-06 工序后缀），
+        归一化后应归并为同一批号 → 不报 critical。"""
+        variants = [
+            "1127011N 250101", "1127011N250101-02", "1127011N 250101 -03",
+            "1127011N·250101 -04", "112701", "1127011N·250101-04",
+            "1127011N250101-05", "1127011N 250101 -05", "1127011N·250101-06",
+            "1127011N", "1127011N250101", "1127011N 250101 -04",
+            "1127011N 25010i", "1127011N250101-03",
+        ]
+        pages = [{"page": i + 1, "page_info": {"batch_no": v}} for i, v in enumerate(variants)]
+        findings = _check_batch_consistency(pages)
+        assert findings == []
+
+    def test_genuine_different_batch_not_merged(self):
+        """真实不同批号（B202201 vs B202202）仍报 critical —
+        归一化只针对分隔符/截断/工序后缀，不吞真实批次差异。"""
+        pages = [
+            {"page": 1, "page_info": {"batch_no": "1127011N 250101"}},
+            {"page": 2, "page_info": {"batch_no": "1127011N250101-02"}},
+            {"page": 5, "page_info": {"batch_no": "2245D P20260115"}},
+        ]
+        findings = _check_batch_consistency(pages)
+        assert len(findings) == 1
+        assert findings[0]["severity"] == "critical"
+        assert "2245D P20260115" in findings[0]["ocr_text"]
+        assert "已归并" in findings[0]["description"]
+
+    def test_batch_no_normalizer(self):
+        from core.rules.parsing import _normalize_batch_no
+
+        assert _normalize_batch_no("1127011N 250101") == "1127011N250101"
+        assert _normalize_batch_no("1127011N·250101 -04") == "1127011N250101-04"
+        assert _normalize_batch_no("1127011N° 241203") == "1127011N241203"
+        assert _normalize_batch_no("1127011N 25010i") == "1127011N250101"
+        assert _normalize_batch_no("　1127011N２５０１０１　") == "1127011N250101"
+        assert _normalize_batch_no("") == ""
+        assert _normalize_batch_no(None) == ""
+
 
 # ===========================================================================
 # QA 签名检查（R6 扩展）
@@ -1758,6 +1917,33 @@ class TestMeasurementCrossPageRules:
             ])], page_info={"production_date": "2025-06-01"}),
         ])
         assert _check_measurement_time_sequence(pages) == []
+
+    def test_sequence_date_only_prev_vs_same_day_datetime_no_finding(self):
+        """date-only 行（2025-06-01 整天）与同日带时间行（14:30 在前）不应误报
+        倒序（年月日 vs 年月日小时分钟混比场景：修复前 14:30 > 00:00 误报）。"""
+        from core.cross_page_analyzer import _check_measurement_time_sequence
+
+        pages = _norm([
+            _make_page(1, [_make_step(3, measurements=[
+                {"time": "2025-06-01 14:30", "values": {"A": _make_cell(1, "1")}},
+                {"time": "2025-06-01", "values": {"A": _make_cell(1, "1")}},
+            ])], page_info={"production_date": "2025-06-01"}),
+        ])
+        assert _check_measurement_time_sequence(pages) == []
+
+    def test_sequence_date_only_prev_previous_day_vs_datetime_finding(self):
+        """date-only 行整天在前、带时间行（前一日）在后应报倒序。"""
+        from core.cross_page_analyzer import _check_measurement_time_sequence
+
+        pages = _norm([
+            _make_page(1, [_make_step(3, measurements=[
+                {"time": "2025-06-02", "values": {"A": _make_cell(1, "1")}},
+                {"time": "2025-06-01 14:30", "values": {"A": _make_cell(1, "1")}},
+            ])], page_info={"production_date": "2025-06-01"}),
+        ])
+        findings = _check_measurement_time_sequence(pages)
+        assert len(findings) == 1
+        assert "2025-06-02" in findings[0]["ocr_text"]
 
     def test_missing_column_across_pages_flagged(self):
         from core.cross_page_analyzer import _check_measurement_column_consistency

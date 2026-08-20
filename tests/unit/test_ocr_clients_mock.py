@@ -1133,6 +1133,73 @@ class TestMinerUBlockToMarkdown:
         assert count == 0
 
 
+class TestHandwritingHashSanitization:
+    """MinerU ### 手写未识别占位符清洗。"""
+
+    def test_inline_hash_replaced_in_table(self):
+        """表格单元格内 '审核:###' 应被替换为 [手写内容未识别]。"""
+        md, _ = mineru_client._compose_page_markdown(
+            3, [{"type": "table", "text": "草案:罗彦 2022.05.07审核:###"}]
+        )
+        assert "审核:[手写内容未识别]" in md
+        assert "###" not in md
+
+    def test_header_markdown_preserved(self):
+        """行首 '### '（header 块 markdown 标题）应保留。"""
+        md, _ = mineru_client._compose_page_markdown(
+            3, [{"type": "header", "text": "HISUN 海正药业"}]
+        )
+        assert "### HISUN 海正药业" in md
+
+    def test_empty_header_filtered(self):
+        """空 header 块不产生输出。"""
+        assert mineru_client._block_to_markdown({"type": "header"}) == ""
+
+    def test_numeric_only_header_filtered(self):
+        """纯数字 header（'0.16'/'101025' 手写噪音或页码）应丢弃。"""
+        assert mineru_client._block_to_markdown({"type": "header", "text": "0.16"}) == ""
+        assert mineru_client._block_to_markdown({"type": "header", "text": "101025"}) == ""
+        # 含文字的 header 保留
+        assert mineru_client._block_to_markdown(
+            {"type": "header", "text": "Joulan"}).startswith("### ")  # 纯字母保留
+        assert mineru_client._block_to_markdown(
+            {"type": "header", "text": "状态标识粘贴处"}).startswith("### ")
+
+    def test_numeric_header_omitted_from_page(self):
+        """纯数字 header 块应从整页输出中消失。"""
+        md, _ = mineru_client._compose_page_markdown(
+            3, [{"type": "header", "text": "0.16"}, {"type": "text", "text": "正文"}]
+        )
+        assert "0.16" not in md
+        assert "正文" in md
+
+    def test_separator_split_sanitizes_inline_hash(self):
+        """降级路径 _split_pages_by_separator（full.md 拆分）也必须清洗
+        表格 HTML 内的 '###' — 实测 749ead79 走结构回退后 14 页残留
+        '###' 直达 LLM（content_list 路径有 sanitize，此处曾漏掉）。"""
+        pages = mineru_client._split_pages_by_separator(
+            "## 第 1 页\n\n## 表格\n| 审核 | 状态 |\n| --- | --- |\n"
+            "| 起草:罗彦 | 审核:### |\n\f## 第 2 页\n\n### HISUN 海正药业\n"
+            "<table><tr><td>复核者:###</td></tr></table>"
+        )
+        assert len(pages) == 2
+        assert "###" not in pages[0]["markdown"]["text"]
+        assert "审核:[手写内容未识别]" in pages[0]["markdown"]["text"]
+        # 行首 '### ' H3 印刷标题保留，表格内行内 ### 替换
+        assert "### HISUN 海正药业" in pages[1]["markdown"]["text"]
+        assert "复核者:[手写内容未识别]" in pages[1]["markdown"]["text"]
+        assert "审核:###" not in pages[0]["markdown"]["text"]
+        assert "复核者:###" not in pages[1]["markdown"]["text"]
+
+    def test_separator_split_single_page_sanitizes(self):
+        """无分页符单页返回路径同样清洗 ###。"""
+        pages = mineru_client._split_pages_by_separator(
+            "<table><tr><td>审核:###</td></tr></table>", expected_pages=None
+        )
+        assert len(pages) == 1
+        assert "###" not in pages[0]["markdown"]["text"]
+
+
 class TestMinerURunOCR:
     """MinerU run_ocr — 端到端编排。"""
 

@@ -321,23 +321,48 @@ class LLMClient:
         except json.JSONDecodeError:
             pass
 
-        # Try to find first { ... } or [ ... ] block
-        for start_char, end_char in [("{", "}"), ("[", "]")]:
-            start = text.find(start_char)
-            end = text.rfind(end_char)
-            if start != -1 and end > start:
-                try:
-                    return json.loads(text[start : end + 1])
-                except json.JSONDecodeError:
-                    pass
+        # Try to find first { ... } or [ ... ] block (only when the text does
+        # not START with a brace — otherwise the block scan can grab an inner
+        # fragment like "steps": [] and return an empty array instead of the
+        # truncated outer object; brace-starting text goes straight to the
+        # truncation recovery below).
+        if not text.startswith(("{", "[")):
+            for start_char, end_char in [("{", "}"), ("[", "]")]:
+                start = text.find(start_char)
+                end = text.rfind(end_char)
+                if start != -1 and end > start:
+                    try:
+                        return json.loads(text[start : end + 1])
+                    except json.JSONDecodeError:
+                        pass
 
         # Attempt truncated JSON recovery: if text starts with { or [ and has
-        # more opening braces than closing, try appending closing braces
+        # more opening braces than closing, try appending closing braces.
+        # Round 3: truncated output may also cut mid-string (e.g. page9 matrix
+        # hitting max_tokens). Repair: drop the dangling tail text (any chars
+        # after the last complete JSON value), re-close unclosed strings/arrays,
+        # then re-balance braces.
         for start_char, end_char in [("{", "}"), ("[", "]")]:
             if text.startswith(start_char):
                 open_count = text.count(start_char)
                 close_count = text.count(end_char)
                 if open_count > close_count:
+                    repaired = _repair_truncated_json(text)
+                    if repaired is not None:
+                        try:
+                            result = json.loads(repaired)
+                            logger.info(
+                                f"Recovered truncated JSON "
+                                f"(added {repaired.count(end_char) - close_count} closing braces)"
+                            )
+                            if isinstance(result, dict):
+                                result["_truncated_recovered"] = True
+                            return result
+                        except json.JSONDecodeError:
+                            pass
+                    # Legacy path: pure brace padding (covers cut-between-values,
+                    # which _repair_truncated_json also handles, but keep as
+                    # last resort for exotic shapes)
                     recovered = text + end_char * (open_count - close_count)
                     try:
                         result = json.loads(recovered)
@@ -345,12 +370,104 @@ class LLMClient:
                             f"Recovered truncated JSON "
                             f"(added {open_count - close_count} closing braces)"
                         )
+                        if isinstance(result, dict):
+                            result["_truncated_recovered"] = True
                         return result
                     except json.JSONDecodeError:
                         pass
 
         logger.warning(f"Failed to parse JSON from LLM response: {raw[:200]}")
         return {"_parse_error": True, "_raw": raw[:500]}
+
+
+def _repair_truncated_json(text: str) -> str | None:
+    """Repair JSON truncated mid-string / mid-value.
+
+    Naive brace padding cannot fix a cut inside a string value ("...16:06,").
+    This walker scans char-by-char tracking string/escape state, drops the
+    dangling tail (the incomplete value), pads a cut value with null, then
+    closes open strings, arrays and objects in the matching order. Returns
+    None when the text is not repairable (e.g. not actually truncated).
+    """
+    out = []
+    in_string = False
+    escape = False
+    stack = []
+    i = 0
+    n = len(text)
+    # value_boundary[i] == True when a complete value ends right before i
+    # (we only need to know whether the last emitted char marks a cut point)
+    while i < n:
+        ch = text[i]
+        if in_string:
+            out.append(ch)
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            i += 1
+            continue
+        if ch == '"':
+            in_string = True
+            out.append(ch)
+        elif ch in "{[":
+            stack.append(ch)
+            out.append(ch)
+        elif ch in "}]":
+            if stack:
+                stack.pop()
+            out.append(ch)
+        elif ch in ",:":
+            out.append(ch)
+        elif ch.isspace():
+            out.append(ch)
+        else:
+            out.append(ch)
+        i += 1
+
+    if in_string:
+        # dangling unterminated string: cut back to its opening quote
+        cut = -1
+        for j in range(len(out) - 1, -1, -1):
+            if out[j] == '"':
+                cut = j
+                break
+        if cut == -1:
+            return None
+        out = out[:cut]
+        # value was cut mid-string: pad with null if we end after a colon
+        stripped = "".join(out).rstrip()
+        if stripped.endswith(":"):
+            out.append("null")
+
+    # Trailing raw token (number/true/false/null): keep it when it reads as a
+    # complete primitive (max_tokens cuts happen between tokens, not usually
+    # mid-number); drop it otherwise.
+    j = len(out) - 1
+    while j >= 0 and (out[j].isspace() or out[j] in "0123456789.+-eE"):
+        j -= 1
+    tail = "".join(out[j + 1:]).strip()
+    if tail:
+        import re as _re
+        if not _re.fullmatch(r"-?\d+(\.\d+)?([eE][+-]?\d+)?|true|false|null", tail):
+            out = out[:j + 1]
+
+    # re-balance brace stack on the trimmed prefix
+    stack.clear()
+    for ch in out:
+        if ch in "{[":
+            stack.append(ch)
+        elif ch in "}]" and stack:
+            stack.pop()
+    if not stack:
+        return None  # not actually truncated
+    if out and out[-1] == ",":
+        out.pop()  # trailing comma before the cut value
+    for ch in reversed(stack):
+        out.append("}" if ch == "{" else "]")
+    return "".join(out)
 
 
 # Singleton

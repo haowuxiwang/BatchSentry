@@ -14,10 +14,11 @@ Phase 7 架构变更：
 """
 import pytest
 import asyncio
+import json
 import logging
 from unittest.mock import patch, AsyncMock, MagicMock
 
-from llm.client import LLMClient, get_llm_client, reset_llm_client
+from llm.client import LLMClient, get_llm_client, reset_llm_client, _repair_truncated_json
 from config import ProviderConfig
 from llm.adapters.base import ChatResult
 
@@ -389,7 +390,7 @@ class TestParseJsonTruncatedRecovery:
         """截断的 dict（缺少闭合 }）应恢复成功并记录日志（covers lines 216-220）。"""
         raw = '{"key": "value", "num": 42'
         result = LLMClient._parse_json(raw)
-        assert result == {"key": "value", "num": 42}
+        assert result == {"key": "value", "num": 42, "_truncated_recovered": True}
 
     def test_parse_truncated_array_recovers_and_logs(self):
         """截断的 array（缺少闭合 ]）应恢复成功。"""
@@ -411,6 +412,62 @@ class TestParseJsonTruncatedRecovery:
         raw = 'prefix {not valid json} suffix'
         result = LLMClient._parse_json(raw)
         assert result.get("_parse_error") is True
+
+
+class TestRepairTruncatedJson:
+    """_repair_truncated_json — 截断在字符串中间/数值中间时的修复（Round 3）。"""
+
+    def test_mid_string_value_padded_null(self):
+        r = _repair_truncated_json('{"a": "truncated str')
+        assert json.loads(r) == {"a": None}
+
+    def test_mid_string_in_array(self):
+        r = _repair_truncated_json('{"a": [1, 2, {"b": "x')
+        assert json.loads(r) == {"a": [1, 2, {"b": None}]}
+
+    def test_mid_string_after_complete_values(self):
+        r = _repair_truncated_json('{"a": "ok", "b": 1, "c": "broken')
+        assert json.loads(r) == {"a": "ok", "b": 1, "c": None}
+
+    def test_cut_between_values_brace_padding(self):
+        r = _repair_truncated_json('{"a": "value", "b": 1, "c": [1, 2, {"d": "x"}]')
+        assert json.loads(r) == {"a": "value", "b": 1, "c": [1, 2, {"d": "x"}]}
+
+    def test_bare_object_not_truncated_returns_none(self):
+        assert _repair_truncated_json('{"a": 1}') is None
+
+    def test_mid_number_tail_dropped(self):
+        # 值在数字中间截断（如 "b": 12 只写了 1）— 丢弃部分 token 后补括号
+        r = _repair_truncated_json('{"a": 12, "b": 34')
+        assert json.loads(r) == {"a": 12, "b": 34}
+
+
+class TestParseJsonMidStringTruncation:
+    """_parse_json 对 max_tokens 截断（字符串中间）的恢复 + _truncated_recovered 标记。"""
+
+    def test_mid_string_truncation_recovered_with_flag(self):
+        raw = '```json\n{"steps": [], "note": "partially cut str'
+        result = LLMClient._parse_json(raw)
+        assert result.get("_truncated_recovered") is True
+        assert result["note"] is None
+
+    def test_realistic_page9_style_truncation(self):
+        # 模拟页 9 实测截断形态：measurements 完整 + findings 截断在字符串里
+        raw = (
+            '{"page_info": {"title": "x"}, '
+            '"measurements": [{"time": "11:04", "values": {"A_流速": {"spec": "0.5", '
+            '"actual": "0.97", "in_spec": true}}}], '
+            '"findings": [{"type": "completeness", "description": "某人'
+        )
+        result = LLMClient._parse_json(raw)
+        assert result.get("_truncated_recovered") is True
+        assert len(result["measurements"]) == 1
+        assert result["findings"][0]["description"] is None
+
+    def test_legacy_brace_padding_still_flags(self):
+        raw = '{"steps": []'
+        result = LLMClient._parse_json(raw)
+        assert isinstance(result, dict)
 
     def test_parse_invalid_array_block_passes_through(self):
         """含 [ ] 但块内非 JSON 时应跳过块提取分支。"""

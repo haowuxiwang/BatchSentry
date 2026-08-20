@@ -26,6 +26,7 @@ from core.rules.llm_checks import (
 )
 from core.rules.rule_doc import (
     _check_batch_consistency,
+    _check_check_consistency,
     _check_completeness,
     _check_handwritten_notes,
     _check_low_confidence_params,
@@ -34,6 +35,7 @@ from core.rules.rule_doc import (
 )
 from core.rules.rule_spec import _check_param_out_of_spec
 from core.rules.rule_time import (
+    _check_signature_order,
     _check_signature_time_anomaly,
     _check_suspicious_dates,
     _check_time_reversal_cross_page,
@@ -65,6 +67,29 @@ async def analyze_cross_page(page_structures: list[dict], job_id: str = "") -> l
         f"[{job_id}] Cross-page analysis start: {len(pages)} pages "
         f"(from {len(page_structures)} structures)"
     )
+    # value_source 覆盖率统计（手写体存疑原则的可观测性）：LLM 语义标注
+    # 优先，_backfill_value_source 按列名启发式兜底；覆盖率过低说明 OCR
+    # 列名识别质量差，会影响降噪路径（边缘超差 → info）的可信度。
+    n_param = 0
+    n_param_vs = 0
+    n_cell = 0
+    n_cell_vs = 0
+    for pg in pages:
+        for s in pg["steps"]:
+            for p in s.get("parameters") or []:
+                n_param += 1
+                if p.get("value_source"):
+                    n_param_vs += 1
+            for m in s.get("measurements") or []:
+                for v in (m.get("values") or {}).values():
+                    n_cell += 1
+                    if v.get("value_source"):
+                        n_cell_vs += 1
+    if n_param or n_cell:
+        logger.info(
+            f"[{job_id}] value_source coverage: parameters {n_param_vs}/{n_param}, "
+            f"cells {n_cell_vs}/{n_cell}"
+        )
 
     rule_findings: list[dict] = []
     llm_queue: list[dict] = []
@@ -87,6 +112,10 @@ async def analyze_cross_page(page_structures: list[dict], job_id: str = "") -> l
     r5 = _check_signature_time_anomaly(pages)
     rule_findings.extend(r5)
     logger.info(f"[{job_id}] R5 signature_time_anomaly: {len(r5)}")
+    # R9a: signature ORDER across roles (reviewer/QA must sign after operator)
+    r9a = _check_signature_order(pages)
+    rule_findings.extend(r9a)
+    logger.info(f"[{job_id}] R9a signature_order: {len(r9a)}")
     # R6: completeness (missing operator/reviewer signatures)
     r6 = _check_completeness(pages)
     rule_findings.extend(r6)
@@ -103,6 +132,10 @@ async def analyze_cross_page(page_structures: list[dict], job_id: str = "") -> l
     r9 = _check_handwritten_notes(pages)
     rule_findings.extend(r9)
     logger.info(f"[{job_id}] R9 handwritten_notes: {len(r9)}")
+    # R8b: check consistency (QA checkbox answered 否 / unrecognizable)
+    r8b = _check_check_consistency(pages)
+    rule_findings.extend(r8b)
+    logger.info(f"[{job_id}] R8b check_consistency: {len(r8b)}")
     # R-M1: cross-page measurement time sequence (same step, monotonic rows)
     rm1 = _check_measurement_time_sequence(pages)
     rule_findings.extend(rm1)

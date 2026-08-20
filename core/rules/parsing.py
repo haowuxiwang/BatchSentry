@@ -6,7 +6,7 @@ import html
 import math
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -160,6 +160,104 @@ def _extract_year(s: Optional[str]) -> Optional[int]:
     if m:
         return int(m.group(1))
     return None
+
+
+# Match whether a time string carries an explicit time-of-day part
+# ("14:30", "9:05", "14时30分"). Used to distinguish point-in-time values
+# from date-only values (which span the whole day).
+_TIME_OF_DAY_RE = re.compile(r"\d{1,2}[:时]\d{2}")
+
+
+# ---------------------------------------------------------------------------
+# Batch number normalization — collapses OCR variants of the same batch no
+# (separator/whitespace noise, full-width glyphs, digit confusions like
+# "25010i" → "250101"). R7 groups by the normalized value so a 15-way
+# "batch_inconsistency" spam collapses back to the real distinct batches.
+# ---------------------------------------------------------------------------
+
+_FULLWIDTH_MAP = str.maketrans(
+    "０１２３４５６７８９ＡＢＣＤＥＦＧＨＩＪＫＬＭＮＯＰＱＲＳＴＵＶＷＸＹＺａｂｃ",
+    "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabc",
+)
+# OCR digit confusions seen in real records: i/I/l read as 1, o/O as 0.
+# Letters with real meaning (N, X, B, 8) are NOT mapped — a genuine
+# cross-batch difference must not be silently merged.
+_OCR_DIGIT_MAP = str.maketrans({"i": "1", "I": "1", "l": "1", "o": "0", "O": "0"})
+_BATCH_SEP_RE = re.compile(r"[\s\u3000·°.,;]+")
+
+
+def _normalize_batch_no(raw: str) -> str:
+    """Normalize a batch number string: strip separators, map full-width
+    glyphs and OCR digit confusions, uppercase. Returns "" when empty."""
+    s = html.unescape(str(raw or "")).strip()
+    if not s:
+        return ""
+    s = _BATCH_SEP_RE.sub("", s)
+    s = s.translate(_FULLWIDTH_MAP)
+    s = s.translate(_OCR_DIGIT_MAP)
+    return s.upper()
+
+
+def _parse_time_interval(
+    s: Optional[str], fallback_date: Optional[str] = None
+) -> Optional[tuple[datetime, datetime, bool]]:
+    """Parse a time string into a (start, end, precise) interval.
+
+    date-only strings ("2024-01-01") span the whole day:
+    (00:00:00, next-day 00:00:00), precise=False — the true moment is
+    somewhere in that day. Strings with an explicit time of day
+    ("2024-01-01 14:30") collapse to a point (t, t), precise=True.
+
+    Rule layer must compare intervals, not raw datetimes: comparing a
+    date-only value (parsed as 00:00) against a datetime on the same day
+    produces false time_reversal/signature_time_anomaly findings (a
+    date-only "2024-01-01" would falsely look earlier than "2024-01-01 14:30").
+
+    Returns None on parse failure (same contract as _parse_time).
+    """
+    dt = _parse_time(s, fallback_date)
+    if dt is None:
+        return None
+    if _TIME_OF_DAY_RE.search(str(s or "")):
+        return (dt, dt, True)
+    return (dt, dt + timedelta(days=1), False)
+
+
+def _interval_after(
+    a: tuple[datetime, datetime, bool], b: tuple[datetime, datetime, bool]
+) -> bool:
+    """True when interval A lies entirely after interval B (start-side after end-side).
+
+    Comparison semantics for date-only values (a[2] or b[2] is False) use the
+    open interval bound: e.g. start="2024-01-02" (whole day) vs
+    end="2024-01-01 14:30" is a real reversal, while start="2024-01-01 14:30"
+    vs end="2024-01-01" (whole day) is NOT (they may coincide that day).
+    """
+    a_start, _a_end, a_prec = a
+    b_start, b_end, b_prec = b
+    if a_start > b_end:
+        return True
+    if a_start == b_end and not b_prec:
+        return True
+    return False
+
+
+def _interval_before(
+    a: tuple[datetime, datetime, bool], b: tuple[datetime, datetime, bool]
+) -> bool:
+    """True when interval A lies entirely before interval B (end-side before start-side).
+
+    Mirror of _interval_after: a date-only A (open end bound) that touches
+    B's start still counts as entirely before (e.g. whole-day "2024-01-01"
+    vs point "2024-01-02 00:00"); two precise equal points do not.
+    """
+    a_start, a_end, a_prec = a
+    b_start, _b_end, _b_prec = b
+    if a_end < b_start:
+        return True
+    if a_end == b_start and not a_prec:
+        return True
+    return False
 
 
 def _parse_number(s: Optional[str]) -> Optional[float]:

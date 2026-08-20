@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import logging
 
-from core.rules.parsing import _parse_time
+from core.rules.parsing import (
+    _interval_after,
+    _normalize_batch_no,
+    _parse_time,
+    _parse_time_interval,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -156,40 +161,125 @@ def _check_handwritten_notes(pages: list[dict]) -> list[dict]:
 
 def _check_batch_consistency(pages: list[dict]) -> list[dict]:
     """Check that all pages with a batch_no use the same value.
-    Pages without batch_no (cover, toc, appendix) are skipped."""
+    Pages without batch_no (cover, toc, appendix) are skipped.
+
+    OCR variants of the SAME batch number are grouped before comparison:
+    separators ("·"/spaces/"°"), full-width glyphs, digit confusions
+    ("25010i" → "250101") and sheet-suffix numbers ("1127011N250101-04")
+    all collapse onto one core. Prefix-truncated extractions (LLM cut the
+    batch no short) merge into the longer group. Only groups that survive
+    normalization are reported as a real inconsistency."""
     findings = []
-    # Collect (page, batch_no) pairs for pages that have a batch_no
-    batch_pages: dict[str, list[int]] = {}  # batch_no -> [page numbers]
+    # normalized core (before "-suffix") -> {raw batch_no: [page numbers]}
+    cores: dict[str, dict[str, list[int]]] = {}
     for page in pages:
         pno = page["page"]
         # batch_no 由 _normalize_pages 嵌套在 page_info 中（生产 schema）
         bno = ((page.get("page_info") or {}).get("batch_no") or "").strip()
         if not bno:
             continue
-        batch_pages.setdefault(bno, []).append(pno)
+        norm = _normalize_batch_no(bno)
+        if not norm:
+            continue
+        # Sheet suffixes ("-02"…"-06" 工序页号) belong to the same batch core
+        raw_map = cores.setdefault(norm.split("-")[0], {})
+        raw_map.setdefault(bno, []).append(pno)
 
-    if len(batch_pages) <= 1:
+    # Merge prefix-truncated cores into the longer group they extend
+    merged: dict[str, dict[str, list[int]]] = {}
+    for core, raw_map in sorted(cores.items(), key=lambda kv: -len(kv[0])):
+        host = next(
+            (g for c, g in merged.items() if core.startswith(c) or c.startswith(core)),
+            None,
+        )
+        if host is None:
+            merged[core] = raw_map
+        else:
+            for raw, pages_ in raw_map.items():
+                host.setdefault(raw, [])
+                host[raw].extend(pages_)
+
+    if len(merged) <= 1:
         return findings  # all same (or none) — consistent
 
-    # Multiple different batch numbers found
-    summary_parts = [f"{bno}(第{','.join(str(p) for p in pn)}页)" for bno, pn in batch_pages.items()]
+    # Report: main group + surviving suspicious groups, noting merged variants
+    items = sorted(merged.items(), key=lambda kv: -sum(len(v) for v in kv[1].values()))
+    main_core, main_map = items[0]
+    summary_parts = []
+    for core, raw_map in items:
+        pns = sorted(p for pages_ in raw_map.values() for p in pages_)
+        summary_parts.append(f"{core}(第{','.join(str(p) for p in pns)}页)")
+    n_variants = sum(len(m) for m in merged.values()) - len(merged)
+    all_raw = [raw for m in merged.values() for raw in m]
     findings.append({
-        "page": min(min(pn) for pn in batch_pages.values()),  # first page with batch_no
+        "page": min(min(v) for v in main_map.values()),
         "type": "batch_inconsistency",
         "severity": "critical",
         "description": (
-            f"跨页批号不一致：检测到 {len(batch_pages)} 个不同批号 — "
+            f"跨页批号不一致：检测到 {len(merged)} 组不同批号 — "
             f"{'；'.join(summary_parts[:3])}"
-            f"{'…' if len(summary_parts) > 3 else ''}，"
+            f"{'…' if len(summary_parts) > 3 else ''}"
+            f"（已归并 {n_variants} 个空格/分隔符/工序后缀等 OCR 变体），"
             f"请核对是否装订错误或混批"
         ),
-        "ocr_text": f"batch_nos={list(batch_pages.keys())}",
+        "ocr_text": f"batch_nos={all_raw}",
         "operator": "",
         "source": "rule",
     })
     logger.warning(
-        f"R7 batch inconsistency: {len(batch_pages)} different batch numbers found"
+        f"R7 batch inconsistency: {len(merged)} distinct batch groups "
+        f"({len(all_raw)} raw variants, {n_variants} merged)"
     )
+    return findings
+
+
+# ---------------------------------------------------------------------------
+# R8: check consistency — a QA/review checkbox answered "否" (failed) must
+# be traceable to a deviation record; answered "是" on an item that is
+# clearly N/A-safe is fine. The check data comes from steps[].checks[]
+# (printed "√是/□否" option templates are NOT real checkboxes — the LLM
+# prompt filters those; here we only judge what survived extraction).
+# ---------------------------------------------------------------------------
+
+
+def _check_check_consistency(pages: list[dict]) -> list[dict]:
+    findings = []
+    for page in pages:
+        pno = page["page"]
+        for step in page["steps"]:
+            for c in step.get("checks", []) or []:
+                selected = (c.get("selected") or "").strip()
+                item = (c.get("item") or "").strip()
+                marker = (c.get("marker") or "").strip()
+                if not selected or not item:
+                    continue
+                if selected == "否":
+                    findings.append({
+                        "page": pno,
+                        "type": "completeness",
+                        "severity": "warning",
+                        "description": (
+                            f"第{pno}页 检查项「{item[:40]}」勾选为“否”"
+                            f"（{marker or '勾选标记'}），需确认是否已启动偏差"
+                            f"处理并在记录中留痕"
+                        ),
+                        "ocr_text": f"item={item[:40]} selected=否",
+                        "operator": "",
+                        "source": "rule",
+                    })
+                elif selected == "无法识别":
+                    findings.append({
+                        "page": pno,
+                        "type": "completeness",
+                        "severity": "info",
+                        "description": (
+                            f"第{pno}页 检查项「{item[:40]}」勾选状态无法识别"
+                            f"（{marker or '手绘勾选'}），请对照 PDF 原页人工核对"
+                        ),
+                        "ocr_text": f"item={item[:40]} selected=无法识别",
+                        "operator": "",
+                        "source": "rule",
+                    })
     return findings
 
 # OCR may misread handwritten values (e.g. "0.974" → "0.914"). Low confidence
@@ -262,6 +352,7 @@ def _check_measurement_time_sequence(pages: list[dict]) -> list[dict]:
                     "page": pno,
                     "time_raw": m.get("time"),
                     "t": _parse_time(m.get("time"), fb_date),
+                    "iv": _parse_time_interval(m.get("time"), fb_date),
                 })
     for key, rows in groups.items():
         if len(rows) < 2:
@@ -271,7 +362,10 @@ def _check_measurement_time_sequence(pages: list[dict]) -> list[dict]:
             if row["t"] is None:
                 prev = None  # 解析失败点打断连续性，避免误报
                 continue
-            if prev is not None and prev["t"] > row["t"]:
+            # Interval comparison: date-only times span the whole day, so a
+            # date-only row that touches the previous datetime row on the
+            # same day is not a reversal (e.g. "2024-01-01" vs "2024-01-01 14:30").
+            if prev is not None and prev["iv"] and row["iv"] and _interval_after(prev["iv"], row["iv"]):
                 findings.append({
                     "page": row["page"],
                     "type": "time_reversal",

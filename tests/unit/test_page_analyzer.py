@@ -180,9 +180,10 @@ class TestPromptConstruction:
             await analyze_page("<table></table>", page_num=1)
 
         call_kwargs = mock_client.chat_json.await_args.kwargs
-        assert call_kwargs["max_tokens"] == 6000
+        assert call_kwargs["max_tokens"] == 8000
         assert call_kwargs["temperature"] == 0.1
-        assert call_kwargs["timeout"] == 240.0
+        assert call_kwargs["timeout"] == 480.0
+        assert call_kwargs["retries"] == 2
 
 
 class TestErrorHandling:

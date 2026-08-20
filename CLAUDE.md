@@ -24,7 +24,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Round 4 (UX + robustness)**: cancel checkpoint injection (`AnalysisCancelled` + `cancel_check` three checkpoints in `page_analyzer.analyze_page`, cancelled pages not counted as failed — single HTTP call remains uninterruptible), prompt page-number injection + `findings[].page` backend enforcement (`_validate_page_result` + force-overwrite after sanitize), LLM hallucination grounding check (`_grounding_check`/`_value_grounded`: ≥4-digit substring match, shorter numbers boundary-checked; `_grounding_warn` → review banner), UX P1 set (no `target="_blank"` in Electron, corrected/note info in AJAX finding cards, `safeAutoReload` skips reload while typing or in dialog, PDF zoom 0.5-2.0x buttons), finding locate v1 (click card → OCR panel mark + scroll), P2 quick wins (empty report.md explicit "no findings" text + total_pages from `jobs.total_pages` instead of page_cache COUNT which undercounts failed-OCR pages, image→PDF conversion 120s timeout via `asyncio.wait_for` → 408, review.js `has_more` notice when >50 findings truncated).
 
-**Test status**: 1020 passed, 90.29% coverage (target ≥90%). Note: test_config/test_health share the process-global config singleton — both now restore original values (order-independent).
+**Round 6 (规则第三轮 + 页 9 截断修复, 2026-08)**: 挂载两条新规则 —— R9a `signature_order`（同一 operator 跨步骤签名时间必须递增，`core/rules/rule_time.py._check_signature_order` + `_ROLE_RANK`；type 合入 `signature_time_anomaly`）和 R8b `check_consistency`（同一复核项前后勾选状态切换必须落在规定的 pendingPage/allowable_transitions 内，`core/rules/rule_doc.py._check_check_consistency`；type 合入 `completeness`）；**value_source 三层方案**（印刷体信任/手写体存疑）：① v3 prompt 的「列级可信度（value_source 必填）」项（标注每列 printed/handwritten），② base.py `_infer_value_source`（列名关键词启发式：实际/实测/记录/填写/手写/结果/偏差 → handwritten；规格/标准/范围/指导/要点/要求/检查项目/项目 → printed；LLM 50% 概率不输出，backfill 兜底，内存级不写回 DB）+ `_backfill_value_source`，③ rule_spec.py `_severity_for_out_of_spec(bounds, actual, spec, value_source)`：printed → warning 不降噪；handwritten/unknown → ≤10% `_EDGE_MARGIN` 边缘偏离降 info。`analyze_cross_page` 输出 value_source 覆盖率统计日志（parameters n/m、cells n/m）；**页 9 大矩阵页截断/超时修复**：页 9（9 时间点 × 8 列大表 + 12MB OCR HTML）LLM 输出 426-485s 且被 max_tokens=6000 截断在字符串中间 → JSON 不可恢复 → fix-hint 重试每次 240s 超时 → 12 分钟整页失败。修复：$`_PAGE_MAX_TOKENS=8000`/$`_PAGE_TIMEOUT=480.0`/$`_PAGE_RETRIES=2`（page_analyzer 两处 chat_json）；llm/client.py 新增 `_repair_truncated_json`（字符串中间截断 → 回退到开引号 + 补 null；尾部完整数字保留；legacy 补括号兜底）+ `_parse_json` block 提取加条件（text 以 `{`/`[` 开头时跳过 block 提取，防误抓内嵌 `[]` 返回空 list）+ 恢复时注入 `_truncated_recovered: True`（analyze_page 打 `_truncated_warn` 日志）。修复后同页 258s 成功、payload 12191 bytes；**server.py CORS 一致性修复**：`python server.py`（无 PORT env）监听 58765 但 config.app.port 默认 8000 → CORS allowlist 只放行 8000 → 浏览器设置页 POST/PUT 被 CORS 拦截。修复：`os.environ.setdefault("PORT", str(port))` 必须在 `from config import config` 之前（否则 config 模块已按 8000 初始化；Electron main.js 传 PORT=58765 天然一致）。
+
+**Test status**: 1081 passed, 94.09% coverage (target ≥90%). Note: test_config/test_health share the process-global config singleton — both now restore original values (order-independent).
 
 **Web 版（飞书入口）决策（2026-08-18）**: 调研已完成（WEB.md，D1~D5 已拍板），但 **Web 版暂缓实施** — 当前优先桌面端迭代，不主动开展 Web 化（auth_mode/守卫改造/移动端适配等）。后续若启动，按 WEB.md §6 实施路线推进，决策结论无需重开讨论。
 
@@ -58,7 +60,7 @@ npx tailwindcss -i ./static/input.css -o ./static/app.css --minify
 # API docs (Swagger): http://127.0.0.1:8000/docs
 ```
 
-Test coverage target: ≥90%. Current: 90.29% (1020 tests, see `tests/` with unit + integration suites).
+Test coverage target: ≥90%. Current: 94.09% (1081 tests, see `tests/` with unit + integration suites).
 
 ---
 
