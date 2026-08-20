@@ -27,6 +27,15 @@ const net = require("net");
 // effect on the first window.
 Menu.setApplicationMenu(null);
 
+// 2026-08: splash 卡顿修复 — 在 VM/远程桌面/无 GPU 驱动环境下 Chromium 检测
+// 不到可用 GPU，全部回退软件渲染（gpu_compositing=disabled_software）。
+// 软件合成器默认把帧率节流在 ~30fps，CSS 线性旋转动画观感明显卡顿。
+// 该 switch 解除合成器帧率上限（实测 30→~40fps，软件光栅化本身有上限，
+// 剩余观感问题由 createSplashWindow 的 steps 离散动画兜底）。
+if (process.platform === "win32") {
+  app.commandLine.appendSwitch("disable-frame-rate-limit");
+}
+
 const SERVER_PORT = 58765;
 const SERVER_HOST = "127.0.0.1";
 const MAX_READY_CHECKS = 60; // 60 × 500ms = 30s timeout
@@ -358,7 +367,10 @@ function createSplashWindow() {
     border: 2px solid #e4e4e7;
     border-top-color: #0a0a0a;
     border-radius: 50%;
-    animation: spin 0.8s linear infinite;
+    /* 2026-08: 线性旋转在软件渲染（~40fps 上限）下会有明显中间帧缺失，
+       观感卡顿。改为离散 steps 旋转（每 100ms 跳 45°），与帧率无关，
+       任何环境观感稳定。 */
+    animation: spin 0.8s steps(8) infinite;
   }
   @keyframes spin { to { transform: rotate(360deg); } }
   #status {
