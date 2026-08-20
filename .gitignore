@@ -70,6 +70,10 @@ screenshot*.png
 samples/*.pdf
 samples/*.docx
 
+# E2E test images (manual upload fixtures, keep out of git)
+test*.jpg
+test*.png
+
 # Temporary spike scripts (one-shot, not part of app)
 spike_phase*.py
 _flip_status.py
