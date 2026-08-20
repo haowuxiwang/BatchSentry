@@ -1215,3 +1215,82 @@ class TestLlmFallbackFailClosed:
         assert len(review_findings) == 1
         assert "外观" in review_findings[0]["description"]
         assert "人工确认" in review_findings[0]["description"]
+
+
+class TestSummaryTruncation:
+    """_build_summary context-budget 护栏：字段压缩 → 逐行截断 + 显式标记。
+
+    对应 best practice：跨页 prompt 注入量必须封顶（51 页实测 ~23K tokens 约
+    22% 窗口，100+ 页记录会逼近质量退化区），超限时宁可带标记 drop 也不
+    静默截断（防 LLM 把缺失当正常，产生"内容不存在"类幻觉 finding）。
+    """
+
+    def _pages(self, n, op_len, findings=None):
+        return [
+            {
+                "page": i,
+                "page_info": {"title": f"记录页 {i}",
+                              "production_date": "2026-01-01",
+                              "batch_no": "B20260001"},
+                "steps": [{
+                    "step_no": 1,
+                    "operation": "操" * op_len,
+                    "start_time": "08:00",
+                    "end_time": "09:00",
+                    "operator": "张健",
+                    "reviewer": "周华",
+                    "parameters": [{"name": "温度", "value": "25", "unit": "℃"}],
+                    "measurements": [{"time": "08:30", "values": {
+                        "实测流速": {"actual": "0.97"},
+                        "实测压力": {"actual": "0.15"},
+                        "实测温度": {"actual": "25.0"},
+                        "实测pH": {"actual": "7.2"},
+                        "实测浊度": {"actual": "1.1"},
+                    }}],
+                    "signatures": [{"role": "operator", "name": "张健",
+                                    "sign_time": "2026-01-01 09:00"}],
+                }],
+                "findings": findings or [],
+                "event_year_groups": {},
+            }
+            for i in range(1, n + 1)
+        ]
+
+    def test_short_summary_within_cap(self):
+        from core.rules.llm_checks import _build_summary, _SUMMARY_MAX_CHARS
+        text = _build_summary(self._pages(2, 30))
+        assert len(text) <= _SUMMARY_MAX_CHARS
+        assert "内容过长已截断" not in text
+        assert "B20260001" in text
+
+    def test_oversized_compresses_fields_to_fit(self):
+        from core.rules.llm_checks import (_build_summary, _summary_lines,
+                                           _SUMMARY_MAX_CHARS)
+        pages = self._pages(400, 700)
+        # 前置：正常宽度（op 60）构建确实超限，压缩测试才有意义
+        assert len("\n".join(_summary_lines(pages, op_len=60, meas_cols=4,
+                                            findings_n=5))) > _SUMMARY_MAX_CHARS
+        text = _build_summary(pages)
+        assert len(text) <= _SUMMARY_MAX_CHARS
+        # 第一级字段压缩（operation 60→24）后应放得下，无需逐行截断
+        assert "内容过长已截断" not in text
+        assert "操" * 24 in text
+
+    def test_line_truncate_with_explicit_marker(self):
+        from core.rules.llm_checks import _build_summary, _SUMMARY_MAX_CHARS
+        pages = self._pages(5000, 700)
+        text = _build_summary(pages)
+        assert len(text) <= _SUMMARY_MAX_CHARS + 200
+        assert "内容过长已截断" in text
+        # 截断标记显式告知 LLM 输入不完整（防缺失当正常的幻觉）
+        assert "未注入" in text
+
+    def test_compression_reduces_sizes(self):
+        from core.rules.llm_checks import _summary_lines, _OP_LEN_COMPRESSED
+        full = _summary_lines(self._pages(1, 200), op_len=60, meas_cols=4,
+                              findings_n=5)
+        comp = _summary_lines(self._pages(1, 200), op_len=_OP_LEN_COMPRESSED,
+                              meas_cols=2, findings_n=2)
+        assert len("\n".join(comp)) < len("\n".join(full))
+        assert any("... " in ln or ln.endswith("...") for ln in comp
+                   if ln.strip().startswith("@"))

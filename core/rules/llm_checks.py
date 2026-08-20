@@ -6,6 +6,21 @@ from llm.client import get_llm_client
 
 logger = logging.getLogger(__name__)
 
+# 跨页 summary 字符上限（context budget 护栏，llm_checks._build_summary）：
+# 61 页实测 summary ≈ 46K chars ≈ 23K prompt tokens，已占 DeepSeek-V3.2
+# 128K 窗口约 22%。页码线性外推 100+ 页会逼近"内容过载"质量退化区
+# （best practice: 窗口占用 ≤ 30-40%）。上限 100K chars ≈ 50K tokens（39%）
+# 封顶于此；超限时第一遍字段压缩（operation 60→24 字符、测量列 4→2、
+# findings 5→2 条），仍超则逐行保留完整行 + 显式截断标记（LLM 知道输入
+# 不完整，不会把缺失当正常——宁可 drop 不可 starve）。
+_SUMMARY_MAX_CHARS = 100_000
+_OP_LEN_FULL = 60
+_OP_LEN_COMPRESSED = 24
+_MEASURE_COLS_FULL = 4
+_MEASURE_COLS_COMPRESSED = 2
+_FINDINGS_FULL = 5
+_FINDINGS_COMPRESSED = 2
+
 
 
 # ---------------------------------------------------------------------------
@@ -260,7 +275,51 @@ async def _llm_based_check(summary: str, *, job_id: str = "",
 
 
 def _build_summary(pages: list[dict]) -> str:
-    """Build compact text summary of all pages for LLM consumption."""
+    """Build compact text summary of all pages for LLM consumption.
+
+    Context-budget guarded: _SUMMARY_MAX_CHARS cap with two-stage degradation
+    (field compression, then whole-line preservation with an explicit
+    truncation marker so the LLM knows the input is incomplete).
+    """
+    text = "\n".join(_summary_lines(pages, op_len=_OP_LEN_FULL,
+                                    meas_cols=_MEASURE_COLS_FULL,
+                                    findings_n=_FINDINGS_FULL))
+    if len(text) <= _SUMMARY_MAX_CHARS:
+        return text
+    logger.warning(
+        f"Cross-page summary {len(text)} chars > {_SUMMARY_MAX_CHARS} cap — "
+        f"compressing fields (op {_OP_LEN_FULL}→{_OP_LEN_COMPRESSED}, "
+        f"cells {_MEASURE_COLS_FULL}→{_MEASURE_COLS_COMPRESSED}, "
+        f"findings {_FINDINGS_FULL}→{_FINDINGS_COMPRESSED})"
+    )
+    lines = _summary_lines(pages, op_len=_OP_LEN_COMPRESSED,
+                           meas_cols=_MEASURE_COLS_COMPRESSED,
+                           findings_n=_FINDINGS_COMPRESSED)
+    text = "\n".join(lines)
+    if len(text) <= _SUMMARY_MAX_CHARS:
+        return text
+    # 仍超限：逐行保留完整行（不切开半行），显式截断标记防 LLM 幻觉。
+    kept, chars = [], 0
+    marker_len = 0
+    for i, ln in enumerate(lines):
+        delta = len(ln) + 1
+        if chars + delta + marker_len > _SUMMARY_MAX_CHARS:
+            break
+        kept.append(ln)
+        chars += delta
+    marker = (f"## 内容过长已截断：仅完整展示 {len(kept)}/{len(lines)} 行，"
+              f"之后页面内容未注入，跨页分析可能缺失，需人工复核")
+    kept.append(marker)
+    logger.warning(
+        f"Compressed summary still {len(text)} chars — line-truncated to "
+        f"{len(kept)}/{len(lines)} lines with explicit marker"
+    )
+    return "\n".join(kept)
+
+
+def _summary_lines(pages: list[dict], *, op_len: int, meas_cols: int,
+                   findings_n: int) -> list[str]:
+    """Build the summary lines with the given field-width limits."""
     lines = []
     for page in pages:
         pi = page["page_info"]
@@ -275,7 +334,7 @@ def _build_summary(pages: list[dict]) -> str:
         if eyg:
             lines.append(f"  事件年份分组: {eyg}")
         for step in page["steps"]:
-            line = f"  步骤{step.get('step_no','?')}: {step.get('operation','')[:60]}"
+            line = f"  步骤{step.get('step_no','?')}: {step.get('operation','')[:op_len]}"
             if step.get("start_time"):
                 line += f" | 开始:{step['start_time']}"
             if step.get("end_time"):
@@ -291,17 +350,17 @@ def _build_summary(pages: list[dict]) -> str:
             for m in step.get("measurements", []) or []:
                 t = m.get("time", "")
                 cells = m.get("values") or {}
-                first_keys = list(cells.keys())[:4]
+                first_keys = list(cells.keys())[:meas_cols]
                 cells_str = ", ".join(
                     f"{k}={cells[k].get('actual','')}" for k in first_keys
                 )
-                lines.append(f"    @ {t} | {cells_str}{' ...' if len(cells) > 4 else ''}")
+                lines.append(f"    @ {t} | {cells_str}{' ...' if len(cells) > meas_cols else ''}")
             for sig in step.get("signatures", []) or []:
                 lines.append(
                     f"    签名: {sig.get('role','')}|{sig.get('name','')}|{sig.get('sign_time','')}"
                 )
         if page["findings"]:
             lines.append(f"  已抓 findings ({len(page['findings'])} 条):")
-            for f in page["findings"][:5]:
+            for f in page["findings"][:findings_n]:
                 lines.append(f"    - [{f.get('type','')}] {f.get('description','')[:80]}")
-    return "\n".join(lines)
+    return lines

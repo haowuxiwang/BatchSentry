@@ -63,6 +63,43 @@ class TestBackfillValueSource:
         _backfill_value_source(data)
         assert data["steps"][0]["parameters"][0]["value_source"] == "printed"
 
+    def test_unrecognized_marker_overrides_llm(self):
+        """MinerU 低置信度标记是机器事实：LLM 标 printed 也要被覆盖为
+        handwritten（该单元格内容实际不可识别）。"""
+        data = {"steps": [
+            {"parameters": [
+                {"name": "规格范围", "value": "[手写内容未识别]",
+                 "value_source": "printed"},
+            ]},
+            {"measurements": [
+                {"time": "10:00", "values": {
+                    "设备A_流速": {"actual": "[手写内容未识别]0.97",
+                                  "value_source": "printed"},
+                }},
+            ]},
+        ]}
+        _backfill_value_source(data)
+        assert data["steps"][0]["parameters"][0]["value_source"] == "handwritten"
+        vals = data["steps"][1]["measurements"][0]["values"]
+        assert vals["设备A_流速"]["value_source"] == "handwritten"
+
+    def test_marker_only_when_present(self):
+        """无标记 + LLM 标注不触碰；marker 检查对非字符串安全。"""
+        data = {"steps": [
+            {"parameters": [
+                {"name": "实际温度", "value": 25.0, "value_source": "printed"},
+            ]},
+            {"measurements": [
+                {"time": "10:00", "values": {
+                    "实测流速": {"actual": None},
+                }},
+            ]},
+        ]}
+        _backfill_value_source(data)
+        assert data["steps"][0]["parameters"][0]["value_source"] == "printed"
+        vals = data["steps"][1]["measurements"][0]["values"]
+        assert vals["实测流速"]["value_source"] == "handwritten"
+
 
 class TestOutOfSpecValueSource:
     def _sev(self, spec, actual, vs):

@@ -25,6 +25,16 @@ def _only_dicts(lst) -> list[dict]:
 
 _HANDWRITTEN_KEYWORDS = ("实际", "实测", "记录", "填写", "手写", "结果", "偏差")
 _PRINTED_KEYWORDS = ("规格", "标准", "范围", "指导", "要点", "要求", "检查项目", "项目")
+# MinerU 低置信度占位符（mineru_client._sanitize_unrecognized_handwriting 把
+# '###' 换成此标记）。单元格值若还带着它（LLM 原样保留），该单元格就是
+# 机器事实级"未识别内容"——value_source 必须 handwritten，优先级高于一切
+# 语义判断（LLM 标 printed 也要覆盖）。
+_UNRECOGNIZED_MARKER = "手写内容未识别"
+
+
+def _has_unrecognized_marker(text) -> bool:
+    """Cell value carries MinerU's low-confidence handwriting marker."""
+    return isinstance(text, str) and _UNRECOGNIZED_MARKER in text
 
 
 def _infer_value_source(name: str, fallback: str = "unknown") -> str:
@@ -49,8 +59,11 @@ def _infer_value_source(name: str, fallback: str = "unknown") -> str:
 def _backfill_value_source(data: dict) -> None:
     """Fill missing value_source on parameters/measurements in-place.
 
-    Called from _normalize_pages before rules run; leaves LLM-provided values
-    untouched (LLM semantic judgment wins over the header heuristic).
+    Resolution order (strongest signal first):
+      1. 机器事实：单元格值携带 MinerU 低置信度手写标记（含
+        「[手写内容未识别]」）→ 强制 handwritten，覆盖 LLM 标注。
+      2. LLM 标注（value_source 已输出）→ 原文保留。
+      3. 列名关键词启发（印刷表头 vs 手写填写列）→ 兜底。
     """
     for s in data.get("steps", []) or []:
         if not isinstance(s, dict):
@@ -58,7 +71,10 @@ def _backfill_value_source(data: dict) -> None:
         for p in s.get("parameters", []) or []:
             if not isinstance(p, dict):
                 continue
-            if not p.get("value_source"):
+            if _has_unrecognized_marker(p.get("value")) or \
+                    _has_unrecognized_marker(p.get("actual")):
+                p["value_source"] = "handwritten"
+            elif not p.get("value_source"):
                 p["value_source"] = _infer_value_source(p.get("name", ""))
         for m in s.get("measurements", []) or []:
             if not isinstance(m, dict):
@@ -66,7 +82,10 @@ def _backfill_value_source(data: dict) -> None:
             for col, v in (m.get("values") or {}).items():
                 if not isinstance(v, dict):
                     continue
-                if not v.get("value_source"):
+                if _has_unrecognized_marker(v.get("value")) or \
+                        _has_unrecognized_marker(v.get("actual")):
+                    v["value_source"] = "handwritten"
+                elif not v.get("value_source"):
                     v["value_source"] = _infer_value_source(col)
 
 
