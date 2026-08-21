@@ -11,8 +11,14 @@ logger = logging.getLogger(__name__)
 async def _run_stage3_cross_analysis(
     db, job_id: str, stage1_ms: int, stage2_ms: int,
     failed_pages: list[int], pipeline_start: float,
+    dual_diff: list[dict] | None = None,
 ) -> None:
-    """Cross-page analysis + findings persistence + final status. (refactor)"""
+    """Cross-page analysis + findings persistence + final status. (refactor)
+
+    dual_diff: 门禁 3 双后端对比差异列表（[{page, reason}, ...]，整份路径
+    传入）。非空时逐页写入 completeness findings 并强制 partial_review —
+    双后端结果不一致本身就是"需人工对照原图"的证据，不得自动通过。
+    """
     # Runtime resolution — tests rebuild core.pipeline.db_lock.
     from core.pipeline import db_lock
     # Runtime resolution — tests patch core.pipeline.{_is_cancelled,
@@ -48,7 +54,18 @@ async def _run_stage3_cross_analysis(
     # 避免取消后仍进入跨页分析（cancelling → review 非法转换）
     if await _run_is_cancelled(job_id):
         return
-    findings = await _run_analyze_cross(page_structures, job_id=job_id)
+
+    # Stage 3 子进度上报（SSE"跨页分析"文案）— 规则校验/LLM 兜底/
+    # LLM 语义三里程碑写入 ocr_progress.cross，结束后清除。
+    from core.pipeline.state import _update_cross_progress
+
+    async def _cross_progress_cb(done: int, total: int, label: str):
+        await _update_cross_progress(job_id, done, total, label)
+
+    findings = await _run_analyze_cross(
+        page_structures, job_id=job_id, progress_cb=_cross_progress_cb
+    )
+    await _update_cross_progress(job_id, 0, 0, "")
     # P-C3 修复：analyze_cross_page 调用后再检查一次取消状态，
     # 避免在跨页分析期间用户点取消后继续写入 findings / 转 review
     if await _run_is_cancelled(job_id):
@@ -128,9 +145,40 @@ async def _run_stage3_cross_analysis(
         f"llm_page skipped, severity={severity_counts})"
     )
 
+    # 门禁 3：双后端差异页逐页写入 completeness finding（复用 rule 链路的
+    # 去重索引 / 复核 UI / 报告导出）。INSERT OR IGNORE + UNIQUE 指纹保证
+    # retry 幂等。
+    dual_diff = dual_diff or []
+    if dual_diff:
+        dual_rows = [
+            (
+                job_id, d["page"], "completeness", "warning",
+                f"第{d['page']}页 双后端 OCR 结果存在显著差异（{d['reason']}），"
+                f"请对照 PDF 原图人工核对",
+                f"dual_compare: primary vs secondary — {d['reason']}",
+                "", "rule", None,
+            )
+            for d in dual_diff
+        ]
+        async with db_lock:
+            await db.executemany(
+                "INSERT OR IGNORE INTO findings "
+                "(job_id, page, type, severity, description, ocr_text, operator, source, user_rule_id, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','localtime'))",
+                dual_rows,
+            )
+            await db.commit()
+        logger.info(
+            f"[{job_id}] DB: dual-compare findings inserted ({len(dual_rows)} rows)"
+        )
+
     # Determine final status
     total_cost_ms = int((time.time() - pipeline_start) * 1000)
-    final_status = "partial_review" if failed_pages else "review"
+    dual_diff = dual_diff or []
+    # 门禁 3：双后端差异页强制人工复核（partial_review），不得自动通过
+    final_status = (
+        "partial_review" if (failed_pages or dual_diff) else "review"
+    )
 
     await db.execute(
         "UPDATE jobs SET finished_at = datetime('now','localtime'), "
@@ -139,8 +187,11 @@ async def _run_stage3_cross_analysis(
         (stage1_ms, stage2_ms, stage3_ms,
          json.dumps(failed_pages) if failed_pages else None, job_id),
     )
-    await transition_status(db, job_id, final_status,
-                            f"流水线完成：{len(findings)} 条问题，{len(failed_pages)} 页失败")
+    status_detail = (
+        f"流水线完成：{len(findings)} 条问题，{len(failed_pages)} 页失败"
+        + (f"，双后端差异 {len(dual_diff)} 页" if dual_diff else "")
+    )
+    await transition_status(db, job_id, final_status, status_detail)
 
     # 飞书通知（旁路：失败不影响主流程；成功/部分完成均推送）
     try:
@@ -151,6 +202,7 @@ async def _run_stage3_cross_analysis(
 
     logger.info(f"[{job_id}] Pipeline complete: status={final_status}, "
                  f"{len(findings)} findings, {len(failed_pages)} failed pages, "
+                 f"{len(dual_diff)} dual-compare diffs, "
                  f"total={total_cost_ms}ms (OCR={stage1_ms} LLM={stage2_ms} Cross={stage3_ms})")
     await _audit_log(db, job_id, "pipeline_complete",
                      f"status={final_status} findings={len(findings)} "

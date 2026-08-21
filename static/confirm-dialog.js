@@ -41,6 +41,9 @@
       container = document.createElement("div");
       container.id = "toast-container";
       container.className = "fixed bottom-4 right-4 z-[70] flex flex-col gap-2";
+      // WCAG 4.1.3 状态消息：读屏用户需感知 toast 通知（保存成功/失败等）
+      container.setAttribute("role", "status");
+      container.setAttribute("aria-live", "polite");
       document.body.appendChild(container);
     }
     const color =

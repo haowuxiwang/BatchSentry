@@ -42,17 +42,26 @@ class OpenAIAdapter(LLMAdapter):
         max_tokens: int = 4000,
         temperature: float = 0.1,
         timeout: float = 180.0,
+        response_format: dict | None = None,
     ) -> ChatResult:
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_content},
         ]
+        kwargs = {}
+        if response_format:
+            # 结构化输出（LLM_JSON_MODE 开启时由 client 传入）：
+            # OpenAI 兼容层的 json_object 模式在服务端约束输出为合法
+            # JSON，从源头减少截断/围栏/前导文本三类解析失败。
+            # 部分兼容网关不支持该参数（400）— client 捕获后降级重试。
+            kwargs["response_format"] = response_format
         resp = await self.client.chat.completions.create(
             model=self.model,
             messages=messages,
             max_tokens=max_tokens,
             temperature=temperature,
             timeout=timeout,
+            **kwargs,
         )
         content = resp.choices[0].message.content or ""
         usage = resp.usage

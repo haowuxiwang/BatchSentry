@@ -115,6 +115,8 @@ async def get_settings(request: Request):
         "ocr": {
             "backend": cfg["app"].ocr_backend,
             "slices": getattr(cfg["app"], "ocr_slices", 1),
+            "dual_compare": getattr(cfg["app"], "ocr_dual_compare", False),
+            "json_mode": getattr(cfg["app"], "llm_json_mode", False),
             "paddle": {
                 "api_url": cfg["paddle_ocr"].api_url,
                 "token": _mask(cfg["paddle_ocr"].token),

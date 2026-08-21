@@ -85,11 +85,19 @@ async def _report_heal_progress(db, job_id: str, done: int, total: int, pages: l
 
 
 async def _self_heal_empty_pages(
-    db, job_id: str, pdf_path: str, pages: list[dict], backend: str
-) -> None:
-    """Re-OCR pages whose tag-stripped text is < 100 chars. (refactor)"""
+    db, job_id: str, pdf_path: str, pages: list[dict], backend: str,
+    skip_pages: set[int] | None = None,
+) -> list[int]:
+    """Re-OCR pages whose tag-stripped text is < 100 chars. (refactor)
+
+    返回实际恢复的页号列表（分片路径用于补跑分析；整份路径忽略返回值）。
+    skip_pages: 跳过不检测的页号集合 — 分片模式下这些页的 LLM 分析已
+    完成，其 raw_html 的 [OCR 警告:] 前缀会命中缺失标记，若不自愈前
+    排除会把已分析页的 structured_json 清掉、触发无谓重跑。
+    """
     # Runtime resolution — tests patch core.pipeline._is_cancelled.
     from core.pipeline import _is_cancelled as _run_is_cancelled
+    recovered: list[int] = []  # 恢复页号（无自愈/异常路径保持空列表）
     if backend in ("mineru", "paddle"):
         # 空页判定增强（对抗审查 cr-17）：仅看 raw_html 长度会漏判
         # "标签多、文字少"的页（如 <table><tr><td></td></tr></table>
@@ -102,7 +110,10 @@ async def _self_heal_empty_pages(
             (job_id,),
         )
         retry_targets = []
+        _skip = skip_pages or set()
         for r in await cursor.fetchall():
+            if r["page"] in _skip:
+                continue
             html = r["raw_html"] or ""
             # 缺失标记（simple_table 整表降级 stub / 表格失败占位 / 空页
             # 占位）即使超 100 字符也视为未完成 — 防 111 字符 stub 逃过
@@ -183,7 +194,10 @@ async def _self_heal_empty_pages(
                             batch_size=batch_size,
                         )
                         heal_total = len(retry_targets)
-                        heal_done = heal_total - len(still_empty)
+                        # 本轮仍未恢复的页（下一轮只重跑这些 — 旧实现
+                        # still_empty 只增不减，第二轮会重跑第一轮已
+                        # 恢复的页，浪费一倍上游配额）
+                        next_pending: list[int] = []
                         for pno, md, discarded in retried:
                             # 对抗审查：恢复验收需排除"整表降级 stub"。
                             # 旧阈值只查长度 <100 → 111 字符的 simple_table
@@ -211,7 +225,8 @@ async def _self_heal_empty_pages(
                                     pages_by_num[pno]["markdown"]["text"] = clean
                                 recovered.append(pno)
                             else:
-                                still_empty.append(pno)
+                                next_pending.append(pno)
+                        still_empty = next_pending
                         # 每轮结束上报自愈进度（SSE 可见，防"卡死"误判）
                         await _report_heal_progress(
                             db, job_id,
@@ -323,3 +338,4 @@ async def _self_heal_empty_pages(
                 logger.error(
                     f"[{job_id}] Empty-page retry failed: {retry_err}"
                 )
+    return recovered

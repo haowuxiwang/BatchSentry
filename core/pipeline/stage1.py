@@ -208,13 +208,24 @@ async def _run_stage1_full(
         from core.pipeline import _self_heal_empty_pages as _run_heal
         await _run_heal(db, job_id, ocr_pdf_path, pages, self_heal_backend)
 
+    # 门禁 3（OCR_GOLDEN_CORPUS.md）：双后端输出对比。主后端成功且
+    # OCR_DUAL_COMPARE 开启时，用备选后端复跑同一工作副本并逐页对比，
+    # 差异页以 findings 呈现并强制 partial_review（stage3 消费）。
+    # cached 复用路径跳过（无新 OCR 产物可比；历史任务如需对比走 retry）。
+    dual_diff: list[dict] = []
+    if used_backend in ("paddle", "mineru"):
+        from core.pipeline.dual_compare import run_dual_compare
+        dual_diff = await run_dual_compare(
+            db, job_id, ocr_pdf_path, used_backend, pages
+        )
+
     await transition_status(db, job_id, "ocr_done", f"OCR 识别完成：共 {len(pages)} 页")
     await db.commit()
     logger.info(
         f"[{job_id}] DB: page_cache inserted {new_pages} new pages, "
         f"jobs.total_pages={len(pages)} ({len(existing_pages)} cached)"
     )
-    return pages, used_backend, stage1_ms, failed_pages
+    return pages, used_backend, stage1_ms, failed_pages, dual_diff
 
 
 

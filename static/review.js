@@ -1,4 +1,4 @@
-/* ============================================================
+﻿/* ============================================================
    Review page — interactions
    依赖：服务端通过 Jinja2 注入全局变量到 window.__PBC__
    ============================================================ */
@@ -253,7 +253,11 @@
               // Todo 13: stage3 阶段指示 — analyzing 含 Stage 2+3，
               // 页分析完成后推断已进入跨页语义分析
               pct = 93;
-              label = `跨页分析中（${analyzedCount}/${total} 页）`;
+              // P1-6: Stage 3 子进度（规则校验/LLM 兜底/LLM 语义里程碑）
+              const cr = d.cross_progress;
+              label = cr && cr.total > 0
+                ? `跨页分析 ${cr.done}/${cr.total} · ${cr.label}`
+                : `跨页分析中（${analyzedCount}/${total} 页）`;
             } else if (d.status === "analyzing") {
               pct =
                 33 +
@@ -507,7 +511,7 @@
         }
         if (c.info > 0 && c.critical === 0 && c.warning === 0) {
           const n = document.createElement("span");
-          n.className = "text-[10px] tabular-nums text-muted-foreground";
+          n.className = "text-[11px] tabular-nums text-muted-foreground";
           n.textContent = String(c.total);
           dotsEl.appendChild(n);
         }
@@ -1045,14 +1049,14 @@
               : "";
         const statusTag =
           f.status !== "pending"
-            ? `<span class="text-[10px] text-muted-foreground">· ${esc(zhOrUnknown(statusZh, f.status))}</span>`
+            ? `<span class="text-[11px] text-muted-foreground">· ${esc(zhOrUnknown(statusZh, f.status))}</span>`
             : "";
         const sourceTag =
           f.source && f.source !== "rule"
-            ? `<span class="text-[10px] text-muted-foreground">· ${esc(sourceZh[f.source] || f.source)}</span>`
+            ? `<span class="text-[11px] text-muted-foreground">· ${esc(sourceZh[f.source] || f.source)}</span>`
             : "";
         const ocrSnippet = f.ocr_text
-          ? `<p class="text-[11px] text-muted-foreground/70 font-mono mt-1 truncate">OCR：${esc(f.ocr_text.slice(0, 100))}</p>`
+          ? `<p class="text-[11px] text-muted-foreground font-mono mt-1 truncate">OCR：${esc(f.ocr_text.slice(0, 100))}</p>`
           : "";
         // UX P1-2: AJAX 渲染补齐人工复核信息 — SSR 模板有 corrected_text /
         // reviewer_note（review.html:359-364），JS 渲染此前缺失：用户修正
@@ -1086,7 +1090,7 @@
                                 <span class="text-[13px] font-medium text-foreground">${esc(zhOrUnknown(typeZh, f.type))}</span>
                                 ${statusTag}
                                 ${sourceTag}
-                                <span class="text-[10px] text-muted-foreground uppercase tracking-wider ml-auto">${esc(zhOrUnknown(severityZh, f.severity))}</span>
+                                <span class="text-[11px] text-muted-foreground uppercase tracking-wider ml-auto">${esc(zhOrUnknown(severityZh, f.severity))}</span>
                             </div>
                             <p class="text-[13px] text-muted-foreground leading-relaxed">${esc(f.description)}</p>
                             ${ocrSnippet}
@@ -1104,7 +1108,7 @@
       // 总数误触发；文案不写死 50，与后端 limit 语义一致。
       .concat(
         hasMore
-          ? '<div class="py-2 px-1 text-[11px] text-muted-foreground/70 text-center">本页已显示 50 条，仍有多条未显示（请逐页翻页或处理后刷新）</div>'
+          ? '<div class="py-2 px-1 text-[11px] text-muted-foreground text-center">本页已显示 50 条，仍有多条未显示（请逐页翻页或处理后刷新）</div>'
           : "",
       );
   }

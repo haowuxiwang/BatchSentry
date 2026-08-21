@@ -127,7 +127,8 @@ body {
   margin-bottom: 6px;
 }
 .field-hint {
-  font-size: 11px;
+  /* WCAG 可读性：11px→12px（辅助文本最低可读字号） */
+  font-size: 12px;
   color: hsl(var(--muted-foreground));
   margin-top: 4px;
 }
@@ -269,7 +270,7 @@ body {
   color: hsl(var(--foreground));
 }
 .provider-active-tag {
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 600;
   padding: 1px 7px;
   background: hsl(var(--foreground));
@@ -279,7 +280,7 @@ body {
   letter-spacing: 0.02em;
 }
 .provider-status {
-  font-size: 11px;
+  font-size: 12px;
   color: hsl(var(--muted-foreground));
   margin-left: 8px;
 }
@@ -297,7 +298,8 @@ body {
 .provider-test-btn,
 .provider-toggle-btn,
 .provider-remove-btn {
-  font-size: 11px;
+  /* WCAG 2.5.8 目标尺寸：高度 24px；字号 12px（11px→12px 可读性） */
+  font-size: 12px;
   font-weight: 500;
   padding: 4px 10px;
   height: 24px;
@@ -384,7 +386,7 @@ body {
 .btn-primary-small,
 .btn-danger-small,
 .btn-text {
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 500;
   padding: 4px 10px;
   height: 24px;

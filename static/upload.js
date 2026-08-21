@@ -1,4 +1,4 @@
-/* ============================================================
+﻿/* ============================================================
    Upload page — file upload + job archive/delete interactions
    依赖：window.__PBC__.jobs_count（可选，仅用于日志）
    ============================================================ */
@@ -507,7 +507,11 @@
             : `OCR ${prog.done}/${prog.total}`;
       } else if (st === "analyzing" && d.phase === "cross") {
         // Todo 14: stage3 阶段指示 — 页分析完成后已进入跨页语义分析
-        pages.textContent = `跨页分析中 · ${d.pages_analyzed || 0}/${d.total_pages || "?"} 页`;
+        // P1-6: 子进度里程碑（规则校验/LLM 兜底/LLM 语义）
+        const cr = d.cross_progress;
+        pages.textContent = cr && cr.total > 0
+          ? `跨页分析 ${cr.done}/${cr.total} · ${cr.label}`
+          : `跨页分析中 · ${d.pages_analyzed || 0}/${d.total_pages || "?"} 页`;
       } else if (st === "analyzing") {
         pages.textContent = `分析 ${d.pages_analyzed || 0}/${d.total_pages || "?"}`;
       } else if (st === "partial_review" && d.error_message) {
@@ -547,6 +551,7 @@
       total_pages: d.total_pages || 0,
       ocr_progress: d.ocr_progress || {},
       self_heal_progress: d.self_heal_progress || null,
+      cross_progress: d.cross_progress || null,
       phase: d.phase || "",
       pages_analyzed: d.pages_analyzed || 0,
       ocr_backend_used: d.ocr_backend_used || "",
@@ -634,7 +639,7 @@
     statusEl.appendChild(stTextSpan);
     const pagesEl = document.createElement("span");
     pagesEl.className =
-      "text-[11px] text-muted-foreground/70 tabular-nums job-pages";
+      "text-[11px] text-muted-foreground tabular-nums job-pages";
     // OCR 进行中且有实时进度时显示 "OCR 12/51"（后端 jobs.ocr_progress）
     const prog = job.ocr_progress || {};
     const sh = job.self_heal_progress;
@@ -657,7 +662,7 @@
     // cr-19：实际使用的 OCR 后端标签（failover 后与配置不同，GMP 追溯可见）
     const ocrTagEl = document.createElement("span");
     ocrTagEl.className =
-      "job-ocr-backend text-[10px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground ml-2";
+      "job-ocr-backend text-[11px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground ml-2";
     ocrTagEl.textContent = job.ocr_backend_used
       ? `OCR: ${job.ocr_backend_display || job.ocr_backend_used}`
       : "";
@@ -695,7 +700,7 @@
       deleteBtn.disabled = true;
     } else {
       deleteBtn.className =
-        "btn-press text-[11px] px-2 py-1 rounded text-muted-foreground/60 hover:text-destructive hover:bg-destructive/5 transition-colors";
+        "btn-press text-[11px] px-2 py-1 rounded text-muted-foreground hover:text-destructive hover:bg-destructive/5 transition-colors";
       deleteBtn.title = "彻底删除（含 PDF 文件，不可恢复）";
     }
     deleteBtn.dataset.action = "delete";
@@ -886,7 +891,7 @@
       if (data.archived.length === 0) {
         const empty = document.createElement("li");
         empty.className =
-          "px-5 py-6 text-center text-[12px] text-muted-foreground/60";
+          "px-5 py-6 text-center text-[12px] text-muted-foreground";
         empty.textContent = "暂无归档记录";
         listEl.appendChild(empty);
         return;
@@ -940,13 +945,13 @@
     titleEl.textContent = job.filename;
     const metaEl = document.createElement("div");
     metaEl.className =
-      "text-[11px] text-muted-foreground/70 mt-0.5 tabular-nums";
+      "text-[11px] text-muted-foreground mt-0.5 tabular-nums";
     metaEl.textContent = `${job.id} · ${job.created_at}`;
     info.appendChild(titleEl);
     info.appendChild(metaEl);
 
     const pagesEl = document.createElement("span");
-    pagesEl.className = "text-[11px] text-muted-foreground/50";
+    pagesEl.className = "text-[11px] text-muted-foreground";
     pagesEl.textContent = `${job.total_pages || "?"} 页`;
 
     link.appendChild(info);
@@ -968,7 +973,7 @@
     deleteBtn.type = "button";
     deleteBtn.textContent = "删除";
     deleteBtn.className =
-      "btn-press text-[11px] px-2 py-1 rounded text-muted-foreground/60 hover:text-destructive hover:bg-destructive/5 transition-colors";
+      "btn-press text-[11px] px-2 py-1 rounded text-muted-foreground hover:text-destructive hover:bg-destructive/5 transition-colors";
     deleteBtn.title = "彻底删除（不可恢复）";
     deleteBtn.dataset.action = "delete-archived";
 

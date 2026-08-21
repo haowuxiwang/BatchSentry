@@ -202,11 +202,18 @@ async def _run_pipeline_impl(job_id: str, pdf_path: str, progress_futures: list)
         stage1_ms = 0
         stage2_ms = 0
         failed_pages: list[int] = []
+        # 门禁 3 双后端对比结果（整份路径填充；分片路径跳过并记审计）
+        dual_diff: list[dict] = []
         if ocr_backend == "mineru" and slice_pages > 1:
             logger.info(
                 f"[{job_id}] Stage 1 (sliced): OCR_SLICES={slice_pages} pages/slice, "
                 f"streaming per-slice analysis enabled"
             )
+            if getattr(config["app"], "ocr_dual_compare", False):
+                await _audit_log(
+                    db, job_id, "dual_compare_skipped",
+                    "sliced 模式（OCR_SLICES>1）暂不支持双后端对比",
+                )
             # 分片路径此前直接提交原件，绕过了整份路径的异常 MediaBox
             # 规范化；这正会让 72dpi 错误嵌入的大扫描件退化成页眉/表格
             # stub。分片也必须用同一个 OCR 工作副本。
@@ -219,9 +226,20 @@ async def _run_pipeline_impl(job_id: str, pdf_path: str, progress_futures: list)
                     db, job_id, "ocr_input_normalized",
                     f"pages={normalized_pages} box>1600pt — sliced working copy",
                 )
+            # 页级 PDF 结构诊断（与整份路径同款 — 低 DPI / 异常页面盒
+            # 证据；分片路径此前缺失该层完整性证据）。基于规范化工作
+            # 副本计算，与实际提交 OCR 的内容一致。
+            from core.pipeline.ocr_support import _pdf_page_diagnostics
+            try:
+                sliced_pdf_diags = await asyncio.to_thread(
+                    _pdf_page_diagnostics, ocr_pdf_path
+                )
+            except Exception:
+                sliced_pdf_diags = {}
             stage1_ms, stage2_ms, failed_pages, sliced_total = (
                 await _run_sliced_stage1_2(
-                    db, job_id, ocr_pdf_path, slice_pages, _ocr_progress_cb
+                    db, job_id, ocr_pdf_path, slice_pages, _ocr_progress_cb,
+                    pdf_diags=sliced_pdf_diags,
                 )
             )
             # 0 页兜底：所有片均失败/空
@@ -243,20 +261,22 @@ async def _run_pipeline_impl(job_id: str, pdf_path: str, progress_futures: list)
             pages = []  # Stage 3 不依赖 pages（数据已在 page_cache）
         else:
             # Stage 1 (模块化): 整份 OCR 流程已拆入 _run_stage1_full —
-            # 复用检测 / 双后端 failover / page_cache 写入 / 空页自愈。
+            # 复用检测 / 双后端 failover / page_cache 写入 / 空页自愈 /
+            # 门禁 3 双后端对比。
             stage_out = await _run_stage1_full(
                 db, job_id, pdf_path, _ocr_progress_cb, loop
             )
             if stage_out is None:
                 return
-            pages, used_backend, stage1_ms, failed_pages = stage_out
+            pages, used_backend, stage1_ms, failed_pages, dual_diff = stage_out
             # ── Stage 2 (整份路径专属; 切片路径已在 _run_sliced_stage1_2 完成)
             stage2_ms = await _run_stage2_analysis(
                 db, job_id, pages, failed_pages
             )
         # ── Stage 3 (两路径共享) ─────────────────────────────────
         await _run_stage3_cross_analysis(
-            db, job_id, stage1_ms, stage2_ms, failed_pages, pipeline_start
+            db, job_id, stage1_ms, stage2_ms, failed_pages, pipeline_start,
+            dual_diff=dual_diff,
         )
 
 
@@ -356,6 +376,7 @@ async def _run_pipeline_impl(job_id: str, pdf_path: str, progress_futures: list)
 
 async def _run_sliced_stage1_2(
     db, job_id: str, pdf_path: str, slice_pages: int, ocr_progress_cb,
+    pdf_diags: dict | None = None,
 ) -> tuple[int, int, list[int], int]:
     """MinerU 分片 OCR + 渐进分析（流式输出核心，问题 2）。
 
@@ -363,6 +384,9 @@ async def _run_sliced_stage1_2(
     完成立即落库 page_cache 并启动该片页面的 LLM 分析**（不等其他片），
 
     用户无需等全部页 OCR 完成才看到 findings。
+
+    pdf_diags: _pdf_page_diagnostics 结果（整份路径同款页级 PDF 结构
+    诊断 — 低 DPI / 异常页面盒证据，分片路径此前缺失）。
 
     返回 (stage1_ms, stage2_ms, failed_pages, total_pages)。
     取消时提前返回（stage1/2_ms 可能为部分值），主流程的取消检查兜底。
@@ -436,7 +460,9 @@ async def _run_sliced_stage1_2(
                 if page_num in existing:
                     continue
                 raw_html = page.get("markdown", {}).get("text", "")
-                diagnostics, integrity_reasons = assess_ocr_page(page)
+                diagnostics, integrity_reasons = assess_ocr_page(
+                    page, (pdf_diags or {}).get(page_num)
+                )
                 # 与整份路径使用完全相同的、基于结构证据的完整性警告。
                 # 分片提前启动 LLM，必须在启动前注入，不能等 OCR 全部结束。
                 if integrity_reasons:
@@ -541,6 +567,55 @@ async def _run_sliced_stage1_2(
     await transition_status(db, job_id, "analyzing", "分片模式开始逐页分析")
     stage2_start = time.time()
     await asyncio.gather(*analysis_tasks)
+
+    # 空页自愈（分片路径补齐 — 与整份路径同机制）。skip_pages 只排除
+    # "已成功分析"的页：其警告前缀会命中缺失标记，不自愈前排除会清掉
+    # 已有 structured_json 触发无谓重跑。_ocr_empty / _parse_error /
+    # 未分析页保持可自愈（恢复后补跑分析）。
+    from core.pipeline import _self_heal_empty_pages as _run_heal
+    heal_skip: set[int] = set()
+    cur = await db.execute(
+        "SELECT page, structured_json FROM page_cache WHERE job_id = ?",
+        (job_id,),
+    )
+    for row in await cur.fetchall():
+        sj = row["structured_json"]
+        if not sj:
+            continue  # 未分析 → 可自愈
+        try:
+            data = json.loads(sj)
+        except json.JSONDecodeError:
+            continue  # 结构损坏 → 可自愈
+        if data.get("_ocr_empty") or data.get("_parse_error"):
+            continue  # 空页短路/解析失败 → 自愈后补分析
+        heal_skip.add(row["page"])
+    recovered = await _run_heal(
+        db, job_id, pdf_path, [], "mineru", skip_pages=heal_skip
+    )
+    if recovered:
+        logger.info(
+            f"[{job_id}] Sliced self-heal recovered {len(recovered)} pages "
+            f"— re-analyzing: p{recovered}"
+        )
+        ph = ",".join("?" * len(recovered))
+        cur = await db.execute(
+            f"SELECT page, raw_html FROM page_cache "
+            f"WHERE job_id = ? AND page IN ({ph})",
+            [job_id, *recovered],
+        )
+        heal_tasks: list[asyncio.Task] = []
+        for row in await cur.fetchall():
+            page_dict = {"markdown": {"text": row["raw_html"] or ""}}
+            heal_tasks.append(
+                asyncio.create_task(
+                    _analyze_one(
+                        db, job_id, row["page"], page_dict, sem,
+                        failed_pages, state_lock, completed, total_pages,
+                    )
+                )
+            )
+        await asyncio.gather(*heal_tasks)
+
     stage2_ms = int((time.time() - stage2_start) * 1000)
     logger.info(
         f"[{job_id}] Stage 2 (sliced): Complete in {stage2_ms}ms, "

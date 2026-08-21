@@ -307,3 +307,39 @@ async def _update_self_heal_progress(
     except Exception as e:
         logger.warning(f"[{job_id}] Self-heal progress update failed: {e}")
 
+
+async def _update_cross_progress(job_id: str, done: int, total: int, label: str) -> None:
+    """跨页分析（Stage 3）子进度 — 合并进 ocr_progress JSON 的 cross 键。
+
+    Stage 3 内部此前无任何进度信号：规则校验 + LLM 兜底 + LLM 语义
+    合计可达 1-2 分钟，SSE 客户端只能靠 phase 推断"跨页分析中"，
+    无法区分卡死与正常推进。total<=0 → 清除子键。
+    """
+    from core.pipeline import db_lock
+    db = await get_db()
+    try:
+        async with db_lock:
+            cursor = await db.execute(
+                "SELECT ocr_progress FROM jobs WHERE id = ?", (job_id,)
+            )
+            row = await cursor.fetchone()
+            data = {}
+            if row and row["ocr_progress"]:
+                try:
+                    data = json.loads(row["ocr_progress"])
+                    if not isinstance(data, dict):
+                        data = {}
+                except (ValueError, TypeError):
+                    data = {}
+            if total <= 0:
+                data.pop("cross", None)
+            else:
+                data["cross"] = {"done": done, "total": total, "label": label}
+            payload = json.dumps(data, ensure_ascii=False)
+            await db.execute(
+                "UPDATE jobs SET ocr_progress = ? WHERE id = ?", (payload, job_id)
+            )
+            await db.commit()
+    except Exception as e:
+        logger.warning(f"[{job_id}] Cross progress update failed: {e}")
+

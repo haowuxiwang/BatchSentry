@@ -422,6 +422,28 @@ class TestPaddleOCRClient:
         # ocr_client 模块应有 OCR 主入口
         assert hasattr(ocr_client, 'run_ocr') or hasattr(ocr_client, 'process_pdf')
 
+    def test_persist_paddle_original_writes_file(self, tmp_path):
+        """门禁 1c：原始响应落盘（回归：缺 import os 曾致 NameError 被吞）。"""
+        pdf = tmp_path / "x.pdf"
+        pdf.write_bytes(b"%PDF-1.4")
+        ocr_client._persist_paddle_original('{"pages": []}', str(pdf), "json")
+        out = tmp_path / "paddle_original.json"
+        assert out.exists()
+        assert out.read_text(encoding="utf-8") == '{"pages": []}'
+        assert not (tmp_path / "paddle_original.json.tmp").exists()
+
+    def test_persist_paddle_original_jsonl_suffix(self, tmp_path):
+        pdf = tmp_path / "x.pdf"
+        pdf.write_bytes(b"%PDF-1.4")
+        ocr_client._persist_paddle_original('{"a": 1}\n{"b": 2}', str(pdf), "jsonl")
+        assert (tmp_path / "paddle_original.jsonl").exists()
+
+    def test_persist_paddle_original_noop_on_empty(self, tmp_path):
+        pdf = tmp_path / "x.pdf"
+        pdf.write_bytes(b"%PDF-1.4")
+        ocr_client._persist_paddle_original("", str(pdf), "json")
+        assert not (tmp_path / "paddle_original.json").exists()
+
 
 class TestOCRBackendSelection:
     """OCR 后端选择逻辑（pipeline 集成）。"""

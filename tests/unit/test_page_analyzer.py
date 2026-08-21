@@ -805,6 +805,24 @@ class TestGroundingCheck:
         data = {"steps": ["污染", None], "findings": []}
         assert _grounding_check("<table><tr><td>0.974</td></tr></table>", data) == []
 
+    def test_fullwidth_digits_normalized(self):
+        """全角数字（OCR 常见形态）归一化后命中 → 不再假阴性。"""
+        html = "<table><tr><td>流速 ０.９７４ m³/h</td><td>温度 12.50 ℃</td></tr></table>"
+        # LLM 输出半角 0.974，原文是全角 —— 归一化后应命中
+        assert _grounding_check(html, self._data()) == []
+
+    def test_thousand_separator_tolerated(self):
+        """千分位逗号（"1,250" vs "1250"）→ 归一化后命中。"""
+        html = "<table><tr><td>投料量 1,250 kg</td><td>温度 12.50 ℃</td></tr></table>"
+        data = self._data()
+        data["steps"][0]["measurements"][0]["values"]["设备A_流速"]["actual"] = "1250"
+        assert _grounding_check(html, data) == []
+        # 反向：原文无分隔、LLM 输出带千分位
+        html2 = "<table><tr><td>投料量 1250 kg</td><td>温度 12.50 ℃</td></tr></table>"
+        data2 = self._data()
+        data2["steps"][0]["measurements"][0]["values"]["设备A_流速"]["actual"] = "1,250"
+        assert _grounding_check(html2, data2) == []
+
     @pytest.mark.asyncio
     async def test_analyze_page_sets_grounding_warn(self):
         """analyze_page 端到端：数值找不到 → _grounding_warn 随结果透出。"""

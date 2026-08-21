@@ -50,8 +50,12 @@ class LLMAdapter(abc.ABC):
         max_tokens: int = 4000,
         temperature: float = 0.1,
         timeout: float = 180.0,
+        response_format: dict | None = None,
     ) -> ChatResult:
         """Send a single chat completion request and return a ChatResult.
+
+        response_format: 协议支持时的结构化输出约束（如 OpenAI json_object）。
+        不支持的实现可忽略；不支持该参数的网关会 400，由 client 降级重试。
 
         Implementations should NOT retry — the LLMClient owns the retry loop.
         Implementations SHOULD raise on transport/auth errors so the retry

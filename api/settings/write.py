@@ -40,6 +40,8 @@ _STATIC_FIELDS = {
     "llm_providers_remove": "LLM_PROVIDERS",  # 从 LLM_PROVIDERS env var 差集移除
     "ocr_backend": "OCR_BACKEND",
     "ocr_slices": "OCR_SLICES",  # MinerU 分片 OCR（流式输出）页数/片
+    "ocr_dual_compare": "OCR_DUAL_COMPARE",  # 门禁 3：双后端输出对比（opt-in）
+    "llm_json_mode": "LLM_JSON_MODE",  # 结构化输出 json_object（网关不支持自动降级）
     "paddle_ocr_api_url": "PADDLE_OCR_API_URL",
     "paddle_ocr_token": "PADDLE_OCR_TOKEN",
     "paddle_ocr_model": "PADDLE_OCR_MODEL",

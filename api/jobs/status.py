@@ -66,6 +66,7 @@ async def get_job_status(job_id: str, request: Request = None):
         "stage3_ms": job["stage3_ms"],
         "ocr_progress": _parse_ocr_progress(job["ocr_progress"] if "ocr_progress" in job.keys() else None),
         "self_heal_progress": _parse_self_heal_progress(job["ocr_progress"] if "ocr_progress" in job.keys() else None),
+        "cross_progress": _parse_cross_progress(job["ocr_progress"] if "ocr_progress" in job.keys() else None),
         "phase": _derive_phase(job["status"], pages_analyzed, job["total_pages"] or 0),
         "page_finding_counts": page_finding_counts,
         "ocr_backend_used": job["ocr_backend_used"] if "ocr_backend_used" in job.keys() else None,
@@ -130,6 +131,7 @@ async def _get_job_progress(db, job_id: str) -> dict:
         "stage3_ms": job["stage3_ms"],
         "ocr_progress": _parse_ocr_progress(job["ocr_progress"] if "ocr_progress" in job.keys() else None),
         "self_heal_progress": _parse_self_heal_progress(job["ocr_progress"] if "ocr_progress" in job.keys() else None),
+        "cross_progress": _parse_cross_progress(job["ocr_progress"] if "ocr_progress" in job.keys() else None),
         "phase": _derive_phase(job["status"], pages_analyzed, job["total_pages"] or 0),
         "page_finding_counts": page_finding_counts,
         "ocr_backend_used": job["ocr_backend_used"] if "ocr_backend_used" in job.keys() else None,
@@ -168,6 +170,28 @@ def _parse_self_heal_progress(raw) -> dict | None:
                 "done": int(sh.get("done", 0)),
                 "total": int(sh.get("total", 0)),
                 "pages": [int(p) for p in (sh.get("pages") or [])],
+            }
+    except (ValueError, TypeError):
+        pass
+    return None
+
+
+def _parse_cross_progress(raw) -> dict | None:
+    """解析 ocr_progress JSON 中的 cross 子键（Stage 3 跨页分析子进度）。
+
+    {done, total, label} — label 为中文里程碑（规则校验/LLM 兜底判定/
+    LLM 语义分析/完成）。无进行中跨页分析返回 None。
+    """
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+        cr = data.get("cross") if isinstance(data, dict) else None
+        if isinstance(cr, dict) and cr.get("total"):
+            return {
+                "done": int(cr.get("done", 0)),
+                "total": int(cr.get("total", 0)),
+                "label": str(cr.get("label", "")),
             }
     except (ValueError, TypeError):
         pass

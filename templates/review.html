@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="zh-CN" class="h-full">
 <head>
     <meta charset="UTF-8">
@@ -38,13 +38,14 @@
             {# cr-19: 实际 OCR 后端徽章 — failover/自愈后用户可见（GMP 追溯），
                SSR 一次性渲染，SSE 期间由 review.js 实时更新 #}
             {% if ocr_backend_display %}
-            <span id="ocr-backend-badge" class="text-[10px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground">{{ ocr_backend_display }}</span>
+            <span id="ocr-backend-badge" class="text-[11px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground">{{ ocr_backend_display }}</span>
             {% else %}
-            <span id="ocr-backend-badge" class="hidden text-[10px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground"></span>
+            <span id="ocr-backend-badge" class="hidden text-[11px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground"></span>
             {% endif %}
             {# SSE 实时进度条：仅在非终态显示 #}
             <span id="progress-bar-container" class="hidden items-center gap-2 text-[11px] text-muted-foreground">
-                <span id="progress-text">—</span>
+                <!-- aria-live：SSE 进度文本动态更新，读屏用户需感知 -->
+                <span id="progress-text" role="status" aria-live="polite">—</span>
                 <span class="w-24 h-1 bg-muted rounded overflow-hidden">
                     <span id="progress-fill" class="block h-full bg-foreground transition-all duration-500" style="width:0%"></span>
                 </span>
@@ -134,7 +135,7 @@
                         <span data-dot="warning" class="w-1 h-1 rounded-full bg-warning" title="{{ pfc.warning }} 警告"></span>
                         {% endif %}
                         {% if pfc.info > 0 and pfc.critical == 0 and pfc.warning == 0 %}
-                        <span class="text-[10px] tabular-nums text-muted-foreground">{{ pfc.total }}</span>
+                        <span class="text-[11px] tabular-nums text-muted-foreground">{{ pfc.total }}</span>
                         {% endif %}
                     </span>
                     {% endif %}
@@ -209,7 +210,7 @@
                 <div class="flex-1 min-w-0">
                     <div class="text-[12px] font-semibold text-foreground mb-1">任务处理失败</div>
                     <p class="text-[12px] text-muted-foreground leading-relaxed break-words">{{ error_message }}</p>
-                    <p class="text-[11px] text-muted-foreground/70 mt-1.5">可点击右上角"重试"重新提交任务；如反复失败，请检查设置页面 LLM/OCR 配置或日志。</p>
+                    <p class="text-[11px] text-muted-foreground mt-1.5">可点击右上角"重试"重新提交任务；如反复失败，请检查设置页面 LLM/OCR 配置或日志。</p>
                 </div>
             </div>
             {% endif %}
@@ -226,7 +227,7 @@
                         以下页面未能完成分析（OCR 缺页或 LLM/JSON 解析失败），成果可能不完整，请以 PDF 原图为准：
                         <span class="font-mono">{{ failed_pages | join('、') }} 页</span>
                     </p>
-                    <p class="text-[11px] text-muted-foreground/70 mt-1.5">可为整体任务点击右下角"重试"补分析失败页面（已分析的页面不会重复消耗）。</p>
+                    <p class="text-[11px] text-muted-foreground mt-1.5">可为整体任务点击右下角"重试"补分析失败页面（已分析的页面不会重复消耗）。</p>
                 </div>
             </div>
             {% endif %}
@@ -393,17 +394,17 @@
                                     <div class="flex items-center gap-2 mb-0.5">
                                         <span class="text-[13px] font-medium text-foreground">{{ type_zh.get(f.type, f.type) }}</span>
                                         {% if f.status != 'pending' %}
-                                        <span class="text-[10px] text-muted-foreground">· {{ status_zh.get(f.status, f.status) }}</span>
+                                        <span class="text-[11px] text-muted-foreground">· {{ status_zh.get(f.status, f.status) }}</span>
                                         {% endif %}
                                         {% if f.source %}
-                                        <span class="source-badge text-[10px] text-muted-foreground">· {{ source_zh.get(f.source, f.source) }}</span>
+                                        <span class="source-badge text-[11px] text-muted-foreground">· {{ source_zh.get(f.source, f.source) }}</span>
                                         {% endif %}
-                                        <span class="text-[10px] text-muted-foreground uppercase tracking-wider ml-auto">{{ severity_zh.get(f.severity, f.severity) }}</span>
+                                        <span class="text-[11px] text-muted-foreground uppercase tracking-wider ml-auto">{{ severity_zh.get(f.severity, f.severity) }}</span>
                                     </div>
                                     <!-- 第二行: 描述 -->
                                     <p class="text-[13px] text-muted-foreground leading-relaxed">{{ f.description | render_page_links(job_id) }}</p>
                                     {% if f.ocr_text %}
-                                    <p class="text-[11px] text-muted-foreground/70 font-mono mt-1 truncate">OCR：{{ f.ocr_text[:100] }}</p>
+                                    <p class="text-[11px] text-muted-foreground font-mono mt-1 truncate">OCR：{{ f.ocr_text[:100] }}</p>
                                     {% endif %}
                                     {% if f.corrected_text %}
                                     <p class="text-[11px] text-foreground mt-1">修正：{{ f.corrected_text }}</p>

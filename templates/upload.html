@@ -1,4 +1,4 @@
-<!doctype html>
+﻿<!doctype html>
 <html lang="zh-CN" class="h-full">
   <head>
     <meta charset="UTF-8" />
@@ -185,18 +185,18 @@
             class="flex items-center gap-1.5 cursor-pointer text-[12px] text-muted-foreground hover:text-foreground transition-colors py-1.5 select-none"
           >
             <span
-              class="text-muted-foreground/60 group-open:rotate-90 transition-transform inline-block"
+              class="text-muted-foreground group-open:rotate-90 transition-transform inline-block"
               >▸</span
             >
             已归档
-            <span id="archived-count" class="text-muted-foreground/50"></span>
+            <span id="archived-count" class="text-muted-foreground"></span>
           </summary>
           <div
             class="mt-2 bg-card border border-border rounded-lg overflow-hidden"
           >
             <ul id="archived-list" class="divide-y divide-border">
               <li
-                class="px-5 py-6 text-center text-[12px] text-muted-foreground/60"
+                class="px-5 py-6 text-center text-[12px] text-muted-foreground"
               >
                 点击上方箭头展开
               </li>
@@ -209,7 +209,7 @@
     </div>
 
     {# robustness-C8: 日志路径可见性 — 排查问题时不需猜测日志位置 #}
-    <footer class="mt-6 pb-4 text-center text-[11px] text-muted-foreground/50">
+    <footer class="mt-6 pb-4 text-center text-[11px] text-muted-foreground">
       日志目录：<code class="font-mono">{{ log_dir }}</code>
     </footer>
 

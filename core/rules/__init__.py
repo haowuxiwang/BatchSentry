@@ -52,15 +52,27 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-async def analyze_cross_page(page_structures: list[dict], job_id: str = "") -> list[dict]:
+async def analyze_cross_page(
+    page_structures: list[dict], job_id: str = "", progress_cb=None
+) -> list[dict]:
     """Analyze all pages and return findings list.
 
     Args:
         page_structures: list of {page, data} dicts from page_cache.
         job_id: passed through to LLM audit_ctx for GMP traceability.
+        progress_cb: async (done, total, label) — Stage 3 子进度上报
+            （SSE"跨页分析"文案），4 个里程碑：规则校验 / LLM 兜底 /
+            LLM 语义 / 完成。None 时静默。
     """
     if not page_structures:
         return []
+
+    _CROSS_TOTAL = 3
+    if progress_cb:
+        try:
+            await progress_cb(0, _CROSS_TOTAL, "规则校验")
+        except Exception:
+            pass
 
     pages = _normalize_pages(page_structures)
     logger.info(
@@ -171,6 +183,11 @@ async def analyze_cross_page(page_structures: list[dict], job_id: str = "") -> l
     rule_findings.extend(per_page_findings)
 
     # LLM fallback: judge params that rules could not
+    if progress_cb:
+        try:
+            await progress_cb(1, _CROSS_TOTAL, "LLM 兜底判定")
+        except Exception:
+            pass
     llm_fallback_findings = await _llm_fallback_check(llm_queue, job_id=job_id)
     rule_findings.extend(llm_fallback_findings)
 
@@ -185,9 +202,19 @@ async def analyze_cross_page(page_structures: list[dict], job_id: str = "") -> l
         pages,
         context_window=getattr(_app_config["app"], "llm_context_window", None),
     )
+    if progress_cb:
+        try:
+            await progress_cb(2, _CROSS_TOTAL, "LLM 语义分析")
+        except Exception:
+            pass
     llm_findings = await _llm_based_check(summary, job_id=job_id, user_rules=user_rules)
 
     all_findings = rule_findings + llm_findings
+    if progress_cb:
+        try:
+            await progress_cb(_CROSS_TOTAL, _CROSS_TOTAL, "完成")
+        except Exception:
+            pass
     logger.info(
         f"[{job_id}] Cross-page analysis done: {len(rule_findings)} rule + {len(llm_findings)} LLM "
         f"({len(llm_fallback_findings)} from LLM fallback, "

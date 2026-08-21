@@ -1,4 +1,4 @@
-/* ============================================================
+﻿/* ============================================================
    Settings page — 业界做法重构 (参考 OpenAI/Anthropic/Linear)
    ------------------------------------------------------------
    设计原则:
@@ -1110,7 +1110,7 @@
       el.textContent =
         ruleLastSaved === "刚刚" ? "刚刚已保存，将注入下次跨页分析" : "从未成功保存 — 规则不会生效";
       el.className =
-        "ml-1.5 px-1.5 py-0.5 rounded bg-destructive/10 text-[10px] font-normal" +
+        "ml-1.5 px-1.5 py-0.5 rounded bg-destructive/10 text-[11px] font-normal" +
         (ruleLastSaved === "刚刚" ? " text-foreground" : " text-destructive");
     } else {
       el.textContent = `上次保存 ${ruleLastSaved}  · 命中 ${rules.reduce(
@@ -1118,7 +1118,7 @@
         0
       )} 次`;
       el.className =
-        "ml-1.5 px-1.5 py-0.5 rounded bg-muted text-muted-foreground text-[10px] font-normal";
+        "ml-1.5 px-1.5 py-0.5 rounded bg-muted text-muted-foreground text-[11px] font-normal";
     }
     void el;
   }
@@ -1133,7 +1133,7 @@
     if (countEl) countEl.textContent = `${rules.length} 条`;
     if (rules.length === 0) {
       const empty = document.createElement("p");
-      empty.className = "text-[12px] text-muted-foreground/50";
+      empty.className = "text-[12px] text-muted-foreground";
       empty.textContent = "暂无自定义规则 — 跨页分析仅使用内置规则 R1-R8 与 LLM 语义检查";
       listEl.appendChild(empty);
       return;
@@ -1144,7 +1144,7 @@
       row.dataset.ruleIndex = String(idx);
 
       const num = document.createElement("span");
-      num.className = "mt-2.5 w-5 shrink-0 text-right text-[11px] text-muted-foreground/60";
+      num.className = "mt-2.5 w-5 shrink-0 text-right text-[11px] text-muted-foreground";
       num.textContent = `${idx + 1}`;
 
       const checkbox = document.createElement("input");
@@ -1172,8 +1172,8 @@
       const hit = ruleHits[rule.id] || 0;
       const badge = document.createElement("span");
       badge.className =
-        "mt-2 shrink-0 px-1.5 py-0.5 rounded text-[10px] " +
-        (hit > 0 ? "bg-foreground text-background" : "bg-muted text-muted-foreground/60");
+        "mt-2 shrink-0 px-1.5 py-0.5 rounded text-[11px] " +
+        (hit > 0 ? "bg-foreground text-background" : "bg-muted text-muted-foreground");
       badge.textContent = hit > 0 ? `命中 ${hit}` : "0 命中";
       badge.title = `历史命中 ${hit} 次（GMP 溯源：findings.user_rule_id）`;
 
@@ -1221,7 +1221,7 @@
     const MAX = 8000;
     el.textContent = `${total} / ${MAX} 字`;
     el.className =
-      "ml-1.5 px-1.5 py-0.5 rounded text-[10px] font-normal " +
+      "ml-1.5 px-1.5 py-0.5 rounded text-[11px] font-normal " +
       (total > MAX
         ? "bg-destructive/10 text-destructive"
         : "bg-muted text-muted-foreground");
@@ -1294,7 +1294,7 @@
     RULE_TEMPLATE_LIBRARY.forEach((section) => {
       const group = document.createElement("div");
       group.className =
-        "px-2 pt-2 pb-1 text-[10px] font-medium text-muted-foreground/60 uppercase tracking-wide";
+        "px-2 pt-2 pb-1 text-[11px] font-medium text-muted-foreground uppercase tracking-wide";
       group.textContent = section.group;
       panel.appendChild(group);
       const grid = document.createElement("div");

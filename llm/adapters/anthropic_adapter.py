@@ -50,8 +50,11 @@ class AnthropicAdapter(LLMAdapter):
         max_tokens: int = 4000,
         temperature: float = 0.1,
         timeout: float = 180.0,
+        response_format: dict | None = None,
     ) -> ChatResult:
         # Anthropic uses a top-level `system` field, not a system message.
+        # response_format: Anthropic 无等价参数，忽略（JSON 约束由 prompt
+        # + client 侧修复链承担）。
         resp = await self.client.messages.create(
             model=self.model,
             system=system_prompt,

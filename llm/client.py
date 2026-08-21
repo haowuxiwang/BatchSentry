@@ -57,8 +57,38 @@ def _mask_secrets(text: str) -> str:
     return text
 
 
+def _looks_like_rf_unsupported(err: Exception) -> bool:
+    """判断异常是否为 response_format 参数不被网关支持（400 类）。
+
+    各兼容网关报错措辞不一（OpenAI "Unrecognized request argument"、
+    部分网关 "Invalid parameter"/"json_object not supported"），取
+    参数名 + 通用 400 关键词的宽松组合，宁可误降级（损失一次结构化
+    约束）不可误判为其他错误。
+    """
+    s = str(err).lower()
+    has_rf = (
+        "response_format" in s
+        or "json_object" in s
+        or "json mode" in s
+    )
+    has_bad = (
+        "400" in s
+        or "bad request" in s
+        or "invalid" in s
+        or "unrecognized" in s
+        or "unknown" in s
+        or "not supported" in s
+        or "unsupported" in s
+    )
+    return has_rf and has_bad
+
+
 class LLMClient:
     """Unified LLM client that routes through protocol adapters."""
+
+    # 会话级 JSON 模式降级标记：某 provider 网关拒绝 response_format 参数
+    # （400）后置 True，本进程内不再尝试（避免每页都白打一次失败请求）。
+    _json_mode_disabled: bool = False
 
     def __init__(self, provider: str | None = None):
         self.provider = provider or config["app"].llm_provider
@@ -89,6 +119,7 @@ class LLMClient:
         retries: int = 3,
         timeout: float = 180.0,
         audit_ctx: dict | None = None,
+        response_format: dict | None = None,
     ) -> str:
         """Send a chat completion request with retry and exponential backoff.
 
@@ -97,6 +128,9 @@ class LLMClient:
                 prompt_version}. If provided, the call is recorded in the
                 llm_call_audit table for GMP traceability. Set to None for
                 ad-hoc calls (health probe, etc.).
+            response_format: 结构化输出约束（如 {"type": "json_object"}）。
+                网关不支持时自动降级重试一次（无该参数），并置会话级
+                禁用标记。
         """
         # Build a short context tag for log correlation (e.g. "[job=abc123 page=5 stage=page_analysis]")
         ctx_tag = ""
@@ -116,13 +150,39 @@ class LLMClient:
         for attempt in range(1, retries + 1):
             try:
                 start = time.time()
-                result = await self.adapter.chat(
-                    system_prompt=system_prompt,
-                    user_content=user_content,
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                    timeout=timeout,
+                use_rf = (
+                    response_format is not None
+                    and not LLMClient._json_mode_disabled
                 )
+                try:
+                    result = await self.adapter.chat(
+                        system_prompt=system_prompt,
+                        user_content=user_content,
+                        max_tokens=max_tokens,
+                        temperature=temperature,
+                        timeout=timeout,
+                        response_format=response_format if use_rf else None,
+                    )
+                except Exception as rf_err:
+                    # 结构化输出参数被网关拒绝 → 降级为普通调用重试一次，
+                    # 并置会话级禁用（后续调用不再尝试该参数）。
+                    if use_rf and _looks_like_rf_unsupported(rf_err):
+                        LLMClient._json_mode_disabled = True
+                        logger.warning(
+                            f"response_format rejected by provider{ctx_tag} — "
+                            f"disabling JSON mode for this session: "
+                            f"{_mask_secrets(str(rf_err))[:150]}"
+                        )
+                        result = await self.adapter.chat(
+                            system_prompt=system_prompt,
+                            user_content=user_content,
+                            max_tokens=max_tokens,
+                            temperature=temperature,
+                            timeout=timeout,
+                            response_format=None,
+                        )
+                    else:
+                        raise
                 elapsed = time.time() - start
                 last_latency_ms = int(elapsed * 1000)
                 last_result = result
@@ -227,6 +287,16 @@ class LLMClient:
         audit_ctx: dict | None = None,
     ) -> dict | list:
         """Send chat completion and parse JSON from response. Returns dict or list."""
+        # 结构化输出（P1-7）：LLM_JSON_MODE 开启 + openai 协议 + 会话未
+        # 禁用时，请求 json_object 模式 — 服务端约束输出为合法 JSON，
+        # 从源头减少围栏/前导文本/截断三类解析失败。失败自动降级。
+        response_format = None
+        if (
+            getattr(config["app"], "llm_json_mode", False)
+            and not LLMClient._json_mode_disabled
+            and getattr(self.adapter, "protocol", "") == "openai"
+        ):
+            response_format = {"type": "json_object"}
         raw = await self.chat(
             system_prompt, user_content,
             max_tokens=max_tokens,
@@ -234,6 +304,7 @@ class LLMClient:
             retries=retries,
             timeout=timeout,
             audit_ctx=audit_ctx,
+            response_format=response_format,
         )
         result = self._parse_json(raw)
 

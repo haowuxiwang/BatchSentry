@@ -2499,7 +2499,7 @@ class TestStage3CoverageGaps:
         async def fake_cancelled(jid):
             return flag["cross_done"]
 
-        def fake_cross(page_structures, job_id=None):
+        def fake_cross(page_structures, job_id=None, progress_cb=None):
             flag["cross_done"] = True
             return [{"page": 1, "type": "t", "severity": "w", "description": "x"}]
 

@@ -401,6 +401,29 @@ async def analyze_page(
         ocr_warning = m.group(1)
         cleaned = cleaned[m.end():].lstrip()
 
+    # 二次空页短路：raw_html 唯一内容是 OCR 警告前缀时（OCR 返回空但
+    # 完整性理由存在 — 空页 + 警告前缀组合），上面的非空检查被前缀
+    # 骗过，剥离后露出真空页。不补短路会把空数据区发给 LLM（幻觉
+    # 风险）。保留 ocr_warning 供横幅展示。
+    if not cleaned or "此页无文本内容" in cleaned:
+        logger.info(
+            f"[{job_id}] Page {page_num}: empty OCR content after warning "
+            f"strip, skipping LLM call"
+        )
+        result = {
+            "page_number": page_num,
+            "_parse_error": False,
+            "_ocr_empty": True,
+            "steps": [],
+            "findings": [],
+            "overall_confidence": "low",
+            "note": "此页无 OCR 内容，无法分析",
+            "_prompt_version": CURRENT_PROMPT_VERSION,
+        }
+        if ocr_warning:
+            result["_ocr_warning"] = ocr_warning
+        return result
+
     # robustness-E1: 稀疏内容页 — OCR 页数一致但内容极少，是"整页解析
     # 不完整"最常见的形态：模型把残缺内容当完整内容分析，可能生成幻觉
     # findings 且无任何提示。两类判定：
@@ -677,8 +700,7 @@ def _grounding_check(html: str, data: dict) -> list:
 
     返回可疑描述列表（最多 _GROUNDING_MAX_ITEMS 条），为空表示全部通过。
     """
-    text = re.sub(r"<[^>]+>", " ", html)       # 去标签
-    text = re.sub(r"\s+", "", text).lower()    # 去空白
+    text = _normalize_grounding_text(re.sub(r"<[^>]+>", " ", html))
     if len(text) < _GROUNDING_MIN_DIGITS:
         return []  # 原文太短（空页/纯空白）不做核对
 
@@ -714,9 +736,29 @@ def _grounding_check(html: str, data: dict) -> list:
     return suspects[:_GROUNDING_MAX_ITEMS]
 
 
+# 全角数字 → 半角映射（OCR 原文/LLM 输出均可能出现全角形态）
+_FULLWIDTH_DIGITS = str.maketrans("０１２３４５６７８９．，", "0123456789.,")
+
+
+def _normalize_grounding_text(s: str) -> str:
+    """grounding 归一化：全角→半角、去千分位逗号、去空白、转小写。
+
+    千分位剥离仅针对数字间的逗号（"1,250" → "1250"），避免影响
+    正常文本。尾零等价（"25.0" vs "25"）由分量匹配 + 边界规则处理。
+    """
+    s = (s or "").translate(_FULLWIDTH_DIGITS)
+    s = re.sub(r"(?<=\d),(?=\d)", "", s)
+    return re.sub(r"\s+", "", s).lower()
+
+
 def _value_grounded(text: str, value: str) -> bool:
-    """value 的数字分量是否能在 text 中找到（任一分量命中即通过）。"""
-    v = re.sub(r"\s+", "", value).lower()
+    """value 的数字分量是否能在 text 中找到（任一分量命中即通过）。
+
+    双方都经 _normalize_grounding_text 归一化：全角数字、千分位逗号
+    不再造成假阴性；尾部归一化（0.974 命中 "0.9740"）靠子串包含；
+    短数字要求边界防误命中。
+    """
+    v = _normalize_grounding_text(value)
     if not v or not re.search(r"\d", v):
         return True  # 无数字的值不核对
     parts = re.findall(r"\d+\.?\d*", v)

@@ -410,6 +410,8 @@ class AppConfig:
     llm_concurrency: int  # Stage 2 并发 LLM 页面分析数
     ocr_slices: int  # MinerU 分片 OCR 页数/片（1=不分片，流式逐片分析）
     llm_context_window: int  # LLM 上下文窗口（tokens）— Round 7 跨页摘要预算推导依据
+    ocr_dual_compare: bool  # 门禁 3：主后端成功后用备选后端复跑并对比（成本翻倍，opt-in）
+    llm_json_mode: bool  # 结构化输出：openai 协议 json_object 模式（网关不支持自动降级）
 
 
 def _load_provider(name: str) -> ProviderConfig:
@@ -600,6 +602,14 @@ def load_config():
             # 或小窗口模型（GLM/Kimi 32K）的提示词溢出。默认 128K
             # （DeepSeek-V3.2 / 通用大窗口）。
             llm_context_window=_env_int("LLM_CONTEXT_WINDOW", 128_000),
+            # 门禁 3（OCR_GOLDEN_CORPUS.md）：双后端输出对比。默认关闭 —
+            # 每个任务多跑一次完整 OCR（分钟级 + 上游配额），按需开启。
+            ocr_dual_compare=os.getenv("OCR_DUAL_COMPARE", "false").lower()
+            in ("1", "true", "yes"),
+            # P1-7 结构化输出：默认关闭（部分兼容网关不支持 json_object，
+            # 开启后首次 400 会自动降级并会话内禁用）
+            llm_json_mode=os.getenv("LLM_JSON_MODE", "false").lower()
+            in ("1", "true", "yes"),
         ),
     }
 
@@ -630,6 +640,14 @@ def update_config(updates: dict):
             config["app"].ocr_slices = max(1, int(updates["ocr_slices"]))
         except (TypeError, ValueError):
             config["app"].ocr_slices = 1
+    if "ocr_dual_compare" in updates:
+        config["app"].ocr_dual_compare = str(
+            updates["ocr_dual_compare"]
+        ).lower() in ("1", "true", "yes")
+    if "llm_json_mode" in updates:
+        config["app"].llm_json_mode = str(
+            updates["llm_json_mode"]
+        ).lower() in ("1", "true", "yes")
 
     # Add new providers to the registry on the fly (Settings UI "add provider")
     if "llm_providers_add" in updates:
