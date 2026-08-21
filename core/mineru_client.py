@@ -291,6 +291,25 @@ def download_result(task_result: dict, pdf_path: str = "") -> list[dict]:
     if resp.status_code != 200:
         raise RuntimeError(f"[MinerU] 下载 zip 失败 HTTP {resp.status_code}")
 
+    # 门禁 1c（OCR 金标发布门禁）：后端原始产物落盘 — 结果 zip 含
+    # content_list/layout/model/full.md，是"设备原始输出"证据链的一部分。
+    # 落盘在 job_dir（pdf_path 同级），先写 tmp 再 os.replace 原子替换；
+    # 失败仅告警不阻断（追溯要求优先于流程鲁棒性降级）。
+    if pdf_path:
+        try:
+            zip_path = Path(pdf_path).parent / "mineru_original.zip"
+            tmp_zip = zip_path.with_suffix(".tmp")
+            tmp_zip.write_bytes(resp.content)
+            os.replace(tmp_zip, zip_path)
+            logger.info(
+                f"[MinerU] 原始产物已落盘: {zip_path.name} "
+                f"({len(resp.content) / 1024:.0f}KB)"
+            )
+        except Exception as e:
+            logger.warning(
+                f"[MinerU] 原始产物落盘失败（不影响主流程）: {redact_urls(str(e))[:200]}"
+            )
+
     # 解压 zip
     pages: list[dict] = []
     with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
@@ -431,6 +450,7 @@ def _split_pages_by_content_list(
                 "markdown": {"text": text},
                 "page_count": i + 1,
                 "_source": "mineru",
+                "_ocr_diagnostics": _page_ocr_diagnostics(block_dicts, discarded_count),
             }
             if discarded_count > 0:
                 # 暴露页级 OCR 完整性信息，pipeline 用于 UI 警告 + LLM 降级提示
@@ -471,6 +491,7 @@ def _split_pages_by_content_list(
             "markdown": {"text": text},
             "page_count": i + 1,
             "_source": "mineru",
+            "_ocr_diagnostics": _page_ocr_diagnostics(blocks_for_page, discarded_count),
         }
         if discarded_count > 0:
             page_dict["_discarded_count"] = discarded_count
@@ -555,7 +576,44 @@ def _compose_page_markdown(page_num: int, blocks: list[dict]) -> tuple[str, int]
     return _sanitize_unrecognized_handwriting("\n".join(parts)).strip(), discarded_count
 
 
+def _page_ocr_diagnostics(blocks: list[dict], discarded_count: int) -> dict:
+    """Return loss-detection facts from MinerU's structured result.
+
+    A page that contains only headers/footers is *not* a successful document
+    extraction even when it has a non-empty markdown string.  Keeping these
+    facts next to the page lets the pipeline distinguish that case from a
+    genuinely short notification page without guessing from character count.
+    """
+    meaningful = 0
+    table_blocks = 0
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        btype = str(block.get("type", "text"))
+        if btype == "table":
+            table_blocks += 1
+        if btype in ("text", "paragraph", "title", "table", "image", "equation", "equation_interline"):
+            if _block_to_markdown(block):
+                meaningful += 1
+    return {
+        "source": "mineru",
+        "total_blocks": len(blocks),
+        "meaningful_blocks": meaningful,
+        "table_blocks": table_blocks,
+        "discarded_blocks": discarded_count,
+        "header_footer_only": bool(blocks) and meaningful == 0,
+    }
+
+
 _HASHES_PLACEHOLDER_RE = re.compile(r"###")
+
+# 服务端整表降级 stub 判定（对抗审查：超大畸形页面盒场景）：
+# 合法表格 html/markdown 必然含 <table/<tr/<td 或行首管道符；
+# 不含这些结构特征的"表格内容"（MinerU 降级输出的字面量 simple_table
+# 等 stub）视为表格缺失 → 走占位 + discarded_count 计数路径（触发
+# OCR 不完整警告 + 自愈），而不是被 _content_text 当正文输出（旧行为：
+# 111 字符 stub 当正常内容，三重检测全部漏检，复核页零提示）。
+_PLAUSIBLE_TABLE_RE = re.compile(r"<table|<tr|<td|^\s*\|", re.IGNORECASE | re.MULTILINE)
 
 
 def _sanitize_unrecognized_handwriting(md: str) -> str:
@@ -614,8 +672,16 @@ def _block_to_markdown(block: dict) -> str:
 
     if btype == "table":
         html = _table_html(block)
+        # 对抗审查：MinerU 服务端对超大/畸形页面（3000x4000pt 这类
+        # 72dpi 错误嵌入）会把整表降级为字面量 stub（"simple_table"），
+        # 而非合法 HTML/Markdown 表格。此类 stub 必须识别为"表格缺失"
+        # — 走下方占位 + discarded_count 计数路径（触发 OCR 不完整
+        # 警告 + 自愈），而不是被 _content_text 当正文输出（旧行为：
+        # 111 字符 stub 当正常内容，三重检测全部漏检，复核页零提示）。
         if html:
-            return html
+            if _PLAUSIBLE_TABLE_RE.search(html):
+                return html
+            return ""  # 有内容但无表格结构特征 → stub，视为表格缺失
         # P1-2: HTML 提取失败不再静默丢整表 — fall through 到下方通用
         # 文本提取（递归捞块内全部字符串），至少保留表格内容；连文本
         # 都没有时由 _compose_page_markdown 计数注入缺失占位 + OCR 警告。

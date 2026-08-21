@@ -378,11 +378,17 @@ async def review_page(job_id: str, request: Request, page: int = 1):
 
     # Get OCR text + structured_json for requested page
     cursor = await db.execute(
-        "SELECT raw_html, structured_json FROM page_cache WHERE job_id = ? AND page = ?",
+        "SELECT raw_html, ocr_diagnostics, structured_json FROM page_cache WHERE job_id = ? AND page = ?",
         (job_id, page),
     )
     row = await cursor.fetchone()
     raw_html = row["raw_html"] if row else ""
+    ocr_diagnostics = None
+    if row and row["ocr_diagnostics"]:
+        try:
+            ocr_diagnostics = json.loads(row["ocr_diagnostics"])
+        except (TypeError, json.JSONDecodeError):
+            pass
     structured_json = row["structured_json"] if row else None
     # Strip HTML tags for display — keep line breaks so tables stay readable.
     # Full raw_html goes to the template separately as ocr_raw_html and is
@@ -497,6 +503,7 @@ async def review_page(job_id: str, request: Request, page: int = 1):
         "total_pages": total_pages,
         "ocr_text": ocr_text,
         "ocr_raw_html": raw_html,
+        "ocr_diagnostics": ocr_diagnostics,
         "findings": findings,
         "severity_counts": severity_counts,
         "page_finding_counts": page_finding_counts,

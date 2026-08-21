@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS page_cache (
     job_id TEXT NOT NULL,
     page INTEGER NOT NULL,
     raw_html TEXT,
+    ocr_diagnostics TEXT,          -- 页级 OCR 完整性证据（JSON）
     structured_json TEXT,
     analyzed_at TIMESTAMP,
     PRIMARY KEY (job_id, page),

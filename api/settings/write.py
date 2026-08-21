@@ -12,6 +12,8 @@ from pydantic import BaseModel
 
 from config import (
     FEISHU_ALLOWED_EVENTS,
+    MINERU_LANGUAGES,
+    MINERU_MODEL_VERSIONS,
     ProviderConfig,
     config,
     load_feishu_config,
@@ -168,18 +170,21 @@ def _build_env_updates(
             continue
         # MinerU 取值白名单（对抗审查 T2.2：此前任意字符串落盘，
         # 手误拼写会静默走错解析链路；常量集中于 config.py）
+        # 修复：config 是 load_config() 返回的 dict，属性访问
+        # config.MINERU_MODEL_VERSIONS 必然 AttributeError → 500；
+        # 必须引用模块级常量（测试走 update_config 内存路径未暴露此分支）。
         if field == "mineru_model_version":
-            if str(value).strip() not in config.MINERU_MODEL_VERSIONS:
+            if str(value).strip() not in MINERU_MODEL_VERSIONS:
                 errors.append(
                     f"invalid mineru_model_version: {value!r} "
-                    f"(allowed: {sorted(config.MINERU_MODEL_VERSIONS)})"
+                    f"(allowed: {sorted(MINERU_MODEL_VERSIONS)})"
                 )
                 continue
         if field == "mineru_language":
-            if str(value).strip() not in config.MINERU_LANGUAGES:
+            if str(value).strip() not in MINERU_LANGUAGES:
                 errors.append(
                     f"invalid mineru_language: {value!r} "
-                    f"(allowed: {sorted(config.MINERU_LANGUAGES)})"
+                    f"(allowed: {sorted(MINERU_LANGUAGES)})"
                 )
                 continue
         # llm_provider 需校验为已注册的 provider（如果新增 provider 的

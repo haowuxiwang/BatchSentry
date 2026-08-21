@@ -10,7 +10,12 @@ from fastapi import HTTPException, Request
 from config import config
 from db.client import get_db
 from api.jobs import router
-from api.jobs.status import _get_job_progress, _parse_ocr_progress
+# 注意：不得在此顶层导入 api.jobs.status —— api/jobs/__init__.py 先导入
+# listings 再导入 status；顶层 from api.jobs.status import ... 会令 status.py
+# 的路由（/{job_id}）在 /live 之前注册，FastAPI 按注册顺序匹配，
+# GET /api/jobs/live 会命中 /{job_id} 返回 "Job not found"（模块拆分回归，
+# 冻结版 e2e 发现）。status 符号改为函数体内延迟解析（与仓库
+# monkeypatch 约定一致）。
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +50,7 @@ async def list_jobs(page: int = 1, page_size: int = 20, request: Request = None)
     )
     rows = [dict(r) for r in await cursor.fetchall()]
     # Don't expose pdf_path in JSON response
+    from api.jobs.status import _parse_ocr_progress  # call-time (route order)
     for r in rows:
         r.pop("pdf_path", None)
         r["ocr_progress"] = _parse_ocr_progress(r.get("ocr_progress"))
@@ -80,6 +86,7 @@ async def _live_jobs_snapshot(db) -> list[dict]:
     )
     rows = await cursor.fetchall()
     snapshots = []
+    from api.jobs.status import _get_job_progress  # call-time (route order)
     for r in rows:
         progress = await _get_job_progress(db, r["id"])
         if progress:

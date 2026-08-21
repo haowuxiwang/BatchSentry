@@ -1680,6 +1680,16 @@ class TestLowConfidenceParams:
         assert len(findings) == 1
         assert "整体识别置信度较低" in findings[0]["description"]
 
+    def test_ocr_empty_page_not_flagged(self):
+        """空页（_ocr_empty）不触发低置信度规则 — 与"此页无 OCR 内容，
+        未执行分析"横幅矛盾（空页未分析，"手写体干扰"是误导性描述）。"""
+        # data 嵌套形态（stage3 → analyze_cross_page 生产路径）
+        pages_nested = [{"page": 5, "data": {"overall_confidence": "low", "_ocr_empty": True}}]
+        assert _check_low_confidence_params(pages_nested) == []
+        # 顶层形态（单测直传）
+        pages_top = [{"page": 5, "_ocr_empty": True, "overall_confidence": "low"}]
+        assert _check_low_confidence_params(pages_top) == []
+
     def test_no_confidence_field_not_flagged(self):
         pages = [{
             "page": 1,

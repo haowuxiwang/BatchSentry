@@ -70,6 +70,10 @@ _TERMINAL_STATUSES = ("review", "partial_review", "error", "cancelled", "archive
 
 # Import submodules AFTER router/constants exist — they decorate the router
 # and read shared names from this namespace.
+# 路由顺序硬约束：/live（listings）必须注册在 /{job_id}（status）之前 —
+# FastAPI 按注册顺序匹配，否则 GET /api/jobs/live 命中 /{job_id} 404。
+# 因此 listings 必须先于 status 导入，且 listings.py 不得顶层 import status
+# （会破坏该顺序，见 listings.py 头注释；status 符号在调用期解析）。
 from api.jobs import upload, listings, page_image, status, actions  # noqa: E402
 
 create_job = upload.create_job

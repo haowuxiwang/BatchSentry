@@ -9,6 +9,7 @@ job 删除时缓存项自然淘汰。
 """
 import asyncio
 import html
+import json
 import logging
 from datetime import datetime
 
@@ -42,6 +43,34 @@ async def _audit_report_export(job_id: str, fmt: str, size: int) -> None:
         await db.commit()
     except Exception as e:
         logger.warning(f"Failed to write report_export audit log: {e}")
+
+
+async def _load_exemptions(db, job_id: str) -> list[dict]:
+    """加载本 job 的 OCR 完整性人工豁免清单（门禁 2 可追溯透出）。
+
+    从 page_cache.ocr_diagnostics.exemption 提取已确认豁免的页，返回按页码
+    排序的 [{page, reason, created_at, reasons}]。空列表 = 无豁免记录。
+    """
+    exemptions: list[dict] = []
+    cursor = await db.execute(
+        "SELECT page, ocr_diagnostics FROM page_cache "
+        "WHERE job_id = ? AND ocr_diagnostics IS NOT NULL",
+        (job_id,),
+    )
+    for r in await cursor.fetchall():
+        try:
+            diag = json.loads(r["ocr_diagnostics"])
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if isinstance(diag, dict) and diag.get("exemption"):
+            exemptions.append({
+                "page": int(r["page"]),
+                "reason": diag["exemption"].get("reason", ""),
+                "created_at": diag["exemption"].get("created_at", ""),
+                "reasons": diag.get("reasons") or [],
+            })
+    exemptions.sort(key=lambda x: x["page"])
+    return exemptions
 
 
 async def _generate_report_md_cached(job_id: str) -> str:
@@ -89,7 +118,12 @@ async def _generate_report_md_cached(job_id: str) -> str:
         (f["id"], f["status"], f.get("corrected_text") or "", f.get("reviewer_note") or "")
         for f in findings
     )))
-    cache_key = (job_id, len(findings), last_id, status_hash)
+
+    # 生成报告（在锁外执行，避免长时间持锁）
+    exemptions = await _load_exemptions(db, job_id)
+    # 缓存 key：findings 数量 + 最后一条 finding 的 id + status_hash +
+    # 豁免清单规模（记录/撤销豁免不改变 findings，但改变报告内容）。
+    cache_key = (job_id, len(findings), last_id, status_hash, len(exemptions))
 
     # 并发安全：用锁保护字典读写
     async with _report_cache_lock:
@@ -98,7 +132,7 @@ async def _generate_report_md_cached(job_id: str) -> str:
             return _report_cache[cache_key]
 
     # 生成报告（在锁外执行，避免长时间持锁）
-    md = _generate_markdown(job, findings, total_pages)
+    md = _generate_markdown(job, findings, total_pages, exemptions)
 
     # 写入缓存，清理超出的项
     async with _report_cache_lock:
@@ -153,7 +187,8 @@ async def download_report_json(job_id: str, request: Request = None):
         (job_id,),
     )
     findings = [dict(r) for r in await cursor.fetchall()]
-    logger.info(f"[{job_id}] Report.json generated: {len(findings)} findings")
+    exemptions = await _load_exemptions(db, job_id)
+    logger.info(f"[{job_id}] Report.json generated: {len(findings)} findings, {len(exemptions)} exemptions")
     await _audit_report_export(job_id, "json", len(findings))
     return {
         "job": {
@@ -169,10 +204,28 @@ async def download_report_json(job_id: str, request: Request = None):
         },
         "findings": findings,
         "count": len(findings),
+        "ocr_exemptions": exemptions,
     }
 
 
-def _generate_markdown(job: dict, findings: list[dict], total_pages: int) -> str:
+def _append_exemption_section(lines: list[str], exemptions: list[dict], esc) -> None:
+    """门禁 2：在报告中追加 OCR 完整性豁免清单章节。"""
+    lines.append("---")
+    lines.append("")
+    lines.append("## OCR 完整性豁免（人工已核对原图）")
+    lines.append("")
+    for ex in exemptions:
+        lines.append(
+            f"- **第{ex['page']}页** | {esc(ex['created_at'])} | "
+            f"原因: {esc(ex['reason'])}"
+        )
+        if ex.get("reasons"):
+            lines.append(f"  - 原始完整性原因: {esc('；'.join(ex['reasons']))}")
+    lines.append("")
+
+
+def _generate_markdown(job: dict, findings: list[dict], total_pages: int,
+                       exemptions: list[dict] | None = None) -> str:
     """Build Markdown report from findings."""
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
     SeverityIcon = {"critical": "🔴", "warning": "🟡", "info": "🔵"}
@@ -219,6 +272,8 @@ def _generate_markdown(job: dict, findings: list[dict], total_pages: int) -> str
         lines.append("")
         lines.append("未发现问题。")
         lines.append("")
+        if exemptions:
+            _append_exemption_section(lines, exemptions, esc)
         lines.append("---")
         lines.append("")
         lines.append("## 汇总")
@@ -248,6 +303,11 @@ def _generate_markdown(job: dict, findings: list[dict], total_pages: int) -> str
             if f.get("reviewer_note"):
                 lines.append(f"  - 审查员备注: {esc(f['reviewer_note'])}")
             lines.append("")
+
+    # 门禁 2（OCR 金标发布门禁）：豁免页清单 — 人工已核对原图的 OCR
+    # 不完整页面，在报告中显式列出，GMP 审计可追溯。
+    if exemptions:
+        _append_exemption_section(lines, exemptions, esc)
 
     # Summary
     pending = len([f for f in findings if f["status"] == "pending"])

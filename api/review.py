@@ -1,4 +1,4 @@
-﻿"""Review API — list/update findings with audit logging."""
+"""Review API — list/update findings with audit logging."""
 import json
 import logging
 from typing import Optional
@@ -69,10 +69,25 @@ async def list_findings(
     rows = await cursor.fetchall()
     findings = [dict(r) for r in rows]
 
-    # 总数（用于前端显示 "x/y"）
-    count_cursor = await db.execute(
-        "SELECT COUNT(*) FROM findings WHERE job_id = ?", (job_id,)
-    )
+    # 总数（用于前端显示 "x/y" + has_more 截断提示）。
+    # 对抗审查：旧实现 count 只按 job_id 统计全局总数，而列表按
+    # page/status 过滤 — 全局 >50 条时每个页面都显示"本页问题超过 50
+    # 条"，与实际列表条数完全不符（如当前页仅 1 条的页 6 也提示超过
+    # 50 条，GMP 复核误导）。total/has_more 必须按当前过滤集统计。
+    if page:
+        count_cursor = await db.execute(
+            "SELECT COUNT(*) FROM findings WHERE job_id = ? AND page = ?",
+            (job_id, page),
+        )
+    elif status:
+        count_cursor = await db.execute(
+            "SELECT COUNT(*) FROM findings WHERE job_id = ? AND status = ?",
+            (job_id, status),
+        )
+    else:
+        count_cursor = await db.execute(
+            "SELECT COUNT(*) FROM findings WHERE job_id = ?", (job_id,)
+        )
     total = (await count_cursor.fetchone())[0]
 
     return {
@@ -205,6 +220,83 @@ async def update_finding(
     return {"ok": True}
 
 
+@router.post("/jobs/{job_id}/pages/{page}/exemption")
+async def set_page_exemption(
+    job_id: str,
+    page: int,
+    request: Request = None,
+    reason: Optional[str] = Form(default=None),
+    revoke: int = Form(default=0),
+):
+    """Set or revoke a manual OCR-integrity exemption for a page.
+
+    门禁 2（docs/OCR_GOLDEN_CORPUS.md）：每页必须 integrity=ok 或带有人工
+    确认的豁免及原因。复核者对照 PDF 原图确认该页可接受后，在此记录
+    豁免原因 — 写入 page_cache.ocr_diagnostics.exemption，GMP 可追溯
+    （audit_log 记录 action=ocr_exemption / ocr_exemption_revoke）。
+    """
+    # 与 finding 更新一致：is_local_request 防 CSRF。
+    from core.security import is_local_request
+    if request is not None and not is_local_request(request):
+        raise HTTPException(403, "Forbidden (non-local request)")
+    _MAX_REASON_LEN = 500
+    if not revoke:
+        if not reason or not reason.strip():
+            raise HTTPException(400, "豁免原因不能为空")
+        if len(reason) > _MAX_REASON_LEN:
+            raise HTTPException(
+                400,
+                f"豁免原因超过 {_MAX_REASON_LEN} 字符上限（实际 {len(reason)}）",
+            )
+    db = await get_db()
+    cursor = await db.execute(
+        "SELECT ocr_diagnostics FROM page_cache WHERE job_id = ? AND page = ?",
+        (job_id, page),
+    )
+    row = await cursor.fetchone()
+    if not row:
+        raise HTTPException(404, "页面不存在")
+
+    diag_str = row["ocr_diagnostics"] or "{}"
+    try:
+        diag = json.loads(diag_str) if isinstance(diag_str, str) else {}
+    except json.JSONDecodeError:
+        diag = {}
+    if not isinstance(diag, dict):
+        diag = {}
+
+    if revoke:
+        had = "exemption" in diag
+        diag.pop("exemption", None)
+        if not had:
+            raise HTTPException(400, "该页面没有已记录的豁免")
+    else:
+        diag["exemption"] = {
+            "reason": reason.strip()[: _MAX_REASON_LEN],
+            "created_at": __import__("time").strftime("%Y-%m-%d %H:%M:%S"),
+        }
+    async with db_lock:
+        await db.execute(
+            "UPDATE page_cache SET ocr_diagnostics = ? WHERE job_id = ? AND page = ?",
+            (json.dumps(diag, ensure_ascii=False), job_id, page),
+        )
+        action = "ocr_exemption_revoke" if revoke else "ocr_exemption"
+        detail = (
+            f"page={page} 撤销豁免"
+            if revoke
+            else f"page={page} reason={reason.strip()[:100]!r}"
+        )
+        await db.execute(
+            "INSERT INTO audit_log (job_id, action, detail) VALUES (?, ?, ?)",
+            (job_id, action, detail),
+        )
+        await db.commit()
+    logger.info(
+        f"[{job_id}] Page exemption {'revoked' if revoke else 'set'}: page={page}"
+    )
+    return {"ok": True, "exemption": diag.get("exemption")}
+
+
 @router.get("/jobs/{job_id}/audit")
 async def get_audit_log(job_id: str, limit: int = 50, request: Request = None):
     """Get audit log entries for a job."""
@@ -256,7 +348,7 @@ async def get_page(job_id: str, page: int, request: Request = None):
         raise HTTPException(403, "Forbidden (non-local request)")
     db = await get_db()
     cursor = await db.execute(
-        "SELECT raw_html, structured_json FROM page_cache WHERE job_id = ? AND page = ?",
+        "SELECT raw_html, ocr_diagnostics, structured_json FROM page_cache WHERE job_id = ? AND page = ?",
         (job_id, page),
     )
     row = await cursor.fetchone()
@@ -268,10 +360,15 @@ async def get_page(job_id: str, page: int, request: Request = None):
         structured = json.loads(row["structured_json"]) if row["structured_json"] else None
     except json.JSONDecodeError:
         structured = None
+    try:
+        ocr_diagnostics = json.loads(row["ocr_diagnostics"]) if row["ocr_diagnostics"] else None
+    except json.JSONDecodeError:
+        ocr_diagnostics = None
     return {
         "job_id": job_id,
         "page": page,
         "raw_html": row["raw_html"],
+        "ocr_diagnostics": ocr_diagnostics,
         "structured": structured,
     }
 

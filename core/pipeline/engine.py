@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from pathlib import Path
@@ -11,7 +12,7 @@ from db.client import get_db
 from core.pipeline.locks import (
     _pipeline_locks, _pipeline_tasks, _locks_guard, _SLICE_QUEUE_TIMEOUT,
 )
-from core.pipeline.ocr_support import _sanitize_ocr_text
+from core.pipeline.ocr_support import _sanitize_ocr_text, assess_ocr_page
 from core.pipeline.state import (
     InvalidTransitionError, _audit_log, transition_status,
 )
@@ -206,9 +207,21 @@ async def _run_pipeline_impl(job_id: str, pdf_path: str, progress_futures: list)
                 f"[{job_id}] Stage 1 (sliced): OCR_SLICES={slice_pages} pages/slice, "
                 f"streaming per-slice analysis enabled"
             )
+            # 分片路径此前直接提交原件，绕过了整份路径的异常 MediaBox
+            # 规范化；这正会让 72dpi 错误嵌入的大扫描件退化成页眉/表格
+            # stub。分片也必须用同一个 OCR 工作副本。
+            from core.pipeline.ocr_support import _prepare_ocr_pdf
+            ocr_pdf_path, normalized_pages = await asyncio.to_thread(
+                _prepare_ocr_pdf, pdf_path, job_id
+            )
+            if normalized_pages:
+                await _audit_log(
+                    db, job_id, "ocr_input_normalized",
+                    f"pages={normalized_pages} box>1600pt — sliced working copy",
+                )
             stage1_ms, stage2_ms, failed_pages, sliced_total = (
                 await _run_sliced_stage1_2(
-                    db, job_id, pdf_path, slice_pages, _ocr_progress_cb
+                    db, job_id, ocr_pdf_path, slice_pages, _ocr_progress_cb
                 )
             )
             # 0 页兜底：所有片均失败/空
@@ -423,19 +436,20 @@ async def _run_sliced_stage1_2(
                 if page_num in existing:
                     continue
                 raw_html = page.get("markdown", {}).get("text", "")
-                # OCR 不完整标记（与整份路径 653-658 保持一致）：sliced 路径
-                # 曾遗漏 _discarded_count 警告注入 — 分片模式下同一页由单片
-                # OCR 产出，丢弃块的风险同样存在，LLM 需感知。
-                discarded_count = page.get("_discarded_count")
-                if discarded_count:
+                diagnostics, integrity_reasons = assess_ocr_page(page)
+                # 与整份路径使用完全相同的、基于结构证据的完整性警告。
+                # 分片提前启动 LLM，必须在启动前注入，不能等 OCR 全部结束。
+                if integrity_reasons:
                     raw_html = (
-                        f"[OCR 警告: 本页有 {discarded_count} 个内容块因置信度过低"
-                        f"被 OCR 丢弃, 以下内容可能不完整, 分析仅供参考]\n\n{raw_html}"
+                        f"[OCR 警告: {'；'.join(integrity_reasons)}，以下内容可能不完整，"
+                        f"分析仅供参考]\n\n{raw_html}"
                     )
                 raw_html = _sanitize_ocr_text(raw_html)
                 await db.execute(
-                    "INSERT OR IGNORE INTO page_cache (job_id, page, raw_html) VALUES (?, ?, ?)",
-                    (job_id, page_num, raw_html),
+                    "INSERT OR IGNORE INTO page_cache "
+                    "(job_id, page, raw_html, ocr_diagnostics) VALUES (?, ?, ?, ?)",
+                    (job_id, page_num, raw_html,
+                     json.dumps(diagnostics, ensure_ascii=False)),
                 )
                 # P0-1 修复（与整份路径一致）：回写内存，_analyze_one 读取
                 # 清洗+警告版而非原始文本。

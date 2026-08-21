@@ -280,7 +280,9 @@
               cancelled: "已取消", cancelling: "取消中", done: "已完成", archived: "已归档",
             };
             const badgeEl = document.getElementById("status-badge");
-            if (badgeEl) badgeEl.textContent = statusZh[d.status] || 未知();
+            // 修复：旧代码 `|| 未知()` 引用未定义函数，ReferenceError 被外层
+            // catch 吞掉 → 整个 SSE 帧更新中断；与上方 label 兜底逻辑对齐
+            if (badgeEl) badgeEl.textContent = statusZh[d.status] || d.status;
             const cancelBtn = document.getElementById("cancel-btn");
             if (cancelBtn) {
               const canCancel = ["pending", "ocr_running", "ocr_done", "analyzing"].includes(d.status);
@@ -729,6 +731,63 @@
       truncatedBanner.classList.toggle("hidden", !bool(structured._ocr_truncated));
     }
 
+    // 2d. OCR 状态横幅（空页/稀疏/不完整警告）— AJAX 翻页时同步更新，
+    // 否则上一页的横幅残留到当前页，对 GMP 复核构成误导
+    const emptyBanner = document.getElementById("ocr-empty-banner");
+    if (emptyBanner) {
+      emptyBanner.classList.toggle("hidden", !bool(structured._ocr_empty));
+    }
+    const sparseBanner = document.getElementById("ocr-sparse-banner");
+    if (sparseBanner) {
+      sparseBanner.classList.toggle("hidden", !bool(structured._ocr_sparse));
+    }
+    const warningBanner = document.getElementById("ocr-warning-banner");
+    if (warningBanner) {
+      warningBanner.classList.toggle("hidden", !structured._ocr_warning);
+      if (structured._ocr_warning) {
+        const warnText = warningBanner.querySelector("span.text-xs");
+        if (warnText) {
+          warnText.textContent = `此页 OCR 不完整：${structured._ocr_warning} — 分析已降级，请以 PDF 原图核对`;
+        }
+      }
+    }
+// OCR 原始完整性证据独立于 LLM 返回。LLM 超时/JSON 失败时仍须让
+    // 复核者看到“此页不可信”，不能因异步翻页而沿用上一页的横幅。
+    const integrityBanner = document.getElementById("ocr-integrity-banner");
+    if (integrityBanner) {
+      const diag = pageData.ocr_diagnostics || {};
+      const showIntegrity = diag.integrity === "incomplete" && !structured._ocr_warning;
+      integrityBanner.classList.toggle("hidden", !showIntegrity);
+      if (showIntegrity) {
+        const integrityText = document.getElementById("ocr-integrity-text");
+        if (integrityText) {
+          integrityText.textContent = `此页 OCR 完整性校验未通过：${(diag.reasons || []).join("；")}。请以 PDF 原图为准。`;
+        }
+        // 门禁 1：有效 DPI / 页面盒 / 旋转 / 长宽比 / 文本量诊断详情
+        const detailEl = document.getElementById("ocr-detail-text");
+        if (detailEl) {
+          const parts = [];
+          if (diag.effective_dpi != null) {
+            parts.push(`有效 DPI=${diag.effective_dpi}${diag.low_dpi ? "（低）" : ""}`);
+          }
+          if (Array.isArray(diag.media_box_pt) && diag.media_box_pt.length === 2) {
+            parts.push(`页面盒=${Math.round(diag.media_box_pt[0])}×${Math.round(diag.media_box_pt[1])}pt`);
+          }
+          if (diag.rotation) {
+            parts.push(`旋转=${diag.rotation}°`);
+          }
+          if (diag.aspect_ratio != null) {
+            parts.push(`长宽比=${diag.aspect_ratio}`);
+          }
+          if (diag.text_chars != null) {
+            parts.push(`文本=${diag.text_chars} 字符`);
+          }
+          detailEl.textContent = parts.join("；");
+        }
+      }
+      renderOcrExemptionZone(diag, pageData.page);
+    }
+
     // 3. critical 横幅 — 按当前页 findings 重新计算 critical 数量
     const criticalBanner = document.getElementById("critical-banner");
     const criticalCount = findings.filter(
@@ -808,6 +867,102 @@
       } else {
         matrixSection.classList.add("hidden");
       }
+    }
+  }
+
+  // 门禁 2（docs/OCR_GOLDEN_CORPUS.md）：OCR 完整性不达标的页面
+  // 记录"人工确认豁免 + 原因"。
+  // 已豁免 → 绿徽章 + 原因 + 时间 + 撤销；未豁免 → "已人工核对原图，
+  // 确认豁免"按钮。操作走 POST /api/jobs/{job_id}/pages/{page}/exemption。
+  function renderOcrExemptionZone(diag, pageNum) {
+    const zone = document.getElementById("ocr-exemption-zone");
+    if (!zone) {
+      return;
+    }
+    // 与 renderFindings 同款转义：reason 是人工输入，可能含 HTML。
+    const esc = (s) =>
+      String(s == null ? "" : s)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+    zone.replaceChildren();
+    const exempt = diag && diag.exemption;
+    if (exempt) {
+      const badge = document.createElement("div");
+      badge.className =
+        "inline-flex items-center gap-2 rounded border-l-2 border-success bg-card px-2 py-1.5 text-xs";
+      badge.innerHTML =
+        '<span class="w-1.5 h-1.5 rounded-full bg-success shrink-0"></span>' +
+        `<span>已确认豁免（人工已核对原图）：${esc(exempt.reason || "")}</span>` +
+        `<span class="text-muted-foreground tabular-nums">${esc(exempt.created_at || "")}</span>` +
+        '<button type="button" class="text-muted-foreground underline underline-offset-2 hover:text-foreground" data-exempt-revoke="1">撤销</button>';
+      zone.appendChild(badge);
+      const revokeBtn = badge.querySelector("[data-exempt-revoke]");
+      if (revokeBtn) {
+        revokeBtn.addEventListener("click", async (e) => {
+          e.stopPropagation();
+          const ok = await window.PBC.confirmDialog({
+            title: "撤销该页 OCR 豁免？",
+            message: "撤销后该页恢复为“完整性未通过”状态，请确认。",
+            confirmText: "撤销豁免",
+            cancelText: "取消",
+          });
+          if (!ok) {
+            return;
+          }
+          try {
+            const r = await fetch(`/api/jobs/${jobId}/pages/${pageNum}/exemption`, {
+              method: "POST",
+              headers: { "Content-Type": "application/x-www-form-urlencoded" },
+              body: "revoke=1",
+            });
+            if (!r.ok) {
+              const err = await r.json().catch(() => ({}));
+              throw new Error(err.detail || `HTTP ${r.status}`);
+            }
+            window.PBC.showToast("已撤销豁免", "ok");
+            loadPageData(pageNum);
+          } catch (err) {
+            window.PBC.showToast("撤销豁免失败: " + err.message, "err");
+          }
+        });
+      }
+    } else if (diag && diag.integrity === "incomplete") {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className =
+        "rounded-md border border-border bg-card px-3 py-1 text-xs text-foreground hover:bg-muted";
+      btn.textContent = "已人工核对原图，确认豁免";
+      btn.addEventListener("click", async () => {
+        const reason = await window.PBC.promptDialog({
+          title: "确认本页 OCR 完整性豁免",
+          message:
+            "你已对照 PDF 原图核对，确认本页 OCR 不完整但内容可接受。请填写豁免原因（GMP 审计将记录）：",
+          confirmText: "记录豁免",
+          cancelText: "取消",
+        });
+        if (!reason) {
+          return;
+        }
+        try {
+          const r = await fetch(`/api/jobs/${jobId}/pages/${pageNum}/exemption`, {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: "reason=" + encodeURIComponent(reason),
+          });
+          if (!r.ok) {
+            const err = await r.json().catch(() => ({}));
+            throw new Error(err.detail || `HTTP ${r.status}`);
+          }
+          window.PBC.showToast("已记录豁免", "ok");
+          loadPageData(pageNum);
+        } catch (err) {
+          window.PBC.showToast("记录豁免失败: " + err.message, "err");
+        }
+      });
+      zone.appendChild(btn);
     }
   }
 
@@ -944,10 +1099,12 @@
       })
       .join("")
       // P2-3: has_more 时追加提示 — 后端默认 limit=50，超出部分被截断；
-      // 静默截断会让复核者误以为本页全部问题就是这些（GMP 漏检风险）
+      // 静默截断会让复核者误以为本页全部问题就是这些（GMP 漏检风险）。
+      // 对抗审查：has_more 现按当前过滤集（页/状态）统计，不再被全局
+      // 总数误触发；文案不写死 50，与后端 limit 语义一致。
       .concat(
         hasMore
-          ? '<div class="py-2 px-1 text-[11px] text-muted-foreground/70 text-center">本页问题超过 50 条，其余未显示（请逐页翻页或处理后刷新）</div>'
+          ? '<div class="py-2 px-1 text-[11px] text-muted-foreground/70 text-center">本页已显示 50 条，仍有多条未显示（请逐页翻页或处理后刷新）</div>'
           : "",
       );
   }
@@ -1070,26 +1227,6 @@
       .trim();
   }
 
-  function toggleOcr() {
-    const el = document.getElementById("ocr-text");
-    const btn = document.getElementById("ocr-toggle-btn");
-    const gradient = document.getElementById("ocr-gradient");
-    if (!el) return;
-    const collapsed = el.style.maxHeight !== "none";
-    if (collapsed) {
-      el.style.maxHeight = "none";
-      el.style.overflow = "visible";
-      if (btn) btn.textContent = "收起 ↑";
-      if (gradient) gradient.style.display = "none";
-    } else {
-      el.style.maxHeight = "360px";
-      el.style.overflow = "hidden";
-      if (btn) btn.textContent = "展开全部 ↓";
-      if (gradient) gradient.style.display = "block";
-    }
-    log("toggleOcr —", collapsed ? "expanded" : "collapsed");
-  }
-
   // === finding 定位（用户核心诉求第一步：减少复核查找时间） ===
   // 点击 finding 卡片 → OCR 面板中高亮对应的原文片段并滚到可视区。
   // 零后端改动：f.ocr_text（LLM 摘录）在 htmlToText 后的面板文本中
@@ -1111,8 +1248,6 @@
       log.warn("locateFinding — no target", { hasOcrText: !!ocrText });
       return;
     }
-    // 折叠态先展开（max-height:360px 下滚动/高亮不可见）
-    if (ocrEl.style.maxHeight !== "none") toggleOcr();
     clearLocateMarks();
 
     const text = ocrEl.textContent || "";
@@ -1300,25 +1435,15 @@
   window.resetZoom = resetZoom;
   window.cancelJob = cancelJob;
   window.retryJob = retryJob;
-  window.toggleOcr = toggleOcr;
   window.updateFinding = updateFinding;
   window.correctFinding = correctFinding;
 
   // 初始化：OCR 文本 raw → htmlToText 可读化（data-raw 为服务端注入原文）
   window.addEventListener("DOMContentLoaded", () => {
     const el = document.getElementById("ocr-text");
-    const gradient = document.getElementById("ocr-gradient");
     if (el) {
       const raw = el.getAttribute("data-raw") || "";
       el.textContent = htmlToText(raw) || "无 OCR 数据";
-    }
-    // 折叠按钮常驻：内容未溢出时隐藏渐变遮罩（避免误导），按钮本身保留
-    if (el && gradient) {
-      el.style.maxHeight = "360px";
-      el.style.overflow = "hidden";
-      if (el.scrollHeight <= 360) {
-        gradient.style.display = "none";
-      }
     }
   });
 

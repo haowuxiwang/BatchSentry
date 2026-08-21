@@ -334,6 +334,23 @@
             </div>
             {% endif %}
 
+<div id="ocr-integrity-banner" class="rounded-md border-l-2 border-warning bg-card px-3 py-2 flex items-start gap-2{% if not (ocr_diagnostics and ocr_diagnostics.integrity == 'incomplete' and not page_ocr_warning) %} hidden{% endif %}">
+                <span class="w-1.5 h-1.5 rounded-full bg-warning mt-[5px] shrink-0"></span>
+                <div class="flex-1 min-w-0">
+                    <p id="ocr-integrity-text" class="text-xs text-foreground">此页 OCR 完整性校验未通过：{% if ocr_diagnostics %}{{ ocr_diagnostics.reasons|join('；') }}{% endif %}。请以 PDF 原图为准。</p>
+                    {% if ocr_diagnostics %}
+                    <p id="ocr-detail-text" class="text-xs text-muted-foreground mt-0.5 font-mono">
+                        {%- if ocr_diagnostics.effective_dpi -%}有效 DPI={{ ocr_diagnostics.effective_dpi }}{% if ocr_diagnostics.low_dpi %}（低）{% endif %}；{% endif -%}
+                        {%- if ocr_diagnostics.media_box_pt -%}页面盒={{ ocr_diagnostics.media_box_pt[0]|round }}×{{ ocr_diagnostics.media_box_pt[1]|round }}pt；{% endif -%}
+                        {%- if ocr_diagnostics.rotation -%}旋转={{ ocr_diagnostics.rotation }}°；{% endif -%}
+                        {%- if ocr_diagnostics.aspect_ratio -%}长宽比={{ ocr_diagnostics.aspect_ratio }}；{% endif -%}
+                        {%- if ocr_diagnostics.text_chars -%}文本={{ ocr_diagnostics.text_chars }} 字符{% endif -%}
+                    </p>
+                    {% endif %}
+                    <div id="ocr-exemption-zone" class="mt-1.5"></div>
+                </div>
+            </div>
+
             {# 幻觉防护横幅：LLM 提取的实测数值在 OCR 原文中找不到（疑似
                臆造）。只提醒、不自动裁决 — 数字字符串匹配存在误报可能，
                复核者应以 PDF 原图为准。 #}
@@ -422,21 +439,14 @@
                 </div>
             </div>
 
-            <!-- OCR text — HashiCorp 范式: header + 折叠 + 浮层按钮 -->
+            <!-- OCR text — 对抗审查: 默认全部展开(移除折叠按钮, GMP复核需要对照原文) -->
             <div class="flex flex-col">
                 <div class="flex items-center justify-between px-1 py-1.5">
                     <h3 class="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">OCR 文本</h3>
                     <span class="text-[11px] text-muted-foreground">第 {{ page }} 页</span>
                 </div>
-                <div class="relative border-t border-border">
-                    <div id="ocr-text" class="px-3 py-3 overflow-hidden text-[12px] leading-[1.6] text-muted-foreground whitespace-pre-wrap font-mono" style="max-height: 360px;" data-raw="{{ (ocr_raw_html or '') | e }}">{{ (ocr_text or '无 OCR 数据') | e }}</div>
-                    <!-- OCR 原文折叠按钮 — 常驻显示（面板短时也可见），点击展开全部 -->
-                    <div class="absolute bottom-0 left-0 right-0 flex items-center justify-center pb-1">
-                        <div id="ocr-gradient" class="absolute inset-0 bg-gradient-to-t from-background via-background/70 to-transparent pointer-events-none"></div>
-                        <button onclick="toggleOcr()" id="ocr-toggle-btn" class="btn-press focus-ring relative z-10 text-[11px] font-medium text-foreground border border-border bg-background px-3 py-1 rounded-full shadow-sm hover:bg-muted/50">
-                            展开全部 ↓
-                        </button>
-                    </div>
+                <div class="border-t border-border">
+                    <div id="ocr-text" class="px-3 py-3 text-[12px] leading-[1.6] text-muted-foreground whitespace-pre-wrap font-mono" data-raw="{{ (ocr_raw_html or '') | e }}">{{ (ocr_text or '无 OCR 数据') | e }}</div>
                 </div>
             </div>
 

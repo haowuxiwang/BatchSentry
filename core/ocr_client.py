@@ -1,4 +1,4 @@
-﻿"""PaddleOCR-VL async OCR client.
+"""PaddleOCR-VL async OCR client.
 
 Logic derived from OCR_BAIDU/core/api_client.py (submitted/polled/extracted there).
 Kept minimal: submit, poll, download result JSONL.
@@ -31,8 +31,11 @@ def submit_pdf(pdf_path: str, retries: int = 3) -> str:
     cfg = config["paddle_ocr"]
     headers = {"Authorization": f"bearer {cfg.token}"}
     optional_payload = json.dumps({
-        "useDocOrientationClassify": False,
-        "useDocUnwarping": False,
+        # 批记录来源包含扫描件、拍摄件和横向表格；关闭这两项会把可纠正
+        # 的旋转/几何畸变直接传给 VLM，表现为漏正文或错列。默认优先
+        # 准确性，服务端若不支持会按其兼容策略忽略可选字段。
+        "useDocOrientationClassify": True,
+        "useDocUnwarping": True,
         "useChartRecognition": False,
     })
     data = {"model": cfg.model, "optionalPayload": optional_payload}
@@ -215,6 +218,29 @@ def _ensure_page_text(pages: list[dict]) -> None:
             )
 
 
+def _persist_paddle_original(raw: str, pdf_path: str, suffix: str) -> None:
+    """门禁 1c：Paddle 原始响应落盘到 job_dir（pdf_path 同级）。
+
+    单 JSON 写 paddle_original.json，JSONL 写 paddle_original.jsonl，
+    原始字节即服务端产物 —— GMP 追溯时可用其复现解析结果。
+    失败仅告警不阻断主流程。
+    """
+    if not pdf_path or not raw:
+        return
+    try:
+        out = Path(pdf_path).parent / f"paddle_original.{suffix}"
+        tmp = out.with_suffix(f".{suffix}.tmp")
+        tmp.write_text(raw, encoding="utf-8")
+        os.replace(tmp, out)
+        logger.info(
+            f"原始产物已落盘: {out.name} ({len(raw) / 1024:.0f}KB)"
+        )
+    except Exception as e:
+        logger.warning(
+            f"原始产物落盘失败（不影响主流程）: {redact_urls(str(e))[:200]}"
+        )
+
+
 def download_result(poll_response: dict, pdf_path: str = "") -> list[dict]:
     """Download OCR result JSON from the URL in poll response.
 
@@ -280,6 +306,7 @@ def download_result(poll_response: dict, pdf_path: str = "") -> list[dict]:
             f"OCR download complete (single JSON): {len(pages)} pages, {raw_size_kb:.1f}KB"
         )
         _ensure_page_text(pages)
+        _persist_paddle_original(raw, pdf_path, "json")
         return pages
     except json.JSONDecodeError:
         pass
@@ -338,6 +365,7 @@ def download_result(poll_response: dict, pdf_path: str = "") -> list[dict]:
         + (f" ({bad_lines} bad lines placeholdered)" if bad_lines else "")
     )
     _ensure_page_text(pages)
+    _persist_paddle_original(raw, pdf_path, "jsonl")
     return pages
 
 

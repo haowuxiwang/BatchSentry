@@ -21,7 +21,7 @@ def _get_init_lock() -> asyncio.Lock:
     return _db_init_lock
 
 # Current schema migration level, persisted via PRAGMA user_version.
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 async def get_db() -> aiosqlite.Connection:
@@ -100,6 +100,9 @@ async def migrate(db: aiosqlite.Connection):
 
     if current_version < 5:
         await _migrate_v5(db)
+
+    if current_version < 6:
+        await _migrate_v6(db)
 
     # PRAGMA user_version cannot be parameterized; SCHEMA_VERSION is an int
     # constant defined in this module, so f-string is safe.
@@ -227,6 +230,29 @@ async def _migrate_v5(db: aiosqlite.Connection):
         logger.info("Migration: findings dedup UNIQUE index ready")
     except Exception as e:
         logger.warning(f"Migration skip findings dedup index: {e}")
+    await db.commit()
+
+
+async def _migrate_v6(db: aiosqlite.Connection):
+    """v6: persist page-level OCR integrity evidence for GMP review."""
+    try:
+        cursor = await db.execute("PRAGMA table_info(page_cache)")
+        existing_cols = {row["name"] for row in await cursor.fetchall()}
+        if "ocr_diagnostics" not in existing_cols:
+            await db.execute(
+                "ALTER TABLE page_cache ADD COLUMN ocr_diagnostics TEXT"
+            )
+            logger.info("Migration: added page_cache.ocr_diagnostics")
+        # Backfill the known MinerU table-degradation signature so historical
+        # review pages do not continue presenting a silent false success.
+        await db.execute(
+            "UPDATE page_cache SET ocr_diagnostics = ? "
+            "WHERE ocr_diagnostics IS NULL AND raw_html LIKE '%simple_table%'",
+            ('{"source":"historical","integrity":"incomplete",'
+             '"reasons":["检测到 OCR 缺失内容占位"]}',),
+        )
+    except Exception as e:
+        logger.warning(f"Migration skip page_cache.ocr_diagnostics: {e}")
     await db.commit()
 
 

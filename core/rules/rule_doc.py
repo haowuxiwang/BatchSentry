@@ -299,13 +299,20 @@ def _check_low_confidence_params(pages: list[dict]) -> list[dict]:
     seen: set[tuple] = set()
     for page in pages:
         pno = page["page"]
+        # 空页短路（_ocr_empty）不触发低置信度规则：空页未执行 LLM
+        # 分析，"置信度较低/手写体干扰"的描述与"此页无 OCR 内容"横幅
+        # 自相矛盾，且对无可分析内容的页面是误导性提示。空页已有专属
+        # 横幅 + 人工复核路径。
+        data = page.get("data") or {}
+        if page.get("_ocr_empty") or data.get("_ocr_empty"):
+            continue
         # overall_confidence is emitted by the per-page LLM (v3 prompt). In
         # _normalize_pages it stays nested under page["data"]; unit tests
         # pass it at the top level. Check both locations so the rule fires
         # in production and in tests.
         overall_conf = (
             page.get("overall_confidence")
-            or (page.get("data") or {}).get("overall_confidence")
+            or data.get("overall_confidence")
             or ""
         ).lower()
         # If overall page confidence is low, flag the whole page

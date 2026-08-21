@@ -74,6 +74,44 @@ class TestListFindings:
             # 第一个应是 critical
             assert data["findings"][0]["severity"] == "critical"
 
+    @pytest.mark.asyncio
+    async def test_has_more_scoped_to_current_filter(self, review_client):
+        """对抗审查：has_more 必须按当前过滤集统计，不得被全局总数误触发。
+
+        旧实现 total 只按 job_id 统计全局（60 条），page 过滤后仅返回
+        当前页数据，但 (0+50) < 60 恒成立 → 每个页面都显示"本页问题
+        超过 50 条"，与实际条数完全不符（GMP 复核误导，用户实况：
+        页 6 仅 1 条却提示超过 50 条）。
+        """
+        # 追加 55 条到 page 1（fixture 已含 2 条 → 共 57 条），page 2 保持 2 条
+        await review_client.get("/api/jobs/review-job/findings")
+        # 直接写库造数据
+        from db.client import get_db
+        db = await get_db()
+        await db.executemany(
+            "INSERT INTO findings (job_id, page, type, severity, source, description, status) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [
+                ("review-job", 1, "参数越界", "warning", "rule", f"批量投料记录 {i}", "pending")
+                for i in range(55)
+            ],
+        )
+        await db.commit()
+
+        # 当前页（page=2）只有 2 条 → has_more 必须是 False
+        r = await review_client.get("/api/jobs/review-job/findings?page=2")
+        data = r.json()
+        assert data["count"] == 2
+        assert data["total"] == 2   # total 是当前过滤集总数，不是全局
+        assert data["has_more"] is False
+
+        # page=1 有 57 条（>50 limit）→ has_more 为 True
+        r2 = await review_client.get("/api/jobs/review-job/findings?page=1")
+        data2 = r2.json()
+        assert data2["count"] == 50   # limit 默认 50
+        assert data2["total"] == 57
+        assert data2["has_more"] is True
+
 
 class TestGetFinding:
     """GET /api/jobs/{id}/findings/{fid}。"""
@@ -196,4 +234,118 @@ class TestLlmAuditLog:
             transport=ASGITransport(app=app), base_url="http://evil.com:8000"
         ) as c:
             r = await c.get("/api/jobs/audit-job/llm_audit")
+        assert r.status_code == 403
+
+
+class TestPageExemption:
+    """POST /api/jobs/{id}/pages/{page}/exemption — 门禁 2 人工豁免。"""
+
+    @pytest_asyncio.fixture
+    async def exempt_client(self, test_db):
+        await test_db.execute(
+            "INSERT INTO jobs (id, filename, pdf_path, status, total_pages) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("exempt-job", "test.pdf", "/tmp/test.pdf", "review", 3),
+        )
+        await test_db.execute(
+            "INSERT INTO page_cache (job_id, page, raw_html, ocr_diagnostics) "
+            "VALUES (?, ?, ?, ?)",
+            ("exempt-job", 1, "<p>page1</p>",
+             '{"source":"mineru","integrity":"incomplete","reasons":["检测到 OCR 缺失内容占位"]}'),
+        )
+        await test_db.execute(
+            "INSERT INTO page_cache (job_id, page, raw_html, ocr_diagnostics) "
+            "VALUES (?, ?, ?, ?)",
+            ("exempt-job", 2, "<p>page2</p>", None),
+        )
+        await test_db.commit()
+        from main import app
+        from httpx import AsyncClient, ASGITransport
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://localhost:8000"
+        ) as c:
+            yield c
+
+    @pytest.mark.asyncio
+    async def test_set_exemption(self, exempt_client):
+        r = await exempt_client.post(
+            "/api/jobs/exempt-job/pages/1/exemption",
+            data={"reason": "人工核对原图，内容可接受"},
+        )
+        assert r.status_code == 200
+        data = r.json()
+        assert data["ok"] is True
+        assert data["exemption"]["reason"] == "人工核对原图，内容可接受"
+        assert "created_at" in data["exemption"]
+
+    @pytest.mark.asyncio
+    async def test_revoke_exemption(self, exempt_client):
+        await exempt_client.post(
+            "/api/jobs/exempt-job/pages/1/exemption",
+            data={"reason": "已核对"},
+        )
+        r = await exempt_client.post(
+            "/api/jobs/exempt-job/pages/1/exemption",
+            data={"revoke": "1"},
+        )
+        assert r.status_code == 200
+        assert r.json()["ok"] is True
+        assert r.json()["exemption"] is None
+
+    @pytest.mark.asyncio
+    async def test_revoke_without_exemption_fails(self, exempt_client):
+        r = await exempt_client.post(
+            "/api/jobs/exempt-job/pages/2/exemption",
+            data={"revoke": "1"},
+        )
+        assert r.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_empty_reason_fails(self, exempt_client):
+        r = await exempt_client.post(
+            "/api/jobs/exempt-job/pages/1/exemption",
+            data={"reason": ""},
+        )
+        assert r.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_exemption_written_to_audit_log(self, exempt_client):
+        await exempt_client.post(
+            "/api/jobs/exempt-job/pages/1/exemption",
+            data={"reason": "GMP 豁免原因"},
+        )
+        r = await exempt_client.get("/api/jobs/exempt-job/audit")
+        assert r.status_code == 200
+        entries = r.json()["entries"]
+        assert any(e["action"] == "ocr_exemption" for e in entries)
+
+    @pytest.mark.asyncio
+    async def test_exemption_page_not_found(self, exempt_client):
+        r = await exempt_client.post(
+            "/api/jobs/exempt-job/pages/99/exemption",
+            data={"reason": "test"},
+        )
+        assert r.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_exemption_guard(self, test_db):
+        from main import app
+        from httpx import AsyncClient, ASGITransport
+        await test_db.execute(
+            "INSERT INTO jobs (id, filename, pdf_path, status, total_pages) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("exempt-guard", "test.pdf", "/tmp/test.pdf", "review", 1),
+        )
+        await test_db.execute(
+            "INSERT INTO page_cache (job_id, page, raw_html) VALUES (?, ?, ?)",
+            ("exempt-guard", 1, "<p>x</p>"),
+        )
+        await test_db.commit()
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://evil.com:8000"
+        ) as c:
+            r = await c.post(
+                "/api/jobs/exempt-guard/pages/1/exemption",
+                data={"reason": "csrf"},
+            )
         assert r.status_code == 403

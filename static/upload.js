@@ -404,7 +404,10 @@
       // 自动重连（retry: 2000）也会累积计数，3 次瞬时抖动后即使连接已恢复
       // 也错误降级为 10s 轮询（与 review.js 的 retryCount 语义不一致）。
       if (errCount > 0) errCount = 0;
-      log.info("SSE aggregated update", { jobs: (d.jobs || []).length });
+      // 修复：原 log.info 方法不存在（logger 仅定义 log/log.warn/log.err，
+      // 见文件顶部），TypeError 在 onmessage 回调 try/catch 之外抛出，
+      // 导致整帧实时状态更新（OCR 进度/终态按钮重建）静默失效。
+      log("SSE aggregated update", { jobs: (d.jobs || []).length });
       const jobs = Array.isArray(d) ? d : d.jobs || [];
       jobs.forEach((snap) => {
         if (!snap || !snap.id) return;

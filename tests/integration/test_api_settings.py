@@ -142,6 +142,26 @@ class TestUpdateSettings:
         # 验证生效
         r2 = await settings_client.get("/api/settings")
         assert r2.json()["ocr"]["mineru"]["enable_formula"] is False
+
+    @pytest.mark.asyncio
+    async def test_update_mineru_enum_fields_no_500(self, settings_client):
+        """mineru_model_version / mineru_language 保存不应 500（冻结版 e2e 发现）。
+
+        修复前 config.MINERU_MODEL_VERSIONS 属性访问 dict 抛
+        AttributeError → 500；测试走 update_config 内存路径未暴露此分支。
+        """
+        r = await settings_client.post("/api/settings", json={
+            "mineru_model_version": "vlm",
+            "mineru_language": "ch",
+        })
+        assert r.status_code == 200, f"request 500: {r.text[:200]}"
+        r2 = await settings_client.get("/api/settings")
+        assert r2.json()["ocr"]["mineru"]["model_version"] == "vlm"
+
+        # 非法值应拒绝（400）而非 500
+        r3 = await settings_client.post("/api/settings", json={"mineru_model_version": "bad-version"})
+        assert r3.status_code == 400
+        assert "invalid mineru_model_version" in str(r3.json())
         assert r2.json()["ocr"]["mineru"]["enable_table"] is True
 
     @pytest.mark.asyncio

@@ -362,17 +362,28 @@ function createSplashWindow() {
     letter-spacing: -0.02em;
   }
   .spinner {
-    width: 28px;
-    height: 28px;
-    border: 2px solid #e4e4e7;
-    border-top-color: #0a0a0a;
-    border-radius: 50%;
-    /* 2026-08: 线性旋转在软件渲染（~40fps 上限）下会有明显中间帧缺失，
-       观感卡顿。改为离散 steps 旋转（每 100ms 跳 45°），与帧率无关，
-       任何环境观感稳定。 */
-    animation: spin 0.8s steps(8) infinite;
+    /* 2026-08/2026-08-20: 旋转 spinner 在软件渲染（无 GPU 的 VM/远程桌
+       面，帧率 16-40fps）下，无论 steps(8) 离散步进还是线性旋转，都会
+       出现明显的"顿挫/跳帧"观感（每帧跳过 >1 步）。改为无位移的呼吸
+       光点：仅有 opacity 变化，低帧下视觉连续，不再有位置跳变。 */
+    display: flex;
+    gap: 6px;
+    align-items: center;
   }
-  @keyframes spin { to { transform: rotate(360deg); } }
+  .spinner i {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #0a0a0a;
+    opacity: 0.25;
+    animation: breath 1.0s ease-in-out infinite;
+  }
+  .spinner i:nth-child(2) { animation-delay: 0.2s; }
+  .spinner i:nth-child(3) { animation-delay: 0.4s; }
+  @keyframes breath {
+    0%, 100% { opacity: 0.25; transform: scale(1); }
+    50% { opacity: 1; transform: scale(1.25); }
+  }
   #status {
     font-size: 13px;
     color: #71717a;
@@ -384,7 +395,7 @@ function createSplashWindow() {
 </head>
 <body>
   <h1>BatchSentry</h1>
-  <div class="spinner"></div>
+  <div class="spinner"><i></i><i></i><i></i></div>
   <p id="status">正在初始化…</p>
 </body>
 </html>`),

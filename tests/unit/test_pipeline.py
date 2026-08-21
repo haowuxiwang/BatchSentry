@@ -1203,7 +1203,7 @@ class TestRobustnessChecks:
         Path(pdf_path).write_bytes(b"%PDF-1.4 fake")
 
         fake_pages = [
-            {"markdown": {"text": "正文内容"}, "_discarded_count": 3},
+            {"markdown": {"text": "正文内容"}, "_ocr_diagnostics": {"discarded_blocks": 3}},
         ]
         with patch(
             "core.pipeline._get_ocr_backend", return_value=lambda p, cb=None, job_id=None: fake_pages
@@ -1945,12 +1945,14 @@ class TestStage1EmptyPageRetry:
         # 两轮重试都发生了（3 页批 → 单页批）
         assert calls[0][1] == 3
         assert calls[1][1] == 1
-        # 原空内容保留（空字符串，未产生虚假恢复）
+        # 空页保留 OCR 警告前缀（诊断标签，非虚假恢复内容）
         cursor = await pipeline_db.execute(
             "SELECT raw_html FROM page_cache WHERE job_id = ? AND page = 5",
             (job_id,),
         )
-        assert (await cursor.fetchone())["raw_html"] == ""
+        raw5 = (await cursor.fetchone())["raw_html"]
+        assert "[OCR 警告" in raw5
+        assert "页面无可用文本" in raw5
         # 无 recovered 审计
         cursor = await pipeline_db.execute(
             "SELECT 1 FROM audit_log WHERE job_id = ? AND action = 'stage1_empty_recovered'",
@@ -1962,22 +1964,28 @@ class TestStage1EmptyPageRetry:
         assert (await cursor.fetchone())["status"] == "review"
 
     @pytest.mark.asyncio
-    async def test_small_file_skips_empty_retry(self, pipeline_db, tmp_path):
-        """<10 页的小文件不触发切片重试（避免多余开销）。"""
+    async def test_small_file_empty_page_selfheal_runs(self, pipeline_db, tmp_path):
+        """<10 页的小文件空页也触发自愈（Round 5 后：小文件也启用自愈）。"""
         pages = [
             {"markdown": {"text": f"page {i} content " + "x" * 200}}
             for i in range(1, 5)
         ]
-        pages[1]["markdown"]["text"] = ""  # p2 空 — 但文件太小不重试
+        pages[1]["markdown"]["text"] = ""  # p2 空 — 小文件仍触发自愈
 
-        job_id, calls = await self._run(pipeline_db, tmp_path, pages)
+        def fake_retry(pdf_path, page_nums, batch_size=3, job_id=""):
+            return [(pno, "", 0) for pno in page_nums]
 
-        assert calls == []
+        job_id, calls = await self._run(pipeline_db, tmp_path, pages, fake_retry=fake_retry)
+
+        # 小文件自愈触发（单页批）
+        assert len(calls) >= 1
+        # 空页保留 OCR 警告前缀
         cursor = await pipeline_db.execute(
             "SELECT raw_html FROM page_cache WHERE job_id = ? AND page = 2",
             (job_id,),
         )
-        assert (await cursor.fetchone())["raw_html"] == ""
+        raw2 = (await cursor.fetchone())["raw_html"]
+        assert "[OCR 警告" in raw2
 
     @pytest.mark.asyncio
     async def test_empty_page_selfheal_runs_on_cached_reuse(self, pipeline_db, tmp_path):
@@ -2255,7 +2263,8 @@ class TestSelfHealCoverageGaps:
                 "SELECT raw_html FROM page_cache WHERE job_id = ? AND page = 10",
                 (job_id,),
             )
-            assert (await cursor.fetchone())["raw_html"] == ""
+            raw10 = (await cursor.fetchone())["raw_html"]
+            assert "[OCR 警告" in raw10
             cursor = await pipeline_db.execute(
                 "SELECT 1 FROM audit_log WHERE job_id = ? AND action = 'stage1_empty_recovered'",
                 (job_id,),
@@ -2297,7 +2306,7 @@ class TestSlicedCoverageGaps:
                 [
                     {"markdown": {"text": "cached p1"}, "page_count": 1},
                     {"markdown": {"text": "page 2"}, "page_count": 2,
-                     "_discarded_count": 3},
+                     "_ocr_diagnostics": {"discarded_blocks": 3}},
                 ],
                 3,
             )
@@ -2337,7 +2346,7 @@ class TestSlicedCoverageGaps:
         )
         rows = await cursor.fetchall()
         assert rows[0]["raw_html"] == "cached p1"  # 未被切片结果覆盖
-        assert "[OCR 警告: 本页有 3 个内容块" in rows[1]["raw_html"]
+        assert "[OCR 警告: 3 个内容块被 OCR 丢弃" in rows[1]["raw_html"]
         assert analyzed_calls == [2]  # p3 已分析跳过；p1 已缓存跳过
         # p1 缓存保留、p3 已分析 → 无真实缺页 → review
         cursor = await pipeline_db.execute(

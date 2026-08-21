@@ -4,12 +4,71 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from pathlib import Path
 
 from config import config
 from core.pipeline.state import _audit_log
 from core.security import redact_urls
 
 logger = logging.getLogger(__name__)
+
+
+_OCR_MISSING_MARKERS = (
+    "simple_table",
+    "[表格内容提取失败 — OCR 结构缺失]",
+    "（此页无文本内容）",
+)
+
+
+def assess_ocr_page(page: dict, pdf_diag: dict | None = None) -> tuple[dict, list[str]]:
+    """Return persisted diagnostics and explicit incompleteness reasons.
+
+    This is intentionally evidence-based: it does not reject a short but
+    valid form merely for having few characters. MinerU's block taxonomy is
+    used when available; all backends share the marker/empty-text checks.
+
+    pdf_diag: PDF 结构诊断（_pdf_page_diagnostics 的单页内容，整份路径
+    注入）。合并进持久化 diag；低 DPI / 超常页面盒 / 旋转页作为完整性
+    理由（samples table low-dpi 样本验收：不得静默标记成功）。
+    """
+    text = str((page.get("markdown") or {}).get("text") or "")
+    diag = dict(page.get("_ocr_diagnostics") or {})
+    diag.setdefault("source", page.get("_source") or "unknown")
+    diag["text_chars"] = len(re.sub(r"<[^>]+>", "", text).strip())
+    reasons: list[str] = []
+    if any(marker in text for marker in _OCR_MISSING_MARKERS):
+        reasons.append("检测到 OCR 缺失内容占位")
+    if diag.get("discarded_blocks", 0):
+        reasons.append(f"{diag['discarded_blocks']} 个内容块被 OCR 丢弃")
+    if diag.get("header_footer_only"):
+        reasons.append("仅识别到页眉、页脚或辅助块，未识别正文")
+    if not text.strip() or diag["text_chars"] == 0:
+        reasons.append("页面无可用文本")
+    if pdf_diag:
+        # 合并 PDF 结构诊断（媒体盒/旋转/长宽比/像素/有效 DPI）。
+        # 仅合入有值的字段，不覆盖 block 级事实。
+        for k, v in (
+            ("media_box_pt", pdf_diag.get("media_box_pt")),
+            ("rotation", pdf_diag.get("rotation")),
+            ("aspect_ratio", pdf_diag.get("aspect_ratio")),
+            ("image_pixels", pdf_diag.get("image_pixels")),
+            ("effective_dpi", pdf_diag.get("effective_dpi")),
+        ):
+            if v is not None:
+                diag[k] = v
+        if pdf_diag.get("low_dpi"):
+            diag["low_dpi"] = True
+            reasons.append(pdf_diag.get("low_dpi_reason") or "有效 DPI 过低")
+        if diag.get("media_box_pt"):
+            box_long = max(diag["media_box_pt"])
+            if box_long > _PDF_ABNORMAL_BOX_PT:
+                reasons.append(
+                    f"PDF 页面盒异常（长边 {box_long:.0f}pt > "
+                    f"{_PDF_ABNORMAL_BOX_PT}pt），扫描 DPI 标注可能错误"
+                )
+    diag["integrity"] = "incomplete" if reasons else "ok"
+    diag["reasons"] = reasons
+    return diag, reasons
 def _get_ocr_backend():
     """根据配置返回 OCR 后端的 run_ocr 函数。
 
@@ -119,6 +178,149 @@ def _pdf_page_count(pdf_path: str) -> int | None:
     except Exception as e:
         logger.warning(f"PDF page count probe failed ({pdf_path}): {e}")
         return None
+
+
+# ── OCR 输入规范化（Stage 0，2026-08-20）──────────────────────────────
+# 扫描件被错误导出为"超大页面盒"是真实缺陷（51 页实测全为 3000x4000pt
+# ≈41.7x55.6in，嵌入 3000x4000px JPEG，有效 DPI 仅 72）。MinerU 按 PDF
+# 坐标假设 1pt=1/72in 渲染，对畸形页面盒输出像素爆炸（×3 upscale 后
+# 直踩 JPEG 65500px 硬限 / VLM 2048px 输入上界），整表降级为字面量
+# simple_table stub（同页 Paddle 输出 991 字符完整表格，MinerU 仅 111
+# 字符 stub）。修复策略（行业最佳实践，调研来源见 CLAUDE.md）：
+#   - 检测页面盒异常（长边 >1600pt 且远超标准尺寸）→ 重新渲染为
+#     300 DPI 等效页面盒（页面图像素 / 300 * 72 pt），长边 cap 4096px，
+#     以灰度渲染（VLM 优先，PDF 提交给服务端后按 300dpi 还原出
+#     恰好原图像素，不再触发服务端二次放大）。
+#   - 仅生成规范化的"工作副本"，原始 PDF 原件保留（GMP 追溯 +
+#     review 页预览仍用原件）。
+_PDF_ABNORMAL_BOX_PT = 1600  # 超过视为扫描 DPI 标注错误（A3=1191pt 封顶
+                              # 于正常印刷幅面；1600pt=22.2in 已是异常）
+_NORMALIZE_TARGET_DPI = 300  # 目标有效 DPI — 服务端安全区（150-300）
+_NORMALIZE_MAX_SIDE_PX = 4096  # 发送端长边上限（MinerU ×3 后 12288px
+                               # 仍低于 JPEG 65500px 硬限）
+_LOW_DPI_THRESHOLD = 150  # 有效 DPI 低于此值视为低质量扫描（samples
+                          # 登记表 low-dpi 样本验收：不得静默标记成功）
+
+
+def _pdf_page_diagnostics(pdf_path: str) -> dict[int, dict]:
+    """扫描 PDF 每页的结构诊断（OCR 前，fitz 读取，不渲染页面）。
+
+    门禁 1（页级诊断可追溯，docs/OCR_GOLDEN_CORPUS.md）：每页记录
+    页面盒、旋转、长宽比、页内图像物理像素与有效 DPI
+    （= 像素长边 / 图像显示尺寸英寸）。低 DPI 直接影响 OCR 识别质量
+    （服务端放大/降采样失真），作为完整性证据并入 assess_ocr_page。
+
+    返回 {page_index_1based: {media_box_pt, rotation, aspect_ratio,
+    image_pixels, effective_dpi, low_dpi, low_dpi_reason}}。
+    无图像页 effective_dpi=None（text PDF 不误判为低质量）；
+    PDF 打开/解析失败返回 {}（不阻断流程）。
+    """
+    import fitz  # PyMuPDF — 页面盒 + 图像元数据，不渲染
+
+    try:
+        with fitz.open(pdf_path) as doc:
+            out: dict[int, dict] = {}
+            for i, page in enumerate(doc, 1):
+                rect = page.rect
+                w_pt, h_pt = rect.width, rect.height
+                best_px_w = best_px_h = 0
+                best_disp_w = best_disp_h = 0.0
+                for im in page.get_image_info(xrefs=True):
+                    wpx = int(im.get("width") or 0)
+                    hpx = int(im.get("height") or 0)
+                    if wpx <= 0 or hpx <= 0 or wpx * hpx <= best_px_w * best_px_h:
+                        continue
+                    bb = im.get("bbox") or (0, 0, 0, 0)
+                    dw = float(bb[2] - bb[0])
+                    dh = float(bb[3] - bb[1])
+                    if dw <= 0 or dh <= 0:
+                        continue
+                    best_px_w, best_px_h = wpx, hpx
+                    best_disp_w, best_disp_h = dw, dh
+                diag: dict = {
+                    "media_box_pt": [round(w_pt, 1), round(h_pt, 1)],
+                    "rotation": int(page.rotation or 0),
+                    "aspect_ratio": round(w_pt / h_pt, 3) if h_pt else None,
+                    "image_pixels": [best_px_w, best_px_h],
+                    "effective_dpi": None,
+                    "low_dpi": False,
+                }
+                if best_px_w > 0 and best_px_h > 0 and max(best_disp_w, best_disp_h) > 0:
+                    eff = max(best_px_w, best_px_h) / (max(best_disp_w, best_disp_h) / 72.0)
+                    diag["effective_dpi"] = round(eff, 1)
+                    if eff < _LOW_DPI_THRESHOLD:
+                        diag["low_dpi"] = True
+                        diag["low_dpi_reason"] = (
+                            f"有效 DPI {eff:.0f} 低于 {_LOW_DPI_THRESHOLD}，"
+                            f"识别质量可能不足"
+                        )
+                out[i] = diag
+            return out
+    except Exception as e:
+        logger.warning(
+            f"PDF 页级诊断扫描失败（不影响主流程）: {redact_urls(str(e))[:300]}"
+        )
+        return {}
+
+
+def _prepare_ocr_pdf(pdf_path: str, job_id: str) -> tuple[str, list[int]]:
+    """OCR 提交前输入规范化。返回 (实际用于 OCR 的路径, 被规范化的页码)。
+
+    页面盒长边 > _PDF_ABNORMAL_BOX_PT 的页会被重新渲染进工作副本，
+    否则原文件直接返回。规范化永不修改原始 PDF。
+    """
+    import fitz  # PyMuPDF — 页面盒检测 + 重渲染
+
+    try:
+        with fitz.open(pdf_path) as doc:
+            abnormal: list[tuple[int, fitz.Rect]] = []
+            for i, page in enumerate(doc, 1):
+                rect = page.rect
+                if max(rect.width, rect.height) > _PDF_ABNORMAL_BOX_PT:
+                    abnormal.append((i, rect))
+            if not abnormal:
+                return pdf_path, []
+            logger.info(
+                f"[{job_id}] Input normalize: {len(abnormal)} page(s) have "
+                f"abnormal media box (> {_PDF_ABNORMAL_BOX_PT}pt): "
+                f"{[(p, f'{r.width:.0f}x{r.height:.0f}') for p, r in abnormal]}"
+                f" — re-rendering 300dpi working copy (original untouched)"
+            )
+            out_path = str(Path(pdf_path).with_name(f"{job_id}_normalized.pdf"))
+            norm = fitz.open()
+            try:
+                for i, page in enumerate(doc, 1):
+                    rect = page.rect
+                    if max(rect.width, rect.height) <= _PDF_ABNORMAL_BOX_PT:
+                        # 正常页原样拷贝（避免无关页被重采样损失保真度）
+                        norm.insert_pdf(doc, from_page=i - 1, to_page=i - 1)
+                        continue
+                    # 畸形页：渲染为 ≤4096px 位图，按 300dpi 摆放
+                    zoom = min(1.0, _NORMALIZE_MAX_SIDE_PX / max(rect.width, rect.height))
+                    pix = page.get_pixmap(
+                        matrix=fitz.Matrix(zoom, zoom),
+                        colorspace=fitz.csGRAY, alpha=False,
+                    )
+                    w_pt = pix.width * 72.0 / _NORMALIZE_TARGET_DPI
+                    h_pt = pix.height * 72.0 / _NORMALIZE_TARGET_DPI
+                    npage = norm.new_page(width=w_pt, height=h_pt)
+                    npage.insert_image(npage.rect, pixmap=pix)
+            except Exception:
+                norm.close()
+                raise
+            norm.save(out_path, garbage=4, deflate=True)
+            norm.close()
+            logger.info(
+                f"[{job_id}] Input normalize: wrote {out_path} "
+                f"({len(abnormal)} re-rendered page(s))"
+            )
+    except Exception as e:
+        logger.error(
+            f"[{job_id}] Input normalize failed — submitting original pdf: "
+            f"{redact_urls(str(e))[:300]}"
+        )
+        return pdf_path, []
+    return out_path, [p for p, _ in abnormal]
 
 
 async def _run_ocr_with_failover(db, job_id: str, pdf_path: str, progress_cb) -> tuple[list, str, list[str]]:

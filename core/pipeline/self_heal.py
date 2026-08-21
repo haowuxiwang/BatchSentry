@@ -14,6 +14,54 @@ from core.security import redact_urls
 
 logger = logging.getLogger(__name__)
 
+# 缺失内容标记：任何页面文本出现这些即视为"内容不完整"（含整表降级
+# stub simple_table / 表格提取失败占位 / 空页占位）。自愈验收、空页判定
+# 及其它完整性检查共用，防止"111 字符的 simple_table stub 被当作已恢复"。
+_MISSING_MARKERS = (
+    "simple_table",
+    "[表格内容提取失败 — OCR 结构缺失]",
+    "（此页无文本内容）",
+    "[OCR 警告:",
+)
+
+# OCR 警告前缀（stage1.py 写入 raw_html 的完整性诊断标签）：strip 后
+# 再判断空页长度，避免前缀膨胀导致"非空"误判。_has_missing_markers 已
+# 能检测该前缀，但语义上长度检查应基于实际内容而非诊断标签。
+_OCR_WARNING_RE = re.compile(
+    r"^\[OCR 警告: .+?分析仅供参考\]\n\n", re.DOTALL
+)
+
+
+def _has_missing_markers(text: str) -> bool:
+    raw = text or ""
+    if any(m in raw for m in _MISSING_MARKERS):
+        return True
+    # MinerU may return a non-empty markdown page composed exclusively of its
+    # page marker and header blocks.  A length threshold cannot catch this
+    # failure mode; treat it as incomplete so self-heal does not certify it.
+    content_lines = [
+        line.strip() for line in raw.splitlines()
+        if line.strip() and not re.fullmatch(r"##\s*第\s*\d+\s*页", line.strip())
+    ]
+    return bool(content_lines) and all(line.startswith("#") for line in content_lines)
+
+
+def _self_heal_diag(prior: dict | None) -> str | None:
+    """自愈恢复页的诊断 JSON：保留原始完整性证据，标记自愈状态。
+
+    门禁 1（页级诊断可追溯）：旧实现自愈 UPDATE 把 ocr_diagnostics 置 NULL，
+    该页"曾因空页/缺失占位被判不完整"的证据就此丢失。恢复页应能回答
+    "此页为何被重跑" — 以 prior_diagnostics 存原始诊断 + self_healed 标记。
+    """
+    if not prior:
+        return None
+    diag = {
+        "self_healed": True,
+        "source": prior.get("source", "unknown"),
+        "prior_diagnostics": prior,
+    }
+    return json.dumps(diag, ensure_ascii=False)
+
 async def _report_heal_progress(db, job_id: str, done: int, total: int, pages: list[int]) -> None:
     """空页自愈进度上报：读当前 ocr_progress 主进度，合并 self_heal 子键。
 
@@ -56,10 +104,18 @@ async def _self_heal_empty_pages(
         retry_targets = []
         for r in await cursor.fetchall():
             html = r["raw_html"] or ""
-            if len(html) < 100:
+            # 缺失标记（simple_table 整表降级 stub / 表格失败占位 / 空页
+            # 占位）即使超 100 字符也视为未完成 — 防 111 字符 stub 逃过
+            # 空页判定（对抗审查，页 48 整表丢失静默通过的真实案例）。
+            if _has_missing_markers(html):
                 retry_targets.append(r["page"])
                 continue
-            stripped = re.sub(r"<[^>]+>", "", html).strip()
+            # strip OCR 警告前缀后检查长度，避免诊断标签膨胀导致误判
+            content = _OCR_WARNING_RE.sub("", html)
+            if len(content) < 100:
+                retry_targets.append(r["page"])
+                continue
+            stripped = re.sub(r"<[^>]+>", "", content).strip()
             if len(stripped) < 100:
                 retry_targets.append(r["page"])
         if retry_targets:
@@ -75,6 +131,24 @@ async def _self_heal_empty_pages(
             # pages dict（Stage 2 从内存读取 — 若只更新 DB，首次运行
             # 时 LLM 仍收到自愈前的空文本，恢复白做）。
             pages_by_num = {i + 1: p for i, p in enumerate(pages)}
+            # 门禁 1：自愈前快照各目标页的原始诊断，恢复写库时以
+            # prior_diagnostics 保留（不置 NULL）。
+            prior_diags: dict[int, dict] = {}
+            try:
+                ph = ",".join("?" * len(retry_targets))
+                cursor2 = await db.execute(
+                    f"SELECT page, ocr_diagnostics FROM page_cache "
+                    f"WHERE job_id = ? AND page IN ({ph})",
+                    [job_id, *retry_targets],
+                )
+                for r2 in await cursor2.fetchall():
+                    if r2["ocr_diagnostics"]:
+                        try:
+                            prior_diags[int(r2["page"])] = json.loads(r2["ocr_diagnostics"])
+                        except json.JSONDecodeError:
+                            pass
+            except Exception:
+                pass
             try:
                 if backend == "mineru":
                     from core.mineru_client import run_ocr_pages
@@ -111,7 +185,11 @@ async def _self_heal_empty_pages(
                         heal_total = len(retry_targets)
                         heal_done = heal_total - len(still_empty)
                         for pno, md, discarded in retried:
-                            if md and len(md.strip()) > 100:
+                            # 对抗审查：恢复验收需排除"整表降级 stub"。
+                            # 旧阈值只查长度 <100 → 111 字符的 simple_table
+                            # stub 被误判"已恢复"，页 48 整表丢失静默通过。
+                            # 合法页面文本不含这些占位/缺失标记。
+                            if md and len(md.strip()) > 100 and not _has_missing_markers(md):
                                 clean = _sanitize_ocr_text(md.strip())
                                 # D3 修复（Round 3）：自愈恢复页也补回
                                 # OCR 不完整警告前缀（主流程 L714 对
@@ -124,10 +202,10 @@ async def _self_heal_empty_pages(
                                         f"不完整, 分析仅供参考]\n\n{clean}"
                                     )
                                 await db.execute(
-                                    "UPDATE page_cache SET raw_html = ?, "
+                                    "UPDATE page_cache SET raw_html = ?, ocr_diagnostics = ?, "
                                     "structured_json = NULL, analyzed_at = NULL "
                                     "WHERE job_id = ? AND page = ?",
-                                    (clean, job_id, pno),
+                                    (clean, _self_heal_diag(prior_diags.get(pno)), job_id, pno),
                                 )
                                 if pno in pages_by_num:
                                     pages_by_num[pno]["markdown"]["text"] = clean
@@ -199,13 +277,17 @@ async def _self_heal_empty_pages(
                                 md = ""
                             finally:
                                 slice_path.unlink(missing_ok=True)
-                            if md and len(md.strip()) > 100:
+                            # 对抗审查：与 MinerU 分支同款验收 — 含整表降级
+                            #  stub / 缺失占位标记的"恢复"视为未恢复，继续
+                            #  下一轮（Paddle 单轮重跑后仍 stub 则保留空页
+                            #  标记走人工复核，不静默放行）。
+                            if md and len(md.strip()) > 100 and not _has_missing_markers(md):
                                 clean = _sanitize_ocr_text(md.strip())
                                 await db.execute(
-                                    "UPDATE page_cache SET raw_html = ?, "
+                                    "UPDATE page_cache SET raw_html = ?, ocr_diagnostics = ?, "
                                     "structured_json = NULL, analyzed_at = NULL "
                                     "WHERE job_id = ? AND page = ?",
-                                    (clean, job_id, pno),
+                                    (clean, _self_heal_diag(prior_diags.get(pno)), job_id, pno),
                                 )
                                 if pno in pages_by_num:
                                     pages_by_num[pno]["markdown"]["text"] = clean

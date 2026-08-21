@@ -140,3 +140,32 @@ class TestServePdf:
         await test_db.commit()
         r = await test_client.get("/api/jobs/traversal-job/pdf")
         assert r.status_code == 403
+
+
+class TestLiveRouteNotShadowed:
+    """GET /api/jobs/live — 模块拆分路由顺序回归（冻结版 e2e 发现）。
+
+    背景：api/jobs.py 拆分后，listings.py 顶层 from api.jobs.status import
+    ... 令 status.py 的 /{job_id} 先注册，FastAPI 按注册顺序匹配，
+    GET /api/jobs/live 会命中 /{job_id}，查询 job_id="live" 不存在返回 404
+    （冻结版 e2e：{"detail":"Job not found"}，upload 页 EventSource 404 →
+    实时进度降级为 10s 轮询）。修复：listings.py 改为函数体内延迟引入
+    status 符号（见 listings.py 头注释），/live 在 /{job_id} 之前注册。
+
+    注意：不能用 httpx stream 请求验证（ASGITransport 无法中途断开
+    永不结束的 SSE 流，会挂起测试）；直接断言路由注册顺序最稳定。
+    """
+
+    @pytest.mark.asyncio
+    async def test_live_registered_before_job_id(self):
+        from api.jobs import router as jobs_router
+        routes = [
+            r for r in jobs_router.routes
+            if "GET" in (getattr(r, "methods", None) or ())
+            and getattr(r, "path", None) in ("/api/jobs/live", "/api/jobs/{job_id}")
+        ]
+        paths = [r.path for r in routes]
+        assert paths == ["/api/jobs/live", "/api/jobs/{job_id}"], (
+            f"route order broken: {paths} — listings must load before status "
+            "(listings.py must not top-level import status)"
+        )

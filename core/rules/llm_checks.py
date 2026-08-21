@@ -42,9 +42,39 @@ _FALLBACK_SYSTEM_PROMPT = """你是 GMP 批生产记录参数合规判定助手�
 严格输出 JSON 数组，不要添加其他文本。"""
 
 
-def _flag_llm_queue_for_review(llm_queue: list[dict], *, reason: str) -> list[dict]:
-    """Fail-closed: when LLM fallback is unavailable, flag all queued params
-    for human review rather than silently passing them (GMP safety principle)."""
+def _flag_llm_queue_for_review(llm_queue: list[dict], *, reason: str,
+                               aggregate: bool = False) -> list[dict]:
+    """Fail-closed: when LLM fallback is unavailable, flag queued params
+    for human review rather than silently passing them (GMP safety principle).
+
+    对抗审查（aggregate=True，队列超限分支）：把所有参数合并为**单条**
+    汇总 finding — 此前逐参数各生成一条（407 参数 = 407 条"参数数量
+    过多"警告），复核页被噪音淹没，真实问题被掩盖。GMP 复核针对
+    "某一页某批参数待人工判定"这一事项，汇总一条即可；明细由
+    ocr_text 携带参数数与页码。小队列（LLM 调用失败/解析失败分支）
+    保持逐条标记，参数少时可读且可逐条核对。
+    """
+    if aggregate and len(llm_queue) > 1:
+        pages = sorted({q["page"] for q in llm_queue})
+        page_s = "、".join(f"第{p}页" for p in pages[:10])
+        if len(pages) > 10:
+            page_s += f" 等{len(pages)}页"
+        n = len(llm_queue)
+        names = "、".join((q["name"] or "?")[:20] for q in llm_queue[:6])
+        if len(llm_queue) > 6:
+            names += f" 等{n}项"
+        return [{
+            "page": pages[0],
+            "type": "completeness",
+            "severity": "warning",
+            "description": (
+                f"{page_s} 共 {n} 个参数（如 {names}）{reason}，"
+                f"需人工逐项核对"
+            ),
+            "ocr_text": f"params={n} pages={len(pages)} reason={reason}",
+            "operator": "",
+            "source": "rule",
+        }]
     findings = []
     for q in llm_queue:
         findings.append({
@@ -79,11 +109,12 @@ async def _llm_fallback_check(llm_queue: list[dict], *, job_id: str = "") -> lis
     if len(llm_queue) > _LLM_FALLBACK_BATCH_MAX:
         logger.warning(
             f"[{job_id}] LLM fallback queue too large ({len(llm_queue)} > "
-            f"{_LLM_FALLBACK_BATCH_MAX}), flagging all as human review"
+            f"{_LLM_FALLBACK_BATCH_MAX}), flagging as one aggregated review item"
         )
         return _flag_llm_queue_for_review(
             llm_queue,
-            reason=f"参数数量过多（{len(llm_queue)}），超出自动判定上限，需人工确认"
+            reason=f"参数数量过多（{len(llm_queue)}），超出自动判定上限，需人工确认",
+            aggregate=True,
         )
 
     items_text = "\n".join(

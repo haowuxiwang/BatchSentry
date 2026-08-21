@@ -96,6 +96,47 @@ class TestLLMFallbackCheck:
         mock_llm.chat_json.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_queue_too_large_aggregates_single_finding(self, mock_llm):
+        """对抗审查：队列超限（>50）时合并为单条汇总 finding，不再逐参生成噪音。
+
+        旧实现：407 个参数 → 407 条"参数数量过多"warning，复核页被噪音
+        淹没，真实问题被掩盖（GMP 复核页误报率 85% 的直接来源）。
+        """
+        from core.rules.llm_checks import _LLM_FALLBACK_BATCH_MAX
+        llm_queue = [
+            {"page": (i % 5) + 1, "step_no": 1, "name": f"参数{i}", "spec": "应澄清",
+             "actual": f"值{i}", "unit": "", "kind": "param"}
+            for i in range(_LLM_FALLBACK_BATCH_MAX + 10)
+        ]
+        findings = await _llm_fallback_check(llm_queue)
+        # 只有 1 条汇总；LLM 未被调用
+        assert len(findings) == 1
+        mock_llm.chat_json.assert_not_called()
+        f = findings[0]
+        assert f["type"] == "completeness"
+        assert f["severity"] == "warning"
+        assert f["source"] == "rule"
+        assert "参数数量过多" in f["description"]
+        assert f"共 {len(llm_queue)} 个参数" in f["description"]
+        # 摘要只列前 6 个参数名 + "等 N 项"
+        assert "等" in f["description"]
+        assert "需人工逐项核对" in f["description"]
+
+    @pytest.mark.asyncio
+    async def test_queue_within_limit_still_calls_llm(self, mock_llm):
+        """队列 ≤50 时仍走 LLM 判定（聚合仅限超限分支）。"""
+        mock_llm.chat_json.return_value = [
+            {"index": 1, "in_spec": True, "reason": "ok"},
+        ]
+        llm_queue = [
+            {"page": 1, "step_no": 1, "name": "外观", "spec": "应澄清",
+             "actual": "澄清", "unit": "", "kind": "param"},
+        ]
+        findings = await _llm_fallback_check(llm_queue)
+        mock_llm.chat_json.assert_called_once()
+        assert findings == []
+
+    @pytest.mark.asyncio
     async def test_in_spec_false_produces_finding(self, mock_llm):
         """LLM 判定不合规时应产生 param_out_of_spec finding。"""
         llm_queue = [
