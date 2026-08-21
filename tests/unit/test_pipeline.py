@@ -938,7 +938,8 @@ class TestOcrFailover:
         # 也判严重缺失 → 双后端均失败 → error（比静默接受残缺页更诚实）。
         # 缺 1-2 页的轻微差异仍容忍（partial_review，见下一测试）。
         assert row["status"] == "error"
-        assert row["ocr_backend_used"] is None
+        # Round 10 #6: failover writes ocr_backend_used in real-time
+        assert row["ocr_backend_used"] == "paddle"
 
     @pytest.mark.asyncio
     async def test_single_backend_chain_no_fallback(self, pipeline_db, tmp_path):

@@ -1173,6 +1173,23 @@ class TestHandwritingHashSanitization:
         assert "0.16" not in md
         assert "正文" in md
 
+    def test_footer_dropped_counted_in_diagnostics(self):
+        """纯数字页脚过滤计数进诊断（误分类数据行丢失通道可观测化）。"""
+        blocks = [
+            {"type": "page_number", "text": "2/24"},
+            {"type": "footer", "text": "15.60%"},
+            {"type": "footer", "text": "文件编号：SOP-001-R3"},  # 含文字 → 保留
+            {"type": "text", "text": "正文内容"},
+        ]
+        diag = mineru_client._page_ocr_diagnostics(blocks, 0, footer_dropped=2)
+        assert diag["footer_dropped"] == 2
+        # helper 与 _block_to_markdown 判定一致
+        assert mineru_client._count_noise_footers(blocks) == 2
+        # 无页脚页计数为 0
+        assert mineru_client._count_noise_footers(
+            [{"type": "text", "text": "正文"}]
+        ) == 0
+
     def test_separator_split_sanitizes_inline_hash(self):
         """降级路径 _split_pages_by_separator（full.md 拆分）也必须清洗
         表格 HTML 内的 '###' — 实测 749ead79 走结构回退后 14 页残留

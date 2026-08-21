@@ -56,6 +56,10 @@ PROMPTS = {
 输出 JSON 格式：{"page_info":{"title":"","file_code":"","version":"","batch_no":"","production_date":""},"steps":[{"step_no":"","operation":"","start_time":"","end_time":"","parameters":[{"name":"","spec_range":"","value":"","unit":""}],"operator":"","reviewer":"","handwritten":[],"anomalies":[]}],"time_anomalies":[],"ocr_noise":[],"overall_confidence":"high|medium|low"}""",
     },
     # v3 — Phase 1 (see spike/baseline_report.md for ground truth)
+    # ⚠️ prompt caching 不变量：system 必须保持全静态（所有页共享同一
+    # 前缀，DeepSeek/SiliconFlow 自动前缀缓存按命中价计费，51 页 job
+    # 省 ~90% system token 成本）。日期/页码/任务号等动态内容只能进
+    # user 侧（_build_user_message 组装处），不得拼进 system。
     "v3": {
         "system": """你是一个 GMP 批生产记录数据提取专家。
 给定一页批生产记录的 HTML 表格（OCR 识别产物），请提取结构化数据。

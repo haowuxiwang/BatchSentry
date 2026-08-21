@@ -10,6 +10,31 @@ from core.pipeline import db_lock
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["review"])
 
+# ── #8 字段级置信度（读时计算，验证信号加权 — 借鉴 invoice-parse：
+# 置信度来自客观信号而非 LLM 自报）────────────────────────────
+_CONF_BASE = 0.85
+_CONF_LLM_GEN_PENALTY = 0.15   # llm_cross/llm_fallback/user_rule（自然语言生成）
+_CONF_LLM_PAGE_PENALTY = 0.10  # llm_page（结构化提取，稍可靠）
+_CONF_PAGE_FLAG_PENALTY = 0.20  # 所在页带 OCR 警告/稀疏/截断/grounding 横幅
+_CONF_MIN, _CONF_MAX = 0.30, 0.95
+
+
+def _confidence_for(finding: dict, page_flagged: bool) -> float:
+    """单条 finding 的置信度评分 [0.30, 0.95]。
+
+    信号：来源确定性（规则层 > LLM 结构化 > LLM 自然语言）+ 所在页
+    完整性标记。已裁决条目不调分（人工裁决本身就是最终置信度）。
+    """
+    score = _CONF_BASE
+    src = finding.get("source") or "rule"
+    if src in ("llm_cross", "llm_fallback", "user_rule"):
+        score -= _CONF_LLM_GEN_PENALTY
+    elif src == "llm_page":
+        score -= _CONF_LLM_PAGE_PENALTY
+    if page_flagged:
+        score -= _CONF_PAGE_FLAG_PENALTY
+    return round(max(_CONF_MIN, min(_CONF_MAX, score)), 2)
+
 
 @router.get("/jobs/{job_id}/findings")
 async def list_findings(
@@ -18,12 +43,17 @@ async def list_findings(
     page: Optional[int] = None,
     limit: int = 50,
     offset: int = 0,
+    order: Optional[str] = None,
     request: Request = None,
 ):
     """List findings for a job, optionally filtered by status and/or page.
 
     统一端点：支持 status 和 page 过滤（AJAX 翻页用 page 参数）。
     分页：limit（默认 50，max 200）+ offset，防止 100+ findings 一次返回卡顿。
+    order=confidence：按置信度升序（最需要人工关注的排前面）。置信度为
+    读时计算（#8 字段级置信度）：LLM 生成型来源 + 所在页带完整性警告
+    标记 → 扣分；确定性规则层产出满分基准。不落库（无 schema 变更），
+    信号变化（如页面横幅消除后重跑）自动反映。
     """
     # P2-1: GET 读端点守卫统一（request=None 时跳过，兼容单元测试直接调用）
     from core.security import is_local_request
@@ -45,8 +75,17 @@ async def list_findings(
         "WHEN 'llm_page' THEN 2 "
         "WHEN 'llm_cross' THEN 3 ELSE 4 END"
     )
+    by_confidence = (order == "confidence")
     # 按页过滤时，仅按 severity+source 排序（不需要 page）
-    if page:
+    if by_confidence:
+        # 置信度排序需全量取回后在 Python 侧排序分页（SQL 无该列）；
+        # 上限 2000 行防超大 job 内存失控
+        cursor = await db.execute(
+            "SELECT * FROM findings WHERE job_id = ? "
+            f"ORDER BY {severity_order}, {source_order}, id LIMIT 2000",
+            (job_id,),
+        )
+    elif page:
         order_clause = f"ORDER BY {severity_order}, {source_order}, id"
         cursor = await db.execute(
             f"SELECT * FROM findings WHERE job_id = ? AND page = ? {order_clause} "
@@ -69,26 +108,54 @@ async def list_findings(
     rows = await cursor.fetchall()
     findings = [dict(r) for r in rows]
 
-    # 总数（用于前端显示 "x/y" + has_more 截断提示）。
-    # 对抗审查：旧实现 count 只按 job_id 统计全局总数，而列表按
-    # page/status 过滤 — 全局 >50 条时每个页面都显示"本页问题超过 50
-    # 条"，与实际列表条数完全不符（如当前页仅 1 条的页 6 也提示超过
-    # 50 条，GMP 复核误导）。total/has_more 必须按当前过滤集统计。
-    if page:
-        count_cursor = await db.execute(
-            "SELECT COUNT(*) FROM findings WHERE job_id = ? AND page = ?",
-            (job_id, page),
-        )
-    elif status:
-        count_cursor = await db.execute(
-            "SELECT COUNT(*) FROM findings WHERE job_id = ? AND status = ?",
-            (job_id, status),
-        )
+    # 页级完整性警告标记（置信度扣分信号）— 一次批量载入
+    page_flags: dict[int, bool] = {}
+    flag_cursor = await db.execute(
+        "SELECT page, structured_json FROM page_cache WHERE job_id = ?",
+        (job_id,),
+    )
+    for r in await flag_cursor.fetchall():
+        flagged = False
+        if r["structured_json"]:
+            try:
+                sj = json.loads(r["structured_json"])
+                flagged = bool(
+                    sj.get("_ocr_warning") or sj.get("_ocr_sparse")
+                    or sj.get("_ocr_truncated") or sj.get("_grounding_warn")
+                )
+            except json.JSONDecodeError:
+                pass
+        page_flags[r["page"]] = flagged
+
+    for f in findings:
+        f["confidence"] = _confidence_for(f, page_flags.get(f.get("page"), False))
+
+    if by_confidence:
+        findings.sort(key=lambda x: (x["confidence"], x.get("id", 0)))
+        total_est = len(findings)
+        findings = findings[offset:offset + limit]
+        total = total_est
     else:
-        count_cursor = await db.execute(
-            "SELECT COUNT(*) FROM findings WHERE job_id = ?", (job_id,)
-        )
-    total = (await count_cursor.fetchone())[0]
+        # 总数（用于前端显示 "x/y" + has_more 截断提示）。
+        # 对抗审查：旧实现 count 只按 job_id 统计全局总数，而列表按
+        # page/status 过滤 — 全局 >50 条时每个页面都显示"本页问题超过 50
+        # 条"，与实际列表条数完全不符（如当前页仅 1 条的页 6 也提示超过
+        # 50 条，GMP 复核误导）。total/has_more 必须按当前过滤集统计。
+        if page:
+            count_cursor = await db.execute(
+                "SELECT COUNT(*) FROM findings WHERE job_id = ? AND page = ?",
+                (job_id, page),
+            )
+        elif status:
+            count_cursor = await db.execute(
+                "SELECT COUNT(*) FROM findings WHERE job_id = ? AND status = ?",
+                (job_id, status),
+            )
+        else:
+            count_cursor = await db.execute(
+                "SELECT COUNT(*) FROM findings WHERE job_id = ?", (job_id,)
+            )
+        total = (await count_cursor.fetchone())[0]
 
     return {
         "findings": findings,

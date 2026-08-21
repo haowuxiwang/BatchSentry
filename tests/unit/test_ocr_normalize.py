@@ -321,6 +321,26 @@ class TestPdfPageDiagnostics:
         diag, reasons = assess_ocr_page(page, pdf_diag)
         assert any("异常" in r for r in reasons)
 
+    def test_assess_ocr_page_footer_drop_threshold(self):
+        """≥3 个纯数字页脚被过滤 → 完整性警告（误分类数据行可观测化）。"""
+        from core.pipeline.ocr_support import assess_ocr_page
+
+        page = {
+            "markdown": {"text": "正常内容"},
+            "_ocr_diagnostics": {"footer_dropped": 3},
+        }
+        diag, reasons = assess_ocr_page(page)
+        assert diag["integrity"] == "incomplete"
+        assert any("页脚" in r for r in reasons)
+        # 1-2 个属正常页脚，不触发
+        page2 = {
+            "markdown": {"text": "正常内容"},
+            "_ocr_diagnostics": {"footer_dropped": 2},
+        }
+        diag2, reasons2 = assess_ocr_page(page2)
+        assert diag2["integrity"] == "ok"
+        assert reasons2 == []
+
 
 class TestSelfHealDiag:
     """自愈恢复页诊断保留 prior_diagnostics。"""

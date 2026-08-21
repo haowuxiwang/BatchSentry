@@ -1053,7 +1053,13 @@
             : "";
         const sourceTag =
           f.source && f.source !== "rule"
-            ? `<span class="text-[11px] text-muted-foreground">· ${esc(sourceZh[f.source] || f.source)}</span>`
+            ? `<span class="text-[11px] text-muted-foreground">· ${esc(zhOrUnknown(sourceZh, f.source))}</span>`
+            : "";
+        // #8 字段级置信度：低置信条目显式标记（LLM 生成 + 所在页带
+        // 完整性警告 → 评分下降），提示复核员优先对照原图
+        const lowConfTag =
+          typeof f.confidence === "number" && f.confidence < 0.6
+            ? `<span class="text-[11px] px-1 py-0.5 rounded bg-warning/10 text-warning" title="置信度 ${f.confidence}（来源可靠性/页面完整性加权）">低置信</span>`
             : "";
         const ocrSnippet = f.ocr_text
           ? `<p class="text-[11px] text-muted-foreground font-mono mt-1 truncate">OCR：${esc(f.ocr_text.slice(0, 100))}</p>`
@@ -1090,6 +1096,7 @@
                                 <span class="text-[13px] font-medium text-foreground">${esc(zhOrUnknown(typeZh, f.type))}</span>
                                 ${statusTag}
                                 ${sourceTag}
+                                ${lowConfTag}
                                 <span class="text-[11px] text-muted-foreground uppercase tracking-wider ml-auto">${esc(zhOrUnknown(severityZh, f.severity))}</span>
                             </div>
                             <p class="text-[13px] text-muted-foreground leading-relaxed">${esc(f.description)}</p>
@@ -1105,10 +1112,10 @@
       // P2-3: has_more 时追加提示 — 后端默认 limit=50，超出部分被截断；
       // 静默截断会让复核者误以为本页全部问题就是这些（GMP 漏检风险）。
       // 对抗审查：has_more 现按当前过滤集（页/状态）统计，不再被全局
-      // 总数误触发；文案不写死 50，与后端 limit 语义一致。
+      // 总数误触发；文案用实际渲染条数，与后端 limit 语义解耦。
       .concat(
         hasMore
-          ? '<div class="py-2 px-1 text-[11px] text-muted-foreground text-center">本页已显示 50 条，仍有多条未显示（请逐页翻页或处理后刷新）</div>'
+          ? `<div class="py-2 px-1 text-[11px] text-muted-foreground text-center">本页已显示 ${findings.length} 条，仍有多条未显示（请逐页翻页或处理后刷新）</div>`
           : "",
       );
   }

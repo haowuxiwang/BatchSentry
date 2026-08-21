@@ -105,6 +105,81 @@ class TestSelfHealSkipAndReturn:
         assert calls and calls[0] == [2]  # 只重跑了 p2
 
 
+class TestFullPathDiagnosticsWorkingCopy:
+    """#1 整份路径页级诊断基于规范化工作副本（与分片路径对齐）。"""
+
+    @pytest.mark.asyncio
+    async def test_full_path_diag_from_normalized_copy(self, pipeline_db, tmp_path):
+        import fitz
+        from core import pipeline as pipeline_mod
+
+        orig_backend = pipeline_mod.config["app"].ocr_backend
+        orig_dual = pipeline_mod.config["app"].ocr_dual_compare
+        pipeline_mod.config["app"].ocr_backend = "mineru"
+        pipeline_mod.config["app"].ocr_dual_compare = False
+        try:
+            job_id = await _insert_job(pipeline_db)
+            pdf_path = str(tmp_path / "abnormal.pdf")
+            # 第 1 页正常 A4；第 2 页 3000x4000pt 畸形盒（触发规范化）
+            doc = fitz.open()
+            p1 = doc.new_page(width=595, height=842)
+            pix1 = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 2479, 3509), False)
+            pix1.clear_with(200)
+            p1.insert_image(p1.rect, pixmap=pix1)
+            p2 = doc.new_page(width=3000, height=4000)
+            pix2 = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 3000, 4000), False)
+            pix2.clear_with(200)
+            p2.insert_image(p2.rect, pixmap=pix2)
+            doc.save(pdf_path)
+            doc.close()
+
+            def fake_run(pdf, cb=None, job_id=None):
+                return [
+                    {"markdown": {"text": "page 1 " + "x" * 200}},
+                    {"markdown": {"text": "page 2 " + "y" * 200}},
+                ]
+
+            with patch(
+                "core.pipeline._get_ocr_backend", return_value=fake_run
+            ), patch(
+                "core.pipeline.analyze_page",
+                new=AsyncMock(
+                    return_value={"steps": [], "findings": [],
+                                  "overall_confidence": "high"}
+                ),
+            ), patch(
+                "core.pipeline.analyze_cross_page",
+                new=AsyncMock(return_value=[]),
+            ):
+                from core.pipeline import run_pipeline
+                await run_pipeline(job_id, pdf_path)
+
+            # 规范化后工作副本第 2 页为 720x960pt@300dpi → 不应再带
+            # low_dpi / 页面盒异常警告（原件诊断是过时证据）
+            cur = await pipeline_db.execute(
+                "SELECT raw_html, ocr_diagnostics FROM page_cache "
+                "WHERE job_id = ? AND page = 2",
+                (job_id,),
+            )
+            row = await cur.fetchone()
+            assert "页面盒异常" not in (row["raw_html"] or "")
+            assert "有效 DPI" not in (row["raw_html"] or "")
+            diag = json.loads(row["ocr_diagnostics"])
+            assert diag.get("low_dpi") is not True
+
+            # 原件诊断另存审计（原始证据链）
+            cur = await pipeline_db.execute(
+                "SELECT detail FROM audit_log WHERE job_id = ? "
+                "AND action = 'ocr_input_normalized_diag'",
+                (job_id,),
+            )
+            audit_row = await cur.fetchone()
+            assert audit_row and "3000" in audit_row["detail"]
+        finally:
+            pipeline_mod.config["app"].ocr_backend = orig_backend
+            pipeline_mod.config["app"].ocr_dual_compare = orig_dual
+
+
 class TestSlicedPathProtections:
     async def _run_sliced(self, pipeline_db, tmp_path, pages, fake_retry=None):
         """驱动分片路径（复用 test_pipeline.py 的 patch 模式）。"""

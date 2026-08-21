@@ -74,6 +74,45 @@ class TestListFindings:
             # 第一个应是 critical
             assert data["findings"][0]["severity"] == "critical"
 
+
+class TestConfidenceScoring:
+    """#8 字段级置信度（读时计算）。"""
+
+    @pytest.mark.asyncio
+    async def test_confidence_present_and_ranks_sources(self, review_client):
+        r = await review_client.get("/api/jobs/review-job/findings")
+        data = r.json()
+        by_src = {f["source"]: f["confidence"] for f in data["findings"]}
+        # 规则层基准 0.85；llm_page 扣 0.10 → 0.75
+        assert by_src["rule"] == 0.85
+        assert by_src["llm_page"] == 0.75
+
+    @pytest.mark.asyncio
+    async def test_page_flag_lowers_confidence(self, review_client, test_db):
+        # 页 1 加 OCR 警告标记 → 该页 findings 置信度下降
+        import json as _json
+        await test_db.execute(
+            "INSERT OR REPLACE INTO page_cache (job_id, page, raw_html, structured_json) "
+            "VALUES (?, 1, 'p1', ?)",
+            ("review-job", _json.dumps({"_ocr_warning": "3 个内容块被丢弃"})),
+        )
+        await test_db.commit()
+        r = await review_client.get("/api/jobs/review-job/findings?page=1")
+        data = r.json()
+        confs = {f["source"]: f["confidence"] for f in data["findings"]}
+        assert confs["rule"] == 0.65   # 0.85 - 0.20 页面标记
+        assert confs["llm_page"] == 0.55
+
+    @pytest.mark.asyncio
+    async def test_order_by_confidence_ascending(self, review_client):
+        r = await review_client.get(
+            "/api/jobs/review-job/findings?order=confidence"
+        )
+        data = r.json()
+        confs = [f["confidence"] for f in data["findings"]]
+        assert confs == sorted(confs)
+        assert confs[0] == min(confs)
+
     @pytest.mark.asyncio
     async def test_has_more_scoped_to_current_filter(self, review_client):
         """对抗审查：has_more 必须按当前过滤集统计，不得被全局总数误触发。

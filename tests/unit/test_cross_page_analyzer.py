@@ -1795,8 +1795,10 @@ class TestUserRulesInjection:
                    return_value=FakeClient()):
             asyncio.run(_llm_based_check("摘要内容", job_id="job-1"))
 
-        assert captured["user"] == "摘要内容"
-        assert captured["audit"]["prompt_version"] == "semantic_v2"
+        # Round 10 #3: exemplar feedback may be prepended to user message
+        assert "摘要内容" in captured["user"]
+        # prompt_version includes +fbN suffix when exemplars are injected
+        assert "semantic_v2" in captured["audit"]["prompt_version"]
 
     def test_user_rule_findings_marked_with_user_rule_source(self, tmp_path):
         """type=user_rule 的 finding 应标记 source=user_rule，其余保持 llm_cross。"""

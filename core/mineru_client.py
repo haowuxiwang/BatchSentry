@@ -446,11 +446,14 @@ def _split_pages_by_content_list(
                 elif btype in ("paragraph", "text", "title"):
                     n_paragraphs += 1
             text, discarded_count = _compose_page_markdown(i + 1, block_dicts)
+            footer_dropped = _count_noise_footers(block_dicts)
             page_dict = {
                 "markdown": {"text": text},
                 "page_count": i + 1,
                 "_source": "mineru",
-                "_ocr_diagnostics": _page_ocr_diagnostics(block_dicts, discarded_count),
+                "_ocr_diagnostics": _page_ocr_diagnostics(
+                    block_dicts, discarded_count, footer_dropped
+                ),
             }
             if discarded_count > 0:
                 # 暴露页级 OCR 完整性信息，pipeline 用于 UI 警告 + LLM 降级提示
@@ -487,11 +490,14 @@ def _split_pages_by_content_list(
             elif btype in ("paragraph", "text", "title"):
                 n_paragraphs += 1
         text, discarded_count = _compose_page_markdown(i + 1, blocks_for_page)
+        footer_dropped = _count_noise_footers(blocks_for_page)
         page_dict = {
             "markdown": {"text": text},
             "page_count": i + 1,
             "_source": "mineru",
-            "_ocr_diagnostics": _page_ocr_diagnostics(blocks_for_page, discarded_count),
+            "_ocr_diagnostics": _page_ocr_diagnostics(
+                blocks_for_page, discarded_count, footer_dropped
+            ),
         }
         if discarded_count > 0:
             page_dict["_discarded_count"] = discarded_count
@@ -576,13 +582,18 @@ def _compose_page_markdown(page_num: int, blocks: list[dict]) -> tuple[str, int]
     return _sanitize_unrecognized_handwriting("\n".join(parts)).strip(), discarded_count
 
 
-def _page_ocr_diagnostics(blocks: list[dict], discarded_count: int) -> dict:
+def _page_ocr_diagnostics(
+    blocks: list[dict], discarded_count: int, footer_dropped: int = 0
+) -> dict:
     """Return loss-detection facts from MinerU's structured result.
 
     A page that contains only headers/footers is *not* a successful document
     extraction even when it has a non-empty markdown string.  Keeping these
     facts next to the page lets the pipeline distinguish that case from a
     genuinely short notification page without guessing from character count.
+    footer_dropped: 被当作纯数字噪音过滤的页脚/页码块数 — 布局模型把
+    真实数据行（手写日期/百分比实测值）误分类为 page_footer 时内容会
+    静默丢失，计数使其可观测（超阈值触发完整性警告）。
     """
     meaningful = 0
     table_blocks = 0
@@ -601,11 +612,43 @@ def _page_ocr_diagnostics(blocks: list[dict], discarded_count: int) -> dict:
         "meaningful_blocks": meaningful,
         "table_blocks": table_blocks,
         "discarded_blocks": discarded_count,
+        "footer_dropped": footer_dropped,
         "header_footer_only": bool(blocks) and meaningful == 0,
     }
 
 
 _HASHES_PLACEHOLDER_RE = re.compile(r"###")
+
+# 纯数字页脚/页码噪音模式（与 _block_to_markdown 页脚分支共用）：
+# "2/24"、"15.60%"、"第 2 页"、纯数字日期等。注意字符集会命中手写
+# 日期/百分比实测值 — 布局模型误分类为页脚时数据被静默丢弃，因此
+# _compose_page_markdown 同步计数（footer_dropped），超阈值触发完整性
+# 警告，使该通道可观测而非不可逆黑洞。
+_PURE_NUM_FOOTER_RE = re.compile(r"[\d./%\u00b0\-()]{1,20}")
+_PAGE_NUM_PATTERNS = (re.compile(r"第\s*\d+\s*页"), re.compile(r"\d+\s*/\s*\d+"))
+
+
+def _is_pure_number_footer(txt: str) -> bool:
+    """页脚文本是否为纯数字/符号噪音（应过滤）。"""
+    if not txt:
+        return False
+    compact = txt.replace(" ", "").replace("\u00a0", "")
+    if _PURE_NUM_FOOTER_RE.fullmatch(compact):
+        return True
+    return any(p.fullmatch(txt.strip()) for p in _PAGE_NUM_PATTERNS)
+
+
+def _count_noise_footers(blocks: list[dict]) -> int:
+    """统计本页将被当作噪音过滤的页脚/页码块数（诊断可观测性）。"""
+    n = 0
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        if str(block.get("type", "")) in ("footer", "page_footer", "page_number"):
+            txt = _content_text(block) or (block.get("text") or "").strip()
+            if txt and _is_pure_number_footer(txt):
+                n += 1
+    return n
 
 # 服务端整表降级 stub 判定（对抗审查：超大畸形页面盒场景）：
 # 合法表格 html/markdown 必然含 <table/<tr/<td 或行首管道符；
@@ -657,11 +700,8 @@ def _block_to_markdown(block: dict) -> str:
         txt = _content_text(block) or (block.get("text") or "").strip()
         if not txt:
             return ""
-        compact = txt.replace(" ", "").replace("\u00a0", "")
-        if re.fullmatch(r"[\d./%\u00b0\-()]{1,20}", compact):
+        if _is_pure_number_footer(txt):
             return ""  # 纯数字/符号噪音
-        if re.fullmatch(r"第\s*\d+\s*页", txt) or re.fullmatch(r"\d+\s*/\s*\d+", txt):
-            return ""  # "第 2 页" / "2/24" 页码模式
         return txt  # 含文字的页脚保留
 
     # 低置信度丢弃块：MinerU 因置信度过低丢弃的内容（type="discarded" 或

@@ -230,6 +230,67 @@ def _user_rules_section(rules: list[dict] | None = None) -> tuple[str, str]:
     return section, rules_hash
 
 
+# 人工复核反馈样例池上限 — 控制 prompt 预算（每条约 100-150 字符）
+_EXEMPLAR_LIMIT = 12
+_EXEMPLAR_DESC_MAX = 80
+
+_VERDICT_ZH = {"confirmed": "问题属实", "rejected": "误报", "corrected": "描述已更正"}
+
+
+async def _load_review_exemplars(limit: int = _EXEMPLAR_LIMIT) -> list[dict]:
+    """加载近期人工裁决的 LLM 生成型 findings 作为 few-shot 校准样例。
+
+    数据源：findings 表中 source ∈ {llm_cross, llm_fallback, user_rule}
+    且 status ∈ {confirmed, rejected, corrected} 的行 — 每条都是复核员
+    对模型输出的真实裁决。全局池（跨 job）：单 job 裁决量少，跨任务
+    积累才能形成有效校准信号；retry 场景当前 job 上一轮的裁决同样
+    入池（正是最相关的反馈）。
+    """
+    from db.client import get_db
+
+    db = await get_db()
+    cursor = await db.execute(
+        "SELECT type, severity, description, status FROM findings "
+        "WHERE source IN ('llm_cross', 'llm_fallback', 'user_rule') "
+        "AND status IN ('confirmed', 'rejected', 'corrected') "
+        "AND TRIM(COALESCE(description, '')) != '' "
+        "ORDER BY COALESCE(reviewed_at, created_at) DESC LIMIT ?",
+        (limit,),
+    )
+    rows = await cursor.fetchall()
+    return [
+        {
+            "type": r["type"],
+            "severity": r["severity"],
+            "description": r["description"],
+            "verdict": r["status"],
+        }
+        for r in rows
+    ]
+
+
+def _exemplars_section(exemplars: list[dict]) -> str:
+    """构造 <HUMAN_REVIEW_FEEDBACK> 提示段（空池返回 ""）。"""
+    if not exemplars:
+        return ""
+    lines = []
+    for e in exemplars[:_EXEMPLAR_LIMIT]:
+        desc = str(e.get("description", ""))[:_EXEMPLAR_DESC_MAX]
+        verdict = _VERDICT_ZH.get(e.get("verdict", ""), e.get("verdict", ""))
+        lines.append(
+            f"- [{e.get('severity', '?')}][{e.get('type', '?')}] {desc} → {verdict}"
+        )
+    return (
+        "<HUMAN_REVIEW_FEEDBACK>\n"
+        "以下是复核员对近期同类分析输出的人工裁决样例"
+        "（问题属实=该类发现真实存在；误报=不构成问题，请避免再报类似；"
+        "描述已更正=发现方向正确但表述与实际不符）。"
+        "请据此校准你的输出倾向，不要照抄样例内容：\n"
+        + "\n".join(lines)
+        + "\n</HUMAN_REVIEW_FEEDBACK>"
+    )
+
+
 async def _llm_based_check(summary: str, *, job_id: str = "",
                            user_rules: list[dict] | None = None) -> list[dict]:
     if not summary.strip():
@@ -239,8 +300,22 @@ async def _llm_based_check(summary: str, *, job_id: str = "",
         from config import load_user_rules
         user_rules = [r for r in load_user_rules() if r.get("active")]
     user_section, rules_hash = _user_rules_section(user_rules)
-    prompt = f"{user_section}\n\n{summary}" if user_section else summary
-    prompt_version = f"semantic_v2+rules{rules_hash}" if rules_hash != "none" else "semantic_v2"
+    # 人工复核反馈回流（few-shot 校准）：近期裁决样例注入 prompt，
+    # 让模型从误报/确认中学习。加载失败不阻断（降级为无样例）。
+    try:
+        exemplars = await _load_review_exemplars()
+    except Exception as e:
+        logger.warning(f"[{job_id}] review exemplars load failed: {e}")
+        exemplars = []
+    fb_section = _exemplars_section(exemplars)
+    sections = [s for s in (user_section, fb_section) if s]
+    prompt = "\n\n".join(sections + [summary]) if sections else summary
+    fb_tag = f"+fb{len(exemplars)}" if exemplars else ""
+    prompt_version = (
+        f"semantic_v2+rules{rules_hash}{fb_tag}"
+        if rules_hash != "none"
+        else f"semantic_v2{fb_tag}"
+    )
     client = get_llm_client()
     try:
         result = await client.chat_json(

@@ -141,13 +141,26 @@ async def _run_stage1_full(
 
     # Save raw HTML to page_cache (skip if already exists)
     existing_pages = await _get_existing_pages(db, job_id)
-    # 门禁 1（doc 页级诊断）：基于原始 PDF 扫描每页结构诊断（媒体盒/旋转/
-    # 有效 DPI），并入页级完整性证据 — 低 DPI 页不静默标记成功。
+    # 门禁 1（doc 页级诊断）：基于 OCR 实际提交的规范化工作副本扫描每页
+    # 结构诊断（媒体盒/旋转/有效 DPI），并入页级完整性证据 — 低 DPI 页
+    # 不静默标记成功。用工作副本而非原件：畸形页（>1600pt）已被
+    # _prepare_ocr_pdf 重渲染修复，按原件诊断会给已修复页挂过时的
+    # low_dpi/页面盒警告误导 LLM 与复核员；分片路径同语义。
+    # 原件诊断另存审计（原始证据链保留，可回答"此件为何被规范化"）。
     pdf_diags = {}
     try:
-        pdf_diags = await asyncio.to_thread(_pdf_page_diagnostics, pdf_path)
+        pdf_diags = await asyncio.to_thread(_pdf_page_diagnostics, ocr_pdf_path)
     except Exception:
         pass
+    if normalized_pages:
+        try:
+            orig_diags = await asyncio.to_thread(_pdf_page_diagnostics, pdf_path)
+            await _audit_log(
+                db, job_id, "ocr_input_normalized_diag",
+                f"original_pdf_diags={json.dumps(orig_diags, ensure_ascii=False)[:1500]}",
+            )
+        except Exception:
+            pass
     new_pages = 0
     for i, page in enumerate(pages):
         page_num = i + 1

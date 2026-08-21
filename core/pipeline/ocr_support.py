@@ -40,6 +40,14 @@ def assess_ocr_page(page: dict, pdf_diag: dict | None = None) -> tuple[dict, lis
         reasons.append("检测到 OCR 缺失内容占位")
     if diag.get("discarded_blocks", 0):
         reasons.append(f"{diag['discarded_blocks']} 个内容块被 OCR 丢弃")
+    # MinerU 纯数字页脚过滤通道可观测化：布局模型把真实数据行（手写
+    # 日期/百分比实测值）误分类为 page_footer 时内容被静默丢弃。正常页
+    # 页脚数 1-2 个；≥3 个视为误分类高概率，触发完整性警告供人工核对。
+    if diag.get("footer_dropped", 0) >= 3:
+        reasons.append(
+            f"{diag['footer_dropped']} 个纯数字页脚块被过滤"
+            f"（可能含被误分类的数据，请对照原图）"
+        )
     if diag.get("header_footer_only"):
         reasons.append("仅识别到页眉、页脚或辅助块，未识别正文")
     if not text.strip() or diag["text_chars"] == 0:
@@ -354,6 +362,17 @@ async def _run_ocr_with_failover(db, job_id: str, pdf_path: str, progress_cb) ->
                 db, job_id, "ocr_failover",
                 f"from={chain[0][1]} to={name} reason={failures[-1] if failures else 'unknown'}",
             )
+            # 实时可见性：切换发生时立即写 ocr_backend_used — 此前该字段
+            # 在 Stage 1 全部完成后才写入，备选后端运行期间（分钟级）SSE
+            # 快照里为 NULL，用户无法看到"已切换备用 OCR"。
+            try:
+                await db.execute(
+                    "UPDATE jobs SET ocr_backend_used = ? WHERE id = ?",
+                    (name, job_id),
+                )
+                await db.commit()
+            except Exception:
+                pass  # 可见性尽力而为，不阻断 failover
         _ocr_ctx_token = ocr_job_id_var.set(job_id)
         try:
             try:
