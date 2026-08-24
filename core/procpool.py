@@ -33,7 +33,7 @@ _pool: ProcessPoolExecutor | None = None
 _pool_broken = False
 
 
-def _pool_worker_init() -> None:
+def _pool_worker_init() -> None:  # pragma: no cover - 仅 spawn worker 子进程内执行
     """worker 初始化：std 流重定向 + 父进程死亡联动退出守卫。
 
     std 流重定向（2026-08-24 pytest 实证）：spawn worker 继承父进程

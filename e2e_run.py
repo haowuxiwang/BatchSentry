@@ -8,8 +8,11 @@ Rounds:
   img         — upload test1.jpg (image->pdf conversion path)
   mineru      — re-upload e2e_test.pdf with mineru backend (dual-engine)
   real        — 丝裂霉素提取批记录.pdf (real handwriting, paddle primary; per-page
-                sparse detection <40 chars + 2400s timeout)
+                sparse detection <40 chars + REAL_TIMEOUT_S budget)
   real-mineru — same real pdf with mineru backend (dual-engine completeness)
+
+Every round also subscribes /api/jobs/{id}/stream and records SSE frames to
+e2e_sse_<stem>.jsonl (streaming-output evidence: event count / phase chain).
 """
 import argparse
 import json
@@ -18,10 +21,65 @@ import subprocess
 import sys
 import tempfile
 import time
+from pathlib import Path
 
 import httpx
 
 API = "http://127.0.0.1:58799"
+
+# 大文档轮次预算：51 页 Stage 2 在上游 LLM 拥堵日（硅基流动单页排队
+# 500-1000s 实测）需要 45-60min，旧固定 2400s 曾在 40/51 页处误杀整轮
+# （driver finally 终止 exe）— 默认 90min，可用 E2E_REAL_TIMEOUT 覆盖。
+REAL_TIMEOUT_S = int(os.environ.get("E2E_REAL_TIMEOUT", "5400"))
+
+_TERMINAL = ("review", "partial_review", "error", "cancelled")
+
+
+def _sse_recorder(job_id, out_path, stats):
+    """后台线程：订阅 /api/jobs/{id}/stream，记录 SSE 帧到 jsonl。
+
+    产出"流式输出是否完成"证据：事件总数 / phase 覆盖（ocr/analyze/cross）
+    / 终帧状态。流在终态自动关闭；线程 daemon，不阻塞 driver 退出。
+
+    EventSource 语义（2026-08-24 实证）：Stage1→2 大事务提交间隙流可能
+    >10s 无字节 — 单次连接 + 短读超时会误杀采集（前端会自动重连，
+    采集器也必须）。读超时放宽到 60s，断流后重连（终态帧出现即停）。
+    """
+    import threading
+
+    def _run():
+        terminal_seen = False
+        while not terminal_seen:
+            try:
+                with httpx.Client(timeout=httpx.Timeout(10, read=60)) as c:
+                    with c.stream("GET",
+                                  f"{API}/api/jobs/{job_id}/stream") as r:
+                        with open(out_path, "a", encoding="utf-8") as f:
+                            for line in r.iter_lines():
+                                if not line.startswith("data: "):
+                                    continue
+                                f.write(line[6:] + "\n")
+                                f.flush()
+                                stats["events"] += 1
+                                try:
+                                    d = json.loads(line[6:])
+                                except ValueError:
+                                    continue
+                                ph = d.get("phase") or d.get("status") or "?"
+                                if ph != stats.get("last_phase"):
+                                    stats["transitions"].append(
+                                        f"{ph}:{d.get('status', '')}")
+                                    stats["last_phase"] = ph
+                                stats["last"] = d
+                                if d.get("status") in _TERMINAL:
+                                    terminal_seen = True
+            except Exception as e:
+                stats["err"] = str(e)[:200]
+                time.sleep(2)  # 断流重连（EventSource retry 语义）
+
+    t = threading.Thread(target=_run, daemon=True, name=f"sse-{job_id[:8]}")
+    t.start()
+    return t
 
 
 def wait_health(client, timeout=40):
@@ -59,14 +117,14 @@ def wait_terminal(client, job_id, timeout_s=600):
         if r.status_code == 200:
             d = r.json()
             st = d.get("status", "")
-            if st in ("review", "partial_review", "error", "cancelled"):
+            if st in _TERMINAL:
                 return st, d
         elif r.status_code == 404:
             # status endpoint may live at a different path; try progress
             p = client.get(f"{API}/api/jobs/{job_id}/progress", timeout=15)
             if p.status_code == 200:
                 d = p.json()
-                if d.get("status") in ("review", "partial_review", "error", "cancelled"):
+                if d.get("status") in _TERMINAL:
                     return d["status"], d
         time.sleep(4)
     return "timeout", {}
@@ -156,7 +214,7 @@ def main():
                     results["real"] = run_upload(
                         c, os.environ.get("E2E_PDF", "丝裂霉素提取批记录.pdf"),
                         "application/pdf", expect_types=[], force=True,
-                        timeout_s=2400, page_chars=True)
+                        timeout_s=REAL_TIMEOUT_S, page_chars=True)
                 elif rnd == "real-mineru":
                     # same real pdf with mineru backend (dual-engine completeness)
                     r = c.post(f"{API}/api/settings", json={"ocr_backend": "mineru"})
@@ -164,7 +222,7 @@ def main():
                     results["real-mineru"] = run_upload(
                         c, os.environ.get("E2E_PDF", "丝裂霉素提取批记录.pdf"),
                         "application/pdf", expect_types=[], force=True,
-                        timeout_s=2400, page_chars=True)
+                        timeout_s=REAL_TIMEOUT_S, page_chars=True)
             print("\n[e2e] SUMMARY:", json.dumps(
                 {k: {kk: vv for kk, vv in v.items() if kk != "findings"}
                  for k, v in results.items()}, ensure_ascii=False, indent=2))
@@ -190,7 +248,12 @@ def run_upload(c, path, mime, expect_types, force, timeout_s=600, page_chars=Fal
         return {"ok": False, "err": f"upload {r.status_code}: {r.text[:300]}"}
     job_id = r.json().get("job_id") or r.json().get("id")
     print(f"[e2e] upload {path} -> job {job_id}")
+    # SSE 流式输出证据采集：全程订阅进度流，记录事件数/phase 覆盖
+    sse_stats = {"events": 0, "transitions": [], "last_phase": None, "last": None}
+    sse_log = f"e2e_sse_{Path(path).stem}.jsonl"
+    sse_thread = _sse_recorder(job_id, sse_log, sse_stats)
     st, d = wait_terminal(c, job_id, timeout_s=timeout_s)
+    sse_thread.join(timeout=15)
     dur = int(time.time() - t0)
     print(f"[e2e] {path}: status={st} in {dur}s (pages={d.get('total_pages')})")
     fs = findings_of(c, job_id) if st in ("review", "partial_review") else []
@@ -224,10 +287,17 @@ def run_upload(c, path, mime, expect_types, force, timeout_s=600, page_chars=Fal
     ok = st in ("review", "partial_review") and not missing
     if missing:
         print(f"[e2e] {path}: MISSING expected types: {missing}")
+    # SSE 证据摘要：事件数 / phase 迁移链 / 终帧
+    phases = [t.split(":")[0] for t in sse_stats["transitions"]]
+    sse_ok = bool(sse_stats["events"]) and "done" in phases
+    print(f"[e2e] {path}: SSE events={sse_stats['events']} phases={sse_stats['transitions']}"
+          f" final={((sse_stats.get('last') or {}).get('status'))} -> {'OK' if sse_ok else 'CHECK'}")
     return {"ok": ok, "status": st, "duration_s": dur,
             "pages": d.get("total_pages"), "findings": len(fs),
             "types": types, "gmp_basis": with_basis, "missing": missing,
-            "sparse_pages": len(sparse_pages)}
+            "sparse_pages": len(sparse_pages),
+            "sse_events": sse_stats["events"],
+            "sse_phases": phases, "sse_ok": sse_ok}
 
 
 if __name__ == "__main__":

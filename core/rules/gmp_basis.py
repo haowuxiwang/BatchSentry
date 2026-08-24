@@ -108,11 +108,14 @@ def attach_gmp_basis(findings: list[dict]) -> list[dict]:
 
     幂等：已有非空 gmp_basis 的 finding 不覆盖（保留 LLM 可能给出的
     更精确引用）。
+    查找顺序：精确 type → 关键词兜底（Round 15 设计却漏接线 — 2026-08-24
+    覆盖率核查发现 _lookup 从未被调用，LLM 变体 type（如 batch_number_
+    mismatch）此前拿不到依据；接线后经 _KEYWORD_FALLBACK 归类）。
     """
     for f in findings:
         if not isinstance(f, dict) or f.get("gmp_basis"):
             continue
-        basis = GMP_BASIS_MAP.get(f.get("type", ""))
+        basis = _lookup(f)
         if basis:
             f["gmp_basis"] = basis
     return findings

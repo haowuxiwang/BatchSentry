@@ -69,6 +69,61 @@ class TestAttachGmpBasis:
         assert findings[1] is None
 
 
+class TestKeywordFallback:
+    """关键词兜底（2026-08-24 接线）：LLM 变体 type 未在 GMP_BASIS_MAP
+    枚举时按关键词归类 — _lookup 此前从未被 attach_gmp_basis 调用
+    （死代码），覆盖率核查发现后接线，本组测试锁定其行为。
+    """
+
+    def test_variant_batch_type_gets_basis(self):
+        from core.rules.gmp_basis import attach_gmp_basis
+        findings = [{"type": "batch_number_mismatch"}]
+        attach_gmp_basis(findings)
+        assert findings[0]["gmp_basis"]
+        assert "批号" in findings[0]["gmp_basis"]
+
+    def test_variant_chinese_type_gets_basis(self):
+        """中文变体 type（含「批号」关键词）同样命中兜底。"""
+        from core.rules.gmp_basis import attach_gmp_basis
+        findings = [{"type": "批号前后不一致"}]
+        attach_gmp_basis(findings)
+        assert findings[0]["gmp_basis"]
+
+    def test_variant_signature_and_time_types(self):
+        from core.rules.gmp_basis import attach_gmp_basis
+        findings = [{"type": "signature_absent"},
+                    {"type": "timestamp_reversed"}]
+        attach_gmp_basis(findings)
+        assert "Attributable" in findings[0]["gmp_basis"]
+        assert "Contemporaneous" in findings[1]["gmp_basis"]
+
+    def test_variant_param_type(self):
+        from core.rules.gmp_basis import attach_gmp_basis
+        findings = [{"type": "parameter_drift_detected"}]
+        attach_gmp_basis(findings)
+        assert "偏差管理" in findings[0]["gmp_basis"]
+
+    def test_garbage_type_still_no_basis(self):
+        """无任何关键词命中的未知 type 依旧不设键（宁可无依据不乱给）。"""
+        from core.rules.gmp_basis import attach_gmp_basis
+        findings = [{"type": "zzz_qqq_xxx"}]
+        attach_gmp_basis(findings)
+        assert "gmp_basis" not in findings[0]
+
+    def test_lookup_missing_or_nonstring_type(self):
+        """type 缺失 / 非 str（脏数据）→ None，不炸。"""
+        from core.rules.gmp_basis import _lookup
+        assert _lookup({}) is None
+        assert _lookup({"type": None}) is None
+        assert _lookup({"type": 123}) is None
+
+    def test_unmapped_short_circuits_before_keywords(self):
+        """_UNMAPPED 在关键词匹配前短路（user_rule 含 'rule' 不误配）。"""
+        from core.rules.gmp_basis import _lookup
+        assert _lookup({"type": "user_rule"}) is None
+        assert _lookup({"type": "ocr_noise"}) is None
+
+
 class TestGmpBasisMigration:
     """schema v7：findings.gmp_basis 列迁移（v6 库 → v7）。"""
 
