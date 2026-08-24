@@ -107,6 +107,7 @@ hiddenimports = [
     "api.settings.probe",
     "db.client",
     "core.pipeline",
+    "core.procpool",  # 2026-08-24: CPU 重活子进程池（300dpi 规范化 GIL 隔离）
     "core.pipeline.locks",
     "core.pipeline.state",
     "core.pipeline.ocr_support",

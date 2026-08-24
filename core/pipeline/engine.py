@@ -224,8 +224,10 @@ async def _run_pipeline_impl(job_id: str, pdf_path: str, progress_futures: list)
             # 规范化；这正会让 72dpi 错误嵌入的大扫描件退化成页眉/表格
             # stub。分片也必须用同一个 OCR 工作副本。
             from core.pipeline.ocr_support import _prepare_ocr_pdf
-            ocr_pdf_path, normalized_pages = await asyncio.to_thread(
-                _prepare_ocr_pdf, pdf_path, job_id
+            # GIL 隔离：与整份路径同款 — 批量重渲染持 GIL 饿死事件循环
+            from core.procpool import run_cpu
+            ocr_pdf_path, normalized_pages = await run_cpu(
+                _prepare_ocr_pdf, pdf_path, job_id, label="stage0_normalize_sliced"
             )
             if normalized_pages:
                 await _audit_log(

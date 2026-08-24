@@ -34,9 +34,13 @@ async def _run_stage1_full(
     # 3000x4000pt 时 MinerU 整表降级为 simple_table stub；规范化为
     # 300dpi 等效工作副本后提交，原件保留）。异常页重渲染期间不可取消
     # 检测（极快），规范化失败时回退原 PDF 不阻断流程。
+    # GIL 隔离（2026-08-24 e2e 实证）：批量 300dpi 重渲染的 fitz C 调用
+    # 持 GIL 数十秒，to_thread 会饿死事件循环（status GET 超时）—
+    # 改投子进程执行（procpool.run_cpu）。
     from core.pipeline.ocr_support import _prepare_ocr_pdf as _run_prepare
-    ocr_pdf_path, normalized_pages = await asyncio.to_thread(
-        _run_prepare, pdf_path, job_id
+    from core.procpool import run_cpu
+    ocr_pdf_path, normalized_pages = await run_cpu(
+        _run_prepare, pdf_path, job_id, label="stage0_normalize"
     )
     if normalized_pages:
         await _audit_log(
