@@ -107,3 +107,11 @@ spike/*.py
 spike/*.log
 spike/*.json
 spike/*.md
+
+# 真实批记录样本（含企业数据，禁止入库）
+丝裂霉素提取批记录.pdf
+*_normalized.pdf
+e2e_*.log
+_tmp_*.pdf
+# 合成 e2e PDF（gen_e2e_pdf.py 可再生）
+e2e_test.pdf
