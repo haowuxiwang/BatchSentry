@@ -460,7 +460,10 @@ class TestPaddleOCRRunOCR:
         assert pages[1]["markdown"]["text"] == "第2页"
 
         mock_submit.assert_called_once_with(fake_pdf)
-        mock_poll.assert_called_once_with("job-e2e", progress_callback=None)
+        # 2026-08-24: run_ocr 按页数自适应轮询超时（fake PDF fitz 不可读 → 基础值）
+        mock_poll.assert_called_once_with(
+            "job-e2e", progress_callback=None, timeout_s=ocr_client.POLL_TIMEOUT
+        )
         # P0-2: download_result 现在接收 pdf_path 做降级拆分页数校验
         mock_download.assert_called_once_with(
             {"data": {"state": "done"}}, pdf_path=fake_pdf

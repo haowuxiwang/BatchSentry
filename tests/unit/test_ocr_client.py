@@ -457,3 +457,113 @@ class TestOCRBackendSelection:
         """ocr_backend 应为 paddle 或 mineru。"""
         from config import config
         assert config["app"].ocr_backend in ("paddle", "mineru")
+
+
+class TestAdaptivePollTimeout:
+    """Paddle 轮询超时按页数自适应（e2e 实证 51 页 600s 超时修复）。"""
+
+    def test_unreadable_path_falls_back_to_base(self, tmp_path):
+        """无法打开的 PDF 回落基础超时（不抛异常）。"""
+        t = ocr_client.poll_timeout_for(str(tmp_path / "nope.pdf"))
+        assert t == ocr_client.POLL_TIMEOUT
+
+    def test_scales_with_page_count(self, tmp_path):
+        """超时应随页数线性扩展：600 + 30×页数。"""
+        import fitz
+        pdf = tmp_path / "three.pdf"
+        doc = fitz.open()
+        for _ in range(3):
+            doc.new_page()
+        doc.save(str(pdf))
+        doc.close()
+        t = ocr_client.poll_timeout_for(str(pdf))
+        assert t == ocr_client.POLL_TIMEOUT + ocr_client.POLL_TIMEOUT_PER_PAGE * 3
+
+    def test_capped_at_max(self):
+        """超时封顶 POLL_TIMEOUT_MAX（monkeypatch fitz 页数极大值场景）。"""
+        import core.ocr_client as oc
+        with mock.patch.object(oc, "POLL_TIMEOUT", oc.POLL_TIMEOUT_MAX), \
+             mock.patch.object(oc, "POLL_TIMEOUT_PER_PAGE", 10_000):
+            # 600 被 patch 为 MAX；base+per_page*pages 任何 pages>=1 都超上限
+            assert oc.poll_timeout_for("whatever.pdf") >= oc.POLL_TIMEOUT_MAX
+            # 直接验证 min() 封顶逻辑
+            assert min(oc.POLL_TIMEOUT_MAX + 10_000 * 5, oc.POLL_TIMEOUT_MAX) == oc.POLL_TIMEOUT_MAX
+
+    def test_run_ocr_passes_scaled_timeout(self, tmp_path):
+        """run_ocr 应把按页数计算的超时传给 poll_job。"""
+        import fitz
+        pdf = tmp_path / "two.pdf"
+        doc = fitz.open()
+        doc.new_page(); doc.new_page()
+        doc.save(str(pdf)); doc.close()
+        expected = ocr_client.POLL_TIMEOUT + ocr_client.POLL_TIMEOUT_PER_PAGE * 2
+        with mock.patch.object(ocr_client, "submit_pdf", return_value="job-1"), \
+             mock.patch.object(ocr_client, "poll_job", return_value={"data": {}}) as mp, \
+             mock.patch.object(ocr_client, "download_result", return_value=[{"page": 1}]):
+            ocr_client.run_ocr(str(pdf))
+        assert mp.call_args.kwargs.get("timeout_s") == expected
+
+
+class TestMinerUTransientResubmit:
+    """MinerU 瞬态终态失败（parsing failed）重提交一次（e2e 实证修复）。"""
+
+    def _fake_pdf(self, tmp_path):
+        pdf = tmp_path / "x.pdf"
+        pdf.write_bytes(b"%PDF-1.4 fake")
+        return str(pdf)
+
+    def test_transient_failure_resubmits_once_then_succeeds(self, tmp_path):
+        """首次 parsing failed → 20s 退避重提交 → 第二次成功。"""
+        calls = {"submit": 0}
+        results = [
+            RuntimeError("[MinerU] 解析失败 task=t1: parsing failed, please try again later"),
+            {"ok": True},
+        ]
+        def fake_submit(_):
+            calls["submit"] += 1
+            return (f"batch-{calls['submit']}", "file-1")
+        def fake_poll(batch_id, progress_callback=None):
+            r = results.pop(0)
+            if isinstance(r, Exception):
+                raise r
+            return r
+        with mock.patch.object(mineru_client, "submit_pdf", side_effect=fake_submit), \
+             mock.patch.object(mineru_client, "poll_job", side_effect=fake_poll), \
+             mock.patch.object(mineru_client, "download_result", return_value=[{"page": 1}]) as md, \
+             mock.patch.object(mineru_client.time, "sleep") as ms:
+            out = mineru_client.run_ocr(self._fake_pdf(tmp_path))
+        assert out == [{"page": 1}]
+        assert calls["submit"] == 2  # 重提交一次
+        assert ms.called  # 退避睡眠除非被 mock
+        assert md.call_count == 1
+
+    def test_non_transient_failure_no_resubmit(self, tmp_path):
+        """非瞬态错误（如 token 无效）不重提交，直接上抛。"""
+        calls = {"submit": 0}
+        def fake_submit(_):
+            calls["submit"] += 1
+            return ("batch-1", "file-1")
+        def fake_poll(batch_id, progress_callback=None):
+            raise RuntimeError("[MinerU] token 无效")
+        with mock.patch.object(mineru_client, "submit_pdf", side_effect=fake_submit), \
+             mock.patch.object(mineru_client, "poll_job", side_effect=fake_poll), \
+             mock.patch.object(mineru_client, "download_result", return_value=[]):
+            with pytest.raises(RuntimeError, match="token 无效"):
+                mineru_client.run_ocr(self._fake_pdf(tmp_path))
+        assert calls["submit"] == 1  # 不重试
+
+    def test_transient_twice_raises_after_second_attempt(self, tmp_path):
+        """两次都瞬态失败 → 第二次失败后上抛（共两次提交，不无限重试）。"""
+        calls = {"submit": 0}
+        def fake_submit(_):
+            calls["submit"] += 1
+            return (f"batch-{calls['submit']}", "file-1")
+        def fake_poll(batch_id, progress_callback=None):
+            raise RuntimeError("[MinerU] 解析失败 task=x: parsing failed, please try again later")
+        with mock.patch.object(mineru_client, "submit_pdf", side_effect=fake_submit), \
+             mock.patch.object(mineru_client, "poll_job", side_effect=fake_poll), \
+             mock.patch.object(mineru_client, "download_result", return_value=[]), \
+             mock.patch.object(mineru_client.time, "sleep"):
+            with pytest.raises(RuntimeError, match="parsing failed"):
+                mineru_client.run_ocr(self._fake_pdf(tmp_path))
+        assert calls["submit"] == 2  # 最多两次

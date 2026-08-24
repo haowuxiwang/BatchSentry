@@ -916,14 +916,28 @@ def run_ocr(pdf_path: str, progress_callback=None, job_id: str = "") -> list[dic
 
     返回格式与 core.ocr_client.run_ocr 兼容，pipeline.py 可透明替换。
     progress_callback 透传给 poll_job（Stage 1 实时进度）。
-    job_id: 应用层 job id — 仅用于日志前缀（本模块日志自动带 [job_id]）。
+    job_id: 应用层 job id — 仅用于日志前缀（本模块所有日志自动带 [job_id]）。
+
+    瞬态失败重提交（2026-08-24 e2e 实证）：MinerU 服务端偶发
+    "parsing failed, please try again later" 终态 —— 任务级失败但
+    明示可重试；退避 20s 重新提交一次，二次失败才走 failover 链。
     """
     if job_id:
         _token = ocr_job_id_var.set(job_id)
+    transient_markers = ("please try again later", "parsing failed")
     try:
-        batch_id, _ = submit_pdf(pdf_path)
-        task_result = poll_job(batch_id, progress_callback=progress_callback)
-        return download_result(task_result, pdf_path=pdf_path)
+        for attempt in (1, 2):
+            try:
+                batch_id, _ = submit_pdf(pdf_path)
+                task_result = poll_job(batch_id, progress_callback=progress_callback)
+                return download_result(task_result, pdf_path=pdf_path)
+            except RuntimeError as e:
+                msg = str(e)
+                if attempt == 1 and any(m in msg.lower() for m in transient_markers):
+                    logger.warning(f"[MinerU] 瞬态解析失败，20s 后重新提交: {msg}")
+                    time.sleep(20)
+                    continue
+                raise
     finally:
         if job_id:
             ocr_job_id_var.reset(_token)

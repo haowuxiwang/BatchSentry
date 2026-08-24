@@ -24,7 +24,24 @@ logger = logging.getLogger(__name__)
 logger.addFilter(JobIdFilter())
 
 POLL_INTERVAL = 5  # seconds
-POLL_TIMEOUT = 600  # 10 minutes
+POLL_TIMEOUT = 600  # 10 minutes（基础值，大文档按页数扩展）
+# 每页额外轮询预算（秒）：e2e 实证 51 页/43.8MB 任务 600s 内未返回
+# （2026-08-24 任务 85287516750168064 轮询超时）；大任务在服务端排队+
+# 逐页抽取时间随页数线性增长，固定 600s 对大文档过紧。
+POLL_TIMEOUT_PER_PAGE = 30
+POLL_TIMEOUT_MAX = 3600  # 单任务轮询上限 1 小时
+
+
+def poll_timeout_for(pdf_path: str) -> int:
+    """按页数计算轮询超时：base + per_page × 页数（封顶 POLL_TIMEOUT_MAX）。"""
+    try:
+        import fitz  # 局部导入：仅计数时加载
+
+        with fitz.open(pdf_path) as doc:
+            pages = doc.page_count
+    except Exception:
+        pages = 0
+    return min(POLL_TIMEOUT + POLL_TIMEOUT_PER_PAGE * pages, POLL_TIMEOUT_MAX)
 
 
 def submit_pdf(pdf_path: str, retries: int = 3) -> str:
@@ -91,20 +108,22 @@ def submit_pdf(pdf_path: str, retries: int = 3) -> str:
         pdf_file.close()
 
 
-def poll_job(job_id: str, progress_callback=None) -> dict:
+def poll_job(job_id: str, progress_callback=None, timeout_s: int | None = None) -> dict:
     """Poll until job done. Returns the final poll response dict.
 
     容错：网络异常重试，最多 POLL_MAX_RETRIES 次后放弃。
     progress_callback(done, total): 每次轮询到 extractProgress 时回调，
     供 pipeline 实时更新 job 进度（Stage 1 流式反馈）。
+    timeout_s: 轮询上限（缺省 POLL_TIMEOUT；大文档由 run_ocr 按页数扩展）。
     """
+    timeout_s = timeout_s or POLL_TIMEOUT
     cfg = config["paddle_ocr"]
     headers = {"Authorization": f"bearer {cfg.token}"}
     url = f"{cfg.api_url}/{job_id}"
     start = time.time()
     consecutive_errors = 0
 
-    while (time.time() - start) < POLL_TIMEOUT:
+    while (time.time() - start) < timeout_s:
         try:
             resp = requests.get(url, headers=headers, timeout=30)
             if resp.status_code != 200:
@@ -157,7 +176,7 @@ def poll_job(job_id: str, progress_callback=None) -> dict:
             time.sleep(POLL_INTERVAL * 2)  # 网络错误时退避更久
     elapsed = int(time.time() - start)
     raise RuntimeError(
-        f"轮询超时: {elapsed}s 内未收到 OCR 结果（上限 {POLL_TIMEOUT}s，任务 {job_id}）"
+        f"轮询超时: {elapsed}s 内未收到 OCR 结果（上限 {timeout_s}s，任务 {job_id}）"
     )
 
 
@@ -385,7 +404,11 @@ def run_ocr(pdf_path: str, progress_callback=None, job_id: str = "") -> list[dic
         _token = ocr_job_id_var.set(job_id)
     try:
         paddle_job_id = submit_pdf(pdf_path)
-        poll_response = poll_job(paddle_job_id, progress_callback=progress_callback)
+        # 大文档按页数扩展轮询预算（e2e 实证 51 页 600s 超时）
+        timeout_s = poll_timeout_for(pdf_path)
+        poll_response = poll_job(
+            paddle_job_id, progress_callback=progress_callback, timeout_s=timeout_s
+        )
         # pdf_path 透传（与 MinerU 签名对齐；Paddle 解析暂不用它，留给
         # 后续页数对齐校验扩展）
         pages = download_result(poll_response, pdf_path=pdf_path)
