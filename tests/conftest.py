@@ -51,6 +51,34 @@ def _suppress_noisy_loggers():
     yield
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _kill_leaked_aiosqlite_threads():
+    """会话结束兜底：强停所有存活的 aiosqlite 线程（防解释器退出挂起）。
+
+    背景（2026-08-24 py-spy 实证）：core.rules.llm_checks._load_review_exemplars
+    经 get_db() 创建全局单例 aiosqlite 连接；在 asyncio.run() 瞬态事件循环中
+    创建的连接，循环随 asyncio.run() 结束而销毁，连接线程（非 daemon，
+    aiosqlite 0.21 Connection 即 Thread 子类）却存活 — close() 的 future 绑定
+    已死循环，无法经 API 关闭 → threading._shutdown 永久阻塞，pytest 进程
+    打印完摘要后"挂起"（全量套件与单文件 test_cross_page_analyzer.py 均复现，
+    曾堆积多个僵尸 pytest 进程）。
+
+    修复：会话 teardown 时用 gc 扫描所有存活 Connection，直接调用
+    _stop_running()（往线程安全队列放哨兵，不依赖事件循环）。
+    """
+    yield
+    import gc
+
+    from aiosqlite.core import Connection
+
+    for obj in gc.get_objects():
+        if isinstance(obj, Connection) and obj.is_alive():
+            try:
+                obj._stop_running()
+            except Exception:
+                pass
+
+
 @pytest_asyncio.fixture
 async def test_db(tmp_path):
     """提供隔离的文件 SQLite 数据库。

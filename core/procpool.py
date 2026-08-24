@@ -14,9 +14,12 @@ GET /api/jobs/{id} 在 10s 内无法完成（ReadTimeout），SSE 同样停摆�
 """
 from __future__ import annotations
 
+import atexit
 import asyncio
 import logging
 import multiprocessing
+import os
+import pickle
 from concurrent.futures import ProcessPoolExecutor
 from functools import partial
 
@@ -31,16 +34,33 @@ _pool_broken = False
 
 
 def _pool_worker_init() -> None:
-    """worker 初始化：父进程死亡联动退出守卫。
+    """worker 初始化：std 流重定向 + 父进程死亡联动退出守卫。
 
-    e2e 实证（2026-08-24）：父进程被硬终止（TerminateProcess）后
-    spawn worker 不随之退出 — 孤儿 pbc-server.exe 持续占用
-    dist/pbc-server/pbc-server.exe 文件锁，导致后续 PyInstaller
-    构建 PermissionError；生产场景 Electron 杀后端时同样残留。
-    守卫线程阻塞在父进程 sentinel（Windows=进程句柄）上，父进程
-    一退出立即 os._exit —— 不等队列 EOF（实测不触发/迟滞）。
+    std 流重定向（2026-08-24 pytest 实证）：spawn worker 继承父进程
+    stdout/stderr 管道句柄 — 父进程退出后管道 EOF 不关闭，包裹
+    shell（CI/测试 harness）永久等待"挂起"；worker 内日志/打印
+    也会与父进程输出交错。重定向 devnull（worker 失败经 future
+    异常回传，不依赖 std 流）。
+
+    父进程死亡守卫（e2e 实证 2026-08-24）：父进程被硬终止
+    （TerminateProcess）后 spawn worker 不随之退出 — 孤儿
+    pbc-server.exe 持续占用 dist/pbc-server/pbc-server.exe 文件锁，
+    导致后续 PyInstaller 构建 PermissionError；生产场景 Electron
+    杀后端时同样残留。守卫线程阻塞在父进程 sentinel（Windows=
+    进程句柄）上，父进程一退出立即 os._exit —— 不等队列 EOF
+    （实测不触发/迟滞）。
     """
     import threading
+
+    # 1) std 流与父进程解耦（防管道 EOF 持有 + 输出交错）
+    try:
+        devnull = open(os.devnull, "w", encoding="utf-8")
+        import sys
+
+        sys.stdout = devnull
+        sys.stderr = devnull
+    except Exception:
+        pass  # 重定向失败不影响核心功能
 
     parent = multiprocessing.parent_process()
     if parent is None:  # 直接运行（非 spawn worker）— 无需守卫
@@ -52,8 +72,6 @@ def _pool_worker_init() -> None:
 
             wait([parent.sentinel])
             # 父进程已退出：立刻退出 worker，不清理（无共享状态需保序）
-            import os
-
             os._exit(0)
         except Exception:
             pass  # 守卫失败不影响 worker 正常功能
@@ -61,12 +79,17 @@ def _pool_worker_init() -> None:
     threading.Thread(target=_watch, daemon=True, name="parent-death-watch").start()
 
 
+def _in_pytest() -> bool:
+    """pytest 运行环境检测（测试不需要进程隔离，spawn 只引入不确定性）。"""
+    return "PYTEST_CURRENT_TEST" in os.environ
+
+
 def _get_pool() -> ProcessPoolExecutor | None:
     """惰性创建进程池；失败（frozen 环境限制等）只告警一次并返回 None。"""
     global _pool, _pool_broken
     if _pool is not None:
         return _pool
-    if _pool_broken:
+    if _pool_broken or _in_pytest():
         return None
     try:
         ctx = multiprocessing.get_context("spawn")
@@ -83,8 +106,6 @@ def _get_pool() -> ProcessPoolExecutor | None:
 
 def _is_picklable(fn) -> bool:
     """模块级真实函数可 pickle；测试替身（Mock/lambda/局部补丁）不可。"""
-    import pickle
-
     try:
         pickle.dumps(fn)
     except Exception:
@@ -101,8 +122,8 @@ async def run_cpu(fn, *args, label: str = ""):
     """
     pool = _get_pool() if _is_picklable(fn) else None
     if pool is None:
-        if label:
-            logger.info(f"CPU task {label}: running in thread (fallback)")
+        if label and _in_pytest():
+            logger.debug(f"CPU task {label}: running in thread (pytest mode)")
         return await asyncio.to_thread(fn, *args)
     loop = asyncio.get_running_loop()
     try:
@@ -119,6 +140,15 @@ async def run_cpu(fn, *args, label: str = ""):
 def shutdown_pool() -> None:
     """优雅关闭进程池（应用退出时调用；未启动则无操作）。"""
     global _pool
-    if _pool is not None:
-        _pool.shutdown(wait=False, cancel_futures=True)
-        _pool = None
+    pool, _pool = _pool, None
+    if pool is not None:
+        try:
+            pool.shutdown(wait=False, cancel_futures=True)
+        except Exception:  # pragma: no cover - 退出路径防御
+            pass
+
+
+# 解释器退出时自动关池（早于非 daemon 线程 join）：显式发送 shutdown
+# 哨兵，避免依赖 concurrent.futures 全局退出钩子在异常状态下的不确定
+# join 行为（pytest 全量套件实证挂起）。
+atexit.register(shutdown_pool)
