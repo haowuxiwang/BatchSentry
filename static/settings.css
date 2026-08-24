@@ -121,14 +121,14 @@ body {
 /* 表单字段 — 统一尺寸 */
 .field-label {
   display: block;
-  font-size: 12px;
+  font-size: 14px;
   font-weight: 500;
   color: hsl(var(--foreground));
   margin-bottom: 6px;
 }
 .field-hint {
-  /* WCAG 可读性：11px→12px（辅助文本最低可读字号） */
-  font-size: 12px;
+  /* WCAG 可读性：辅助文本最低可读字号 */
+  font-size: 13px;
   color: hsl(var(--muted-foreground));
   margin-top: 4px;
 }
@@ -161,7 +161,7 @@ body {
 }
 .seg button {
   padding: 6px 16px;
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 500;
   background: transparent;
   color: hsl(var(--muted-foreground));
@@ -181,11 +181,11 @@ body {
 /* 状态徽章 */
 .badge-ok {
   color: hsl(var(--success));
-  font-size: 11px;
+  font-size: 12px;
 }
 .badge-no {
   color: hsl(var(--muted-foreground));
-  font-size: 11px;
+  font-size: 12px;
 }
 
 /* ============================================================
@@ -193,7 +193,7 @@ body {
    测试连接: 边框次操作 (唯一实现在此的按钮，模板无 #save-btn)
    ============================================================ */
 #test-conn-btn {
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 500;
   padding: 6px 16px;
   min-height: 30px;

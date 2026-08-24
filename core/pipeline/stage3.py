@@ -179,9 +179,11 @@ async def _run_stage3_cross_analysis(
     # Determine final status
     total_cost_ms = int((time.time() - pipeline_start) * 1000)
     dual_diff = dual_diff or []
-    # 门禁 3：双后端差异页 / 空页 + 解析错误页强制人工复核
+    # 门禁 3：双后端差异页 / 解析错误页强制人工复核
+    # 空页（_ocr_empty）不强制 partial_review — 空页不是失败，只是无内容
+    # （如封面/目录页），review UI 会显示 _ocr_empty 横幅供人工确认。
     final_status = (
-        "partial_review" if (failed_pages or dual_diff or empty_pages_count) else "review"
+        "partial_review" if (failed_pages or dual_diff) else "review"
     )
 
     await db.execute(

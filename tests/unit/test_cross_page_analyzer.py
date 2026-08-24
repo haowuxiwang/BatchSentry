@@ -1040,6 +1040,91 @@ class TestStepSortKey:
 
 
 # ===========================================================================
+# R10: 工序编号连续性（缺页/漏页检测）
+# ===========================================================================
+
+
+class TestStepNumberGaps:
+    """R10: _check_step_number_gaps — 工序号缺口检测。"""
+
+    def _run(self, pages):
+        from core.rules.rule_time import _check_step_number_gaps
+        return _check_step_number_gaps(_norm(pages))
+
+    def test_gap_reports_warning(self):
+        """1,2,4,5 缺 3 → warning step_gap。"""
+        pages = [
+            _make_page(1, [_make_step("1"), _make_step("2")]),
+            _make_page(2, [_make_step("4"), _make_step("5")]),
+        ]
+        findings = self._run(pages)
+        assert len(findings) == 1
+        f = findings[0]
+        assert f["type"] == "step_gap"
+        assert f["severity"] == "warning"
+        assert "3" in f["description"]
+        assert "缺页" in f["description"] or "漏识别" in f["description"]
+
+    def test_continuous_no_finding(self):
+        """1..5 连续 → 无 finding。"""
+        pages = [
+            _make_page(1, [_make_step("1"), _make_step("2"), _make_step("3")]),
+            _make_page(2, [_make_step("4"), _make_step("5")]),
+        ]
+        assert self._run(pages) == []
+
+    def test_sub_step_merges_to_int(self):
+        """子工序 3.1 与 3 归并为同一编号，不算缺口。"""
+        pages = [
+            _make_page(1, [_make_step("1"), _make_step("2")]),
+            _make_page(2, [_make_step("3.1"), _make_step("3.2"), _make_step("4")]),
+        ]
+        assert self._run(pages) == []
+
+    def test_duplicate_step_across_pages_not_gap(self):
+        """同工序号跨页续表（去重后 1,2,3）→ 无 finding。"""
+        pages = [
+            _make_page(1, [_make_step("1"), _make_step("2")]),
+            _make_page(2, [_make_step("2"), _make_step("3")]),
+        ]
+        assert self._run(pages) == []
+
+    def test_too_few_steps_skipped(self):
+        """数值工序号 < 3 个（封面/附录）→ 不检查。"""
+        pages = [_make_page(1, [_make_step("1"), _make_step("3")])]
+        assert self._run(pages) == []
+
+    def test_non_numeric_ignored(self):
+        """'附表A' 等非数字编号不参与（不触发误报）。"""
+        pages = [
+            _make_page(1, [_make_step("1"), _make_step("2"), _make_step("附表A")]),
+        ]
+        assert self._run(pages) == []
+
+    def test_many_gaps_downgrade_info(self):
+        """缺口数超过已知数一半（编号体系混杂嫌疑）→ 降级 info。"""
+        # 已知 1,2,10 → 缺 3-9 共 7 个 > 已知 3 个的一半
+        pages = [
+            _make_page(1, [_make_step("1"), _make_step("2")]),
+            _make_page(2, [_make_step("10")]),
+        ]
+        findings = self._run(pages)
+        assert len(findings) == 1
+        assert findings[0]["severity"] == "info"
+        assert "编号体系" in findings[0]["description"]
+
+    def test_consecutive_gap_segment_merged(self):
+        """连续缺口段合并显示（缺 3,4 → '3-4'）。"""
+        pages = [
+            _make_page(1, [_make_step("1"), _make_step("2")]),
+            _make_page(2, [_make_step("5"), _make_step("6")]),
+        ]
+        findings = self._run(pages)
+        assert len(findings) == 1
+        assert "3-4" in findings[0]["description"]
+
+
+# ===========================================================================
 # R3: 参数越界检查（含 _judge_param / _judge_cell）
 # ===========================================================================
 

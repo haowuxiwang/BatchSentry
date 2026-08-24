@@ -619,6 +619,11 @@ def _page_ocr_diagnostics(
 
 
 _HASHES_PLACEHOLDER_RE = re.compile(r"###")
+# Markdown 标题行（# ~ ###### 后跟空格）— 不参与 ### 占位符替换。
+# Round 13 新增 "#### 表格" 标题后被 sanitizer 误替换为
+# "[手写内容未识别]# 表格"（startswith("### ") 只豁免 H3），此正则
+# 豁免全部合法标题行；MinerU 占位符是行内裸 ###，不匹配标题形态。
+_MD_HEADING_LINE_RE = re.compile(r"^#{1,6}\s")
 
 # 纯数字页脚/页码噪音模式（与 _block_to_markdown 页脚分支共用）：
 # "2/24"、"15.60%"、"第 2 页"、纯数字日期等。注意字符集会命中手写
@@ -666,12 +671,13 @@ def _sanitize_unrecognized_handwriting(md: str) -> str:
 
     MinerU emits bare '###' as a placeholder where it could not recognize
     characters — most visibly in signature cells ('起草部门负责人审核:###').
-    Line-start '### ' is a legit markdown H3 from header blocks (kept intact);
-    inline '###' tokens are replaced with a clear Chinese marker.
+    Line-start markdown headings ('#{1,6} ' — header blocks, '#### 表格')
+    are legit and kept intact; inline '###' tokens are replaced with a clear
+    Chinese marker.
     """
     out = []
     for line in md.split("\n"):
-        if line.startswith("### "):
+        if _MD_HEADING_LINE_RE.match(line):
             out.append(line)
         else:
             out.append(_HASHES_PLACEHOLDER_RE.sub("[手写内容未识别]", line))

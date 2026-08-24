@@ -1044,3 +1044,118 @@ class TestCorsPreflight:
         r = await client.get("/health", headers={"Origin": origin})
         assert r.status_code == 200
         assert r.headers.get("access-control-allow-origin") == origin
+
+
+class TestStreamAllLiveJobs:
+    """GET /api/jobs/live — SSE 聚合端点守卫与生成器主体（listings.py 106-137）。
+
+    生成器为无限流，httpx 0.28 的 ASGITransport 要等 app 完成才交付
+    Response，无法经 client.stream 消费（同 TestStreamJobProgress 注释），
+    因此直接调用路由函数手动迭代 body_iterator。
+    """
+
+    @pytest.mark.asyncio
+    async def test_live_forbidden_for_non_local(self, client, monkeypatch):
+        """非本地请求 /live 应 403（守卫与单 job 流一致）。"""
+        import core.security as sec
+
+        monkeypatch.setattr(sec, "is_local_request", lambda req: False)
+        r = await client.get("/api/jobs/live")
+        assert r.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_archived_forbidden_for_non_local(self, client, monkeypatch):
+        """非本地请求 /archived/list 应 403（listings.py:153）。"""
+        import core.security as sec
+
+        monkeypatch.setattr(sec, "is_local_request", lambda req: False)
+        r = await client.get("/api/jobs/archived/list")
+        assert r.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_stats_forbidden_for_non_local(self, client, monkeypatch):
+        """非本地请求 /stats/overview 应 403（listings.py:168）。"""
+        import core.security as sec
+
+        monkeypatch.setattr(sec, "is_local_request", lambda req: False)
+        r = await client.get("/api/jobs/stats/overview")
+        assert r.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_live_generator_emits_snapshots(self, test_db, monkeypatch):
+        """生成器应输出 retry 头 + 携带活跃 job 快照的自增 id 事件。"""
+        import asyncio as _asyncio
+
+        import core.security as sec
+        from api.jobs.listings import stream_all_live_jobs
+
+        await test_db.execute(
+            "INSERT INTO jobs (id, filename, pdf_path, status) VALUES (?, ?, ?, ?)",
+            ("live-gen-job", "a.pdf", "/tmp/a.pdf", "analyzing"),
+        )
+        await test_db.commit()
+
+        # FakeRequest：第 2 次 is_disconnected 返回 True → 生成器发完
+        # 首个快照事件后正常收尾，测试无需等待 3s 轮询间隔。
+        calls = {"n": 0}
+
+        class FakeRequest:
+            async def is_disconnected(self) -> bool:
+                calls["n"] += 1
+                return calls["n"] > 1
+
+        async def _fast_sleep(_s):
+            return None
+
+        monkeypatch.setattr(_asyncio, "sleep", _fast_sleep)
+        monkeypatch.setattr(sec, "is_local_request", lambda req: True)
+
+        resp = await stream_all_live_jobs(FakeRequest())
+        body = ""
+        async for chunk in resp.body_iterator:
+            body += chunk
+
+        assert "retry: 2000" in body
+        assert '"jobs"' in body
+        assert "live-gen-job" in body
+        assert "id: 1" in body
+
+    @pytest.mark.asyncio
+    async def test_live_generator_survives_db_error(self, test_db, monkeypatch):
+        """快照查询抛错时应记录并跳过本轮，聚合流不中断（P0-4 守卫）。"""
+        import asyncio as _asyncio
+
+        import core.security as sec
+        import api.jobs.listings as listings_mod
+        from api.jobs.listings import stream_all_live_jobs
+
+        async def _fast_sleep(_s):
+            return None
+
+        # 第 1 轮抛错 → 跳过；第 2 轮恢复 → 正常产出；第 3 次 is_disconnected 结束
+        state = {"snap_calls": 0}
+
+        async def _flaky(db):
+            state["snap_calls"] += 1
+            if state["snap_calls"] == 1:
+                raise RuntimeError("db down")
+            return [{"id": "recovered-job", "status": "ocr_running"}]
+
+        calls = {"n": 0}
+
+        class FakeRequest:
+            async def is_disconnected(self) -> bool:
+                calls["n"] += 1
+                return calls["n"] > 2
+
+        monkeypatch.setattr(_asyncio, "sleep", _fast_sleep)
+        monkeypatch.setattr(sec, "is_local_request", lambda req: True)
+        monkeypatch.setattr(listings_mod, "_live_jobs_snapshot", _flaky)
+
+        resp = await stream_all_live_jobs(FakeRequest())
+        body = ""
+        async for chunk in resp.body_iterator:
+            body += chunk
+
+        # 首轮错误被吞掉，第二轮快照正常送达
+        assert "recovered-job" in body

@@ -379,3 +379,76 @@ def _check_signature_order(pages: list[dict]) -> list[dict]:
                         "source": "rule",
                     })
     return findings
+
+
+# ---------------------------------------------------------------------------
+# R10: step-number gaps — 批记录工序号应连续（1..N），缺口提示缺页/漏页
+# 或 OCR 漏识别。对齐"编号类程序化校验"需求（17 条内置规则方向）。
+#
+# 防误报设计：
+# - 子工序号 "3.1" 归并为整数 3（与 _step_sort_key 的数值语义一致）
+# - 数值工序号去重后 < 3 个不检查（封面/附录页样本太少无统计意义）
+# - 同一工序号跨页出现（续表）是正常装订，去重后不触发
+# - 缺口数 > 已识别数的一半时降级 info（可能混入附表/设备编号体系）
+# ---------------------------------------------------------------------------
+
+_STEP_NO_RE = re.compile(r"(\d+)")
+
+
+def _check_step_number_gaps(pages: list[dict]) -> list[dict]:
+    """Report gaps in the numeric step_no sequence across all pages."""
+    step_pages: dict[int, int] = {}  # step_no(int) -> first page seen
+    for page in pages:
+        pno = page["page"]
+        for step in page["steps"]:
+            raw = step.get("step_no")
+            if raw is None:
+                continue
+            m = _STEP_NO_RE.search(str(raw))
+            if not m:
+                continue  # "附表A" 等非数字编号不参与
+            n = int(m.group(1))
+            if n < 1:
+                continue
+            step_pages.setdefault(n, pno)
+
+    nums = sorted(step_pages)
+    if len(nums) < 3:
+        return []
+    max_n = nums[-1]
+    missing = [n for n in range(1, max_n + 1) if n not in step_pages]
+    if not missing:
+        return []
+
+    # 连续缺口段合并描述：3,4,5 → "3-5"
+    segments: list[str] = []
+    start = prev = missing[0]
+    for n in missing[1:]:
+        if n == prev + 1:
+            prev = n
+        else:
+            segments.append(str(start) if start == prev else f"{start}-{prev}")
+            start = prev = n
+    segments.append(str(start) if start == prev else f"{start}-{prev}")
+
+    # 缺口占比过高 → 编号体系混杂嫌疑（附表/设备号），降级 info
+    severity = "warning" if len(missing) * 2 <= len(nums) else "info"
+    desc = (
+        f"工序编号不连续：已识别 {len(nums)} 个工序号（最大 {max_n}），"
+        f"缺少 {len(missing)} 个（{','.join(segments[:6])}"
+        f"{'…' if len(segments) > 6 else ''}），"
+    )
+    if severity == "warning":
+        desc += "请核对是否存在缺页/漏页或 OCR 漏识别"
+    else:
+        desc += "缺口较多，可能为附表/其他编号体系混入，请人工确认"
+    first_gap_page = step_pages.get(missing[0] + 1, step_pages.get(missing[0] - 1, 1))
+    return [{
+        "page": first_gap_page,
+        "type": "step_gap",
+        "severity": severity,
+        "description": desc,
+        "ocr_text": f"step_nos={nums} missing={missing}",
+        "operator": "",
+        "source": "rule",
+    }]

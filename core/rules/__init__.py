@@ -37,6 +37,7 @@ from core.rules.rule_spec import _check_param_out_of_spec
 from core.rules.rule_time import (
     _check_signature_order,
     _check_signature_time_anomaly,
+    _check_step_number_gaps,
     _check_suspicious_dates,
     _check_time_reversal_cross_page,
     _check_time_reversal_in_page,
@@ -137,6 +138,10 @@ async def analyze_cross_page(
     r9a = _check_signature_order(pages)
     rule_findings.extend(r9a)
     logger.info(f"[{job_id}] R9a signature_order: {len(r9a)}")
+    # R10: step-number gaps (缺页/漏页检测)
+    r10 = _check_step_number_gaps(pages)
+    rule_findings.extend(r10)
+    logger.info(f"[{job_id}] R10 step_number_gaps: {len(r10)}")
     # R6: completeness (missing operator/reviewer signatures)
     r6 = _check_completeness(pages)
     rule_findings.extend(r6)

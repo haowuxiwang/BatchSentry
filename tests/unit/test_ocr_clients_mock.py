@@ -1,4 +1,4 @@
-﻿"""OCR 客户端单元测试 — 通过 mock HTTP 请求测试 PaddleOCR 和 MinerU 客户端。
+"""OCR 客户端单元测试 — 通过 mock HTTP 请求测试 PaddleOCR 和 MinerU 客户端。
 
 覆盖：
 - PaddleOCR (core/ocr_client.py): submit_pdf / poll_job / download_result / run_ocr
@@ -792,8 +792,8 @@ class TestMinerUDownload:
         assert pages[0]["markdown"]["text"] == "## 第 1 页\n第1页文本 继续"
         assert pages[0]["page_count"] == 1
         assert pages[0]["_source"] == "mineru"
-        # 第2页：标题 + 文本 + 表格（前后空行分隔）
-        assert pages[1]["markdown"]["text"] == "## 第 2 页\n第2页文本\n\n| 列1 | 列2 |"
+        # 第2页：标题 + 文本 + 表格标题(Round 13 LLM 可见性) + 表格（前后空行分隔）
+        assert pages[1]["markdown"]["text"] == "## 第 2 页\n第2页文本\n\n#### 表格\n| 列1 | 列2 |"
         assert pages[1]["page_count"] == 2
         assert pages[1]["_source"] == "mineru"
 
@@ -1142,7 +1142,8 @@ class TestHandwritingHashSanitization:
             3, [{"type": "table", "text": "草案:罗彦 2022.05.07审核:###"}]
         )
         assert "审核:[手写内容未识别]" in md
-        assert "###" not in md
+        # Round 13 表格标题 "#### 表格" 含合法 ### — 排除后不应有占位符残留
+        assert "###" not in md.replace("#### 表格", "")
 
     def test_header_markdown_preserved(self):
         """行首 '### '（header 块 markdown 标题）应保留。"""

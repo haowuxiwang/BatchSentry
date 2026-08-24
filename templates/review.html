@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="zh-CN" class="h-full">
 <head>
     <meta charset="UTF-8">
@@ -16,7 +16,7 @@
     {% set job_status_zh = {'pending': '待处理', 'queued': '排队中', 'processing': '处理中', 'ocr_running': '识别中', 'ocr_done': '识别完成', 'analyzing': '分析中', 'review': '可复核', 'partial_review': '部分可复核', 'error': '出错', 'cancelled': '已取消', 'cancelling': '取消中', 'done': '已完成', 'archived': '已归档'} %}
     {% set confidence_zh = {'high': '高', 'medium': '中', 'low': '低'} %}
     {# finding type 映射（与 static/review.js typeZh 保持一致 — SSR/AJAX 必须同源，否则同一 finding 首屏英文、翻页后变中文） #}
-    {% set type_zh = {'time_reversal': '时间倒序', 'year_contradiction': '年份矛盾', 'suspicious_date': '日期可疑', 'signature_time_anomaly': '签名时间异常', 'completeness': '信息缺失', 'batch_inconsistency': '批号不一致', 'param_out_of_spec': '参数超标', 'low_confidence': '低置信度', 'handwritten': '手写内容需核对', 'signature_mismatch': '签名不符', 'user_rule': '用户规则', 'ocr_noise': 'OCR 噪音', 'time_anomaly': '时间异常'} %}
+    {% set type_zh = {'time_reversal': '时间倒序', 'year_contradiction': '年份矛盾', 'suspicious_date': '日期可疑', 'signature_time_anomaly': '签名时间异常', 'completeness': '信息缺失', 'batch_inconsistency': '批号不一致', 'param_out_of_spec': '参数超标', 'low_confidence': '低置信度', 'handwritten': '手写内容需核对', 'signature_mismatch': '签名不符', 'user_rule': '用户规则', 'ocr_noise': 'OCR 噪音', 'time_anomaly': '时间异常', 'step_gap': '工序缺号'} %}
 </head>
 <body class="h-full flex flex-col">
     <a href="#main-content" class="skip-link">跳到主要内容</a>
