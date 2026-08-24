@@ -1,4 +1,4 @@
-﻿<!doctype html>
+<!doctype html>
 <html lang="zh-CN" class="h-full">
   <head>
     <meta charset="UTF-8" />
@@ -115,7 +115,7 @@
               <div class="px-5 py-4 border-b border-border flex items-center justify-between">
                 <div>
                   <h2 class="text-[14px] font-medium">LLM 大模型</h2>
-                  <p class="text-[11px] text-muted-foreground mt-0.5">
+                  <p class="text-[12px] text-muted-foreground mt-0.5">
                     用于批记录结构化分析与问题发现
                   </p>
                 </div>
@@ -179,7 +179,7 @@
               <div class="px-5 py-4 border-b border-border flex items-center justify-between">
                 <div>
                   <h2 class="text-[14px] font-medium">OCR 文档解析</h2>
-                  <p class="text-[11px] text-muted-foreground mt-0.5">
+                  <p class="text-[12px] text-muted-foreground mt-0.5">
                     将 PDF 批记录转换为结构化文本
                   </p>
                 </div>
@@ -320,7 +320,7 @@
                   >
                     保存 OCR 设置
                   </button>
-                  <span id="ocr-msg" class="text-[12px]"></span>
+                  <span id="ocr-msg" class="text-[12px]" role="status" aria-live="polite"></span>
                 </div>
               </div>
             </div>
@@ -331,7 +331,7 @@
             <div class="hover-lift bg-card border border-border rounded-lg overflow-hidden">
               <div class="px-5 py-4 border-b border-border">
                 <h2 class="text-[14px] font-medium">合规规则</h2>
-                <p class="text-[11px] text-muted-foreground mt-0.5">
+                <p class="text-[12px] text-muted-foreground mt-0.5">
                   用户自定义规则注入跨页 LLM 分析
                   <span class="ml-1.5 px-1.5 py-0.5 rounded bg-muted text-[11px] font-normal" id="rules-count">0 条</span>
                   <span class="ml-1.5 px-1.5 py-0.5 rounded bg-muted text-[11px] font-normal" id="rules-total-chars">0 / 8000 字</span>
@@ -366,7 +366,7 @@
                   >
                     保存规则
                   </button>
-                  <span id="rule-msg" class="text-[12px]"></span>
+                  <span id="rule-msg" class="text-[12px]" role="status" aria-live="polite"></span>
                 </div>
                 <!-- 模板库就地展开（非 absolute dropdown）— 父卡片
                      overflow-hidden 会裁剪 absolute 面板，改为文档流展开
@@ -384,7 +384,7 @@
             <div class="hover-lift bg-card border border-border rounded-lg overflow-hidden">
               <div class="px-5 py-4 border-b border-border">
                 <h2 class="text-[14px] font-medium">飞书通知</h2>
-                <p class="text-[11px] text-muted-foreground mt-0.5">
+                <p class="text-[12px] text-muted-foreground mt-0.5">
                   任务完成/出错时推送摘要，通知失败不影响任务处理
                 </p>
               </div>
@@ -440,7 +440,7 @@
                       class="rounded-md border border-border bg-background px-3 py-2 text-[13px] focus:outline-none focus:ring-2 focus:ring-foreground/40"
                     />
                   </div>
-                  <details class="text-[11px] text-muted-foreground leading-relaxed">
+                  <details class="text-[12px] text-muted-foreground leading-relaxed">
                     <summary class="cursor-pointer hover:text-foreground transition-colors">接入步骤（自建应用私聊）</summary>
                     <ol class="mt-1 ml-4 list-decimal flex flex-col gap-0.5">
                       <li>open.feishu.cn 创建企业自建应用</li>
@@ -471,7 +471,7 @@
                       class="rounded-md border border-border bg-background px-3 py-2 text-[13px] focus:outline-none focus:ring-2 focus:ring-foreground/40"
                     />
                   </div>
-                  <p class="text-[11px] text-muted-foreground leading-relaxed">
+                  <p class="text-[12px] text-muted-foreground leading-relaxed">
                     在飞书群「设置 → 群机器人 → 添加机器人 → 自定义机器人」创建 Webhook，
                     可选勾选签名校验。仅发送到机器人所在群。
                   </p>
@@ -502,7 +502,7 @@
                   >
                     清除凭据
                   </button>
-                  <span id="feishu-msg" class="text-[12px]"></span>
+                  <span id="feishu-msg" class="text-[12px]" role="status" aria-live="polite"></span>
                 </div>
               </div>
             </div>
@@ -516,9 +516,9 @@
             >
               保存全部设置
             </button>
-            <span id="save-msg" class="text-[12px]"></span>
+            <span id="save-msg" class="text-[12px]" role="status" aria-live="polite"></span>
           </div>
-          <p class="text-[11px] text-muted-foreground">
+          <p class="text-[12px] text-muted-foreground leading-relaxed">
             每个 LLM 提供商的 API Key、协议、Base URL、模型请在对应卡片内点击「保存」一次性提交（即时生效，首次保存会自动设为当前）。底部"保存全部设置"用于 OCR 与飞书通知等通用字段。
             "测试连接"会并行检测 OCR + 所有已配置的 LLM 提供商。
           </p>

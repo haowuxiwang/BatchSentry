@@ -88,7 +88,8 @@ class LLMClient:
 
     # 会话级 JSON 模式降级标记：某 provider 网关拒绝 response_format 参数
     # （400）后置 True，本进程内不再尝试（避免每页都白打一次失败请求）。
-    _json_mode_disabled: bool = False
+    # 按 provider 名隔离 — provider A 拒绝不影响 provider B 的 json_mode。
+    _json_mode_disabled: dict[str, bool] = {}
 
     def __init__(self, provider: str | None = None):
         self.provider = provider or config["app"].llm_provider
@@ -167,10 +168,11 @@ class LLMClient:
                     # 结构化输出参数被网关拒绝 → 降级为普通调用重试一次，
                     # 并置会话级禁用（后续调用不再尝试该参数）。
                     if use_rf and _looks_like_rf_unsupported(rf_err):
-                        LLMClient._json_mode_disabled = True
+                        LLMClient._json_mode_disabled[self.provider] = True
                         logger.warning(
-                            f"response_format rejected by provider{ctx_tag} — "
-                            f"disabling JSON mode for this session: "
+                            f"response_format rejected by provider "
+                            f"'{self.provider}'{ctx_tag} — "
+                            f"disabling JSON mode for this provider: "
                             f"{_mask_secrets(str(rf_err))[:150]}"
                         )
                         result = await self.adapter.chat(
@@ -293,7 +295,7 @@ class LLMClient:
         response_format = None
         if (
             getattr(config["app"], "llm_json_mode", False)
-            and not LLMClient._json_mode_disabled
+            and self.provider not in LLMClient._json_mode_disabled
             and getattr(self.adapter, "protocol", "") == "openai"
         ):
             response_format = {"type": "json_object"}

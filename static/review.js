@@ -148,6 +148,11 @@
         log("SSE subscribe", url);
         es = new EventSource(url);
 
+        es.onopen = () => {
+          // 成功连接后重置重试计数，断线重连时从头开始退避
+          retryCount = 0;
+        };
+
         // 流式输出：跟踪 pages_analyzed 变化，当当前页被分析完成时
         // 自动 AJAX 刷新该页 findings，让用户在 Stage 2 进行中就能看到
         // 已分析页的结果，无需等全部页完成。
@@ -591,8 +596,8 @@
       const pageData = await r.json();
       if (token !== pageLoadToken) return; // 已翻到新页，丢弃过期响应
 
-      // 加载该页的 findings
-      const fr = await fetch(`/api/jobs/${jobId}/findings?page=${targetPage}`);
+      // 加载该页的 findings（按置信度排序：低置信度排前便于人工优先复核）
+      const fr = await fetch(`/api/jobs/${jobId}/findings?page=${targetPage}&order=confidence`);
       if (!fr.ok) throw new Error("HTTP " + fr.status);
       const findingsData = await fr.json();
 
@@ -665,7 +670,7 @@
     try {
       const [pageRes, findingsRes] = await Promise.all([
         fetch(`/api/jobs/${jobId}/pages/${page}`),
-        fetch(`/api/jobs/${jobId}/findings?page=${page}`),
+        fetch(`/api/jobs/${jobId}/findings?page=${page}&order=confidence`),
       ]);
       if (!pageRes.ok || !findingsRes.ok) return;
       const pageData = await pageRes.json();

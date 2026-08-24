@@ -37,3 +37,10 @@ mark.finding-locate-mark {
     0% { background: hsl(38 95% 55%); }
     100% { background: hsl(45 100% 82% / 0.9); }
 }
+
+/* WCAG 2.5.8: 复核操作按钮最小触控区域 24px */
+.review-actions button,
+.finding-card button {
+    min-height: 24px;
+    font-size: 12px;
+}

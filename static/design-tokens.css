@@ -34,11 +34,12 @@
   /* === 状态色：纯色 + 仅用于徽章/点，绝不铺底 === */
   --destructive: 0 72% 51%;
   --destructive-foreground: 0 0% 100%;
-  --warning: 38 92% 50%;
+  /* WCAG AA ≥4.5:1 on white — darkened from 50%/48%/45% lightness */
+  --warning: 38 92% 38%;
   --warning-foreground: 48 96% 9%;
-  --info: 199 89% 48%;
+  --info: 199 89% 38%;
   --info-foreground: 0 0% 100%;
-  --success: 142 71% 45%;
+  --success: 142 71% 35%;
   --success-foreground: 0 0% 100%;
 
   /* === 圆角：严肃类 6/8/12 === */

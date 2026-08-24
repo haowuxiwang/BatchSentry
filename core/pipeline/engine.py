@@ -199,6 +199,12 @@ async def _run_pipeline_impl(job_id: str, pdf_path: str, progress_futures: list)
         # 落库并开始该片页面分析，用户无需等全部页 OCR 完成才看到结果。
         # 整份 OCR（默认, 含 Paddle）保持原有阻塞式流程。
         slice_pages = int(getattr(config["app"], "ocr_slices", 1) or 1)
+        if ocr_backend == "paddle" and slice_pages > 1:
+            logger.warning(
+                f"[{job_id}] OCR_SLICES={slice_pages} ignored — sliced mode "
+                f"is only supported by MinerU, falling back to whole-job Paddle"
+            )
+            slice_pages = 1
         stage1_ms = 0
         stage2_ms = 0
         failed_pages: list[int] = []

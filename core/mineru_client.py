@@ -550,6 +550,7 @@ def _compose_page_markdown(page_num: int, blocks: list[dict]) -> tuple[str, int]
             flush_paragraph()
             parts.append("")
             if content:
+                parts.append("#### 表格")
                 parts.append(content)
             else:
                 # P1-2: 表格结构+文本全部提取失败 — 显式占位并计数，

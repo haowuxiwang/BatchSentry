@@ -207,6 +207,8 @@ def _derive_phase(status: str, pages_analyzed: int, total_pages: int) -> str:
     """
     if status == "ocr_running":
         return "ocr"
+    if status == "ocr_done":
+        return "analyze"
     if status == "analyzing":
         return "cross" if total_pages > 0 and pages_analyzed >= total_pages else "analyze"
     if status in _TERMINAL_STATUSES:

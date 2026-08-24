@@ -162,6 +162,8 @@
 
     const xhr = new XMLHttpRequest();
     xhr.open("POST", `/api/jobs${force ? "?force=1" : ""}`);
+    // 大文件上传超时保护：200MB 上限 × 慢速网络 ≈ 120s 超时
+    xhr.timeout = 120000;
 
     // 上传进度（大文件反馈关键）
     xhr.upload.addEventListener("progress", (e) => {
@@ -254,6 +256,13 @@
     xhr.onerror = () => {
       log.err("uploadFile — XHR network error");
       setStatus(`网络错误: 上传失败`, "err");
+      if (progressBar) progressBar.classList.add("hidden");
+      if (dropZone) dropZone.style.pointerEvents = "";
+    };
+
+    xhr.ontimeout = () => {
+      log.err("uploadFile — XHR timeout (120s)");
+      setStatus(`上传超时: 文件过大或网络不稳定，请重试`, "err");
       if (progressBar) progressBar.classList.add("hidden");
       if (dropZone) dropZone.style.pointerEvents = "";
     };

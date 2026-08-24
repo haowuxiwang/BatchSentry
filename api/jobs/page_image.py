@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import time
 from pathlib import Path
 
@@ -22,6 +23,18 @@ logger = logging.getLogger(__name__)
 _pdf_doc_cache: dict[str, tuple] = {}  # job_id -> (fitz.Document, last_ts)
 _PDF_CACHE_MAX = 6
 _PDF_CACHE_TTL = 1800.0  # 秒 — 大 PDF（百 MB 级）重开成本高，拉长 TTL
+# fitz.Document 非线程安全：并发页面请求（双标签页/预取）会从不同线程
+# 同时调用同一缓存 Document 的 load_page/get_pixmap，存在竞争崩溃风险。
+# per-doc 锁串行化渲染（渲染本身在线程池，不阻塞事件循环）。
+_doc_locks: dict[str, threading.Lock] = {}
+
+
+def _doc_lock(job_id: str) -> threading.Lock:
+    lock = _doc_locks.get(job_id)
+    if lock is None:
+        lock = threading.Lock()
+        _doc_locks[job_id] = lock
+    return lock
 # 渲染输出上限：批记录扫描件常为 300dpi+（单页 27MP），按 72dpi 基准
 # zoom=1.5 输出 4500x6000px/9-18MB PNG，浏览器解码慢且每翻页重传。
 # 限制输出宽度 ≤2000px（CSS fit-width 实际显示 ~1000px，2000px 足够清晰），
@@ -117,7 +130,9 @@ async def get_job_page_image(job_id: str, page_num: int, request: Request = None
     # Runtime resolution — tests monkeypatch api.jobs._get_pdf_doc.
     from api.jobs import _get_pdf_doc
     try:
-        doc = _get_pdf_doc(job_id, str(pdf_path))
+        # fitz.open 对损坏/超大 PDF 的 xref 修复可能秒级（upload.py 页数
+        # 统计已为同款威胁包了 to_thread），此处同样不能在事件循环上裸调。
+        doc = await asyncio.to_thread(_get_pdf_doc, job_id, str(pdf_path))
     except Exception as e:
         logger.error(f"[{job_id}] Failed to open PDF for rendering: {e}")
         raise HTTPException(500, "PDF 无法渲染（文件可能损坏）")
@@ -127,12 +142,13 @@ async def get_job_page_image(job_id: str, page_num: int, request: Request = None
     # 事件循环（所有 API/SSE 请求排队，前端"正在渲染"卡住）。尺寸由
     # _pdf_render_zoom 限制（≤2000px 宽），输出 JPEG 体积再降 5-10x。
     def _render_sync() -> bytes:
-        page = doc.load_page(page_num - 1)
-        zoom = _pdf_render_zoom(page)
-        pix = page.get_pixmap(
-            matrix=fitz.Matrix(zoom, zoom), alpha=False, colorspace=fitz.csRGB
-        )
-        return pix.tobytes("jpeg", jpg_quality=82)
+        with _doc_lock(job_id):
+            page = doc.load_page(page_num - 1)
+            zoom = _pdf_render_zoom(page)
+            pix = page.get_pixmap(
+                matrix=fitz.Matrix(zoom, zoom), alpha=False, colorspace=fitz.csRGB
+            )
+            return pix.tobytes("jpeg", jpg_quality=82)
 
     try:
         jpeg = await asyncio.to_thread(_render_sync)

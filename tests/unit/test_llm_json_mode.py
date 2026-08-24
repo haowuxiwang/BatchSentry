@@ -42,9 +42,9 @@ class _FakeAdapter:
 
 @pytest.fixture(autouse=True)
 def _reset_json_mode_flag():
-    LLMClient._json_mode_disabled = False
+    LLMClient._json_mode_disabled.clear()
     yield
-    LLMClient._json_mode_disabled = False
+    LLMClient._json_mode_disabled.clear()
 
 
 def _make_client(monkeypatch_adapter):
@@ -107,8 +107,8 @@ class TestJsonMode:
             assert len(adapter.calls) == 2
             assert adapter.calls[0]["response_format"] is not None
             assert adapter.calls[1]["response_format"] is None
-            # 会话级禁用生效
-            assert LLMClient._json_mode_disabled is True
+            # 会话级禁用生效（仅对当前 provider）
+            assert "test" in LLMClient._json_mode_disabled
             await c.chat_json("sys", "user again")
             assert len(adapter.calls) == 3
             assert adapter.calls[2]["response_format"] is None
@@ -146,6 +146,6 @@ class TestJsonMode:
             with pytest.raises(RuntimeError, match="401"):
                 await c.chat_json("sys", "user", retries=1)
             # 未触发会话禁用（错误与 rf 无关）
-            assert LLMClient._json_mode_disabled is False
+            assert "test" not in LLMClient._json_mode_disabled
         finally:
             config["app"].llm_json_mode = orig

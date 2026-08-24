@@ -672,7 +672,9 @@ async def analyze_page(
     # [手写内容未识别]）所在列/标签 → 列名 token 列表，随结果透传给
     # 规则层（_backfill_value_source 强制 value_source=handwritten；
     # 机器事实 > LLM 猜测）。仅在命中时写入，无信号结果不带该键。
-    low_conf_tokens = _extract_low_conf_tokens(cleaned)
+    # 从原始 OCR 输出提取，保留结构信息用于列映射；
+    # _clean_html 会折叠 span 破坏对齐信息。
+    low_conf_tokens = _extract_low_conf_tokens(html)
     if low_conf_tokens:
         result["_ocr_low_conf_cols"] = low_conf_tokens
     # 幻觉防护：LLM 提取的实测数值必须在 OCR 原文中找到（零 LLM 成本，

@@ -46,20 +46,28 @@ def _has_missing_markers(text: str) -> bool:
     return bool(content_lines) and all(line.startswith("#") for line in content_lines)
 
 
-def _self_heal_diag(prior: dict | None) -> str | None:
+def _self_heal_diag(prior: dict | None, *, recovered: bool = False,
+                    content_len: int = 0, round_num: int = 0) -> str | None:
     """自愈恢复页的诊断 JSON：保留原始完整性证据，标记自愈状态。
 
     门禁 1（页级诊断可追溯）：旧实现自愈 UPDATE 把 ocr_diagnostics 置 NULL，
     该页"曾因空页/缺失占位被判不完整"的证据就此丢失。恢复页应能回答
     "此页为何被重跑" — 以 prior_diagnostics 存原始诊断 + self_healed 标记。
+    新增：recovery_round / content_length / recovered 标记，便于审计追踪
+    自愈效果（哪一轮恢复、恢复后内容量）。
     """
     if not prior:
         return None
     diag = {
         "self_healed": True,
+        "recovered": recovered,
         "source": prior.get("source", "unknown"),
         "prior_diagnostics": prior,
     }
+    if round_num:
+        diag["recovery_round"] = round_num
+    if content_len:
+        diag["content_length"] = content_len
     return json.dumps(diag, ensure_ascii=False)
 
 async def _report_heal_progress(db, job_id: str, done: int, total: int, pages: list[int]) -> None:
@@ -219,7 +227,9 @@ async def _self_heal_empty_pages(
                                     "UPDATE page_cache SET raw_html = ?, ocr_diagnostics = ?, "
                                     "structured_json = NULL, analyzed_at = NULL "
                                     "WHERE job_id = ? AND page = ?",
-                                    (clean, _self_heal_diag(prior_diags.get(pno)), job_id, pno),
+                                    (clean, _self_heal_diag(prior_diags.get(pno),
+                                     recovered=True, content_len=len(clean),
+                                     round_num=attempt + 1), job_id, pno),
                                 )
                                 if pno in pages_by_num:
                                     pages_by_num[pno]["markdown"]["text"] = clean
@@ -248,7 +258,10 @@ async def _self_heal_empty_pages(
                     job_dir_p = Path(config["app"].output_dir) / job_id
                     recovered = []
                     still_empty = []
-                    src_doc = fitz.open(pdf_path)
+                    # 打开大 PDF + 写切片文件是磁盘 I/O（秒级），必须放线程池，
+                    # 否则每个空页都在事件循环上同步停顿（同函数内 run_ocr
+                    # 已包 to_thread，此处对齐）。
+                    src_doc = await asyncio.to_thread(fitz.open, pdf_path)
                     try:
                         for idx, pno in enumerate(retry_targets, 1):
                             if await _run_is_cancelled(job_id):
@@ -263,12 +276,16 @@ async def _self_heal_empty_pages(
                                 f"{pno} as standalone slice"
                             )
                             slice_path = job_dir_p / f"selfheal-p{pno}.pdf"
-                            out = fitz.open()
-                            out.insert_pdf(
-                                src_doc, from_page=pno - 1, to_page=pno - 1
-                            )
-                            out.save(str(slice_path))
-                            out.close()
+
+                            def _make_slice(src=src_doc, dst=slice_path, pg=pno):
+                                out = fitz.open()
+                                out.insert_pdf(
+                                    src, from_page=pg - 1, to_page=pg - 1
+                                )
+                                out.save(str(dst))
+                                out.close()
+
+                            await asyncio.to_thread(_make_slice)
                             try:
                                 # P0-7 修复：变量遮蔽 — 此前
                                 # `pages = ...` 覆盖外层整份 OCR 结果
@@ -302,7 +319,9 @@ async def _self_heal_empty_pages(
                                     "UPDATE page_cache SET raw_html = ?, ocr_diagnostics = ?, "
                                     "structured_json = NULL, analyzed_at = NULL "
                                     "WHERE job_id = ? AND page = ?",
-                                    (clean, _self_heal_diag(prior_diags.get(pno)), job_id, pno),
+                                    (clean, _self_heal_diag(prior_diags.get(pno),
+                                     recovered=True, content_len=len(clean),
+                                     round_num=1), job_id, pno),
                                 )
                                 if pno in pages_by_num:
                                     pages_by_num[pno]["markdown"]["text"] = clean

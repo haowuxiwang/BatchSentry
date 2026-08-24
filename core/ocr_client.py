@@ -307,6 +307,8 @@ def download_result(poll_response: dict, pdf_path: str = "") -> list[dict]:
             f"OCR download complete (single JSON): {len(pages)} pages, {raw_size_kb:.1f}KB"
         )
         _ensure_page_text(pages)
+        for p in pages:
+            p["source"] = "paddle"
         _persist_paddle_original(raw, pdf_path, "json")
         return pages
     except json.JSONDecodeError:
@@ -366,6 +368,8 @@ def download_result(poll_response: dict, pdf_path: str = "") -> list[dict]:
         + (f" ({bad_lines} bad lines placeholdered)" if bad_lines else "")
     )
     _ensure_page_text(pages)
+    for p in pages:
+        p["source"] = "paddle"
     _persist_paddle_original(raw, pdf_path, "jsonl")
     return pages
 

@@ -40,6 +40,7 @@ async def _run_stage3_cross_analysis(
         (job_id,),
     )
     page_structures = []
+    empty_pages_count = 0
     for row in await cursor.fetchall():
         if row["structured_json"]:
             try:
@@ -47,8 +48,11 @@ async def _run_stage3_cross_analysis(
                 # Skip pages with parse errors
                 if not data.get("_parse_error") and not data.get("_ocr_empty"):
                     page_structures.append({"page": row["page"], "data": data})
+                else:
+                    empty_pages_count += 1
             except json.JSONDecodeError:
                 logger.warning(f"[{job_id}] Stage 3: Failed to parse page_cache page={row['page']}")
+                empty_pages_count += 1
 
     # P-C3 修复：analyze_cross_page 调用前检查取消状态，
     # 避免取消后仍进入跨页分析（cancelling → review 非法转换）
@@ -175,9 +179,9 @@ async def _run_stage3_cross_analysis(
     # Determine final status
     total_cost_ms = int((time.time() - pipeline_start) * 1000)
     dual_diff = dual_diff or []
-    # 门禁 3：双后端差异页强制人工复核（partial_review），不得自动通过
+    # 门禁 3：双后端差异页 / 空页 + 解析错误页强制人工复核
     final_status = (
-        "partial_review" if (failed_pages or dual_diff) else "review"
+        "partial_review" if (failed_pages or dual_diff or empty_pages_count) else "review"
     )
 
     await db.execute(
@@ -190,6 +194,7 @@ async def _run_stage3_cross_analysis(
     status_detail = (
         f"流水线完成：{len(findings)} 条问题，{len(failed_pages)} 页失败"
         + (f"，双后端差异 {len(dual_diff)} 页" if dual_diff else "")
+        + (f"，{empty_pages_count} 页内容为空/解析错误" if empty_pages_count else "")
     )
     await transition_status(db, job_id, final_status, status_detail)
 
