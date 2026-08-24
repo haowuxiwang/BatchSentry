@@ -67,10 +67,40 @@ GMP_BASIS_MAP: dict[str, str] = {
         "《药品生产质量管理规范(2010修订)》批记录应字迹清晰、不易擦除；"
         "江苏省药品生产记录填写规范；ALCOA+ Legible（清晰性）"
     ),
+    # LLM 自由产出的变体 type（prompt 未枚举，e2e 实测出现）
+    "batch_logic": (
+        "《药品生产质量管理规范(2010修订)》批号管理与物料平衡；"
+        "ALCOA+ Consistent（一致性）"
+    ),
 }
 
 # 不映射依据的 type（技术噪音/用户规则自含依据/内部键）
 _UNMAPPED = {"ocr_noise", "user_rule"}
+
+# 关键词兜底：LLM 可能产出任意 type 字符串（e2e 实测 batch_logic 等
+# 未枚举变体）。按 type 关键词归类到语义最近的依据，避免整类 finding
+# 无依据可引用。顺序敏感：先具体后宽泛。
+_KEYWORD_FALLBACK: list[tuple[tuple[str, ...], str]] = [
+    (("batch", "批号", "批logic"), GMP_BASIS_MAP["batch_inconsistency"]),
+    (("signature", "签名"), GMP_BASIS_MAP["signature_time_anomaly"]),
+    (("time", "date", "时间", "日期"), GMP_BASIS_MAP["time_reversal"]),
+    (("param", "spec", "参数", "规格"), GMP_BASIS_MAP["param_out_of_spec"]),
+    (("sign",), GMP_BASIS_MAP["signature_mismatch"]),
+]
+
+
+def _lookup(f: dict) -> str | None:
+    """精确 type 命中 → 关键词兜底 → None。"""
+    ftype = str(f.get("type", ""))
+    if ftype in _UNMAPPED:
+        return None
+    if ftype in GMP_BASIS_MAP:
+        return GMP_BASIS_MAP[ftype]
+    low = ftype.lower()
+    for keywords, basis in _KEYWORD_FALLBACK:
+        if any(k in low or k in ftype for k in keywords):
+            return basis
+    return None
 
 
 def attach_gmp_basis(findings: list[dict]) -> list[dict]:
