@@ -66,7 +66,7 @@ BatchSentry 用 OCR + LLM 半自动化：OCR 还原页面文本 → LLM 提取�
 | 路径 | 职责 | 注意事项 |
 |------|------|----------|
 | `config.py` | 配置加载 | **config.json > os.environ > 默认值**；设置页热更新走 `update_config` + `reset_llm_client` |
-| `core/procpool.py` | CPU 重活子进程池（GIL 隔离） | 300dpi 规范化等 PyMuPDF 批量渲染**必须**走 `run_cpu`（fitz C 调用持 GIL，`to_thread` 会饿死事件循环，e2e 实证 status GET 10s 超时）；worker 带父进程死亡守卫（防孤儿 exe 锁文件）；不可 pickle（测试替身）自动回退 `to_thread` |
+| `core/procpool.py` | CPU 重活子进程池（GIL 隔离） | 300dpi 规范化等 PyMuPDF 批量渲染**必须**走 `run_cpu`（fitz C 调用持 GIL，`to_thread` 会饿死事件循环，e2e 实证 status GET 10s 超时）；worker 带父进程死亡守卫（防孤儿 exe 锁文件）+ std 流重定向 devnull（防管道 EOF 持有）；不可 pickle（测试替身）自动回退 `to_thread`；pytest 环境（`PYTEST_CURRENT_TEST`）一律线程回退（进程隔离是生产诉求）；`atexit` 自动关池 |
 | `core/pipeline.py` | 三阶段编排 + 状态机 + failover + 空页自愈 | aiosqlite 单连接不支持并发写 — 所有 DB 写必须走 `db_lock` |
 | `core/mineru_client.py` | MinerU 客户端 + content_list 解析 | `_compose_page_markdown` 页首标记是 HTML 注释；页脚"纯数字丢弃、含文字保留" |
 | `core/ocr_client.py` | Paddle 客户端（阻塞 requests，pipeline 用 `asyncio.to_thread` 包裹） | 不要直接在 async 上下文调用 |
