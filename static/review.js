@@ -1070,6 +1070,11 @@
         const ocrSnippet = f.ocr_text
           ? `<p class="text-[11px] text-muted-foreground font-mono mt-1 truncate">OCR：${esc(f.ocr_text.slice(0, 100))}</p>`
           : "";
+        // GMP 依据引用（v7）：法规知识库映射（gmp_basis.py），复核员可
+        // 直接引用到复核记录；无映射（ocr_noise/user_rule）不显示
+        const basisInfo = f.gmp_basis
+          ? `<p class="text-[11px] text-muted-foreground mt-1 border-l-2 border-border pl-1.5">依据：${esc(f.gmp_basis)}</p>`
+          : "";
         // UX P1-2: AJAX 渲染补齐人工复核信息 — SSR 模板有 corrected_text /
         // reviewer_note（review.html:359-364），JS 渲染此前缺失：用户修正
         // 或备注后详情从视图中消失，复核记录审计不可见。
@@ -1107,6 +1112,7 @@
                             </div>
                             <p class="text-[13px] text-muted-foreground leading-relaxed">${esc(f.description)}</p>
                             ${ocrSnippet}
+                            ${basisInfo}
                             ${correctedInfo}
                             ${noteInfo}
                             ${actionBtns}

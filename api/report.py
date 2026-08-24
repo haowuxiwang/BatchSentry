@@ -298,6 +298,9 @@ def _generate_markdown(job: dict, findings: list[dict], total_pages: int,
                 # P2: 先截原始文本再转义 — 反过来的话实体（如 &#33;）会被
                 # 拦腰截断，渲染成字面 "&#33"，且实际展示字符数不足
                 lines.append(f"  - OCR原文: `{esc(f['ocr_text'][:100])}`")
+            # GMP 依据引用（v7）：报告携带法规依据（gmp_basis.py 知识库映射）
+            if f.get("gmp_basis"):
+                lines.append(f"  - 法规依据: {esc(f['gmp_basis'])}")
             if f.get("corrected_text"):
                 lines.append(f"  - 修正为: `{esc(f['corrected_text'][:100])}`")
             if f.get("reviewer_note"):

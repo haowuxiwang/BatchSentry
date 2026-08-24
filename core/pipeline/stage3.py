@@ -69,6 +69,10 @@ async def _run_stage3_cross_analysis(
     findings = await _run_analyze_cross(
         page_structures, job_id=job_id, progress_cb=_cross_progress_cb
     )
+    # GMP 依据引用（v7）：按 type 映射法规依据（幂等；无映射不设键，
+    # ocr_noise/user_rule 不映射 — user_rule 依据是其自身规则文本）
+    from core.rules.gmp_basis import attach_gmp_basis
+    attach_gmp_basis(findings)
     await _update_cross_progress(job_id, 0, 0, "")
     # P-C3 修复：analyze_cross_page 调用后再检查一次取消状态，
     # 避免在跨页分析期间用户点取消后继续写入 findings / 转 review
@@ -130,6 +134,7 @@ async def _run_stage3_cross_analysis(
             job_id, f["page"], f["type"], f["severity"], f["description"],
             f.get("ocr_text"), f.get("operator"), f.get("source", "rule"),
             f.get("rule_id") if f.get("source") == "user_rule" else None,
+            f.get("gmp_basis"),
         ))
         inserted += 1
     if batch_rows:
@@ -139,8 +144,8 @@ async def _run_stage3_cross_analysis(
         async with db_lock:
             await db.executemany(
                 "INSERT OR IGNORE INTO findings "
-                "(job_id, page, type, severity, description, ocr_text, operator, source, user_rule_id, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','localtime'))",
+                "(job_id, page, type, severity, description, ocr_text, operator, source, user_rule_id, gmp_basis, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','localtime'))",
                 batch_rows,
             )
             await db.commit()
@@ -154,6 +159,7 @@ async def _run_stage3_cross_analysis(
     # retry 幂等。
     dual_diff = dual_diff or []
     if dual_diff:
+        from core.rules.gmp_basis import GMP_BASIS_MAP
         dual_rows = [
             (
                 job_id, d["page"], "completeness", "warning",
@@ -161,14 +167,15 @@ async def _run_stage3_cross_analysis(
                 f"请对照 PDF 原图人工核对",
                 f"dual_compare: primary vs secondary — {d['reason']}",
                 "", "rule", None,
+                GMP_BASIS_MAP.get("completeness"),
             )
             for d in dual_diff
         ]
         async with db_lock:
             await db.executemany(
                 "INSERT OR IGNORE INTO findings "
-                "(job_id, page, type, severity, description, ocr_text, operator, source, user_rule_id, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','localtime'))",
+                "(job_id, page, type, severity, description, ocr_text, operator, source, user_rule_id, gmp_basis, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','localtime'))",
                 dual_rows,
             )
             await db.commit()

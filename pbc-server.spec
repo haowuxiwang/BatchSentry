@@ -122,6 +122,7 @@ hiddenimports = [
     "core.rules.rule_spec",
     "core.rules.rule_doc",
     "core.rules.llm_checks",
+    "core.rules.gmp_basis",  # Round 14 GMP 法规依据映射（v7 findings.gmp_basis）
     "core.page_analyzer",
     "core.hw_signal",  # Round 7 OCR handwriting-signal extraction
     "core.cross_page_analyzer",  # shim — kept for apps importing the old name

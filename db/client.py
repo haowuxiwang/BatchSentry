@@ -21,7 +21,7 @@ def _get_init_lock() -> asyncio.Lock:
     return _db_init_lock
 
 # Current schema migration level, persisted via PRAGMA user_version.
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 
 async def get_db() -> aiosqlite.Connection:
@@ -103,6 +103,9 @@ async def migrate(db: aiosqlite.Connection):
 
     if current_version < 6:
         await _migrate_v6(db)
+
+    if current_version < 7:
+        await _migrate_v7(db)
 
     # PRAGMA user_version cannot be parameterized; SCHEMA_VERSION is an int
     # constant defined in this module, so f-string is safe.
@@ -253,6 +256,21 @@ async def _migrate_v6(db: aiosqlite.Connection):
         )
     except Exception as e:
         logger.warning(f"Migration skip page_cache.ocr_diagnostics: {e}")
+    await db.commit()
+
+
+async def _migrate_v7(db: aiosqlite.Connection):
+    """v7: GMP 法规依据引用 — findings.gmp_basis（gmp_basis.py 映射）。"""
+    try:
+        cursor = await db.execute("PRAGMA table_info(findings)")
+        existing_cols = {row["name"] for row in await cursor.fetchall()}
+        if "gmp_basis" not in existing_cols:
+            await db.execute(
+                "ALTER TABLE findings ADD COLUMN gmp_basis TEXT"
+            )
+            logger.info("Migration: added findings.gmp_basis")
+    except Exception as e:
+        logger.warning(f"Migration skip findings.gmp_basis: {e}")
     await db.commit()
 
 

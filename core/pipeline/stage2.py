@@ -189,6 +189,9 @@ async def _analyze_one(
                 # 对抗审查(cr-3): llm_page 路径同样依赖 idx_findings_dedup UNIQUE
                 # 索引（v5）做原子去重，防御"部分提交残留 + retry"组合路径下的重复行。
                 llm_page_rows = []
+                # GMP 依据引用（v7）：按 type 映射法规依据（幂等，无映射不设键）
+                from core.rules.gmp_basis import attach_gmp_basis
+                attach_gmp_basis([f for f in page_findings if isinstance(f, dict)])
                 for f in page_findings:
                     if not isinstance(f, dict):
                         continue
@@ -198,12 +201,13 @@ async def _analyze_one(
                         job_id, page_num, f.get("type", "info"),
                         f.get("severity", "info"), f.get("description", ""),
                         f.get("ocr_text", ""), f.get("operator", ""),
+                        f.get("gmp_basis"),
                     ))
                 if llm_page_rows:
                     await db.executemany(
                         "INSERT OR IGNORE INTO findings "
-                        "(job_id, page, type, severity, description, ocr_text, operator, source, created_at) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, 'llm_page', datetime('now','localtime'))",
+                        "(job_id, page, type, severity, description, ocr_text, operator, source, gmp_basis, created_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, 'llm_page', ?, datetime('now','localtime'))",
                         llm_page_rows,
                     )
                 await db.commit()

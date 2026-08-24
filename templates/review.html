@@ -406,6 +406,9 @@
                                     {% if f.ocr_text %}
                                     <p class="text-[11px] text-muted-foreground font-mono mt-1 truncate">OCR：{{ f.ocr_text[:100] }}</p>
                                     {% endif %}
+                                    {% if f.gmp_basis %}
+                                    <p class="text-[11px] text-muted-foreground mt-1 border-l-2 border-border pl-1.5">依据：{{ f.gmp_basis }}</p>
+                                    {% endif %}
                                     {% if f.corrected_text %}
                                     <p class="text-[11px] text-foreground mt-1">修正：{{ f.corrected_text }}</p>
                                     {% endif %}
