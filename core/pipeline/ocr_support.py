@@ -312,7 +312,16 @@ def _prepare_ocr_pdf(pdf_path: str, job_id: str) -> tuple[str, list[int]]:
                     w_pt = pix.width * 72.0 / _NORMALIZE_TARGET_DPI
                     h_pt = pix.height * 72.0 / _NORMALIZE_TARGET_DPI
                     npage = norm.new_page(width=w_pt, height=h_pt)
-                    npage.insert_image(npage.rect, pixmap=pix)
+                    # JPEG q85 嵌入（2026-08-24 e2e 实证：灰度扫描页 PNG 无损
+                    # 嵌入膨胀 5-8×，51 页 3000x4000 → 224.8MB 工作副本，超过
+                    # 系统 200MB 上限且拖垮上游提交；JPEG q85 对灰度扫描件
+                    # OCR 识别无损，体积约 1/4。tobytes 失败（异常构建）回退
+                    # pixmap 直嵌，行为退化为旧版可用路径。
+                    try:
+                        img_bytes = pix.tobytes("jpeg", jpg_quality=85)
+                        npage.insert_image(npage.rect, stream=img_bytes)
+                    except Exception:
+                        npage.insert_image(npage.rect, pixmap=pix)
             except Exception:
                 norm.close()
                 raise
