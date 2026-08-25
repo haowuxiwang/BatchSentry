@@ -114,6 +114,28 @@ class TestConfidenceScoring:
         assert confs[0] == min(confs)
 
     @pytest.mark.asyncio
+    async def test_confidence_order_respects_page_filter(self, review_client):
+        """对抗审查（生产事故）回归：order=confidence 必须尊重 page 过滤。
+
+        复核页翻页固定带 order=confidence —— 旧实现该分支 WHERE 只有
+        job_id，任何页都返回全 job 的前 50 条（total 恒为全局数），问题
+        清单与当前页完全脱钩（用户实况：点导航页码清单不变）。
+        """
+        r = await review_client.get(
+            "/api/jobs/review-job/findings?page=2&order=confidence"
+        )
+        assert r.status_code == 200
+        data = r.json()
+        # fixture：page2 恰有 2 条（info+critical），其余在 page1
+        assert data["count"] == 2
+        assert all(f["page"] == 2 for f in data["findings"])
+        # 不带 page 时仍返回全量（复核队列语义保留）
+        r_all = await review_client.get(
+            "/api/jobs/review-job/findings?order=confidence"
+        )
+        assert r_all.json()["count"] == 4
+
+    @pytest.mark.asyncio
     async def test_has_more_scoped_to_current_filter(self, review_client):
         """对抗审查：has_more 必须按当前过滤集统计，不得被全局总数误触发。
 

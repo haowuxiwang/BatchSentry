@@ -92,6 +92,50 @@ class TestReportMarkdown:
         assert r.status_code == 404
 
     @pytest.mark.asyncio
+    async def test_report_md_warns_on_incomplete_coverage(self, test_db):
+        """对抗审查 P1 回归：空页/未分析页存在时报告不得宣称"无需人工复核"。
+
+        OCR 全部返回空文本且自愈失败时 job 照样终态 review + 0 findings，
+        旧报告输出"✅ 未发现问题，无需人工复核" = 静默合规通过假象。
+        """
+        import json as _json
+        await test_db.execute(
+            "INSERT INTO jobs (id, filename, pdf_path, status, total_pages) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("coverage-job", "scan.pdf", "/tmp/scan.pdf", "review", 3),
+        )
+        await test_db.executemany(
+            "INSERT INTO page_cache (job_id, page, raw_html, structured_json) "
+            "VALUES (?, ?, ?, ?)",
+            [
+                # 页1 空页标记 / 页2 无 structured_json（未完成分析）/ 页3 正常
+                ("coverage-job", 1, "", _json.dumps({"_ocr_empty": True})),
+                ("coverage-job", 2, "<p>partial</p>", None),
+                ("coverage-job", 3, "<p>ok</p>", _json.dumps({"steps": []})),
+            ],
+        )
+        await test_db.commit()
+        from main import app
+        from httpx import ASGITransport
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://localhost:8000"
+        ) as client:
+            r = await client.get("/api/jobs/coverage-job/report.md")
+        assert r.status_code == 200
+        # 头部覆盖声明 + 汇总警告
+        assert "页面覆盖" in r.text
+        assert "1 页 OCR 内容为空" in r.text
+        assert "1 页未完成分析" in r.text
+        assert "无需人工复核" not in r.text
+
+    @pytest.mark.asyncio
+    async def test_report_md_clean_job_still_positive_summary(self, report_client):
+        """对照组：findings 齐全且无覆盖缺失 → 保持原"无需人工复核"文案。"""
+        r = await report_client.get("/api/jobs/report-job/report.md")
+        assert r.status_code == 200
+        assert "页面覆盖" not in r.text
+
+    @pytest.mark.asyncio
     async def test_report_md_escapes_html_in_findings(self, report_client, test_db):
         """对抗审查(cr-7): LLM/OCR 生成的 description 可能含 HTML/脚本，
         Markdown 文件中必须 HTML-escape，防止 Typora/Obsidian 渲染 XSS。"""

@@ -119,7 +119,8 @@ async def create_job(
 
     # Sanitize filename — strip path separators from uploaded name to prevent
     # path traversal via crafted Content-Disposition filenames.
-    safe_name = Path(file.filename).name
+    # filename=None 时 Path(None) 抛 TypeError → 500（与 :63 的 or "" 兜底对齐）
+    safe_name = Path(file.filename or "").name
     if not safe_name or safe_name in (".", ".."):
         safe_name = f"{job_id}.pdf"
     logger.info(f"[{job_id}] Upload start: name={safe_name}")

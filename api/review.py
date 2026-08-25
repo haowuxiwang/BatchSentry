@@ -79,12 +79,23 @@ async def list_findings(
     # 按页过滤时，仅按 severity+source 排序（不需要 page）
     if by_confidence:
         # 置信度排序需全量取回后在 Python 侧排序分页（SQL 无该列）；
-        # 上限 2000 行防超大 job 内存失控
-        cursor = await db.execute(
-            "SELECT * FROM findings WHERE job_id = ? "
-            f"ORDER BY {severity_order}, {source_order}, id LIMIT 2000",
-            (job_id,),
-        )
+        # 上限 2000 行防超大 job 内存失控。
+        # 对抗审查（生产事故）：page 过滤在本分支同样生效 —— 此前
+        # WHERE 只有 job_id，复核页每次翻页（loadPageData 固定带
+        # order=confidence）都拿到全 job 的前 50 条，问题清单与当前页
+        # 完全脱钩（每页 total 恒为全局数）。
+        if page:
+            cursor = await db.execute(
+                "SELECT * FROM findings WHERE job_id = ? AND page = ? "
+                f"ORDER BY {severity_order}, {source_order}, id LIMIT 2000",
+                (job_id, page),
+            )
+        else:
+            cursor = await db.execute(
+                "SELECT * FROM findings WHERE job_id = ? "
+                f"ORDER BY {severity_order}, {source_order}, id LIMIT 2000",
+                (job_id,),
+            )
     elif page:
         order_clause = f"ORDER BY {severity_order}, {source_order}, id"
         cursor = await db.execute(
@@ -122,6 +133,7 @@ async def list_findings(
                 flagged = bool(
                     sj.get("_ocr_warning") or sj.get("_ocr_sparse")
                     or sj.get("_ocr_truncated") or sj.get("_grounding_warn")
+                    or sj.get("_truncated_warn") or sj.get("_schema_warn")
                 )
             except json.JSONDecodeError:
                 pass
@@ -447,6 +459,11 @@ async def get_page_measurements(job_id: str, page: int, request: Request = None)
     Extracts all step[].measurements[] from the page's structured_json so the
     review template can render a time × column table with in_spec cell colors.
     """
+    # P2-1: GET 读端点守卫统一 — 守卫必须在 DB 查询之前（其余端点均前置；
+    # 后置会让非本地请求先触发查询，且 404 先于 403 泄露页存在性）
+    from core.security import is_local_request
+    if request is not None and not is_local_request(request):
+        raise HTTPException(403, "Forbidden (non-local request)")
     db = await get_db()
     cursor = await db.execute(
         "SELECT structured_json FROM page_cache WHERE job_id = ? AND page = ?",
@@ -455,10 +472,6 @@ async def get_page_measurements(job_id: str, page: int, request: Request = None)
     row = await cursor.fetchone()
     if not row:
         raise HTTPException(404, "Page not found")
-    # P2-1: GET 读端点守卫统一
-    from core.security import is_local_request
-    if request is not None and not is_local_request(request):
-        raise HTTPException(403, "Forbidden (non-local request)")
     # 对抗审查(cr-6): 同 get_page_data — 非 JSON 的 structured_json 降级为空。
     try:
         data = json.loads(row["structured_json"]) if row["structured_json"] else {}

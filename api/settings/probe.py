@@ -76,6 +76,14 @@ async def test_provider(req: TestProviderRequest, request: Request):
             return {"ok": False, "provider": name, "reason": "密钥为掩码，请粘贴完整值"}
         cfg.api_key = req.api_key.strip()
     if req.base_url:
+        # 对抗审查 P2：与保存路径（settings/write.py）同款 SSRF 校验 —
+        # 测试连接会携带 Bearer key 发真实请求，表单覆盖的 base_url 指向
+        # loopback/内网时同样必须拒绝
+        from core.security import validate_external_url
+
+        ok, err = validate_external_url(req.base_url.strip(), kind="LLM base_url")
+        if not ok:
+            return {"ok": False, "provider": name, "reason": err}
         cfg.base_url = req.base_url.strip()
     if req.model:
         cfg.model = req.model.strip()

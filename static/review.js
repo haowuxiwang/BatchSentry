@@ -740,6 +740,36 @@
       truncatedBanner.classList.toggle("hidden", !bool(structured._ocr_truncated));
     }
 
+    // 2c-b. LLM 完整性横幅（对抗审查 P1）— 输出截断已恢复 / schema 校验
+    // 未通过，此前标记无消费终端，复核者看不到"数据可能静默缺失"
+    const llmIntegrityBanner = document.getElementById("llm-integrity-banner");
+    if (llmIntegrityBanner) {
+      const schemaWarn = structured._schema_warn || [];
+      const llmTruncated = bool(structured._truncated_warn);
+      const showLlmIntegrity = llmTruncated || schemaWarn.length > 0;
+      llmIntegrityBanner.classList.toggle("hidden", !showLlmIntegrity);
+      const mainText = llmIntegrityBanner.querySelector(".llm-integrity-text") ||
+        llmIntegrityBanner.querySelector("p.text-xs.font-medium");
+      if (mainText) {
+        let msg = "此页 LLM 分析结果可能不完整";
+        if (llmTruncated) msg += "（输出过长被截断后自动恢复，尾部数据可能丢失）";
+        if (llmTruncated && schemaWarn.length > 0) msg += "；";
+        if (schemaWarn.length > 0) msg += "（结构校验未完全通过）";
+        msg += "，请以 PDF 原图核对此页全部内容";
+        mainText.textContent = msg;
+      }
+      const schemaText = llmIntegrityBanner.querySelector(".llm-schema-warn-text");
+      if (schemaText) {
+        if (schemaWarn.length > 0) {
+          schemaText.textContent = schemaWarn.join("；");
+          schemaText.classList.remove("hidden");
+        } else {
+          schemaText.textContent = "";
+          schemaText.classList.add("hidden");
+        }
+      }
+    }
+
     // 2d. OCR 状态横幅（空页/稀疏/不完整警告）— AJAX 翻页时同步更新，
     // 否则上一页的横幅残留到当前页，对 GMP 复核构成误导
     const emptyBanner = document.getElementById("ocr-empty-banner");

@@ -15,6 +15,7 @@
 import pytest
 import pytest_asyncio
 from httpx import AsyncClient, ASGITransport
+from pathlib import Path
 
 
 @pytest_asyncio.fixture
@@ -110,6 +111,56 @@ class TestReviewPage:
         # review 模板应体现该 job 的上下文
         assert "route-job" in r.text
 
+    @pytest.mark.asyncio
+    async def test_review_page_with_ocr_diagnostics_renders(
+        self, client_with_job, test_db
+    ):
+        """对抗审查 P0 回归：ocr_diagnostics 非空时 review 页不得 500。
+
+        main.py 曾缺 import json —— json.loads(row["ocr_diagnostics"])
+        抛 NameError 使整个复核页崩溃。Stage 0 assess_ocr_page 给低 DPI /
+        超大 MediaBox 的页写入诊断即触发（真实扫描件必现）。
+        """
+        await test_db.execute(
+            "INSERT INTO page_cache (job_id, page, raw_html, ocr_diagnostics) "
+            "VALUES (?, ?, ?, ?)",
+            (
+                "route-job", 1, "<p>x</p>",
+                '{"integrity": "incomplete", "reasons": ["low_dpi"], '
+                '"effective_dpi": 150}',
+            ),
+        )
+        await test_db.commit()
+        r = await client_with_job.get("/jobs/route-job/review")
+        assert r.status_code == 200
+        assert "<html" in r.text.lower()
+
+    @pytest.mark.asyncio
+    async def test_review_page_llm_truncated_flag_renders_banner(
+        self, client_with_job, test_db
+    ):
+        """对抗审查 P1 回归：_truncated_warn/_schema_warn 必须透出到 SSR。
+
+        此前这两个标记只写进 structured_json 无任何消费终端 — 截断被
+        静默恢复后尾部数据丢失，复核者看不到任何提示。
+        """
+        await test_db.execute(
+            "INSERT INTO page_cache (job_id, page, raw_html, structured_json) "
+            "VALUES (?, ?, ?, ?)",
+            (
+                "route-job", 2, "<p>x</p>",
+                '{"steps": [], "_truncated_warn": true, '
+                '"_schema_warn": ["findings[0].type: missing"]}',
+            ),
+        )
+        await test_db.commit()
+        r = await client_with_job.get("/jobs/route-job/review?page=2")
+        assert r.status_code == 200
+        assert "llm-integrity-banner" in r.text
+        # 关键断言：横幅内容出现（非 hidden 态由模板条件分支保证）
+        assert "输出过长被截断后自动恢复" in r.text
+        assert "结构校验未完全通过" in r.text
+
 
 class TestServePdf:
     """GET /api/jobs/{job_id}/pdf — PDF 文件服务。"""
@@ -124,6 +175,31 @@ class TestServePdf:
         """job 存在但 pdf_path 指向不存在的文件 → 404 PDF file missing。"""
         r = await client_with_job.get("/api/jobs/route-job/pdf")
         assert r.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_pdf_non_local_host_returns_403(self, test_db, test_client):
+        """对抗审查 P1 回归：serve_pdf 是最后一个无守卫的读端点。
+
+        最敏感资产（原始 PDF）此前是唯一没有 is_local_request 守卫的
+        GET 读端点，与"所有读端点统一守卫"策略不一致。
+        """
+        output_dir = Path("output")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        pdf_path = output_dir / "guard_probe.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4\n")
+        try:
+            await test_db.execute(
+                "INSERT INTO jobs (id, filename, pdf_path, status, total_pages) "
+                "VALUES (?, ?, ?, ?, ?)",
+                ("guarded-pdf", "g.pdf", str(pdf_path.resolve()), "review", 1),
+            )
+            await test_db.commit()
+            r = await test_client.get(
+                "/api/jobs/guarded-pdf/pdf", headers={"Host": "evil.com:80"}
+            )
+            assert r.status_code == 403
+        finally:
+            pdf_path.unlink(missing_ok=True)
 
     @pytest.mark.asyncio
     async def test_pdf_path_traversal_blocked(self, test_db, test_client):

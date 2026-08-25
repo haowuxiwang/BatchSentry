@@ -159,9 +159,11 @@
     background-color var(--motion-hover),
     box-shadow var(--motion-hover);
 }
-.btn-press:hover {
-  background-color: hsl(var(--muted) / 0.6);
-}
+/* 对抗审查（分发实证 #2/#3）：此 hover 曾强制把背景刷成浅色 muted/0.6，
+   特异性(0,2,0)高于 Tailwind 的 .bg-foreground(0,1,0) —— 黑底白字的
+   "保存 OCR 设置 / 保存规则"按钮悬停即变白底白字，视觉上直接消失。
+   修复：btn-press 只负责按压反馈；悬停背景交还给各按钮自身的
+   hover:* 工具类（文本按钮有 hover:text-*，实心按钮有 hover:bg-*）。 */
 .btn-press:active {
   transform: scale(0.97);
 }

@@ -18,6 +18,7 @@
 const { app, BrowserWindow, shell, dialog, Menu } = require("electron");
 const { spawn, execSync } = require("child_process");
 const path = require("path");
+const fs = require("fs");
 const http = require("http");
 const net = require("net");
 
@@ -38,7 +39,34 @@ if (process.platform === "win32") {
 
 const SERVER_PORT = 58765;
 const SERVER_HOST = "127.0.0.1";
-const MAX_READY_CHECKS = 60; // 60 × 500ms = 30s timeout
+
+// 对抗审查（分发实证）：冷启动失败不可诊断 —— uvicorn 的绑定时间线只打在
+// stdout，打包后被 console 吞掉；健康检查把 ECONNREFUSED/超时一律静默计数，
+// 超时报 "not ready after 60 checks" 却无法区分原因。两处修复：
+// 1) 后端 stdout/stderr 追加写入 %APPDATA%/PBC/logs/backend-boot.log
+// 2) 等待逻辑改截止时间制（180s），子进程存活就继续等；错误带进拒绝消息
+const READY_TIMEOUT_MS = 180_000;
+
+let reusedBackend = false; // 复用孤儿后端时 waitForServer 不要求子进程存活
+
+let bootLogStream = null;
+
+function bootLog(line) {
+  try {
+    if (!bootLogStream) {
+      const dir = path.join(app.getPath("appData"), "PBC", "logs");
+      fs.mkdirSync(dir, { recursive: true });
+      bootLogStream = fs.createWriteStream(path.join(dir, "backend-boot.log"), {
+        flags: "a",
+      });
+    }
+    bootLogStream.write(
+      `${new Date().toISOString()} ${line}\n`,
+    );
+  } catch {
+    // 日志尽力而为，绝不阻断启动流程
+  }
+}
 const SHUTDOWN_GRACE_MS = 2500; // wait for /api/shutdown to complete
 
 // robustness-G1: 看门狗 — 后端运行中自崩/僵死时自动重启。
@@ -128,6 +156,12 @@ function startPythonServer() {
   };
 
   console.log(`[BatchSentry] Spawning server: ${cmd} ${args.join(" ")}`);
+  // 打包模式不在 console 回显绝对路径（同 #5）；bootLog 落盘保留
+  if (!app.isPackaged) {
+    bootLog(`[spawn] ${cmd} ${args.join(" ")} port=${SERVER_PORT}`);
+  } else {
+    bootLog(`[spawn] pbc-server.exe port=${SERVER_PORT}`);
+  }
 
   pythonProcess = spawn(cmd, args, {
     cwd: cwd || undefined,
@@ -138,12 +172,21 @@ function startPythonServer() {
 
   pythonProcess.stdout.on("data", (data) => {
     const msg = data.toString().trim();
-    if (msg) console.log(`[pbc-server] ${msg}`);
+    if (msg) {
+      // 对抗审查（分发实证 #5）：打包模式 console 不再回显含绝对路径的
+      // 后端输出（用户 DevTools 可见，观感差且暴露本机目录）；完整内容
+      // 始终落盘 %APPDATA%/PBC/logs/backend-boot.log 供排障。
+      if (!app.isPackaged) console.log(`[pbc-server] ${msg}`);
+      bootLog(`[stdout] ${msg}`);
+    }
   });
 
   pythonProcess.stderr.on("data", (data) => {
     const msg = data.toString().trim();
-    if (msg) console.error(`[pbc-server] ${msg}`);
+    if (msg) {
+      if (!app.isPackaged) console.error(`[pbc-server] ${msg}`);
+      bootLog(`[stderr] ${msg}`);
+    }
   });
 
   pythonProcess.on("error", (err) => {
@@ -151,11 +194,13 @@ function startPythonServer() {
     // 日志，waitForServer 继续空轮询满 60 次（30s）后才报误导性的
     // "启动超时"。此处把错误记录到全局，waitForServer 立即失败。
     console.error("[BatchSentry] Failed to start server:", err);
+    bootLog(`[spawn-error] ${err.message}`);
     spawnError = err;
   });
 
   pythonProcess.on("exit", (code, signal) => {
     console.log(`[BatchSentry] Server exited (code=${code} signal=${signal})`);
+    bootLog(`[exit] code=${code} signal=${signal}`);
     pythonProcess = null;
   });
 }
@@ -166,10 +211,28 @@ function startPythonServer() {
 function waitForServer() {
   return new Promise((resolve, reject) => {
     let checks = 0;
+    let lastError = "no error captured"; // 对抗审查：失败时带出真实原因
+    // 对抗审查（分发实证）：固定 60 次×500ms 会误杀"慢但健康"的冷启动
+    // （杀软深度扫描实测可拖 >145s 才到 uvicorn）。改为截止时间制：
+    // 子进程存活就继续等（上限 180s）；进程退出/spawn 失败立即失败。
+    const deadline = Date.now() + READY_TIMEOUT_MS;
 
     const check = () => {
       if (spawnError) {
         reject(spawnError);
+        return;
+      }
+      if (!pythonProcess && !reusedBackend) {
+        reject(new Error(
+          `Server process exited before becoming ready (last error: ${lastError})`,
+        ));
+        return;
+      }
+      if (Date.now() > deadline) {
+        reject(new Error(
+          `Server not ready within 180s (last error: ${lastError}) `
+          + `— see %APPDATA%/PBC/logs/backend-boot.log`,
+        ));
         return;
       }
       const req = http.get(
@@ -177,28 +240,38 @@ function waitForServer() {
         (res) => {
           if (res.statusCode === 200) {
             console.log("[BatchSentry] Server ready");
+            bootLog(`[ready] after ${checks} failed checks`);
             resolve();
           } else {
+            lastError = `HTTP ${res.statusCode}`;
             retry();
           }
           res.resume();
         },
       );
 
-      req.on("error", () => retry());
+      req.on("error", (err) => {
+        lastError = err.code || err.message; // ECONNREFUSED / ETIMEDOUT / ...
+        retry();
+      });
       req.setTimeout(2000, () => {
         req.destroy();
+        lastError = "request timeout (2s)";
         retry();
       });
     };
 
     const retry = () => {
       checks += 1;
-      if (checks >= MAX_READY_CHECKS) {
-        reject(new Error(`Server not ready after ${MAX_READY_CHECKS} checks`));
-      } else {
-        setTimeout(check, 500);
+      // 每 20 次（约 10s）把进度与当前错误刷到 splash + 日志
+      if (checks > 0 && checks % 20 === 0) {
+        setSplashStatus(`仍在等待后端就绪…（${Math.round(checks / 2)}s）`);
+        console.warn(
+          `[BatchSentry] health check #${checks}: still waiting (${lastError})`,
+        );
+        bootLog(`[wait] check=${checks} lastError=${lastError}`);
       }
+      setTimeout(check, 500);
     };
 
     check();
@@ -344,7 +417,8 @@ function createSplashWindow() {
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body {
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI",
+      "Microsoft YaHei", "微软雅黑", system-ui, sans-serif;
     background: #ffffff;
     color: #0a0a0a;
     height: 100vh;
@@ -394,9 +468,30 @@ function createSplashWindow() {
 </style>
 </head>
 <body>
-  <h1>BatchSentry</h1>
+  <h1 id="brand"></h1>
   <div class="spinner"><i></i><i></i><i></i></div>
-  <p id="status">正在初始化…</p>
+  <p id="status"></p>
+  <script>
+    // 对抗审查（分发实证 #1）：首帧曾直接渲染中文文本，软件渲染环境下
+    // DirectWrite 的 CJK 回退字体（雅黑）尚未就绪 → 先画出方框（tofu），
+    // 数秒后字体可用才恢复正常 —— 观感即"先方框、后动画/文字"。
+    // 修复：spinner 圆点是纯形状不依赖字形，立即呈现；文本等 fonts.ready
+    // （300ms 兜底）再填充，首帧永远是干净的 白底+呼吸点。
+    (function () {
+      var fill = function () {
+        document.getElementById("brand").textContent = "BatchSentry";
+        document.getElementById("status").textContent = "正在初始化…";
+      };
+      if (document.fonts && document.fonts.ready) {
+        var done = false;
+        var go = function () { if (!done) { done = true; fill(); } };
+        document.fonts.ready.then(go);
+        setTimeout(go, 300);
+      } else {
+        fill();
+      }
+    })();
+  </script>
 </body>
 </html>`),
   );
@@ -476,6 +571,20 @@ function createWindow() {
     return { action: "deny" };
   });
 
+  // Block same-window navigation away from the local server. setWindowOpenHandler
+  // only covers window.open — without this guard, window.location = "https://..."
+  // (or any injected <a> click) would navigate the trusted app window to an
+  // attacker-controlled page (credential phishing against GMP users).
+  mainWindow.webContents.on("will-navigate", (event, url) => {
+    const allowedPrefixes = [
+      `http://${SERVER_HOST}:${SERVER_PORT}/`,
+      `http://localhost:${SERVER_PORT}/`,
+    ];
+    if (!allowedPrefixes.some((prefix) => url.startsWith(prefix))) {
+      event.preventDefault();
+    }
+  });
+
   // DevTools in dev mode only
   if (!app.isPackaged) {
     mainWindow.webContents.openDevTools({ mode: "detach" });
@@ -507,6 +616,7 @@ app.whenReady().then(async () => {
     if (!portOk) {
       reused = await probeHealth(SERVER_PORT);
       if (reused) {
+        reusedBackend = true; // waitForServer 不要求子进程存活
         setSplashStatus("检测到正在运行的 BatchSentry 服务，直接连接…");
         console.warn(`SERVER: Port ${SERVER_PORT} occupied by a healthy backend, reusing it (orphan recovery)`);
         // 对抗审查 P2-K：记录孤儿后端 PID，退出时必须一并清理 —

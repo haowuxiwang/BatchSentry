@@ -121,6 +121,26 @@ async def _generate_report_md_cached(job_id: str) -> str:
 
     # 生成报告（在锁外执行，避免长时间持锁）
     exemptions = await _load_exemptions(db, job_id)
+    # 对抗审查 P1：零 findings ≠ 全部合规。OCR 全空页/分析缺失时 job 照样
+    # 终态 review，旧报告输出"✅ 无需人工复核"= 静默合规通过假象。
+    # 报告头部与汇总必须声明 OCR 覆盖情况，供复核者判定可信度。
+    empty_pages = 0
+    unanalyzed_pages = 0
+    pc = await db.execute(
+        "SELECT structured_json FROM page_cache WHERE job_id = ?", (job_id,)
+    )
+    for r in await pc.fetchall():
+        sj_raw = r["structured_json"]
+        if not sj_raw:
+            unanalyzed_pages += 1
+            continue
+        try:
+            sj = json.loads(sj_raw)
+        except json.JSONDecodeError:
+            unanalyzed_pages += 1
+            continue
+        if isinstance(sj, dict) and sj.get("_ocr_empty"):
+            empty_pages += 1
     # 缓存 key：findings 数量 + 最后一条 finding 的 id + status_hash +
     # 豁免清单规模（记录/撤销豁免不改变 findings，但改变报告内容）。
     cache_key = (job_id, len(findings), last_id, status_hash, len(exemptions))
@@ -132,7 +152,9 @@ async def _generate_report_md_cached(job_id: str) -> str:
             return _report_cache[cache_key]
 
     # 生成报告（在锁外执行，避免长时间持锁）
-    md = _generate_markdown(job, findings, total_pages, exemptions)
+    md = _generate_markdown(job, findings, total_pages, exemptions,
+                            empty_pages=empty_pages,
+                            unanalyzed_pages=unanalyzed_pages)
 
     # 写入缓存，清理超出的项
     async with _report_cache_lock:
@@ -225,7 +247,9 @@ def _append_exemption_section(lines: list[str], exemptions: list[dict], esc) -> 
 
 
 def _generate_markdown(job: dict, findings: list[dict], total_pages: int,
-                       exemptions: list[dict] | None = None) -> str:
+                       exemptions: list[dict] | None = None,
+                       empty_pages: int = 0,
+                       unanalyzed_pages: int = 0) -> str:
     """Build Markdown report from findings."""
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
     SeverityIcon = {"critical": "🔴", "warning": "🟡", "info": "🔵"}
@@ -258,6 +282,15 @@ def _generate_markdown(job: dict, findings: list[dict], total_pages: int,
         f"- **生成时间**: {now}",
         f"- **Job ID**: {job['id']}",
         f"- **总 Findings**: {len(findings)}",
+    ]
+    # 对抗审查 P1：OCR 覆盖不完整时报告头部必须显式声明 —
+    # 零 findings 可能只是数据缺失，不是合规通过。
+    if empty_pages or unanalyzed_pages:
+        lines.append(
+            f"- **页面覆盖**: {empty_pages} 页 OCR 内容为空，"
+            f"{unanalyzed_pages} 页未完成分析"
+        )
+    lines += [
         "",
         "---",
         "",
@@ -278,7 +311,15 @@ def _generate_markdown(job: dict, findings: list[dict], total_pages: int,
         lines.append("")
         lines.append("## 汇总")
         lines.append("")
-        lines.append("✅ 未发现问题，无需人工复核。")
+        if empty_pages or unanalyzed_pages:
+            # 覆盖不完整：零问题可能只是数据缺失，不得宣称合规通过
+            lines.append(
+                f"⚠️ 未发现问题，但页面覆盖不完整"
+                f"（{empty_pages} 页内容为空、{unanalyzed_pages} 页未完成分析）。"
+                f"零问题记录可能源于数据缺失，请人工核对 PDF 原件后再判定。"
+            )
+        else:
+            lines.append("✅ 未发现问题，无需人工复核。")
         lines.append("")
         return "\n".join(lines)
 

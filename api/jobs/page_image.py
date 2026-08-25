@@ -138,6 +138,20 @@ async def get_job_page_image(job_id: str, page_num: int, request: Request = None
         raise HTTPException(500, "PDF 无法渲染（文件可能损坏）")
     if page_num < 1 or page_num > doc.page_count:
         raise HTTPException(404, f"页码越界（有效范围 1-{doc.page_count}）")
+    # 对抗审查 P1（性能）：复核动作此前每次确认/拒绝都整页 reload，页面
+    # 图无 ETag → no-cache 协商无从命中 → fitz 对同一页反复渲染 + 数百 KB
+    # 重传。ETag 由 (job, page, pdf mtime, size) 组成：job 终态后页内容不变，
+    # If-None-Match 命中即 304 短路（渲染与传输都省掉）。
+    try:
+        st = pdf_path.stat()
+        etag = f'"{job_id}-{page_num}-{int(st.st_mtime)}-{st.st_size}"'
+    except OSError:
+        etag = None
+    if (
+        etag
+        and request.headers.get("if-none-match", "").strip() == etag
+    ):
+        return Response(status_code=304, headers={"ETag": etag})
     # 渲染在线程池执行：大扫描页 get_pixmap 需秒级，同步执行会阻塞整个
     # 事件循环（所有 API/SSE 请求排队，前端"正在渲染"卡住）。尺寸由
     # _pdf_render_zoom 限制（≤2000px 宽），输出 JPEG 体积再降 5-10x。
@@ -155,10 +169,13 @@ async def get_job_page_image(job_id: str, page_num: int, request: Request = None
     except Exception as e:
         logger.error(f"[{job_id}] Page render failed (p{page_num}): {e}")
         raise HTTPException(500, "页面渲染失败，请重试")
+    headers = {"Cache-Control": "private, max-age=300"}  # 页内容 job 内不变；短窗免往返
+    if etag:
+        headers["ETag"] = etag
     return Response(
         content=jpeg,
         media_type="image/jpeg",
-        # 注：Cache-Control 由 main.py 全局中间件统一设置（非 /static/ 一律 no-cache）
+        headers=headers,
     )
 
 async def _page_finding_counts(db, job_id: str) -> dict[int, dict]:

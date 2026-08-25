@@ -372,6 +372,28 @@
             </div>
             {% endif %}
 
+            {# 对抗审查 P1：LLM 输出截断已恢复 / schema 校验未通过 — 数据可能
+               静默缺失（尾部 findings/测量值被丢弃），复核者必须知情。 #}
+            {% if page_llm_truncated or page_schema_warn %}
+            <div id="llm-integrity-banner" class="llm-integrity-banner rounded-md border-l-2 border-warning bg-card px-3 py-2 flex items-start gap-2">
+                <span class="w-1.5 h-1.5 rounded-full bg-warning mt-[5px] shrink-0"></span>
+                <div class="flex-1 min-w-0">
+                    <p class="text-xs font-medium text-foreground">此页 LLM 分析结果可能不完整{% if page_llm_truncated %}（输出过长被截断后自动恢复，尾部数据可能丢失）{% endif %}{% if page_llm_truncated and page_schema_warn %}；{% endif %}{% if page_schema_warn %}（结构校验未完全通过）{% endif %}，请以 PDF 原图核对此页全部内容</p>
+                    {% if page_schema_warn %}
+                    <p class="text-xs text-muted-foreground mt-0.5 font-mono llm-schema-warn-text">{{ page_schema_warn|join('；') }}</p>
+                    {% endif %}
+                </div>
+            </div>
+            {% else %}
+            <div id="llm-integrity-banner" class="llm-integrity-banner rounded-md border-l-2 border-warning bg-card px-3 py-2 flex items-start gap-2 hidden">
+                <span class="w-1.5 h-1.5 rounded-full bg-warning mt-[5px] shrink-0"></span>
+                <div class="flex-1 min-w-0">
+                    <p class="text-xs font-medium text-foreground llm-integrity-text">此页 LLM 分析结果可能不完整，请以 PDF 原图核对此页全部内容</p>
+                    <p class="text-xs text-muted-foreground mt-0.5 font-mono llm-schema-warn-text hidden"></p>
+                </div>
+            </div>
+            {% endif %}
+
             <!-- Findings list — Linear 风格扁平列表，无外层卡片包裹 -->
             <div class="flex flex-col">
                 <!-- 列表 header — 仅标题 + 计数，无卡片背景 -->
