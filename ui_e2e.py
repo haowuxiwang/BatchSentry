@@ -122,9 +122,18 @@ try:
             pd = httpx.get(f"{BASE}/api/jobs/{jid}/pages/{n}").json()
             api_ocr[n] = norm(pd.get("raw_html"))
 
+        nav_ms = []
         for n in range(1, total + 1):
+            t_nav = time.time()
             page.click(f'.page-nav-item[data-page="{n}"]')
-            page.wait_for_timeout(600)  # AJAX settle
+            # 等待该页图片就位（src 切换）—— CSP 禁 eval，用 Python 轮询
+            for _ in range(120):
+                src_now = page.locator("#pdf-page-img").get_attribute("src") or ""
+                if src_now.endswith(f"/page/{n}"):
+                    break
+                time.sleep(0.05)
+            page.wait_for_timeout(500)  # findings/OCR 渲染 settle
+            nav_ms.append(int((time.time() - t_nav) * 1000))
             src = page.locator("#pdf-page-img").get_attribute("src") or ""
             ok_img = src.endswith(f"/page/{n}")
             natural = page.evaluate(
@@ -157,6 +166,11 @@ try:
         # prev/next arrows
         page.click('.page-nav-item[data-page="3"]')
         page.wait_for_timeout(1500)  # 充分等待 AJAX 完成
+        avg_nav = sum(nav_ms) // max(1, len(nav_ms))
+        worst = max(nav_ms) if nav_ms else 0
+        check("P3 nav smoothness (avg<=1.5s, worst<=4s)",
+              avg_nav <= 1500 and worst <= 4000,
+              f"per-page ms={nav_ms} avg={avg_nav} worst={worst}")
         diag = page.evaluate(
             """() => {
               const n = document.getElementById('btn-next-page');
@@ -211,6 +225,20 @@ try:
 
         hover_check("ocr", "ocr-save-btn", "保存 OCR 设置")
         hover_check("rules", "rule-save-btn", "保存规则")
+
+        # 规则保存往返：UI 点击 → 内容不变 + last_saved_at 前进（真实持久化）
+        rules_before = httpx.get(f"{BASE}/api/settings/rules").json()
+        page.locator("#rule-save-btn").click()
+        page.wait_for_timeout(2000)
+        rules_after = httpx.get(f"{BASE}/api/settings/rules").json()
+        check("P4 rules save keeps content",
+              rules_before["rules"] == rules_after["rules"])
+        check("P4 rules save persists (last_saved_at advances)",
+              rules_after.get("last_saved_at")
+              and rules_after["last_saved_at"]
+              != rules_before.get("last_saved_at"),
+              f"before={rules_before.get('last_saved_at')} "
+              f"after={rules_after.get('last_saved_at')}")
 
         # provider connectivity probe (LLM reachability from UI)
         page.evaluate(
