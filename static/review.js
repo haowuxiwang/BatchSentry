@@ -554,6 +554,12 @@
 
   // 更新 PDF 区域页码显示
   function updatePdfDisplay(targetPage) {
+    // 对抗审查（分发实证）：syncNavButtons 必须无条件执行 —— 此前放在
+    // 函数末尾，而图片缓存命中（src 已是目标页）会提前 return 跳过它；
+    // 叠加 loadPageData 中间态用旧 currentPage 计算过一次禁用位，导致
+    // "从末页跳回任意页后 next 永久卡死"。箭头状态只依赖
+    // currentPage/totalPages，与图片是否重新渲染无关。
+    syncNavButtons();
     const pageNumEl = document.getElementById("page-num");
     if (pageNumEl) pageNumEl.textContent = targetPage;
     // 更新标题栏 "第 N / M 页" 和计数器 "N / M"（totalPages=0 显示 "?"）
@@ -577,8 +583,6 @@
         loading.querySelector("p").textContent = `正在渲染第 ${targetPage} 页 …`;
       }
     }
-    // 更新翻页按钮 disabled 状态（prev/next 箭头 — 页码导航各自管理 active 态）
-    syncNavButtons();
   }
 
   // AJAX 加载页面数据（findings + OCR + measurements + banners）
@@ -616,6 +620,10 @@
       );
 
       // 更新页码导航 + PDF + 翻页按钮
+      // 对抗审查：先落全局 currentPage 再刷 UI —— updatePdfDisplay 内的
+      // syncNavButtons 读取全局值，后置赋值会让中间态按旧页码计算
+      // （从末页回跳时 next 被错误禁用）。
+      currentPage = targetPage;
       updatePageNavActive(targetPage);
       updatePdfDisplay(targetPage);
 
@@ -643,7 +651,7 @@
         measurementsData,
       );
 
-      currentPage = targetPage;
+      // currentPage 已在 UI 刷新前更新（见上）
       log("loadPageData — success", {
         page: targetPage,
         findings: findingsData.count,
