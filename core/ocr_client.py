@@ -25,6 +25,16 @@ logger.addFilter(JobIdFilter())
 
 POLL_INTERVAL = 5  # seconds
 POLL_TIMEOUT = 600  # 10 minutes（基础值，大文档按页数扩展）
+
+
+class OCRCancelled(RuntimeError):
+    """Raised inside blocking OCR worker threads when the job was cancelled.
+
+    asyncio.to_thread 无法中断已运行的线程，只能由轮询循环主动检查外部
+    取消标记后抛出本异常，把中止信号带回事件循环 —— 避免用户点取消后
+    主/备两个后端仍各跑满整个轮询超时（51 页任务最长可达数十分钟，
+    白白消耗上游配额）。failover 链必须放行本异常而非切换备选。
+    """
 # 每页额外轮询预算（秒）：e2e 实证 51 页/43.8MB 任务 600s 内未返回
 # （2026-08-24 任务 85287516750168064 轮询超时）；大任务在服务端排队+
 # 逐页抽取时间随页数线性增长，固定 600s 对大文档过紧。
@@ -108,13 +118,20 @@ def submit_pdf(pdf_path: str, retries: int = 3) -> str:
         pdf_file.close()
 
 
-def poll_job(job_id: str, progress_callback=None, timeout_s: int | None = None) -> dict:
+def poll_job(
+    job_id: str,
+    progress_callback=None,
+    timeout_s: int | None = None,
+    cancel_check=None,
+) -> dict:
     """Poll until job done. Returns the final poll response dict.
 
-    容错：网络异常重试，最多 POLL_MAX_RETRIES 次后放弃。
-    progress_callback(done, total): 每次轮询到 extractProgress 时回调，
-    供 pipeline 实时更新 job 进度（Stage 1 流式反馈）。
-    timeout_s: 轮询上限（缺省 POLL_TIMEOUT；大文档由 run_ocr 按页数扩展）。
+    容错：网络异常重试，最�?POLL_MAX_RETRIES 次后放弃�?
+    progress_callback(done, total): 每次轮询�?extractProgress 时回调，
+    �?pipeline 实时更新 job 进度（Stage 1 流式反馈）�?
+    timeout_s: 轮询上限（缺�?POLL_TIMEOUT；大文档�?run_ocr 按页数扩展）�?
+    cancel_check: 同步取消探针（阻塞线程内无法 await，由调用方提供
+    线程安全的只读检查）；返回 True 时抛 OCRCancelled 中止轮询。
     """
     timeout_s = timeout_s or POLL_TIMEOUT
     cfg = config["paddle_ocr"]
@@ -124,6 +141,8 @@ def poll_job(job_id: str, progress_callback=None, timeout_s: int | None = None) 
     consecutive_errors = 0
 
     while (time.time() - start) < timeout_s:
+        if cancel_check is not None and cancel_check():
+            raise OCRCancelled(f"job {job_id} cancelled during OCR polling")
         try:
             resp = requests.get(url, headers=headers, timeout=30)
             if resp.status_code != 200:
@@ -393,21 +412,30 @@ def download_result(poll_response: dict, pdf_path: str = "") -> list[dict]:
     return pages
 
 
-def run_ocr(pdf_path: str, progress_callback=None, job_id: str = "") -> list[dict]:
-    """End-to-end OCR: submit → poll → download. Returns list of page results.
+def run_ocr(
+    pdf_path: str,
+    progress_callback=None,
+    job_id: str = "",
+    cancel_check=None,
+) -> list[dict]:
+    """End-to-end OCR: submit �?poll �?download. Returns list of page results.
 
-    progress_callback 透传给 poll_job（Stage 1 实时进度）。
-    job_id: 应用层 job id — 仅用于日志前缀（本模块所有日志自动带
-    [job_id]），便于从 pipeline.log 反查某个 job 的 OCR 全流程。
+    progress_callback 透传�?poll_job（Stage 1 实时进度）�?
+    job_id: 应用�?job id �?仅用于日志前缀（本模块所有日志自动带
+    [job_id]），便于�?pipeline.log 反查某个 job �?OCR 全流程�?
+    cancel_check: 同步取消探针，透传 poll_job（见 OCRCancelled）。
     """
     if job_id:
         _token = ocr_job_id_var.set(job_id)
     try:
         paddle_job_id = submit_pdf(pdf_path)
-        # 大文档按页数扩展轮询预算（e2e 实证 51 页 600s 超时）
+        # 大文档按页数扩展轮询预算（e2e 实证 51 �?600s 超时�?
         timeout_s = poll_timeout_for(pdf_path)
         poll_response = poll_job(
-            paddle_job_id, progress_callback=progress_callback, timeout_s=timeout_s
+            paddle_job_id,
+            progress_callback=progress_callback,
+            timeout_s=timeout_s,
+            cancel_check=cancel_check,
         )
         # pdf_path 透传（与 MinerU 签名对齐；Paddle 解析暂不用它，留给
         # 后续页数对齐校验扩展）

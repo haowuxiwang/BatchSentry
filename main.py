@@ -3,6 +3,7 @@ import logging
 import sys
 from contextlib import asynccontextmanager
 
+import json
 import re
 from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request
@@ -12,7 +13,6 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi.responses import HTMLResponse, FileResponse
 from markupsafe import Markup
-from pathlib import Path
 
 from config import config
 from db.client import get_db, close_db
@@ -150,10 +150,12 @@ async def security_headers_middleware(request: Request, call_next):
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     response.headers["X-XSS-Protection"] = "0"  # 现代浏览器用 CSP，关闭旧的 XSS Auditor
     # 静态资源缓存：CSS/JS/字体长期缓存（文件名不变即可），HTML 不缓存
+    # setdefault: endpoint-declared Cache-Control (e.g. page_image
+    # private,max-age) survives; no-cache + ETag revalidation still applies.
     if request.url.path.startswith("/static/"):
         response.headers["Cache-Control"] = "public, max-age=86400"
     else:
-        response.headers["Cache-Control"] = "no-cache"
+        response.headers.setdefault("Cache-Control", "no-cache")
     return response
 
 # Mount static files
@@ -440,6 +442,11 @@ async def review_page(job_id: str, request: Request, page: int = 1):
         page_ocr_warning = str(data.get("_ocr_warning") or "")
         # 幻觉防护：LLM 提取数值未在 OCR 原文找到 — 横幅提醒复核重点核对
         page_grounding_warn = data.get("_grounding_warn") or []
+        # 对抗审查 P1：LLM 输出截断已被 _repair_truncated_json 静默恢复 /
+        # schema 校验重试后仍不合规 — 此前这两个标记无任何消费终端，
+        # 复核者看不到"数据可能缺失"，必须与 OCR 横幅同等透出
+        page_llm_truncated = bool(data.get("_truncated_warn"))
+        page_schema_warn = data.get("_schema_warn") or []
         page_confidence = data.get("overall_confidence") or ""
         col_set: dict[str, None] = {}
         for step in data.get("steps", []) or []:
@@ -460,6 +467,8 @@ async def review_page(job_id: str, request: Request, page: int = 1):
         page_ocr_truncated = False
         page_ocr_warning = ""
         page_grounding_warn = []
+        page_llm_truncated = False
+        page_schema_warn = []
         page_confidence = ""
 
     # Count findings by severity (all pages, for status bar)
@@ -522,6 +531,8 @@ async def review_page(job_id: str, request: Request, page: int = 1):
         "page_ocr_truncated": page_ocr_truncated,
         "page_ocr_warning": page_ocr_warning,
         "page_grounding_warn": page_grounding_warn,
+        "page_llm_truncated": page_llm_truncated,
+        "page_schema_warn": page_schema_warn,
         "page_confidence": page_confidence,
         # cr-19: 实际 OCR 后端（failover 后与配置不同 — GMP 复核可见性）
         "ocr_backend_used": job["ocr_backend_used"] if "ocr_backend_used" in job.keys() else None,
@@ -533,13 +544,16 @@ async def review_page(job_id: str, request: Request, page: int = 1):
 
 
 @app.get("/api/jobs/{job_id}/pdf")
-async def serve_pdf(job_id: str):
+async def serve_pdf(job_id: str, request: Request):
     """Serve the original PDF for in-browser preview.
 
     Security: validate pdf_path is within output_dir to prevent path
     traversal. If DB is tampered (SQL injection or direct edit), the
     pdf_path could point to arbitrary system files like C:\\Windows\\...
     """
+    from core.security import is_local_request
+    if request is not None and not is_local_request(request):
+        raise HTTPException(403, "Forbidden (non-local request)")
     db = await get_db()
     cursor = await db.execute("SELECT pdf_path FROM jobs WHERE id = ?", (job_id,))
     row = await cursor.fetchone()

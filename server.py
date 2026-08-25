@@ -16,6 +16,13 @@ if __name__ == "__main__":
     import os
     import sys
     import time
+    # 对抗审查（分发实证）：最早一行引导日志 —— 此后 uvicorn/heavy imports
+    # 可能被杀软扫描拖到分钟级，backend-boot.log 需要能切分"引导阶段"与
+    # "导入/绑定阶段"。PYTHONUNBUFFERED=1 由 Electron 注入。
+    print(
+        f"[boot] server.py entering pid={os.getpid()} t={time.strftime('%H:%M:%S')}",
+        flush=True,
+    )
     import traceback
     import uvicorn
 

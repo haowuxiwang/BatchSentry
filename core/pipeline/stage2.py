@@ -185,6 +185,16 @@ async def _analyze_one(
                     "WHERE job_id = ? AND page = ?",
                     (payload, job_id, page_num),
                 )
+                # 对抗审查 P2：重分析页先清该页待审（pending）llm_page 旧行 —
+                # 自愈/重试后 raw_html 变化 → 新 findings 指纹不同，
+                # idx_findings_dedup UNIQUE 挡不住，新旧两套结论并存误导复核。
+                # 只删 pending：confirmed/rejected/corrected 是人工裁决记录
+                # （GMP 审计证据），必须保留。
+                await db.execute(
+                    "DELETE FROM findings WHERE job_id = ? AND page = ? "
+                    "AND source = 'llm_page' AND status = 'pending'",
+                    (job_id, page_num),
+                )
                 # 流式输出：立即把该页 LLM 产生的 findings 写入 findings 表。
                 # 对抗审查(cr-3): llm_page 路径同样依赖 idx_findings_dedup UNIQUE
                 # 索引（v5）做原子去重，防御"部分提交残留 + retry"组合路径下的重复行。

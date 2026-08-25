@@ -1,4 +1,8 @@
 fastapi>=0.110.0
+# Floor for SSE safety: >=0.47 GZipMiddleware excludes text/event-stream from
+# compression — older versions buffer SSE frames until ~64KB (progress appears
+# frozen, then dumps all at once).
+starlette>=0.47.0
 uvicorn[standard]>=0.27.0
 python-multipart>=0.0.9
 jinja2>=3.1.3

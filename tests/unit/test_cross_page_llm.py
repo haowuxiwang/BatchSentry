@@ -920,6 +920,47 @@ class TestSignatureOrder:
         ])
         assert _check_signature_order(pages) == []
 
+    def test_same_role_adjacent_no_finding(self):
+        """对抗审查 P2：同角色相邻对不比较 — 两名复核人之间的先后在 GMP
+        上通常无约束，逐对比较会结构性误报。"""
+        pages = _norm([
+            _make_page(1, [
+                _make_step(1, start_time="2024.01.01 08:00",
+                           signatures=[
+                               {"role": "operator", "name": "张三",
+                                "sign_time": "2024.01.01 09:00"},
+                               # 王五早于李四，但同为 reviewer → 不报
+                               {"role": "reviewer", "name": "李四",
+                                "sign_time": "2024.01.01 10:00"},
+                               {"role": "reviewer", "name": "王五",
+                                "sign_time": "2024.01.01 09:30"},
+                           ]),
+            ]),
+        ])
+        assert _check_signature_order(pages) == []
+
+    def test_cross_level_still_detected_among_same_role_pairs(self):
+        """同角色豁免不放过跨级违规：reviewer 早于 operator 仍必须报。"""
+        pages = _norm([
+            _make_page(1, [
+                _make_step(1, start_time="2024.01.01 08:00",
+                           signatures=[
+                               {"role": "operator", "name": "张三",
+                                "sign_time": "2024.01.01 10:00"},
+                               # 早于操作签名（跨级违规）
+                               {"role": "reviewer", "name": "李四",
+                                "sign_time": "2024.01.01 09:30"},
+                               # 同为 reviewer 的第二人（应被豁免）
+                               {"role": "reviewer", "name": "王五",
+                                "sign_time": "2024.01.01 09:00"},
+                           ]),
+            ]),
+        ])
+        findings = _check_signature_order(pages)
+        assert len(findings) == 1
+        assert "李四" in findings[0]["description"]
+        assert "早于" in findings[0]["description"]
+
     def test_year_gap_over_2_flags_ocr(self):
         pages = _norm([
             _make_page(1, [

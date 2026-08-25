@@ -349,16 +349,21 @@ def _check_signature_order(pages: list[dict]) -> list[dict]:
                 ranked.append((rk, s, iv))
             ranked.sort(key=lambda x: x[0])
             for i in range(1, len(ranked)):
-                prev_iv = ranked[i - 1][2]
+                prev = ranked[i - 1]
                 curr = ranked[i]
-                if _interval_before(curr[2], prev_iv):
-                    year_delta = abs(curr[2][0].year - prev_iv[0].year)
+                # 对抗审查 P2：同角色相邻对不比较 —— 排序后同 rank 的两名
+                # 复核人/操作人之间的先后在 GMP 上通常无约束，逐对比较会
+                # 结构性误报；只在跨级（严格升序）时检查时间递增。
+                if curr[0] <= prev[0]:
+                    continue
+                if _interval_before(curr[2], prev[2]):
+                    year_delta = abs(curr[2][0].year - prev[2][0].year)
                     desc = (
                         f"第{pno}页 {curr[1].get('role','')} {curr[1].get('name','')} "
                         f"签名时间({curr[1].get('sign_time')}) 早于 "
-                        f"{ranked[i-1][1].get('role','')} "
-                        f"{ranked[i-1][1].get('name','')}"
-                        f"({ranked[i-1][1].get('sign_time')})，"
+                        f"{prev[1].get('role','')} "
+                        f"{prev[1].get('name','')}"
+                        f"({prev[1].get('sign_time')}),"
                         f"复核/审批顺序异常"
                     )
                     if year_delta > 2:
@@ -372,7 +377,7 @@ def _check_signature_order(pages: list[dict]) -> list[dict]:
                         "severity": "warning",
                         "description": desc,
                         "ocr_text": (
-                            f"{ranked[i-1][1].get('role','')}={ranked[i-1][1].get('sign_time')}"
+                            f"{prev[1].get('role','')}={prev[1].get('sign_time')}"
                             f" > {curr[1].get('role','')}={curr[1].get('sign_time')}"
                         ),
                         "operator": curr[1].get("name") or "",

@@ -461,8 +461,10 @@ class TestPaddleOCRRunOCR:
 
         mock_submit.assert_called_once_with(fake_pdf)
         # 2026-08-24: run_ocr 按页数自适应轮询超时（fake PDF fitz 不可读 → 基础值）
+        # 对抗审查 P2: run_ocr 透传 cancel_check=None（Stage1 取消语义）
         mock_poll.assert_called_once_with(
-            "job-e2e", progress_callback=None, timeout_s=ocr_client.POLL_TIMEOUT
+            "job-e2e", progress_callback=None, timeout_s=ocr_client.POLL_TIMEOUT,
+            cancel_check=None,
         )
         # P0-2: download_result 现在接收 pdf_path 做降级拆分页数校验
         mock_download.assert_called_once_with(
@@ -1249,7 +1251,9 @@ class TestMinerURunOCR:
         assert pages[1]["markdown"]["text"] == "第2页"
 
         mock_submit.assert_called_once_with(fake_pdf)
-        mock_poll.assert_called_once_with("batch-e2e", progress_callback=None)
+        mock_poll.assert_called_once_with(
+            "batch-e2e", progress_callback=None, cancel_check=None
+        )
         # P0-2: download_result 现在接收 pdf_path 做降级拆分页数校验
         mock_download.assert_called_once_with({
             "task_id": "t1",
@@ -1424,3 +1428,63 @@ class TestMinerURunOcrSliced:
         assert mock_submit.call_count == 2
         assert mock_poll.call_count == 2
         assert mock_download.call_count == 2
+
+
+class TestOCRCancelSemantics:
+    """对抗审查 P2：Stage 1 取消语义 — 阻塞轮询线程内的同步取消探针。
+
+    OCR 跑在 asyncio.to_thread 里无法被 await 中断；poll_job 每次循环
+    检查 cancel_check，命中即抛 OCRCancelled，failover 链放行不切备选。
+    """
+
+    def test_paddle_poll_job_cancelled_before_http(self, paddle_cfg):
+        """cancel_check 命中 → 立即抛 OCRCancelled（不发任何 HTTP）。"""
+        from core.ocr_client import OCRCancelled
+
+        with patch("core.ocr_client.requests.get") as mock_get:
+            with pytest.raises(OCRCancelled):
+                ocr_client.poll_job("job-x", cancel_check=lambda: True)
+        mock_get.assert_not_called()
+
+    def test_paddle_poll_job_not_cancelled_continues(self, paddle_cfg, monkeypatch):
+        """cancel_check 未命中 → 正常轮询（此处只验证探针为 False 不抛）。"""
+        calls = {"n": 0}
+
+        def probe():
+            calls["n"] += 1
+            return False
+
+        ok_resp = MagicMock()
+        ok_resp.status_code = 200
+        ok_resp.json.return_value = {"data": {"state": "done"}}
+        with patch("core.ocr_client.requests.get", return_value=ok_resp):
+            result = ocr_client.poll_job("job-y", cancel_check=probe)
+        assert result["data"]["state"] == "done"
+        assert calls["n"] >= 1
+
+    def test_mineru_poll_job_cancelled_before_http(self, mineru_cfg):
+        """MinerU 同构：取消探针命中 → 抛 OCRCancelled。"""
+        from core.ocr_client import OCRCancelled
+
+        with patch("core.mineru_client.requests.get") as mock_get:
+            with pytest.raises(OCRCancelled):
+                mineru_client.poll_job("batch-x", cancel_check=lambda: True)
+        mock_get.assert_not_called()
+
+    def test_mineru_run_ocr_no_resubmit_on_cancel(self, mineru_cfg, tmp_path):
+        """取消异常不得进入瞬态重提交路径（二次 submit 绝不发生）。"""
+        from core.ocr_client import OCRCancelled
+
+        fake_pdf = tmp_path / "c.pdf"
+        fake_pdf.write_bytes(b"%PDF-1.4 fake")
+
+        with patch(
+            "core.mineru_client.submit_pdf", return_value=("b1", None)
+        ) as m_submit, patch(
+            "core.mineru_client.poll_job",
+            side_effect=OCRCancelled("cancelled"),
+        ):
+            with pytest.raises(OCRCancelled):
+                mineru_client.run_ocr(str(fake_pdf), cancel_check=lambda: False)
+        # 只提交一次：OCRCancelled 无瞬态标记 → 直接 raise，不 sleep(20) 重试
+        assert m_submit.call_count == 1

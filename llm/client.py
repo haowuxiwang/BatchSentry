@@ -377,7 +377,7 @@ class LLMClient:
     def _parse_json(raw: str) -> dict | list:
         """Extract JSON from LLM response. Handles markdown fence, leading text,
         truncated JSON, and both {..} and [..]."""
-        text = raw.strip()
+        text = raw.strip().lstrip("\ufeff")
 
         # Strip markdown code fence
         if text.startswith("```"):
@@ -453,6 +453,16 @@ class LLMClient:
         return {"_parse_error": True, "_raw": raw[:500]}
 
 
+_NUM_TOKEN_RE = __import__("re").compile(
+    r"-?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?"
+)
+
+
+def re_fullmatch_number(token: str) -> bool:
+    """True when token reads as a (possibly BPE-cut) JSON number literal."""
+    return _NUM_TOKEN_RE.fullmatch(token) is not None
+
+
 def _repair_truncated_json(text: str) -> str | None:
     """Repair JSON truncated mid-string / mid-value.
 
@@ -515,17 +525,38 @@ def _repair_truncated_json(text: str) -> str | None:
         if stripped.endswith(":"):
             out.append("null")
 
-    # Trailing raw token (number/true/false/null): keep it when it reads as a
-    # complete primitive (max_tokens cuts happen between tokens, not usually
-    # mid-number); drop it otherwise.
+    # Trailing raw token: keep true/false/null (atomic keywords — a partial
+    # cut like "tru" fails the match). Bare numbers are ALWAYS dropped even
+    # when they read as complete: BPE tokenization can split mid-number
+    # ("25.4" → tokens "25" + ".4"), so a surviving "25" may be a silently
+    # wrong VALUE that still passes a numeric regex. Dropping yields null →
+    # schema validation flags the missing field → fix-hint retry regenerates.
+    # GMP correctness over salvage.
     j = len(out) - 1
-    while j >= 0 and (out[j].isspace() or out[j] in "0123456789.+-eE"):
+    while j >= 0 and (out[j].isspace() or out[j].isalnum() or out[j] in "+-."):
         j -= 1
     tail = "".join(out[j + 1:]).strip()
     if tail:
         import re as _re
-        if not _re.fullmatch(r"-?\d+(\.\d+)?([eE][+-]?\d+)?|true|false|null", tail):
+        if _re.fullmatch(r"true|false|null", tail):
+            pass  # atomic keyword intact - trustworthy, keep it
+        else:
+            lowered = tail.lower()
+            is_number = bool(re_fullmatch_number(tail))
+            is_partial_kw = any(
+                kw.startswith(lowered) for kw in ("true", "false", "null")
+            )
+            if not (is_number or is_partial_kw):
+                return None  # garbage token, not a cut JSON value
             out = out[:j + 1]
+            # mirror the in_string handling: a cut right after "key": needs a
+            # null value; a cut right after a comma leaves a dangling separator
+            while out and out[-1].isspace():
+                out.pop()
+            if out and out[-1] == ":":
+                out.append(" null")
+            elif out and out[-1] == ",":
+                out.pop()
 
     # re-balance brace stack on the trimmed prefix
     stack.clear()

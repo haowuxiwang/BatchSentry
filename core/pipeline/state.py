@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 
 from db.client import get_db
 from core.zh_map import zh_job_status
@@ -256,6 +257,32 @@ async def _is_cancelled(job_id: str) -> bool:
             logger.info(f"[{job_id}] Pipeline cancelled")
             return True
     return False
+
+
+def is_job_stopping_sync(job_id: str) -> bool:
+    """Thread-safe cancellation probe for blocking OCR worker threads.
+
+    OCR 轮询跑在 asyncio.to_thread 的线程里，无法 await 异步检查；本探针
+    用独立只读 sqlite3 连接（WAL 允许并发读）轮询 jobs.status。
+
+    只读、不做状态迁移 —— cancelling→cancelled 的正式转换 + 审计仍由
+    _is_cancelled() 在阻塞调用中止后于事件循环上完成，避免两个写入方
+    竞争同一状态行。
+    """
+    from config import config as _cfg
+
+    try:
+        conn = sqlite3.connect(_cfg["app"].database_path, timeout=2)
+        try:
+            row = conn.execute(
+                "SELECT status FROM jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+            return bool(row and row[0] in ("cancelling", "cancelled"))
+        finally:
+            conn.close()
+    except Exception:
+        # 探针失败绝不阻断 OCR 本身（下次 tick 再试）
+        return False
 
 
 async def _update_ocr_progress(job_id: str, done: int, total: int) -> None:

@@ -360,6 +360,28 @@ async def _run_ocr_with_failover(db, job_id: str, pdf_path: str, progress_cb) ->
     """
     from logging_config import ocr_job_id_var
 
+    # 对抗审查 P2：取消语义 — OCR 阻塞在 to_thread 线程里无法被 await
+    # 中断，注入同步探针让轮询循环在用户取消后数秒内主动中止，而不是
+    # 主/备两个后端各跑满轮询超时（51 页最长数十分钟）。
+    import inspect
+
+    from core.ocr_client import OCRCancelled
+    from core.pipeline.state import is_job_stopping_sync
+
+    def _cancel_probe() -> bool:
+        return is_job_stopping_sync(job_id)
+
+    def _run_with_cancel(run_fn):
+        """返回零参可调用对象（to_thread 的目标）；测试替身（无 cancel_check
+        形参）保持旧签名调用。"""
+        try:
+            accepts = "cancel_check" in inspect.signature(run_fn).parameters
+        except (TypeError, ValueError):
+            accepts = False
+        if accepts:
+            return lambda: run_fn(pdf_path, progress_cb, cancel_check=_cancel_probe)
+        return lambda: run_fn(pdf_path, progress_cb)
+
     chain = _run_get_ocr_chain()
     failures: list[str] = []
     for attempt, (run_fn, name) in enumerate(chain):
@@ -383,15 +405,20 @@ async def _run_ocr_with_failover(db, job_id: str, pdf_path: str, progress_cb) ->
             except Exception:
                 pass  # 可见性尽力而为，不阻断 failover
         _ocr_ctx_token = ocr_job_id_var.set(job_id)
+        # 注意：OCRCancelled 是 RuntimeError 子类，必须先于通用
+        # except Exception 放行，否则会被当作后端故障触发 failover
         try:
-            try:
-                pages = await asyncio.to_thread(run_fn, pdf_path, progress_cb)
-            finally:
-                ocr_job_id_var.reset(_ocr_ctx_token)
+            pages = await asyncio.to_thread(_run_with_cancel(run_fn))
+        except OCRCancelled:
+            # 用户取消不是后端故障：立即终止整条 failover 链，
+            # 由 stage1 的 _is_cancelled 完成正式状态迁移
+            raise
         except Exception as e:
             failures.append(f"{name}: {type(e).__name__}: {redact_urls(str(e))[:300]}")
             logger.error(f"[{job_id}] OCR attempt failed (backend={name}): {failures[-1]}")
             continue
+        finally:
+            ocr_job_id_var.reset(_ocr_ctx_token)
         if not pages:
             failures.append(f"{name}: 0 pages returned")
             logger.error(f"[{job_id}] OCR attempt returned 0 pages (backend={name})")

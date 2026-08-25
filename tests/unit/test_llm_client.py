@@ -387,16 +387,20 @@ class TestParseJsonTruncatedRecovery:
     """_parse_json 截断 JSON 恢复路径 — 成功恢复日志 + 块提取失败分支（lines 203-204, 216-220）。"""
 
     def test_parse_truncated_dict_recovers_and_logs(self):
-        """截断的 dict（缺少闭合 }）应恢复成功并记录日志（covers lines 216-220）。"""
+        """截断的 dict（缺少闭合 }）应恢复成功并记录日志（covers lines 216-220）。
+
+        对抗审查 P1：尾部数字一律丢弃（BPE 可把数字切成合法前缀 token，
+        保留 = 静默错值），补 null 让 schema 校验触发 fix-hint 重试。
+        """
         raw = '{"key": "value", "num": 42'
         result = LLMClient._parse_json(raw)
-        assert result == {"key": "value", "num": 42, "_truncated_recovered": True}
+        assert result == {"key": "value", "num": None, "_truncated_recovered": True}
 
     def test_parse_truncated_array_recovers_and_logs(self):
-        """截断的 array（缺少闭合 ]）应恢复成功。"""
+        """截断的 array（缺少闭合 ]）应恢复成功；末尾数字元素丢弃。"""
         raw = '[1, 2, 3'
         result = LLMClient._parse_json(raw)
-        assert result == [1, 2, 3]
+        assert result == [1, 2]
 
     def test_parse_nested_truncated_recovers(self):
         """多层嵌套截断应恢复（添加多个闭合符，仅限同类型括号）。"""
@@ -437,9 +441,17 @@ class TestRepairTruncatedJson:
         assert _repair_truncated_json('{"a": 1}') is None
 
     def test_mid_number_tail_dropped(self):
-        # 值在数字中间截断（如 "b": 12 只写了 1）— 丢弃部分 token 后补括号
+        # 值在数字中间截断（如 "b": 12.34 只写了 12）— 对抗审查 P1：
+        # BPE 可把数字切成合法前缀 token，保留 = 静默错值。一律丢弃 → null，
+        # schema 校验触发 fix-hint 重试重新生成。
         r = _repair_truncated_json('{"a": 12, "b": 34')
-        assert json.loads(r) == {"a": 12, "b": 34}
+        assert json.loads(r) == {"a": 12, "b": None}
+
+    def test_atomic_keyword_tail_kept(self):
+        # true/false/null 是原子关键字，部分截断（"tru"）过不了匹配，
+        # 完整存活即可信
+        r = _repair_truncated_json('{"a": 1, "b": true')
+        assert json.loads(r) == {"a": 1, "b": True}
 
 
 class TestParseJsonMidStringTruncation:

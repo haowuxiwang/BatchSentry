@@ -81,11 +81,21 @@ async def _run_stage1_full(
         # （保留上次真实后端，见下方 UPDATE 条件）。
         pages, used_backend, ocr_failures = reuse_pages, "cached", []
     else:
-        # 双 OCR 兜底：主后端失败（异常/0 页/严重缺页）自动切换备后端
+        # 双 OCR 兜底：主后端失败（异常 / 0 页 / 严重缺页）自动切换备后端
         # 整单重试，job 记录实际使用的后端（jobs.ocr_backend_used）审计。
-        pages, used_backend, ocr_failures = await _run_failover(
-            db, job_id, ocr_pdf_path, progress_cb
-        )
+        from core.ocr_client import OCRCancelled
+
+        try:
+            pages, used_backend, ocr_failures = await _run_failover(
+                db, job_id, ocr_pdf_path, progress_cb
+            )
+        except OCRCancelled:
+            # 轮询线程内同步探针发现取消而中止 — 此处在事件循环上跑
+            # _is_cancelled 完成 cancelling→cancelled 正式迁移 + 审计，
+            # 然后按既定取消路径返回 None（engine 直接结束流水线）。
+            if await _run_is_cancelled(job_id):
+                return None
+            raise
     stage1_ms = int((time.time() - stage1_start) * 1000)
     if not pages:
         reason = ocr_failures[0] if ocr_failures else f"backend={ocr_backend}"

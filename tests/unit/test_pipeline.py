@@ -934,12 +934,60 @@ class TestOcrFailover:
             "SELECT status, ocr_backend_used FROM jobs WHERE id = ?", (job_id,)
         )
         row = await cursor.fetchone()
-        # cr-17: 阈值收紧为 max(2, 10%) — 备后端 25/30（缺 5 页 > max(2,3)）
+        # cr-17: 阈值收紧为 max(2, 10%) → 备后端 25/30（缺 5 页 > max(2,3)）
         # 也判严重缺失 → 双后端均失败 → error（比静默接受残缺页更诚实）。
-        # 缺 1-2 页的轻微差异仍容忍（partial_review，见下一测试）。
+        # ≤1-2 页的轻微差异仍容忍（partial_review，见下一测试）。
         assert row["status"] == "error"
         # Round 10 #6: failover writes ocr_backend_used in real-time
         assert row["ocr_backend_used"] == "paddle"
+
+    @pytest.mark.asyncio
+    async def test_ocr_cancelled_aborts_chain_no_failover(self, pipeline_db, tmp_path):
+        """对抗审查 P2：取消不是后端故障 —— OCRCancelled 必须终止整条
+        failover 链（不切备选白烧配额），job 经正式迁移终态 cancelled。"""
+        import sqlite3 as _sqlite3
+
+        from core.ocr_client import OCRCancelled
+
+        job_id = await _insert_job(pipeline_db, status="pending")
+        pdf_path = str(tmp_path / "fake.pdf")
+        Path(pdf_path).write_bytes(b"%PDF-1.4 fake")
+        db_path = config["app"].database_path
+
+        def _cancelled_during_poll(pdf_path, progress_callback=None,
+                                   cancel_check=None):
+            # 模拟用户在 OCR 轮询期间点了取消（POST /cancel 置 cancelling；
+            # 同步探针发现后抛 OCRCancelled —— 与真实链路一致）
+            con = _sqlite3.connect(db_path)
+            try:
+                con.execute(
+                    "UPDATE jobs SET status = 'cancelling' WHERE id = ?",
+                    (job_id,),
+                )
+                con.commit()
+            finally:
+                con.close()
+            raise OCRCancelled("cancelled during polling")
+
+        secondary_calls = []
+
+        def _secondary(pdf_path, progress_callback=None):
+            secondary_calls.append(True)
+            return [{"markdown": {"text": "should never run"}}]
+
+        chain = [(_cancelled_during_poll, "mineru"), (_secondary, "paddle")]
+
+        with patch(
+            "core.pipeline._get_ocr_chain", return_value=chain
+        ):
+            await run_pipeline(job_id, pdf_path)
+
+        assert not secondary_calls, "failover 链在取消后不得切换备选后端"
+        cursor = await pipeline_db.execute(
+            "SELECT status FROM jobs WHERE id = ?", (job_id,)
+        )
+        row = await cursor.fetchone()
+        assert row["status"] == "cancelled"
 
     @pytest.mark.asyncio
     async def test_single_backend_chain_no_fallback(self, pipeline_db, tmp_path):

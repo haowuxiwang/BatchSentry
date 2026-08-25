@@ -522,7 +522,7 @@ class TestMinerUTransientResubmit:
         def fake_submit(_):
             calls["submit"] += 1
             return (f"batch-{calls['submit']}", "file-1")
-        def fake_poll(batch_id, progress_callback=None):
+        def fake_poll(batch_id, progress_callback=None, cancel_check=None):
             r = results.pop(0)
             if isinstance(r, Exception):
                 raise r
@@ -543,7 +543,7 @@ class TestMinerUTransientResubmit:
         def fake_submit(_):
             calls["submit"] += 1
             return ("batch-1", "file-1")
-        def fake_poll(batch_id, progress_callback=None):
+        def fake_poll(batch_id, progress_callback=None, cancel_check=None):
             raise RuntimeError("[MinerU] token 无效")
         with mock.patch.object(mineru_client, "submit_pdf", side_effect=fake_submit), \
              mock.patch.object(mineru_client, "poll_job", side_effect=fake_poll), \
@@ -558,7 +558,7 @@ class TestMinerUTransientResubmit:
         def fake_submit(_):
             calls["submit"] += 1
             return (f"batch-{calls['submit']}", "file-1")
-        def fake_poll(batch_id, progress_callback=None):
+        def fake_poll(batch_id, progress_callback=None, cancel_check=None):
             raise RuntimeError("[MinerU] 解析失败 task=x: parsing failed, please try again later")
         with mock.patch.object(mineru_client, "submit_pdf", side_effect=fake_submit), \
              mock.patch.object(mineru_client, "poll_job", side_effect=fake_poll), \

@@ -28,6 +28,10 @@ from pathlib import Path
 
 import requests
 
+# OCRCancelled 定义在 ocr_client（failover 链据此放行取消、不切备选）；
+# MinerU 轮询线程内同样用它在用户取消时中止阻塞等待
+from core.ocr_client import OCRCancelled
+
 from config import config
 from core.security import redact_urls
 from logging_config import ocr_job_id_var, JobIdFilter
@@ -150,20 +154,24 @@ def submit_pdf(pdf_path: str) -> tuple[str, str]:
     return batch_id, pdf_name
 
 
-def poll_job(batch_id: str, progress_callback=None) -> dict:
+def poll_job(batch_id: str, progress_callback=None, cancel_check=None) -> dict:
     """轮询批次结果直到全部完成。
 
     MinerU 批量上传后用 batch_id 查询整体进度。
     返回 extract_result 列表中的第一个（我们只上传了一个文件）。
 
-    progress_callback(done, total): 每次轮询到 extract_progress 时回调，
+    progress_callback(done, total): 每次轮询时 extract_progress 回调，
     供 pipeline 实时更新 job 进度（Stage 1 流式反馈）。
+    cancel_check: 同步取消探针；返回 True 时抛 OCRCancelled 中止阻塞
+    等待（线程无法被 to_thread 中断，只能循环内主动检查）。
     """
     start = time.time()
     url = f"{_api_base()}/extract-results/batch/{batch_id}"
     consecutive_errors = 0
 
     while (time.time() - start) < POLL_TIMEOUT:
+        if cancel_check is not None and cancel_check():
+            raise OCRCancelled(f"batch {batch_id} cancelled during OCR polling")
         try:
             resp = requests.get(url, headers=_headers(), timeout=30)
         except requests.RequestException as e:
@@ -911,7 +919,12 @@ def _split_pages_by_separator(
     return pages if pages else [{"markdown": {"text": full_md}, "page_count": 1, "_source": "mineru"}]
 
 
-def run_ocr(pdf_path: str, progress_callback=None, job_id: str = "") -> list[dict]:
+def run_ocr(
+    pdf_path: str,
+    progress_callback=None,
+    job_id: str = "",
+    cancel_check=None,
+) -> list[dict]:
     """端到端 MinerU 解析: 上传 → 轮询 → 下载 → 按页拆分。
 
     返回格式与 core.ocr_client.run_ocr 兼容，pipeline.py 可透明替换。
@@ -929,12 +942,21 @@ def run_ocr(pdf_path: str, progress_callback=None, job_id: str = "") -> list[dic
         for attempt in (1, 2):
             try:
                 batch_id, _ = submit_pdf(pdf_path)
-                task_result = poll_job(batch_id, progress_callback=progress_callback)
+                task_result = poll_job(
+                    batch_id,
+                    progress_callback=progress_callback,
+                    cancel_check=cancel_check,
+                )
                 return download_result(task_result, pdf_path=pdf_path)
             except RuntimeError as e:
+                # OCRCancelled 是 RuntimeError 子类：无瞬态标记 → 落到 raise
                 msg = str(e)
                 if attempt == 1 and any(m in msg.lower() for m in transient_markers):
                     logger.warning(f"[MinerU] 瞬态解析失败，20s 后重新提交: {msg}")
+                    if cancel_check is not None and cancel_check():
+                        raise OCRCancelled(
+                            f"job {job_id} cancelled before transient resubmit"
+                        )
                     time.sleep(20)
                     continue
                 raise
