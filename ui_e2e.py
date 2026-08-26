@@ -164,13 +164,72 @@ try:
                   f"len={ocr_len} server_chars={len(api_ocr[n])}")
 
         # prev/next arrows
+        # inline onclick 依赖 defer 的 review.js 暴露全局函数 —— goto 后必须
+        # 等 JS 就绪（typeof goPage === 'function'），否则点击静默失效
+        for _ in range(100):
+            ready = page.evaluate("() => typeof window.goPage")
+            if ready == "function":
+                break
+            time.sleep(0.1)
         page.click('.page-nav-item[data-page="3"]')
         page.wait_for_timeout(1500)  # 充分等待 AJAX 完成
+
+        # ── P3b: 知识库条文引用渲染（KB v8 回归）──
+        # 找一个带 kb_refs 的页：逐页找第一个含 依据条文 的卡片
+        kb_page = None
+        for n in range(1, total + 1):
+            cnt = page.evaluate(
+                "() => document.querySelectorAll('.finding-card details summary')"
+                ".length")
+            if cnt and int(cnt) > 0:
+                kb_page = n
+                break
+            if n < total:
+                page.click(f'.page-nav-item[data-page="{n + 1}"]')
+                page.wait_for_timeout(900)
+        if kb_page:
+            sum_text = page.locator(
+                ".finding-card details summary").first.inner_text()
+            # 展开第一条，验证原文可见
+            page.locator(".finding-card details").first.click()
+            page.wait_for_timeout(200)
+            body_visible = page.locator(
+                ".finding-card details p").first.is_visible()
+            check("P3b kb citation rendered (AJAX)",
+                  "依据条文" in sum_text and body_visible,
+                  f"page={kb_page} summary={sum_text[:24]}")
+            # SSR 路径：直接打开该页，模板条件分支渲染
+            page.goto(f"{BASE}/jobs/{jid}/review?page={kb_page}",
+                      wait_until="domcontentloaded")
+            page.wait_for_selector(".finding-card", timeout=20_000)
+            ssr_details = page.locator(".finding-card details").count()
+            check("P3b kb citation rendered (SSR)", ssr_details > 0,
+                  f"details={ssr_details}")
+            page.goto(f"{BASE}/jobs/{jid}/review?page=1",
+                      wait_until="domcontentloaded")
+            page.wait_for_selector(".page-nav-item", timeout=20_000)
+        else:
+            # 本轮 LLM 未产生可命中条文的 finding 也算通过（检索是增强项）
+            print("[SKIP] P3b no kb-cited findings this round")
+
         avg_nav = sum(nav_ms) // max(1, len(nav_ms))
         worst = max(nav_ms) if nav_ms else 0
         check("P3 nav smoothness (avg<=1.5s, worst<=4s)",
               avg_nav <= 1500 and worst <= 4000,
               f"per-page ms={nav_ms} avg={avg_nav} worst={worst}")
+
+        # ── 箭头翻页：P3b 的 goto 已整页重载（JS 作用域重建），必须重等
+        # defer 脚本就绪并重新定位到第 3 页，否则断言起点错乱 ──
+        for _ in range(100):
+            if page.evaluate("() => typeof window.goPage") == "function":
+                break
+            time.sleep(0.1)
+        page.click('.page-nav-item[data-page="3"]')
+        for _ in range(60):  # 等 AJAX 完成（src 切到 page/3）
+            src_now = page.locator("#pdf-page-img").get_attribute("src") or ""
+            if src_now.endswith("/page/3"):
+                break
+            time.sleep(0.05)
         diag = page.evaluate(
             """() => {
               const n = document.getElementById('btn-next-page');
@@ -254,6 +313,30 @@ try:
         check("P4 test-conn probe completes",
               ("成功" in toast) or ("ok" in toast.lower()) or True,
               f"toast={toast[:60]}")
+
+        # ── P5: 设置页知识库分区（KB v8 UI）──
+        page.evaluate(
+            "document.querySelectorAll('[data-section]').forEach("
+            "x => x.classList.add('hidden'));"
+            "document.querySelector('[data-section=\"kb\"]')"
+            ".classList.remove('hidden');")
+        page.locator("#kb-search").scroll_into_view_if_needed()
+        # 懒加载由 nav 点击触发；此处直接切 hash 兜底
+        page.evaluate("location.hash = '#kb'")
+        page.wait_for_timeout(1500)
+        rows = page.locator("#kb-list details").count()
+        check("P5 settings kb section lists articles", rows >= 1,
+              f"rows={rows}")
+        if rows:
+            first = page.locator("#kb-list details summary").first.inner_text()
+            check("P5 kb article label format", "第" in first and "条" in first,
+                  f"summary={first[:30]}")
+            # 搜索防抖过滤
+            page.fill("#kb-search", "批记录")
+            page.wait_for_timeout(1200)
+            filtered = page.locator("#kb-list details").count()
+            check("P5 kb search filters", 0 < filtered <= rows,
+                  f"filtered={filtered}/{rows}")
 
         check("P4 zero uncaught page errors", len(errors) == 0,
               "; ".join(errors[:3]))
