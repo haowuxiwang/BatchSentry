@@ -21,7 +21,7 @@ def _get_init_lock() -> asyncio.Lock:
     return _db_init_lock
 
 # Current schema migration level, persisted via PRAGMA user_version.
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 
 async def get_db() -> aiosqlite.Connection:
@@ -106,6 +106,9 @@ async def migrate(db: aiosqlite.Connection):
 
     if current_version < 7:
         await _migrate_v7(db)
+
+    if current_version < 8:
+        await _migrate_v8(db)
 
     # PRAGMA user_version cannot be parameterized; SCHEMA_VERSION is an int
     # constant defined in this module, so f-string is safe.
@@ -271,6 +274,28 @@ async def _migrate_v7(db: aiosqlite.Connection):
             logger.info("Migration: added findings.gmp_basis")
     except Exception as e:
         logger.warning(f"Migration skip findings.gmp_basis: {e}")
+    await db.commit()
+
+
+async def _migrate_v8(db: aiosqlite.Connection):
+    """v8: knowledge base - kb_entries mirror + findings.kb_refs citations."""
+    await db.execute(
+        "CREATE TABLE IF NOT EXISTS kb_entries ("
+        "entry_id TEXT PRIMARY KEY,"
+        "source_id TEXT NOT NULL,"
+        "chapter TEXT,"
+        "article_label TEXT NOT NULL,"
+        "no INTEGER,"
+        "text TEXT NOT NULL)"
+    )
+    try:
+        cur = await db.execute("PRAGMA table_info(findings)")
+        cols = {row["name"] for row in await cur.fetchall()}
+        if "kb_refs" not in cols:
+            await db.execute("ALTER TABLE findings ADD COLUMN kb_refs TEXT")
+            logger.info("Migration: added findings.kb_refs")
+    except Exception as e:
+        logger.warning(f"Migration skip findings.kb_refs: {e}")
     await db.commit()
 
 

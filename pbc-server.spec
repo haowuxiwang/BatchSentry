@@ -33,6 +33,8 @@ datas = [
     (str(_PROJECT_ROOT / "templates"), "templates"),
     (str(_PROJECT_ROOT / "static"), "static"),
     (str(_PROJECT_ROOT / "db" / "schema.sql"), "db"),
+    (str(_PROJECT_ROOT / "core" / "kb" / "data" / "gmp2010.json"),
+     "core/kb/data"),  # v8 知识库种子（派生 JSON，源 .doc 不入包）
 ]
 
 # Hidden imports — modules PyInstaller can't detect via static analysis
@@ -124,6 +126,9 @@ hiddenimports = [
     "core.rules.rule_doc",
     "core.rules.llm_checks",
     "core.rules.gmp_basis",  # Round 14 GMP 法规依据映射（v7 findings.gmp_basis）
+    "core.kb.store",  # v8 知识库：种子装载 + kb_entries 镜像
+    "core.kb.retriever",  # v8 知识库：bigram-BM25 检索 + findings.kb_refs 富集
+    "api.settings.kb",  # v8 知识库只读浏览端点
     "core.page_analyzer",
     "core.hw_signal",  # Round 7 OCR handwriting-signal extraction
     "core.cross_page_analyzer",  # shim — kept for apps importing the old name

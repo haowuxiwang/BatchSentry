@@ -43,7 +43,8 @@ CREATE TABLE IF NOT EXISTS findings (
     corrected_text TEXT,
     source TEXT DEFAULT 'rule',  -- Phase 3: rule | llm_page | llm_fallback | llm_cross
     user_rule_id TEXT,           -- Phase 11: 命中的用户规则 id（source='user_rule' 时，GMP 溯源）
-    gmp_basis TEXT,              -- v7: 法规依据引用（GMP 2010/ALCOA+ 等知识库映射，gmp_basis.py）
+    gmp_basis TEXT,
+    kb_refs TEXT,                -- v8: 知识库引用 JSON [{entry_id,label,excerpt,score}]              -- v7: 法规依据引用（GMP 2010/ALCOA+ 等知识库映射，gmp_basis.py）
     created_at TIMESTAMP DEFAULT (datetime('now','localtime')),
     reviewed_at TIMESTAMP,
     FOREIGN KEY (job_id) REFERENCES jobs(id)
@@ -97,3 +98,14 @@ CREATE INDEX IF NOT EXISTS idx_jobs_created_at ON jobs(created_at DESC);
 -- any active state → cancelling → cancelled
 -- any state → error
 -- error → pending (retry)
+
+CREATE TABLE IF NOT EXISTS kb_entries (
+    entry_id TEXT PRIMARY KEY,
+    source_id TEXT NOT NULL,
+    chapter TEXT,
+    article_label TEXT NOT NULL,
+    no INTEGER,
+    text TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_kb_entries_source ON kb_entries(source_id);
+

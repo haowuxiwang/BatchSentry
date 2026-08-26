@@ -82,6 +82,20 @@ async def lifespan(app: FastAPI):
 
     import asyncio as _asyncio
     _asyncio.create_task(_recover_bg())
+
+    # v8: 知识库条目镜像装载（幂等；JSON 缺失/异常不致命——检索走内存）
+    async def _kb_seed_bg():
+        try:
+            from core.kb import ensure_db_seeded
+
+            db = await get_db()
+            n = await ensure_db_seeded(db)
+            if n:
+                logger.info(f"  knowledge base seeded: {n} entries")
+        except Exception as e:
+            logger.warning(f"  kb seed skipped: {e}")
+
+    _asyncio.create_task(_kb_seed_bg())
     yield
     await close_db()
     logger.info("Shutdown complete.")
@@ -419,6 +433,19 @@ async def review_page(job_id: str, request: Request, page: int = 1):
         (job_id, page),
     )
     findings = [dict(r) for r in await cursor.fetchall()]
+    # v8: 解码 kb_refs JSON → 列表供模板折叠渲染（坏数据安全退化）
+    for f in findings:
+        raw = f.get("kb_refs")
+        refs = []
+        if raw:
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, list):
+                    refs = [x for x in parsed if isinstance(x, dict)]
+            except ValueError:
+                pass
+        f["kb_refs_list"] = refs
+        f.pop("kb_refs", None)
 
     # Phase 3: extract measurement matrix from structured_json so the template
     # can render the 9×8 cell grid with in_spec colors without an extra API call.

@@ -73,6 +73,18 @@ async def _run_stage3_cross_analysis(
     # ocr_noise/user_rule 不映射 — user_rule 依据是其自身规则文本）
     from core.rules.gmp_basis import attach_gmp_basis
     attach_gmp_basis(findings)
+    # 知识库条文引用（v8）：GMP2010 后置富集 —— 幂等、纯内存 BM25 检索，
+    # 零 token 成本；命中则随行落库 findings.kb_refs（JSON）。
+    from core.kb.retriever import attach_kb_refs
+    import json as _json
+
+    def _refs_json(f: dict):
+        refs = f.get("kb_refs")
+        if isinstance(refs, list) and refs:
+            return _json.dumps(refs, ensure_ascii=False)
+        return None
+
+    attach_kb_refs(findings)
     await _update_cross_progress(job_id, 0, 0, "")
     # P-C3 修复：analyze_cross_page 调用后再检查一次取消状态，
     # 避免在跨页分析期间用户点取消后继续写入 findings / 转 review
@@ -134,7 +146,7 @@ async def _run_stage3_cross_analysis(
             job_id, f["page"], f["type"], f["severity"], f["description"],
             f.get("ocr_text"), f.get("operator"), f.get("source", "rule"),
             f.get("rule_id") if f.get("source") == "user_rule" else None,
-            f.get("gmp_basis"),
+            f.get("gmp_basis"), _refs_json(f),
         ))
         inserted += 1
     if batch_rows:
@@ -144,8 +156,8 @@ async def _run_stage3_cross_analysis(
         async with db_lock:
             await db.executemany(
                 "INSERT OR IGNORE INTO findings "
-                "(job_id, page, type, severity, description, ocr_text, operator, source, user_rule_id, gmp_basis, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','localtime'))",
+                "(job_id, page, type, severity, description, ocr_text, operator, source, user_rule_id, gmp_basis, kb_refs, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','localtime'))",
                 batch_rows,
             )
             await db.commit()
@@ -160,22 +172,34 @@ async def _run_stage3_cross_analysis(
     dual_diff = dual_diff or []
     if dual_diff:
         from core.rules.gmp_basis import GMP_BASIS_MAP
+
+        dual_dicts = [
+            {
+                "page": d["page"], "type": "completeness", "severity": "warning",
+                "description": (
+                    f"第{d['page']}页 双后端 OCR 结果存在显著差异"
+                    f"（{d['reason']}），请对照 PDF 原图人工核对"
+                ),
+                "ocr_text": f"dual_compare: primary vs secondary — {d['reason']}",
+                "operator": "", "source": "rule",
+                "gmp_basis": GMP_BASIS_MAP.get("completeness"),
+            }
+            for d in dual_diff
+        ]
+        attach_kb_refs(dual_dicts)
         dual_rows = [
             (
-                job_id, d["page"], "completeness", "warning",
-                f"第{d['page']}页 双后端 OCR 结果存在显著差异（{d['reason']}），"
-                f"请对照 PDF 原图人工核对",
-                f"dual_compare: primary vs secondary — {d['reason']}",
-                "", "rule", None,
-                GMP_BASIS_MAP.get("completeness"),
+                job_id, x["page"], x["type"], x["severity"], x["description"],
+                x["ocr_text"], x["operator"], x["source"], None,
+                x.get("gmp_basis"), _refs_json(x),
             )
-            for d in dual_diff
+            for x in dual_dicts
         ]
         async with db_lock:
             await db.executemany(
                 "INSERT OR IGNORE INTO findings "
-                "(job_id, page, type, severity, description, ocr_text, operator, source, user_rule_id, gmp_basis, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','localtime'))",
+                "(job_id, page, type, severity, description, ocr_text, operator, source, user_rule_id, gmp_basis, kb_refs, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','localtime'))",
                 dual_rows,
             )
             await db.commit()

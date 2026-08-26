@@ -201,7 +201,19 @@ async def _analyze_one(
                 llm_page_rows = []
                 # GMP 依据引用（v7）：按 type 映射法规依据（幂等，无映射不设键）
                 from core.rules.gmp_basis import attach_gmp_basis
-                attach_gmp_basis([f for f in page_findings if isinstance(f, dict)])
+                dict_findings = [f for f in page_findings if isinstance(f, dict)]
+                attach_gmp_basis(dict_findings)
+                # 知识库条文引用（v8）：后置富集（幂等，纯内存检索）
+                from core.kb.retriever import attach_kb_refs
+                import json as _json
+
+                def _refs_json(x: dict):
+                    refs = x.get("kb_refs")
+                    if isinstance(refs, list) and refs:
+                        return _json.dumps(refs, ensure_ascii=False)
+                    return None
+
+                attach_kb_refs(dict_findings)
                 for f in page_findings:
                     if not isinstance(f, dict):
                         continue
@@ -211,13 +223,13 @@ async def _analyze_one(
                         job_id, page_num, f.get("type", "info"),
                         f.get("severity", "info"), f.get("description", ""),
                         f.get("ocr_text", ""), f.get("operator", ""),
-                        f.get("gmp_basis"),
+                        f.get("gmp_basis"), _refs_json(f),
                     ))
                 if llm_page_rows:
                     await db.executemany(
                         "INSERT OR IGNORE INTO findings "
-                        "(job_id, page, type, severity, description, ocr_text, operator, source, gmp_basis, created_at) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, 'llm_page', ?, datetime('now','localtime'))",
+                        "(job_id, page, type, severity, description, ocr_text, operator, source, gmp_basis, kb_refs, created_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, 'llm_page', ?, ?, datetime('now','localtime'))",
                         llm_page_rows,
                     )
                 await db.commit()
