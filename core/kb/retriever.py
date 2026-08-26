@@ -73,7 +73,9 @@ class _Index:
         )
 
     def search(self, terms: list[str], topk: int = _TOPK,
-               min_score: float = _MIN_SCORE) -> list[dict]:
+               min_score: float = _MIN_SCORE,
+               excerpt_chars: int = _EXCERPT_CHARS,
+               budget_chars: int = _BUDGET_CHARS) -> list[dict]:
         if not terms or not self.docs:
             return []
         n = len(self.docs)
@@ -95,10 +97,10 @@ class _Index:
         out = []
         used = 0
         for i, s in ranked:
-            if s < min_score or used >= _BUDGET_CHARS:
+            if s < min_score or used >= budget_chars:
                 break
             e = self.entries[i]
-            excerpt = e["text"][:_EXCERPT_CHARS].replace("\n", " ")
+            excerpt = e["text"][:excerpt_chars].replace("\n", " ")
             out.append({
                 "entry_id": e["entry_id"],
                 "label": e["article_label"],
@@ -128,16 +130,19 @@ def _get_index() -> _Index:
     return _index
 
 
-def _mine_description_bigrams(description: str, index: _Index) -> list[str]:
+def _mine_description_bigrams(description: str, index: _Index,
+                              cap: int = _DESC_TERM_CAP,
+                              max_df: int = 60) -> list[str]:
     """High-value bigrams from the finding's own text: present in the corpus
-    AND reasonably rare (df<=60) so generic characters don't drown ranking."""
+    AND reasonably rare (df<=max_df) so generic characters don't drown
+    ranking."""
     cands = _bigrams(description or "")
     picked: list[str] = []
     for t in dict.fromkeys(cands):  # dedupe, keep order
         postings = index.inverted.get(t)
-        if postings and len(postings) <= 60:
+        if postings and len(postings) <= max_df:
             picked.append(t)
-        if len(picked) >= _DESC_TERM_CAP:
+        if len(picked) >= cap:
             break
     return picked
 
@@ -156,6 +161,40 @@ def query_for(finding: dict) -> list[str]:
     expanded.extend(_mine_description_bigrams(
         str(finding.get("description") or ""), idx))
     return list(dict.fromkeys(expanded))
+
+
+# 页面级注入主题词（KB-2）：批记录审核场景最常涉及的法规域
+PAGE_TOPIC_TERMS = ["批记录", "记录", "复核", "签名", "偏差", "放行", "文件"]
+_PAGE_TERM_CAP = 24
+_PAGE_EXCERPT_CHARS = 200
+_PAGE_BUDGET_CHARS = 1500
+
+
+def build_page_kb_context(page_text: str, topk: int = 5,
+                          min_score: float = _MIN_SCORE) -> tuple[str, list]:
+    """KB-2：为整页 OCR 文本构建条文参考块（RAG grounding）。
+
+    返回 (block_text, refs)：block 供 user prompt 注入（system 保持静态，
+    维持 prompt caching 不变量）；refs 随 audit_ctx 落 llm_call_audit.kb_used
+    （RAG 审计规范：记录本次检索命中的条目与知识库版本）。
+    语料无关/低分/超预算时返回 ("", [])，调用方零成本跳过。
+    """
+    idx = _get_index()
+    if not idx.docs:
+        return "", []
+    terms: list[str] = []
+    for t in PAGE_TOPIC_TERMS:
+        terms.extend(_bigrams(t))
+    terms.extend(_mine_description_bigrams(
+        page_text or "", idx, cap=_PAGE_TERM_CAP, max_df=80))
+    terms = list(dict.fromkeys(terms))
+    refs = idx.search(terms, topk=topk, min_score=min_score,
+                      excerpt_chars=_PAGE_EXCERPT_CHARS,
+                      budget_chars=_PAGE_BUDGET_CHARS)
+    if not refs:
+        return "", []
+    lines = [f"{r['label']}：{r['excerpt']}" for r in refs]
+    return "\n".join(lines), refs
 
 
 def attach_kb_refs(findings: list[dict]) -> list[dict]:

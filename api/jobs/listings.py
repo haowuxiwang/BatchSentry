@@ -78,7 +78,7 @@ async def _live_jobs_snapshot(db) -> list[dict]:
     from api.jobs import _ACTIVE_STATUSES
     placeholders = ",".join("?" * len(_ACTIVE_STATUSES))
     cursor = await db.execute(
-        f"SELECT id FROM jobs WHERE status IN ({placeholders}) "
+        f"SELECT id, status, finished_at FROM jobs WHERE status IN ({placeholders}) "
         "OR (status NOT IN ('archived') "
         "AND finished_at IS NOT NULL "
         "AND finished_at > datetime('now', 'localtime', '-10 minutes'))",
@@ -87,11 +87,29 @@ async def _live_jobs_snapshot(db) -> list[dict]:
     rows = await cursor.fetchall()
     snapshots = []
     from api.jobs.status import _get_job_progress  # call-time (route order)
+    # 对抗审查 P2：终态 job 的快照永不变化，却每 3s 重算 5 条查询。
+    # 以 (id, status, finished_at) 为 key 缓存最近 100 个终态快照，
+    # 命中直接复用；活跃 job 照常实时计算。
+    global _terminal_snap_cache
     for r in rows:
+        cached = _terminal_snap_cache.get(r["id"])
+        if cached and r["status"] not in _ACTIVE_STATUSES:
+            snapshots.append(cached[1])
+            continue
         progress = await _get_job_progress(db, r["id"])
         if progress:
+            if r["status"] not in _ACTIVE_STATUSES:
+                if len(_terminal_snap_cache) > 100:
+                    _terminal_snap_cache.clear()
+                _terminal_snap_cache[r["id"]] = (
+                    (r["status"], str(r.get("finished_at") or "")),
+                    progress,
+                )
             snapshots.append(progress)
     return snapshots
+
+
+_terminal_snap_cache: dict[str, tuple[tuple, dict]] = {}
 
 @router.get("/live")
 async def stream_all_live_jobs(request: Request = None):

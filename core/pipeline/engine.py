@@ -226,9 +226,14 @@ async def _run_pipeline_impl(job_id: str, pdf_path: str, progress_futures: list)
             from core.pipeline.ocr_support import _prepare_ocr_pdf
             # GIL 隔离：与整份路径同款 — 批量重渲染持 GIL 饿死事件循环
             from core.procpool import run_cpu
+            # 对抗审查 P2：Stage 0 取消检查点（与整份路径 stage1 同语义）
+            if await _run_is_cancelled(job_id):
+                return
             ocr_pdf_path, normalized_pages = await run_cpu(
                 _prepare_ocr_pdf, pdf_path, job_id, label="stage0_normalize_sliced"
             )
+            if await _run_is_cancelled(job_id):
+                return
             if normalized_pages:
                 await _audit_log(
                     db, job_id, "ocr_input_normalized",

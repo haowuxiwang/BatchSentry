@@ -16,6 +16,7 @@ from core.page_analyzer import (
     PROMPTS,
     _grounding_check,
 )
+from config import config as _app_config
 
 
 def _ok_payload(page=1):
@@ -100,7 +101,7 @@ class TestAnalyzePageReturnsStructure:
 
         assert result["page_number"] == 7
         assert result["_prompt_version"] == CURRENT_PROMPT_VERSION
-        assert CURRENT_PROMPT_VERSION == "v3"
+        assert CURRENT_PROMPT_VERSION.startswith("v4")
 
     @pytest.mark.asyncio
     async def test_steps_content_preserved(self):
@@ -805,6 +806,29 @@ class TestGroundingCheck:
         data = {"steps": ["污染", None], "findings": []}
         assert _grounding_check("<table><tr><td>0.974</td></tr></table>", data) == []
 
+    def test_adjacent_cell_concat_hallucination_blocked(self):
+        """对抗审查 P2 通道一：相邻单元格 "12"+"50" 不得让幻觉值 1250 通过。"""
+        html = "<table><tr><td>12</td><td>50</td></tr></table>"
+        data = {"steps": [{"measurements": [{"time": "t", "values": {
+            "col": {"actual": "1250"}}}]}]}
+        suspects = _grounding_check(html, data)
+        assert len(suspects) == 1 and "1250" in suspects[0]
+
+    def test_prefix_embedding_magnitude_blocked(self):
+        """对抗审查 P2 通道二：2500 不得命中 12500 的内部（量级错误）。"""
+        html = "<table><tr><td>A 12500 B</td></tr></table>"
+        data = {"steps": [{"measurements": [{"time": "t", "values": {
+            "col": {"actual": "2500"}}}]}]}
+        suspects = _grounding_check(html, data)
+        assert len(suspects) == 1 and "2500" in suspects[0]
+
+    def test_tail_zero_still_tolerated_with_tokens(self):
+        """尾部归一化容忍保持：0.974 ↔ 0.9740。"""
+        html = "<table><tr><td>0.9740</td></tr></table>"
+        data = {"steps": [{"measurements": [{"time": "t", "values": {
+            "col": {"actual": "0.974"}}}]}]}
+        assert _grounding_check(html, data) == []
+
     def test_fullwidth_digits_normalized(self):
         """全角数字（OCR 常见形态）归一化后命中 → 不再假阴性。"""
         html = "<table><tr><td>流速 ０.９７４ m³/h</td><td>温度 12.50 ℃</td></tr></table>"
@@ -859,3 +883,46 @@ class TestGroundingCheck:
             result = await analyze_page(html, page_num=1)
 
         assert "_grounding_warn" not in result
+
+    @pytest.mark.asyncio
+    async def test_analyze_page_injects_kb_context_and_audit(self):
+        """KB-2：批记录相关页 → user prompt 注入 [知识库参考] 块，
+        audit_ctx.kb_used 携带命中条目 id 与知识库版本（RAG 审计留痕）。"""
+        html = ("<table><tr><td>批生产记录应当由质量管理部门复核，"
+                "保存至药品有效期后一年，并按企业文件管理操作规程归档，"
+                "批号、生产日期与工序时间应当逐项如实填写、及时复核。</td>"
+                "</tr></table>")
+        payload = _ok_payload()
+        mock_client = _make_mock_client(payload)
+        with patch("core.page_analyzer.get_llm_client", return_value=mock_client):
+            await analyze_page(html, page_num=2)
+
+        kwargs = mock_client.chat_json.call_args
+        user_msg = kwargs.args[1] if len(kwargs.args) > 1 else ""
+        assert "[知识库参考]" in user_msg
+        assert "第一百" in user_msg  # 条文号出现
+        kb_used = (kwargs.kwargs.get("audit_ctx") or {}).get("kb_used")
+        assert kb_used and kb_used["ids"], "audit kb_used must carry entry ids"
+        assert len(kb_used["v"]) == 12  # seed sha 前 12 位
+
+    @pytest.mark.asyncio
+    async def test_analyze_page_skips_kb_when_flag_off(self):
+        """kb_prompt_inject=False → 不注入块、audit_ctx 无 kb_used。"""
+        html = ("<table><tr><td>批生产记录应当由质量管理部门复核，"
+                "保存至药品有效期后一年，并按企业文件管理操作规程归档，"
+                "批号、生产日期与工序时间应当逐项如实填写、及时复核。</td>"
+                "</tr></table>")
+        payload = _ok_payload()
+        mock_client = _make_mock_client(payload)
+        flag = getattr(_app_config["app"], "kb_prompt_inject", True)
+        _app_config["app"].kb_prompt_inject = False
+        try:
+            with patch("core.page_analyzer.get_llm_client",
+                       return_value=mock_client):
+                await analyze_page(html, page_num=1)
+        finally:
+            _app_config["app"].kb_prompt_inject = flag
+        kwargs = mock_client.chat_json.call_args
+        user_msg = kwargs.args[1] if len(kwargs.args) > 1 else ""
+        assert "[知识库参考]" not in user_msg
+        assert (kwargs.kwargs.get("audit_ctx") or {}).get("kb_used") is None

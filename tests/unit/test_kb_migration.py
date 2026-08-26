@@ -50,7 +50,7 @@ class TestMigrationV8:
             assert (await cur.fetchone()) is not None
 
             cur = await db.execute("PRAGMA user_version")
-            assert (await cursor_version(cur)) == 8
+            assert (await cursor_version(cur)) == 9
 
             # 旧数据无损 + 新列可写
             cur = await db.execute("SELECT description FROM findings")

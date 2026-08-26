@@ -214,6 +214,9 @@ async def download_report_json(job_id: str, request: Request = None):
     logger.info(f"[{job_id}] Report.json generated: {len(findings)} findings, {len(exemptions)} exemptions")
     await _audit_report_export(job_id, "json", len(findings))
     return {
+        # v9: 对外 JSON 报告加版本字段 —— 后续列演进（如 kb_refs）时
+        # 下游消费者可据此分支，避免 SELECT * 直出的静默漂移。
+        "schema_version": 1,
         "job": {
             "id": job["id"],
             "filename": job["filename"],

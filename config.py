@@ -411,6 +411,7 @@ class AppConfig:
     ocr_slices: int  # MinerU 分片 OCR 页数/片（1=不分片，流式逐片分析）
     llm_context_window: int  # LLM 上下文窗口（tokens）— Round 7 跨页摘要预算推导依据
     ocr_dual_compare: bool  # 门禁 3：主后端成功后用备选后端复跑并对比（成本翻倍，opt-in）
+    kb_prompt_inject: bool  # KB-2：知识库条文参考注入（RAG grounding，默认开）
     llm_json_mode: bool  # 结构化输出：openai 协议 json_object 模式（网关不支持自动降级）
 
 
@@ -606,6 +607,10 @@ def load_config():
             # 每个任务多跑一次完整 OCR（分钟级 + 上游配额），按需开启。
             ocr_dual_compare=os.getenv("OCR_DUAL_COMPARE", "false").lower()
             in ("1", "true", "yes"),
+            # KB-2: 知识库条文参考注入（RAG grounding）。默认开启；
+            # 关闭后仅保留后置引用富集（findings.kb_refs 不受影响）。
+            kb_prompt_inject=os.getenv("KB_PROMPT_INJECT", "true").lower()
+            in ("1", "true", "yes"),
             # P1-7 结构化输出：默认关闭（部分兼容网关不支持 json_object，
             # 开启后首次 400 会自动降级并会话内禁用）
             llm_json_mode=os.getenv("LLM_JSON_MODE", "false").lower()
@@ -643,6 +648,10 @@ def update_config(updates: dict):
     if "ocr_dual_compare" in updates:
         config["app"].ocr_dual_compare = str(
             updates["ocr_dual_compare"]
+        ).lower() in ("1", "true", "yes")
+    if "kb_prompt_inject" in updates:
+        config["app"].kb_prompt_inject = str(
+            updates["kb_prompt_inject"]
         ).lower() in ("1", "true", "yes")
     if "llm_json_mode" in updates:
         config["app"].llm_json_mode = str(

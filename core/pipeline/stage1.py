@@ -39,9 +39,18 @@ async def _run_stage1_full(
     # 改投子进程执行（procpool.run_cpu）。
     from core.pipeline.ocr_support import _prepare_ocr_pdf as _run_prepare
     from core.procpool import run_cpu
+    # 对抗审查 P2：取消语义覆盖 Stage 0 —— 提交前/完成后各一个检查点，
+    # 避免已取消任务仍排队执行秒~分钟级规范化（procpool 单 worker 会
+    # 连带阻塞后续任务的提交）。worker 体内协作式取消暂不支持（fn 已
+    # pickle 到子进程），此处保证"取消后不再启动/不采纳结果"。
+    if await _run_is_cancelled(job_id):
+        return None
     ocr_pdf_path, normalized_pages = await run_cpu(
         _run_prepare, pdf_path, job_id, label="stage0_normalize"
     )
+    if await _run_is_cancelled(job_id):
+        # 规范化完成但用户已取消 —— 不进入 OCR，走正式取消迁移
+        return None
     if normalized_pages:
         await _audit_log(
             db, job_id, "ocr_input_normalized",

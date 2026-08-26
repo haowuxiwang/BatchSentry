@@ -9,6 +9,7 @@ Deliberately dependency-free: retrieval works purely from the in-memory copy.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from pathlib import Path
@@ -27,14 +28,23 @@ def _load() -> dict:
         if not _DATA_PATH.exists():
             logger.warning("[kb] seed data missing: %s", _DATA_PATH)
             _payload = {"source_id": "", "title": "", "chapters": [],
-                        "entries": []}
+                        "entries": [], "_version": ""}
         else:
-            _payload = json.loads(_DATA_PATH.read_text(encoding="utf-8"))
+            raw = _DATA_PATH.read_bytes()
+            _payload = json.loads(raw.decode("utf-8"))
+            # RAG 审计规范：知识库版本必须可溯源 —— 取内容哈希前 12 位，
+            # 随每次注入写入 llm_call_audit.kb_used。
+            _payload["_version"] = hashlib.sha256(raw).hexdigest()[:12]
             logger.info(
-                "[kb] loaded %s: %d entries",
-                _payload.get("source_id"), len(_payload.get("entries", [])),
+                "[kb] loaded %s@%s: %d entries",
+                _payload.get("source_id"), _payload["_version"],
+                len(_payload.get("entries", [])),
             )
     return _payload
+
+
+def kb_version() -> str:
+    return str(_load().get("_version", ""))
 
 
 def source_meta() -> dict:

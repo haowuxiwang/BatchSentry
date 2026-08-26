@@ -625,8 +625,9 @@ async def _record_llm_call(
                 """INSERT INTO llm_call_audit
                    (job_id, page, stage, provider, protocol, model,
                     prompt_version, prompt_tokens, completion_tokens,
-                    total_tokens, latency_ms, success, error, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    total_tokens, latency_ms, success, error, kb_used,
+                    created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                            datetime('now','localtime'))""",
                 (
                     ctx.get("job_id", ""),
@@ -642,6 +643,11 @@ async def _record_llm_call(
                     latency_ms,
                     1 if success else 0,
                     error,
+                    # v9 KB-2：RAG 审计留痕（注入条目 id + 知识库版本）
+                    (
+                        json.dumps(ctx["kb_used"], ensure_ascii=False)
+                        if ctx.get("kb_used") else None
+                    ),
                 ),
             )
             await db.commit()

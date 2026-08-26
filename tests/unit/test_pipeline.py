@@ -527,9 +527,10 @@ class TestPipelineCancellation:
 
         async def fake_cancelled(jid):
             calls["n"] += 1
-            # 调用序：1=Stage1 后检查, 2/3=两页 _analyze_one 入口,
-            # 4=Stage 2 while 循环（fast 页完成后）→ 触发取消
-            return calls["n"] >= 4
+            # 调用序（对抗审查 P2 后 +2）：1=Stage0 pre, 2=Stage0 post,
+            # 3=Stage1 后检查, 4/5=两页 _analyze_one 入口,
+            # 6=Stage 2 while 循环（fast 页完成后）→ 触发取消
+            return calls["n"] >= 6
 
         with patch(
             "core.pipeline._get_ocr_backend",
@@ -1766,11 +1767,18 @@ class TestSlicedPipeline:
             on_batch(1, [{"markdown": {"text": "p1"}, "page_count": 1}], 1)
             return [(1, [{"markdown": {"text": "p1"}, "page_count": 1}])]
 
-        calls = {"n": 0}
+        fired = {"batch": False}
+
+        def fake_run_sliced_wrapper(pdf_path, slice_pages, on_batch,
+                                    progress_cb, job_id=None):
+            res = fake_run_sliced(pdf_path, slice_pages, on_batch,
+                                  progress_cb, job_id=job_id)
+            # 首片已落库；返回后循环内检查才命中取消（Stage0 新检查点为 False）
+            fired["batch"] = True
+            return res
 
         async def fake_cancelled(*a, **kw):
-            calls["n"] += 1
-            return True  # 循环内第一次检查即取消
+            return fired["batch"]
 
         orig_backend = pipeline_mod.config["app"].ocr_backend
         orig_slices = pipeline_mod.config["app"].ocr_slices
@@ -1780,7 +1788,8 @@ class TestSlicedPipeline:
         pipeline_mod._SLICE_QUEUE_TIMEOUT = 0.05
         try:
             with patch(
-                "core.mineru_client.run_ocr_sliced", side_effect=fake_run_sliced
+                "core.mineru_client.run_ocr_sliced",
+                side_effect=fake_run_sliced_wrapper,
             ), patch(
                 "core.pipeline._is_cancelled", new=AsyncMock(side_effect=fake_cancelled)
             ), patch(
@@ -1818,13 +1827,25 @@ class TestSlicedPipeline:
             on_batch(1, [{"markdown": {"text": "p1"}, "page_count": 1}], 1)
             return [(1, [{"markdown": {"text": "p1"}, "page_count": 1}])]
 
-        calls = {"n": 0}
+        done = {"ocr": False}
+
+        def fake_run_sliced_mark(pdf_path, slice_pages, on_batch,
+                                 progress_cb, job_id=None):
+            res = fake_run_sliced(pdf_path, slice_pages, on_batch,
+                                  progress_cb, job_id=job_id)
+            # OCR 全部返回后才允许取消命中 —— 精确锚定 :571 的
+            # post-ocr_done 检查点（Stage0 新检查点保持 False）
+            done["ocr"] = True
+            return res
 
         async def fake_cancelled(*a, **kw):
-            calls["n"] += 1
-            # 循环内检查（845）→ False；ocr_done 后检查（858）→ True；
-            # 主流程兜底（407）→ True 直接退出
-            return calls["n"] > 1
+            if not done["ocr"]:
+                return False
+            cur = await pipeline_db.execute(
+                "SELECT status FROM jobs WHERE id = ?", (job_id,))
+            row = await cur.fetchone()
+            # 仅当状态已迁移至 ocr_done 才取消 → 跳过 Stage 2/3
+            return bool(row) and row["status"] == "ocr_done"
 
         orig_backend = pipeline_mod.config["app"].ocr_backend
         orig_slices = pipeline_mod.config["app"].ocr_slices
@@ -1834,7 +1855,8 @@ class TestSlicedPipeline:
         pipeline_mod._SLICE_QUEUE_TIMEOUT = 0.05
         try:
             with patch(
-                "core.mineru_client.run_ocr_sliced", side_effect=fake_run_sliced
+                "core.mineru_client.run_ocr_sliced",
+                side_effect=fake_run_sliced_mark,
             ), patch(
                 "core.pipeline._is_cancelled", new=AsyncMock(side_effect=fake_cancelled)
             ), patch(

@@ -52,12 +52,18 @@ def _get_pdf_doc(job_id: str, pdf_path: str):
 
     TTL/容量淘汰时 close 句柄；Windows 上未关闭的 fitz 句柄会锁住 PDF
     文件（delete_job 的 rmtree 会因此失败），删除前须 _invalidate_pdf_doc。
+
+    对抗审查 P2：淘汰 close 必须持该 doc 的渲染锁 —— 否则并发渲染线程
+    正用此句柄 load_page 时被 close，抛 "document closed" 500。
     """
     now = time.time()
     stale = [k for k, (_, ts) in _pdf_doc_cache.items() if now - ts > _PDF_CACHE_TTL]
     for k in stale:
         try:
-            _pdf_doc_cache[k][0].close()
+            with _doc_lock(k):
+                entry = _pdf_doc_cache.get(k)
+                if entry is not None:
+                    entry[0].close()
         except Exception:
             pass
         _pdf_doc_cache.pop(k, None)
@@ -69,7 +75,10 @@ def _get_pdf_doc(job_id: str, pdf_path: str):
     if len(_pdf_doc_cache) >= _PDF_CACHE_MAX:
         oldest = min(_pdf_doc_cache, key=lambda k: _pdf_doc_cache[k][1])
         try:
-            _pdf_doc_cache[oldest][0].close()
+            with _doc_lock(oldest):
+                victim = _pdf_doc_cache.get(oldest)
+                if victim is not None:
+                    victim[0].close()
         except Exception:
             pass
         _pdf_doc_cache.pop(oldest, None)

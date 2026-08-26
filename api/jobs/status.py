@@ -67,7 +67,8 @@ async def get_job_status(job_id: str, request: Request = None):
         "ocr_progress": _parse_ocr_progress(job["ocr_progress"] if "ocr_progress" in job.keys() else None),
         "self_heal_progress": _parse_self_heal_progress(job["ocr_progress"] if "ocr_progress" in job.keys() else None),
         "cross_progress": _parse_cross_progress(job["ocr_progress"] if "ocr_progress" in job.keys() else None),
-        "phase": _derive_phase(job["status"], pages_analyzed, job["total_pages"] or 0),
+        "phase": _derive_phase(job["status"], pages_analyzed, job["total_pages"] or 0,
+                               cross_started=bool(_parse_cross_progress(job["ocr_progress"] if "ocr_progress" in job.keys() else None))),
         "page_finding_counts": page_finding_counts,
         "ocr_backend_used": job["ocr_backend_used"] if "ocr_backend_used" in job.keys() else None,
         "ocr_backend_display": _ocr_backend_display(job),
@@ -132,7 +133,8 @@ async def _get_job_progress(db, job_id: str) -> dict:
         "ocr_progress": _parse_ocr_progress(job["ocr_progress"] if "ocr_progress" in job.keys() else None),
         "self_heal_progress": _parse_self_heal_progress(job["ocr_progress"] if "ocr_progress" in job.keys() else None),
         "cross_progress": _parse_cross_progress(job["ocr_progress"] if "ocr_progress" in job.keys() else None),
-        "phase": _derive_phase(job["status"], pages_analyzed, job["total_pages"] or 0),
+        "phase": _derive_phase(job["status"], pages_analyzed, job["total_pages"] or 0,
+                               cross_started=bool(_parse_cross_progress(job["ocr_progress"] if "ocr_progress" in job.keys() else None))),
         "page_finding_counts": page_finding_counts,
         "ocr_backend_used": job["ocr_backend_used"] if "ocr_backend_used" in job.keys() else None,
         "ocr_backend_display": _ocr_backend_display(job),
@@ -198,19 +200,25 @@ def _parse_cross_progress(raw) -> dict | None:
     return None
 
 
-def _derive_phase(status: str, pages_analyzed: int, total_pages: int) -> str:
+def _derive_phase(status: str, pages_analyzed: int, total_pages: int,
+                  cross_started: bool | None = None) -> str:
     """派生阶段指示（SSE 前端进度文案用）。
 
-    translating 覆盖 Stage 2 + Stage 3 两段 — stages 之间无状态位，
-    用"页分析完成数 == 总页数"推断已进入跨页分析（stage2 完成后才
-    启动 stage3，毫秒级边界误差可接受）。
+    translating 覆盖 Stage 2 + Stage 3 两段（两 stage 之间无独立状态位）。
+    原"pages_analyzed >= total_pages 推断 cross"在 page_cache 行数少于
+    total_pages（OCR 失败页/缺页）时永远不成立，SSE 文案卡在 analyze；
+    现优先采信显式信号 cross_progress 子键是否存在（Stage 3 一启动即写入，
+    结束时清除）—— 调用方通过 ocr_progress 解析结果传入。
     """
     if status == "ocr_running":
         return "ocr"
     if status == "ocr_done":
         return "analyze"
     if status == "analyzing":
-        return "cross" if total_pages > 0 and pages_analyzed >= total_pages else "analyze"
+        if cross_started:
+            return "cross"
+        return ("cross" if total_pages > 0 and pages_analyzed >= total_pages
+                else "analyze")
     if status in _TERMINAL_STATUSES:
         return "done"
     return "idle"

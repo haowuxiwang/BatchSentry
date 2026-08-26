@@ -91,6 +91,11 @@ class TestUpdateConfig:
         # 读全局 config；config.json 为 mineru 时残留 paddle 会让 probe_all
         # 选择错误的 probe 分支，全量测试通过/单独跑失败取决运行顺序）。
         update_config({"ocr_backend": orig})
+        # KB-2: kb_prompt_inject 开关往返（v9）
+        update_config({"kb_prompt_inject": False})
+        assert config["app"].kb_prompt_inject is False
+        update_config({"kb_prompt_inject": "true"})
+        assert config["app"].kb_prompt_inject is True
         assert config["app"].ocr_backend == orig
 
     def test_update_deepseek_api_key(self):

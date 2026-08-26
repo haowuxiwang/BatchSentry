@@ -426,6 +426,12 @@ def _post_app_bot_sync(
     return False, f"retries exhausted: {last_err}"
 
 
+# 对抗审查 P3：webhook 去重是"查审计→发送→写审计"三步，两个并发终态
+# 通知（stage3 与 engine 恢复路径）可双双通过检查造成重复推送。
+# asyncio.Lock 串行化整个关键段（单事件循环内即互斥）。
+_notify_dedup_lock = asyncio.Lock()
+
+
 async def notify_job(job_id: str, status: str) -> None:
     """Send a job lifecycle notification if configured.
 
@@ -437,6 +443,15 @@ async def notify_job(job_id: str, status: str) -> None:
         cfg = load_feishu_config()
         if not _should_notify(status, cfg):
             return
+        async with _notify_dedup_lock:
+            await _notify_job_locked(job_id, status, cfg)
+    except Exception as e:
+        logger.warning(f"[{job_id}] Feishu notify failed (non-fatal): {e}")
+
+
+async def _notify_job_locked(job_id: str, status: str, cfg: dict) -> None:
+    """Dedup-check -> send -> audit，全程持 _notify_dedup_lock。"""
+    try:
         await _throttle()
         # Job stats snapshot for the message
         from db.client import get_db

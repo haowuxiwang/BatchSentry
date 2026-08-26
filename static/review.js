@@ -496,6 +496,11 @@
     document.querySelectorAll(".page-nav-item").forEach((el) => {
       const p = parseInt(el.dataset.page);
       const c = counts[p] || { critical: 0, warning: 0, info: 0, total: 0 };
+      // 对抗审查 P2：counts 无变化时跳过重建（SSE 每 3s 全量 tick，
+      // 51 页 × 每页删建 DOM 纯属浪费）；以 data-dots-sig 记录上次签名
+      const sig = `${c.critical}-${c.warning}-${c.info}`;
+      if (el.dataset.dotsSig === sig) return;
+      el.dataset.dotsSig = sig;
       // 移除旧的圆点容器，重建当前值
       el.querySelectorAll("[data-dots]").forEach((n) => n.remove());
       const dotsEl = document.createElement("span");

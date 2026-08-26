@@ -21,7 +21,7 @@ def _get_init_lock() -> asyncio.Lock:
     return _db_init_lock
 
 # Current schema migration level, persisted via PRAGMA user_version.
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 
 async def get_db() -> aiosqlite.Connection:
@@ -109,6 +109,9 @@ async def migrate(db: aiosqlite.Connection):
 
     if current_version < 8:
         await _migrate_v8(db)
+
+    if current_version < 9:
+        await _migrate_v9(db)
 
     # PRAGMA user_version cannot be parameterized; SCHEMA_VERSION is an int
     # constant defined in this module, so f-string is safe.
@@ -296,6 +299,20 @@ async def _migrate_v8(db: aiosqlite.Connection):
             logger.info("Migration: added findings.kb_refs")
     except Exception as e:
         logger.warning(f"Migration skip findings.kb_refs: {e}")
+    await db.commit()
+
+
+async def _migrate_v9(db: aiosqlite.Connection):
+    """v9: KB-2 RAG provenance - llm_call_audit.kb_used (injected entries)."""
+    try:
+        cur = await db.execute("PRAGMA table_info(llm_call_audit)")
+        cols = {row["name"] for row in await cur.fetchall()}
+        if "kb_used" not in cols:
+            await db.execute(
+                "ALTER TABLE llm_call_audit ADD COLUMN kb_used TEXT")
+            logger.info("Migration: added llm_call_audit.kb_used")
+    except Exception as e:
+        logger.warning(f"Migration skip llm_call_audit.kb_used: {e}")
     await db.commit()
 
 

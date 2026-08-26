@@ -15,6 +15,7 @@ from typing import Awaitable, Callable, Optional
 
 from llm.client import get_llm_client
 from core.hw_signal import _extract_low_conf_tokens
+from config import config as _app_config
 
 logger = logging.getLogger(__name__)
 
@@ -152,11 +153,17 @@ signatures: [{"role":"workshop_reviewer", "name":"李四", "sign_time":"2025.01.
  "findings":[{"page":1,"type":"time_reversal|year_contradiction|signature_time_anomaly|suspicious_date|param_out_of_spec|completeness","severity":"critical|warning|info","description":"","ocr_text":""}],
  "time_anomalies":[],
  "ocr_noise":[],
- "overall_confidence":"high|medium|low"}""",
+  "overall_confidence":"high|medium|low"}""",
     },
 }
 
-CURRENT_PROMPT_VERSION = "v3"
+# v4：模板与 v3 完全一致 —— KB-2 的条文参考块是运行时按页动态追加到
+# user 侧的（system 静态不变，维持 prompt caching）。注册独立版本号是
+# 为了 RAG 审计可区分"带条文注入"的调用（llm_call_audit.kb_used）。
+PROMPTS["v4"] = PROMPTS["v3"]
+
+
+CURRENT_PROMPT_VERSION = "v4"  # v4: KB-2 条文参考块注入 user 侧（system 静态不变）
 
 # robustness-E1: 稀疏内容页判定阈值 — (a) 无表格时文本低于该长度，
 # (b) 有表格但行数 < 3 且总文本量低于该阈值，视为"OCR 可能解析不完整"。
@@ -456,6 +463,30 @@ async def analyze_page(
     input_label = "HTML 表格" if is_html_input else "纯文本内容"
     fence_lang = "html" if is_html_input else "text"
 
+    # v9 KB-2：知识库条文参考注入（RAG grounding）—— 块放 user 侧且在
+    # user_suffix 之前（suffix 保持提示词终结语义）；system 静态不变。
+    # 命中条目 + 知识库版本写 llm_call_audit.kb_used。
+    kb_block, kb_refs_used = "", []
+    if getattr(_app_config["app"], "kb_prompt_inject", True) and len(cleaned) >= 40:
+        try:
+            from core.kb import retriever as _kb_ret
+            from core.kb import store as _kb_store
+
+            kb_plain = re.sub(r"<[^>]+>", " ", cleaned)
+            kb_block, kb_refs_used = _kb_ret.build_page_kb_context(kb_plain)
+            _kb_version = _kb_store.kb_version()
+        except Exception as e:
+            logger.warning(f"[{job_id}] Page {page_num}: kb context failed: {e}")
+            _kb_version = ""
+    kb_section = ""
+    if kb_block:
+        kb_section = (
+            "\n\n[知识库参考] 以下为《药品生产质量管理规范（2010年修订）》"
+            "与本页内容可能相关的条文摘录，仅供合规判定参考；"
+            "数据一律以上方 OCR 原文为准，条文不得作为数据来源：\n"
+            + kb_block
+        )
+
     today = datetime.now().date()
     prompt = (
         f"提取以下 {input_label}中的结构化数据：\n\n"
@@ -475,6 +506,7 @@ async def analyze_page(
         + cleaned
         + "\n```\n"
         + "</PBC_UNTRUSTED_OCR>\n\n"
+        + (kb_section + "\n\n" if kb_section else "")
         + prompt_cfg["user_suffix"]
     )
     if is_sparse:
@@ -501,6 +533,22 @@ async def analyze_page(
             "可靠识别的信息；对无法确定归属行/列的数值，不要臆造表格"
             "结构补全，overall_confidence 相应调低。"
         )
+
+    # v9 KB-2：知识库条文参考注入（RAG grounding）—— 块放 user 侧，
+    # system 保持静态（prompt caching 不变量）；命中条目 + 知识库版本
+    # 写入 llm_call_audit.kb_used（RAG 审计规范：可溯源重建）。
+    kb_block, kb_refs_used = "", []
+    if getattr(_app_config["app"], "kb_prompt_inject", True) and len(cleaned) >= 64:
+        try:
+            from core.kb import retriever as _kb_ret
+            from core.kb import store as _kb_store
+
+            kb_plain = re.sub(r"<[^>]+>", " ", cleaned)
+            kb_block, kb_refs_used = _kb_ret.build_page_kb_context(kb_plain)
+            _kb_version = _kb_store.kb_version()
+        except Exception as e:
+            logger.warning(f"[{job_id}] Page {page_num}: kb context failed: {e}")
+            _kb_version = ""
 
     # Phase 7 security: prompt-injection mitigation.
     # OCR content comes from a user-uploaded PDF and could contain adversarial
@@ -537,6 +585,15 @@ async def analyze_page(
             "page": page_num,
             "stage": "page_analysis",
             "prompt_version": CURRENT_PROMPT_VERSION,
+            # v9 KB-2：RAG 审计留痕 —— 本次注入的条文 id + 知识库版本
+            "kb_used": (
+                {
+                    "v": _kb_version,
+                    "ids": [r["entry_id"] for r in kb_refs_used],
+                }
+                if kb_refs_used
+                else None
+            ),
         },
     )
 
@@ -633,6 +690,15 @@ async def analyze_page(
                 "page": page_num,
                 "stage": "page_analysis_schema_fix",
                 "prompt_version": CURRENT_PROMPT_VERSION,
+                # v9：重试沿用同一 KB 注入上下文，审计留痕不因重试丢失
+                "kb_used": (
+                    {
+                        "v": _kb_version,
+                        "ids": [r["entry_id"] for r in kb_refs_used],
+                    }
+                    if kb_refs_used
+                    else None
+                ),
             },
         )
         if isinstance(retry, dict) and not retry.get("_parse_error"):
@@ -706,9 +772,11 @@ def _grounding_check(html: str, data: dict) -> list:
 
     返回可疑描述列表（最多 _GROUNDING_MAX_ITEMS 条），为空表示全部通过。
     """
-    text = _normalize_grounding_text(re.sub(r"<[^>]+>", " ", html))
+    plain = re.sub(r"<[^>]+>", " ", html)
+    text = _normalize_grounding_text(plain)
     if len(text) < _GROUNDING_MIN_DIGITS:
         return []  # 原文太短（空页/纯空白）不做核对
+    tokens = _normalize_preserving_tokens(plain)
 
     suspects = []
     stepped = data.get("steps") or []
@@ -729,7 +797,7 @@ def _grounding_check(html: str, data: dict) -> list:
                 v = cell.get("actual")
                 if v is None or str(v) == "":
                     continue
-                if not _value_grounded(text, str(v)):
+                if not _value_grounded(text, str(v), tokens):
                     suspects.append(f"{m.get('time') or ''} {col}: {v}")
         for p in step.get("parameters") or []:
             if not isinstance(p, dict):
@@ -737,7 +805,7 @@ def _grounding_check(html: str, data: dict) -> list:
             v = p.get("value")
             if v is None or str(v) == "":
                 continue
-            if not _value_grounded(text, str(v)):
+            if not _value_grounded(text, str(v), tokens):
                 suspects.append(f"{p.get('name') or '参数'}={v}")
     return suspects[:_GROUNDING_MAX_ITEMS]
 
@@ -757,12 +825,25 @@ def _normalize_grounding_text(s: str) -> str:
     return re.sub(r"\s+", "", s).lower()
 
 
-def _value_grounded(text: str, value: str) -> bool:
-    """value 的数字分量是否能在 text 中找到（任一分量命中即通过）。
+def _normalize_preserving_tokens(s: str) -> list[str]:
+    """token 保留版归一化：同样变换但不跨空白合并 —— 相邻 OCR 单元格
+    （"12"+"50"）不得拼出幻觉数字 "1250"（对抗审查 P2 通道一）。"""
+    s = (s or "").translate(_FULLWIDTH_DIGITS)
+    s = re.sub(r"(?<=\d),(?=\d)", "", s).lower()
+    return [t for t in re.split(r"\s+", s) if t]
+
+
+def _value_grounded(text: str, value: str,
+                    tokens: list[str] | None = None) -> bool:
+    """value 的数字分量是否能�?text 中找到（任一分量命中即通过）�?
 
     双方都经 _normalize_grounding_text 归一化：全角数字、千分位逗号
-    不再造成假阴性；尾部归一化（0.974 命中 "0.9740"）靠子串包含；
-    短数字要求边界防误命中。
+    不再造成假阴性；尾部归一化（0.974 命中 "0.9740"）靠子串包含�?
+    短数字要求边界防误命中�?
+
+    tokens（可选）：token 保留版归一化的词元列表 —— 提供时长数字优先
+    走 token 精确/尾零匹配，根除"相邻单元格拼接幻观数字"与
+    "前向嵌入量级错误"两条假阴性通道；未提供时保持旧子串语义。
     """
     v = _normalize_grounding_text(value)
     if not v or not re.search(r"\d", v):
@@ -773,7 +854,26 @@ def _value_grounded(text: str, value: str) -> bool:
     for part in parts:
         digits = re.sub(r"[^0-9]", "", part)
         if len(digits) >= _GROUNDING_MIN_DIGITS:
-            # 长数字：直接子串（容忍尾部归一化：0.974 命中 "0.9740"）
+            # 长数字（对抗审查 P2 通道二加固）：
+            # ① 前向嵌入拒绝 —— "2500" 不得命中 "12500" 内部（量级错误）；
+            # ② 后向仅容忍纯零延展（尾部归一化："0.974" ↔ "0.9740"），
+            #    且延展后不得再接数字/句点；
+            # ③ 全部匹配须发生在单个 token 内部（token 保留版归一化），
+            #    杜绝相邻单元格拼接出的幻观数字。
+            tok_ok = tokens is not None and any(
+                (t == part)
+                or (
+                    len(t) > len(part)
+                    and t.startswith(part)
+                    and set(t[len(part):]) <= {"0"}
+                )
+                for t in tokens
+            )
+            if tok_ok:
+                return True
+            if tokens is not None:
+                continue  # token 语义下未命中 → 本分量不通过
+            # 旧语义（tokens 未提供）：纯子串包含，保持既有调用方行为
             if part in text:
                 return True
         else:
