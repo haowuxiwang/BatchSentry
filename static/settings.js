@@ -563,6 +563,80 @@
     // 初始: 显示 URL hash 对应的 section，否则默认 llm
     applyNav(hashTarget());
     log("section nav initialized", { initial: hashTarget() });
+
+    // 知识库分区：首次切入时懒加载（KB v8）
+    let kbLoaded = false;
+    const maybeLoadKb = (target) => {
+      if (target !== "kb" || kbLoaded) return;
+      kbLoaded = true;
+      initKbPanel();
+    };
+    document.querySelectorAll(".settings-nav, .settings-nav-mobile").forEach(
+      (nav) => nav.addEventListener("click", (e) => {
+        const link = e.target.closest("[data-target]");
+        if (link) maybeLoadKb(link.dataset.target);
+      }),
+    );
+    window.addEventListener("hashchange", () => maybeLoadKb(hashTarget()));
+    if (hashTarget() === "kb") maybeLoadKb("kb");
+  }
+
+  function initKbPanel() {
+    const list = document.getElementById("kb-list");
+    const meta = document.getElementById("kb-meta");
+    const count = document.getElementById("kb-count");
+    const search = document.getElementById("kb-search");
+    if (!list) return;
+
+    async function loadKb(q) {
+      try {
+        const url =
+          "/api/settings/kb?limit=200" + (q ? "&q=" + encodeURIComponent(q) : "");
+        const r = await fetch(url);
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        const d = await r.json();
+        meta.textContent = `${d.source.title}（${d.source.effective} 起施行）`;
+        count.textContent = `显示 ${d.returned} / 共 ${d.total_entries} 条`;
+        list.innerHTML = "";
+        if (!d.entries.length) {
+          const p = document.createElement("p");
+          p.className = "text-[12px] text-muted-foreground px-3 py-3";
+          p.textContent = "无匹配条款";
+          list.appendChild(p);
+          return;
+        }
+        for (const e of d.entries) {
+          const row = document.createElement("details");
+          row.className = "px-3 py-2";
+          const sum = document.createElement("summary");
+          sum.className =
+            "cursor-pointer text-[12px] font-medium text-foreground " +
+            "hover:text-muted-foreground select-none";
+          sum.textContent = `${e.article_label} · ${e.chapter}`;
+          const body = document.createElement("p");
+          body.className =
+            "text-[12px] leading-relaxed text-muted-foreground mt-1 whitespace-pre-wrap";
+          body.textContent = e.text; // textContent：无 XSS 面
+          row.appendChild(sum);
+          row.appendChild(body);
+          list.appendChild(row);
+        }
+      } catch (err) {
+        list.innerHTML = "";
+        const p = document.createElement("p");
+        p.className = "text-[12px] text-destructive px-3 py-3";
+        p.textContent = "知识库加载失败：" + err.message;
+        list.appendChild(p);
+        log.err("kb panel load failed", err);
+      }
+    }
+
+    let debounce = null;
+    search.addEventListener("input", () => {
+      clearTimeout(debounce);
+      debounce = setTimeout(() => loadKb(search.value.trim()), 300);
+    });
+    loadKb("");
   }
 
   // ============================================================

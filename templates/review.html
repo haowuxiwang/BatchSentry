@@ -431,6 +431,16 @@
                                     {% if f.gmp_basis %}
                                     <p class="text-[11px] text-muted-foreground mt-1 border-l-2 border-border pl-1.5">依据：{{ f.gmp_basis }}</p>
                                     {% endif %}
+                                    {% if f.kb_refs_list %}
+                                    <details class="mt-1 group">
+                                        <summary class="text-[11px] text-muted-foreground cursor-pointer select-none hover:text-foreground">依据条文（{{ f.kb_refs_list|length }}）</summary>
+                                        <div class="mt-1 space-y-1 border-l-2 border-border pl-1.5">
+                                            {% for r in f.kb_refs_list %}
+                                            <p class="text-[11px] text-muted-foreground leading-relaxed"><span class="font-medium text-foreground">{{ r.label }}</span>：{{ r.excerpt }}</p>
+                                            {% endfor %}
+                                        </div>
+                                    </details>
+                                    {% endif %}
                                     {% if f.corrected_text %}
                                     <p class="text-[11px] text-foreground mt-1">修正：{{ f.corrected_text }}</p>
                                     {% endif %}

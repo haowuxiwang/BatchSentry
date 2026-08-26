@@ -1113,6 +1113,30 @@
         const basisInfo = f.gmp_basis
           ? `<p class="text-[11px] text-muted-foreground mt-1 border-l-2 border-border pl-1.5">依据：${esc(f.gmp_basis)}</p>`
           : "";
+        // 知识库条文引用（v8）：kb_refs 为 JSON 字符串，坏数据安全退化
+        let kbRefsInfo = "";
+        if (f.kb_refs) {
+          let refs = [];
+          try {
+            const parsed = JSON.parse(f.kb_refs);
+            if (Array.isArray(parsed)) refs = parsed.filter((x) => x && x.label);
+          } catch {
+            /* ignore malformed */
+          }
+          if (refs.length) {
+            const rowsHtml = refs
+              .map(
+                (r) =>
+                  `<p class="text-[11px] text-muted-foreground leading-relaxed">` +
+                  `<span class="font-medium text-foreground">${esc(r.label)}</span>：${esc(r.excerpt || "")}</p>`,
+              )
+              .join("");
+            kbRefsInfo =
+              `<details class="mt-1 group"><summary class="text-[11px] text-muted-foreground ` +
+              `cursor-pointer select-none hover:text-foreground">依据条文（${refs.length}）</summary>` +
+              `<div class="mt-1 space-y-1 border-l-2 border-border pl-1.5">${rowsHtml}</div></details>`;
+          }
+        }
         // UX P1-2: AJAX 渲染补齐人工复核信息 — SSR 模板有 corrected_text /
         // reviewer_note（review.html:359-364），JS 渲染此前缺失：用户修正
         // 或备注后详情从视图中消失，复核记录审计不可见。
@@ -1151,6 +1175,7 @@
                             <p class="text-[13px] text-muted-foreground leading-relaxed">${esc(f.description)}</p>
                             ${ocrSnippet}
                             ${basisInfo}
+                            ${kbRefsInfo}
                             ${correctedInfo}
                             ${noteInfo}
                             ${actionBtns}

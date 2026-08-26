@@ -18,6 +18,7 @@ from fastapi.responses import PlainTextResponse
 
 from db.client import get_db
 from core.zh_map import zh_finding_status, zh_severity
+from core.kb.retriever import dedup_refs_for_report
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["report"])
@@ -352,6 +353,29 @@ def _generate_markdown(job: dict, findings: list[dict], total_pages: int,
     # 不完整页面，在报告中显式列出，GMP 审计可追溯。
     if exemptions:
         _append_exemption_section(lines, exemptions, esc)
+
+    # v8 知识库：本次 findings 引用的法规条文附录（去重，全文）
+    kb_cited = dedup_refs_for_report(findings)
+    if kb_cited:
+        from core.kb.store import get_entry as _kb_entry
+
+        lines.append("## 依据条文附录")
+        lines.append("")
+        lines.append("> 以下为本次问题清单引用的《药品生产质量管理规范（2010年修订）》条文原文。")
+        lines.append("")
+        for r in sorted(kb_cited, key=lambda x: x.get("entry_id", "")):
+            e = _kb_entry(r["entry_id"])
+            body = e["text"] if e else r.get("excerpt", "")
+            lines.append(f"### {r['label']}（{r.get('chapter', '')}）")
+            lines.append("")
+            lines.append(esc(body))
+            lines.append("")
+    else:
+        from core.kb.store import source_meta as _kb_meta
+
+        if _kb_meta()["source_id"]:
+            pass  # 知识库已装载但本报告无引用 —— 不输出空章节
+        # 知识库未装载时同样静默：附录是增强项，非必需章节
 
     # Summary
     pending = len([f for f in findings if f["status"] == "pending"])

@@ -30,6 +30,7 @@ from api.settings import (  # noqa: E402,F401
     rules,
     provider,
     probe,
+    kb,
 )
 # fmt: on
 

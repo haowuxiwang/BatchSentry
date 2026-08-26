@@ -82,6 +82,10 @@
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path><path d="M13.73 21a2 2 0 0 1-3.46 0"></path></svg>
             飞书通知
           </a>
+          <a href="#kb" data-target="kb" class="settings-nav-link">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path></svg>
+            知识库
+          </a>
           <div class="mt-auto pt-4 border-t border-border">
             <button type="button" id="test-conn-btn" class="settings-nav-link w-full text-left">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline></svg>
@@ -102,6 +106,7 @@
           <a href="#ocr" data-target="ocr" class="settings-nav-link">OCR 配置</a>
           <a href="#rules" data-target="rules" class="settings-nav-link">合规规则</a>
           <a href="#feishu" data-target="feishu" class="settings-nav-link">飞书通知</a>
+          <a href="#kb" data-target="kb" class="settings-nav-link">知识库</a>
         </nav>
 
         <!-- ═══════════════════════════════════════════════════
@@ -508,7 +513,34 @@
             </div>
           </section>
 
-          <!-- 底部全局消息 -->
+          <!-- ════════════════════ 知识库（只读浏览） ════════════════════ -->
+          <section data-section="kb" class="stagger-in hidden" style="--i: 7">
+            <div class="flex items-center justify-between mb-2">
+              <div>
+                <h2 class="text-[15px] font-semibold text-foreground">知识库</h2>
+                <p class="text-[12px] text-muted-foreground mt-0.5">
+                  内置法规条文，跨页分析自动为问题引用依据。只读浏览；来源变更需更新应用内置数据。
+                </p>
+              </div>
+              <span id="kb-meta" class="text-[11px] text-muted-foreground tabular-nums shrink-0 ml-4"></span>
+            </div>
+            <div class="flex items-center gap-2 mb-3">
+              <input
+                type="text"
+                id="kb-search"
+                placeholder="搜索条款内容 / 条款号 / 章名…"
+                class="w-full max-w-md px-3 py-1.5 text-[13px] bg-card border border-border rounded-md focus:outline-none focus:ring-1 focus:ring-ring"
+              />
+              <span id="kb-count" class="text-[11px] text-muted-foreground tabular-nums"></span>
+            </div>
+            <div
+              id="kb-list"
+              class="border border-border rounded-md divide-y divide-border max-h-[60vh] overflow-y-auto"
+            >
+              <p class="text-[12px] text-muted-foreground px-3 py-3">加载中…</p>
+            </div>
+          </section>
+
           <div class="flex items-center gap-3">
             <button
               type="submit"
