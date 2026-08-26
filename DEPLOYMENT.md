@@ -41,6 +41,19 @@ cd d:\learn\claudecode\pharma-batch-checker
 4. 主窗口打开后，进入**设置页面**配置 LLM API key
 5. 配置完成后即可上传 PDF 开始审核
 
+### 启动失败排障（backend-boot.log）
+
+Electron 主进程把后端的 spawn/stdout/stderr/exit 与每次健康检查的 lastError 追加写入：
+
+```
+%APPDATA%/PBC/logs/backend-boot.log
+```
+
+- 启动等待为截止时间制（180s）：只要后端进程存活就继续等（splash 每 10s 显示进度与当前原因）；进程退出立即失败
+- 报错信息包含最后一次检查的真实错误（如 ECONNREFUSED / request timeout）
+- 冷启动偶发 >30s 属正常（Windows Defender 对新构建 exe 的深度扫描实测可达 145s）；若频繁超时可将安装目录加入杀软白名单
+- 日志中的 `[boot] server.py entering ...` 行用于切分"引导阶段"与"导入/绑定阶段"
+
 ## 数据存储位置
 
 ### 便携版（开发/测试模式）
