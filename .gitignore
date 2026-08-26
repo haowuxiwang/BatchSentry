@@ -120,3 +120,5 @@ e2e_test.pdf
 
 # KB seed source binary (derived JSON ships instead)
 docs/*.doc
+# dev-time temp patch scripts
+_patch_*.py
