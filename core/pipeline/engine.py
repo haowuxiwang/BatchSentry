@@ -319,6 +319,16 @@ async def _run_pipeline_impl(job_id: str, pdf_path: str, progress_futures: list)
             if cur_status == "cancelling":
                 await transition_status(db, job_id, "cancelled", "第 3 阶段执行期间收到取消")
                 final_recovery_status = "cancelled"
+            elif cur_status in ("cancelled", "review", "partial_review",
+                                "error", "archived"):
+                # 已是终态（e2e cancel 轮实证：取消在 stage1 尾部确认后，
+                # 残余的 ocr_done 转换抛 InvalidTransitionError 到此）——
+                # 终态语义不得覆盖：cancelled 被改成 error 会破坏取消审计链，
+                # 通知也会重发。保持现状即可。
+                logger.info(
+                    f"[{job_id}] Job already terminal ({cur_status}) — "
+                    f"keeping status after invalid transition"
+                )
             else:
                 # 其他非预期状态 → error（直接 UPDATE，与 recover_stuck_jobs 同模式）
                 force_msg = f"任务处理失败: 状态转换异常 {e}"
@@ -566,14 +576,31 @@ async def _run_sliced_stage1_2(
     )
     await _audit_log(db, job_id, "stage1_complete",
                      f"pages={total_pages} duration={stage1_ms}ms")
-    await transition_status(db, job_id, "ocr_done", f"分片 OCR 完成：共 {total_pages} 页")
-    await db.commit()
-    if await _run_is_cancelled(job_id):
+
+    async def _drain_analysis_tasks() -> None:
         # 与片内取消分支一致：先取消并等待已排队分析任务再退出
+        # （孤儿协程会继续跑 LLM 并写入已取消的 job）
         for t in analysis_tasks:
             t.cancel()
         if analysis_tasks:
             await asyncio.gather(*analysis_tasks, return_exceptions=True)
+
+    # 取消检查点（对齐整份路径 stage1 尾部）：转换前确认取消，避免
+    # cancelling → ocr_done 非法转换抛 InvalidTransitionError 后跳过
+    # 已排队分析任务的清理。
+    if await _run_is_cancelled(job_id):
+        await _drain_analysis_tasks()
+        return stage1_ms, 0, failed_pages, total_pages
+    try:
+        await transition_status(db, job_id, "ocr_done", f"分片 OCR 完成：共 {total_pages} 页")
+        await db.commit()
+    except InvalidTransitionError:
+        # 竞态窗口：检查点后、转换前用户取消（ocr_running → cancelling）。
+        # 分析任务清理必须执行，异常交给引擎恢复分支完成取消迁移。
+        await _drain_analysis_tasks()
+        raise
+    if await _run_is_cancelled(job_id):
+        await _drain_analysis_tasks()
         return stage1_ms, 0, failed_pages, total_pages
 
     # Stage 2 收尾：等待所有已排队的分析任务（含最后一片刚入队的）

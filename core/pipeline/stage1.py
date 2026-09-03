@@ -255,6 +255,12 @@ async def _run_stage1_full(
             db, job_id, ocr_pdf_path, used_backend, pages
         )
 
+    # 取消检查点（e2e cancel 轮实证）：self-heal / 双后端对比期间取消
+    # 已确认（status=cancelled）后，此处无条件 transition ocr_done 抛
+    # InvalidTransitionError，引擎恢复分支误将取消终态覆盖为 error。
+    # 与 Stage 0 前后检查点同模式：取消即整体退出，不进入 Stage 2。
+    if await _run_is_cancelled(job_id):
+        return None
     await transition_status(db, job_id, "ocr_done", f"OCR 识别完成：共 {len(pages)} 页")
     await db.commit()
     logger.info(

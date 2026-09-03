@@ -486,6 +486,125 @@ class TestPipelineCancellation:
         assert (await cursor.fetchone())["c"] == 0
 
     @pytest.mark.asyncio
+    async def test_cancel_confirmed_after_ocr_keeps_cancelled(
+        self, pipeline_db, tmp_path
+    ):
+        """e2e cancel 轮回归：OCR 完成后的窗口（空页自愈/双后端对比）
+        取消被确认，stage1 尾部检查点应退出流水线，终态保持
+        cancelled —— 修复前残余的 ocr_done 转换抛 InvalidTransitionError，
+        引擎恢复分支把取消终态覆盖成 error。"""
+        job_id = await _insert_job(pipeline_db)
+        pdf_path = str(tmp_path / "fake.pdf")
+        Path(pdf_path).write_bytes(b"%PDF-1.4 fake")
+
+        pages = [{"markdown": {"text": f"page {i} " + "内容" * 50}}
+                 for i in (1, 2)]
+        analyze_page_mock = AsyncMock(
+            return_value={"steps": [], "findings": [], "overall_confidence": "high"}
+        )
+
+        # 语义等价 _is_cancelled：前 3 个检查点（stage0 前/后 + OCR 后）
+        # 返回 False；第 4 个（stage1 尾部新检查点）确认取消并落终态。
+        calls = {"n": 0}
+
+        async def fake_is_cancelled(jid):
+            from db.client import get_db
+            from core.pipeline import db_lock
+            db = await get_db()
+            async with db_lock:
+                calls["n"] += 1
+                if calls["n"] >= 4:
+                    await db.execute(
+                        "UPDATE jobs SET status = 'cancelled', "
+                        "finished_at = datetime('now','localtime') WHERE id = ?",
+                        (jid,),
+                    )
+                    await db.commit()
+                    return True
+            return False
+
+        with patch(
+            "core.pipeline._get_ocr_chain",
+            return_value=[(lambda p, cb: pages, "mineru")],
+        ), patch(
+            "core.pipeline.analyze_page", new=analyze_page_mock,
+        ), patch(
+            "core.pipeline._is_cancelled", new=fake_is_cancelled,
+        ):
+            await run_pipeline(job_id, pdf_path)
+
+        cursor = await pipeline_db.execute(
+            "SELECT status, error_message FROM jobs WHERE id = ?", (job_id,))
+        row = await cursor.fetchone()
+        assert row["status"] == "cancelled", (
+            f"cancel terminal overwritten: {row['status']} {row['error_message']}"
+        )
+        assert not row["error_message"]
+
+        # 取消发生在 OCR 完成之后（区别于 stage0 检查点路径）
+        cursor = await pipeline_db.execute(
+            "SELECT COUNT(*) AS c FROM audit_log WHERE job_id = ? "
+            "AND action = 'stage1_complete'", (job_id,))
+        assert (await cursor.fetchone())["c"] == 1
+        # 不得强制覆盖为 error
+        cursor = await pipeline_db.execute(
+            "SELECT COUNT(*) AS c FROM audit_log WHERE job_id = ? "
+            "AND action = 'status_forced_error'", (job_id,))
+        assert (await cursor.fetchone())["c"] == 0
+        # Stage 2 未执行
+        analyze_page_mock.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_invalid_transition_recovery_keeps_terminal_status(
+        self, pipeline_db, tmp_path
+    ):
+        """e2e cancel 轮回归（引擎兜底层）：pipeline 末尾残余转换抛
+        InvalidTransitionError 时，若 job 已是终态（cancelled 等），
+        恢复分支不得覆盖为 error（破坏取消审计链 + 重发通知）。"""
+        job_id = await _insert_job(pipeline_db)
+        pdf_path = str(tmp_path / "fake.pdf")
+        Path(pdf_path).write_bytes(b"%PDF-1.4 fake")
+
+        async def fake_stage3(db, jid, *a, **kw):
+            # 模拟：stage3 运行期间取消被确认（终态落库），其内部随后
+            # 的终态转换因 cancelled → review 非法而抛 InvalidTransitionError
+            await db.execute(
+                "UPDATE jobs SET status = 'cancelled', "
+                "finished_at = datetime('now','localtime') WHERE id = ?",
+                (jid,),
+            )
+            await db.commit()
+            raise InvalidTransitionError("不能从「已取消」转换到「待复核」")
+
+        pages = [{"markdown": {"text": "page 1 " + "内容" * 50}}]
+        import core.pipeline.engine as engine_mod
+        with patch(
+            "core.pipeline._get_ocr_chain",
+            return_value=[(lambda p, cb: pages, "mineru")],
+        ), patch(
+            "core.pipeline.analyze_page",
+            new=AsyncMock(return_value={
+                "steps": [], "findings": [], "overall_confidence": "high"}),
+        ), patch(
+            "core.pipeline.analyze_cross_page", new=AsyncMock(return_value=[]),
+        ), patch.object(
+            engine_mod, "_run_stage3_cross_analysis", new=fake_stage3,
+        ):
+            await run_pipeline(job_id, pdf_path)
+
+        cursor = await pipeline_db.execute(
+            "SELECT status, error_message FROM jobs WHERE id = ?", (job_id,))
+        row = await cursor.fetchone()
+        assert row["status"] == "cancelled", (
+            f"terminal status overwritten: {row['status']}"
+        )
+        assert not row["error_message"]
+        cursor = await pipeline_db.execute(
+            "SELECT COUNT(*) AS c FROM audit_log WHERE job_id = ? "
+            "AND action = 'status_forced_error'", (job_id,))
+        assert (await cursor.fetchone())["c"] == 0
+
+    @pytest.mark.asyncio
     async def test_stage2_cancel_kills_inflight_page_tasks(
         self, pipeline_db, tmp_path
     ):
@@ -527,10 +646,11 @@ class TestPipelineCancellation:
 
         async def fake_cancelled(jid):
             calls["n"] += 1
-            # 调用序（对抗审查 P2 后 +2）：1=Stage0 pre, 2=Stage0 post,
-            # 3=Stage1 后检查, 4/5=两页 _analyze_one 入口,
-            # 6=Stage 2 while 循环（fast 页完成后）→ 触发取消
-            return calls["n"] >= 6
+            # 调用序（stage1 尾部检查点加入后 +1）：1=Stage0 pre,
+            # 2=Stage0 post, 3=Stage1 后检查, 4=stage1 尾部（ocr_done 前）,
+            # 5/6=两页 _analyze_one 入口,
+            # 7=Stage 2 while 循环（fast 页完成后）→ 触发取消
+            return calls["n"] >= 7
 
         with patch(
             "core.pipeline._get_ocr_backend",
@@ -1879,6 +1999,209 @@ class TestSlicedPipeline:
         )
         assert (await cursor.fetchone())["n"] == 0
 
+    @pytest.mark.asyncio
+    async def test_sliced_cancel_before_ocr_done_transition(self, pipeline_db, tmp_path):
+        """分片尾部 ocr_done 转换前确认取消（对齐整份路径修复）→
+        已排队分析任务被清理，job 停在 cancelled，不进入 Stage 2/3。"""
+        from core import pipeline as pipeline_mod
+
+        pipeline_mod.db_lock = asyncio.Lock()
+
+        job_id = await _insert_job(pipeline_db, status="pending")
+        pdf_path = str(tmp_path / "fake.pdf")
+        Path(pdf_path).write_bytes(b"%PDF-1.4 fake")
+
+        def fake_run_sliced(pdf_path, slice_pages, on_batch, progress_cb, job_id=None):
+            on_batch(1, [{"markdown": {"text": "p1"}, "page_count": 1}], 1)
+            return [(1, [{"markdown": {"text": "p1"}, "page_count": 1}])]
+
+        # 调用序：1=Stage0 pre, 2=Stage0 post, 3=片内循环检查,
+        # 4=尾部转换前检查点 → 确认取消（与整份路径同模式）
+        calls = {"n": 0}
+
+        async def fake_cancelled(jid):
+            from db.client import get_db
+            from core.pipeline import db_lock
+            calls["n"] += 1
+            if calls["n"] < 4:
+                return False
+            db = await get_db()
+            async with db_lock:
+                await db.execute(
+                    "UPDATE jobs SET status = 'cancelled', "
+                    "finished_at = datetime('now','localtime') WHERE id = ?",
+                    (jid,),
+                )
+                await db.commit()
+            return True
+
+        orig_backend = pipeline_mod.config["app"].ocr_backend
+        orig_slices = pipeline_mod.config["app"].ocr_slices
+        orig_timeout = pipeline_mod._SLICE_QUEUE_TIMEOUT
+        pipeline_mod.config["app"].ocr_backend = "mineru"
+        pipeline_mod.config["app"].ocr_slices = 2
+        pipeline_mod._SLICE_QUEUE_TIMEOUT = 0.05
+        try:
+            with patch(
+                "core.mineru_client.run_ocr_sliced", side_effect=fake_run_sliced,
+            ), patch(
+                "core.pipeline._is_cancelled",
+                new=AsyncMock(side_effect=fake_cancelled),
+            ), patch(
+                "core.pipeline.analyze_page",
+                new=AsyncMock(return_value={"steps": [], "findings": [],
+                                            "overall_confidence": "high"}),
+            ), patch(
+                "core.pipeline.analyze_cross_page", new=AsyncMock(return_value=[]),
+            ):
+                await run_pipeline(job_id, pdf_path)
+        finally:
+            pipeline_mod.config["app"].ocr_backend = orig_backend
+            pipeline_mod.config["app"].ocr_slices = orig_slices
+            pipeline_mod._SLICE_QUEUE_TIMEOUT = orig_timeout
+
+        cursor = await pipeline_db.execute(
+            "SELECT status, error_message FROM jobs WHERE id = ?", (job_id,))
+        row = await cursor.fetchone()
+        assert row["status"] == "cancelled", f"got {row['status']}"
+        assert not row["error_message"]
+        # 未发生 ocr_done 迁移、未被强制 error
+        cursor = await pipeline_db.execute(
+            "SELECT count(*) AS n FROM audit_log WHERE job_id = ? "
+            "AND action = 'status_forced_error'", (job_id,))
+        assert (await cursor.fetchone())["n"] == 0
+
+    @pytest.mark.asyncio
+    async def test_sliced_ocr_done_transition_race_drains_tasks(
+        self, pipeline_db, tmp_path
+    ):
+        """竞态窗口回归：尾部检查点后、ocr_done 转换前用户取消
+        （ocr_running → cancelling）→ 转换抛 InvalidTransitionError，
+        except 分支必须清理已排队分析任务后重抛，引擎恢复分支完成
+        cancelling → cancelled 正式迁移（终态不落 error）。"""
+        from core import pipeline as pipeline_mod
+
+        pipeline_mod.db_lock = asyncio.Lock()
+
+        job_id = await _insert_job(pipeline_db, status="pending")
+        pdf_path = str(tmp_path / "fake.pdf")
+        Path(pdf_path).write_bytes(b"%PDF-1.4 fake")
+
+        def fake_run_sliced(pdf_path, slice_pages, on_batch, progress_cb, job_id=None):
+            on_batch(1, [{"markdown": {"text": "p1"}, "page_count": 1}], 1)
+            return [(1, [{"markdown": {"text": "p1"}, "page_count": 1}])]
+
+        calls = {"n": 0}
+
+        async def fake_cancelled(jid):
+            from db.client import get_db
+            from core.pipeline import db_lock
+            calls["n"] += 1
+            if calls["n"] < 4:
+                return False
+            # 第 4 次调用（尾部检查点）时把状态改成 cancelling 但返回
+            # False —— 检查点放行，转换在 cancelling 状态下必然非法抛出
+            db = await get_db()
+            async with db_lock:
+                await db.execute(
+                    "UPDATE jobs SET status = 'cancelling' WHERE id = ?", (jid,))
+                await db.commit()
+            return False
+
+        orig_backend = pipeline_mod.config["app"].ocr_backend
+        orig_slices = pipeline_mod.config["app"].ocr_slices
+        orig_timeout = pipeline_mod._SLICE_QUEUE_TIMEOUT
+        pipeline_mod.config["app"].ocr_backend = "mineru"
+        pipeline_mod.config["app"].ocr_slices = 2
+        pipeline_mod._SLICE_QUEUE_TIMEOUT = 0.05
+        try:
+            with patch(
+                "core.mineru_client.run_ocr_sliced", side_effect=fake_run_sliced,
+            ), patch(
+                "core.pipeline._is_cancelled",
+                new=AsyncMock(side_effect=fake_cancelled),
+            ), patch(
+                "core.pipeline.analyze_page",
+                new=AsyncMock(return_value={"steps": [], "findings": [],
+                                            "overall_confidence": "high"}),
+            ), patch(
+                "core.pipeline.analyze_cross_page", new=AsyncMock(return_value=[]),
+            ):
+                await run_pipeline(job_id, pdf_path)
+        finally:
+            pipeline_mod.config["app"].ocr_backend = orig_backend
+            pipeline_mod.config["app"].ocr_slices = orig_slices
+            pipeline_mod._SLICE_QUEUE_TIMEOUT = orig_timeout
+
+        cursor = await pipeline_db.execute(
+            "SELECT status, error_message FROM jobs WHERE id = ?", (job_id,))
+        row = await cursor.fetchone()
+        assert row["status"] == "cancelled", f"got {row['status']}"
+        assert not row["error_message"]
+        cursor = await pipeline_db.execute(
+            "SELECT count(*) AS n FROM audit_log WHERE job_id = ? "
+            "AND action = 'status_forced_error'", (job_id,))
+        assert (await cursor.fetchone())["n"] == 0
+
+    @pytest.mark.asyncio
+    async def test_llm_overlap_suppressed(self, pipeline_db, tmp_path):
+        """降噪 N1：rule 已覆盖的 (page,type)，llm_cross 不再重复报告。
+
+        同一问题在复核 UI 出现 rule+LLM 两三份是用户可见噪声主源；
+        rule 为权威版本，被抑制数量写审计（GMP 可追溯）。
+        """
+        job_id = await _insert_job(pipeline_db)
+        pdf_path = str(tmp_path / "fake.pdf")
+        Path(pdf_path).write_bytes(b"%PDF-1.4 fake")
+
+        pages = [{"markdown": {"text": f"page {i} " + "内容" * 50}}
+                 for i in (1, 2)]
+
+        rule_findings = [
+            {"page": 1, "type": "time_reversal", "severity": "critical",
+             "description": "规则层：工序6 时间倒序", "source": "rule"},
+        ]
+        llm_cross = [
+            {"page": 1, "type": "time_reversal", "severity": "warning",
+             "description": "LLM：发现时间倒序（语义重复）",
+             "source": "llm_cross"},
+            {"page": 1, "type": "completeness", "severity": "info",
+             "description": "缺少复核签名", "source": "llm_cross"},
+        ]
+
+        async def fake_cross(page_structures, job_id="", progress_cb=None):
+            return rule_findings + llm_cross
+
+        with patch(
+            "core.pipeline._get_ocr_chain",
+            return_value=[(lambda p, cb: pages, "mineru")],
+        ), patch(
+            "core.pipeline.analyze_page",
+            new=AsyncMock(return_value={
+                "steps": [], "findings": [],
+                "overall_confidence": "high"}),
+        ), patch(
+            "core.pipeline.analyze_cross_page",
+            new=AsyncMock(side_effect=fake_cross),
+        ):
+            await run_pipeline(job_id, pdf_path)
+
+        cur = await pipeline_db.execute(
+            "SELECT type, source FROM findings WHERE job_id = ? "
+            "AND page = 1 ORDER BY source", (job_id,))
+        rows = [dict(r) for r in await cur.fetchall()]
+        tr_sources = [r["source"] for r in rows
+                      if r["type"] == "time_reversal"]
+        assert tr_sources == ["rule"], f"overlap not suppressed: {rows}"
+        comp = [r for r in rows if r["type"] == "completeness"]
+        assert len(comp) == 1 and comp[0]["source"] == "llm_cross"
+
+        cur = await pipeline_db.execute(
+            "SELECT detail FROM audit_log WHERE job_id = ? AND "
+            "action = 'findings_overlap_suppressed'", (job_id,))
+        log = await cur.fetchone()
+        assert log is not None and "count=1" in log["detail"]
+
 
 # ─── 3. 空页自动重试（Stage 1 抗挫折，MinerU 大文件丢页）───────────
 
@@ -2609,6 +2932,8 @@ class TestStage3CoverageGaps:
                      "severity": "w", "description": "r1"},
                     {"source": "rule", "page": 1, "type": "t",
                      "severity": "w", "description": "r1"},
+                    # user_rule 与 rule 同 (page,type) —— N1 抑制仅针对
+                    # llm_cross/llm_fallback，user_rule 豁免（用户显式规则）
                     {"source": "user_rule", "page": 1, "type": "t",
                      "severity": "info", "description": "ur", "rule_id": 5},
                 ]

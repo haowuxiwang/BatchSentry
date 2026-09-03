@@ -546,6 +546,37 @@ class TestPipelineEdgeCases:
         assert result is False
 
     @pytest.mark.asyncio
+    async def test_is_cancelled_notifies_outside_db_lock(self, pipeline_db):
+        """round-21 回归：取消确认通知必须在 db_lock 释放后执行。
+
+        飞书 HTTP 重试退避可达数秒，持全局锁等网络会阻塞所有 DB 写入方。
+        """
+        from unittest.mock import patch, AsyncMock
+        from core.pipeline import _is_cancelled, db_lock
+        import core.notify
+
+        await pipeline_db.execute(
+            "INSERT INTO jobs (id, filename, status, pdf_path) "
+            "VALUES (?, ?, ?, ?)",
+            ("notify-lock-test", "t.pdf", "cancelling", "/tmp/t.pdf"),
+        )
+        await pipeline_db.commit()
+
+        lock_states = []
+
+        async def capture_notify(jid, status):
+            lock_states.append((status, db_lock.locked()))
+
+        with patch.object(core.notify, "notify_job",
+                          new=AsyncMock(side_effect=capture_notify)):
+            result = await _is_cancelled("notify-lock-test")
+
+        assert result is True
+        assert lock_states == [("cancelled", False)], (
+            f"notify ran inside db_lock: {lock_states}"
+        )
+
+    @pytest.mark.asyncio
     async def test_is_cancelled_returns_false_for_nonexistent_job(self, pipeline_db):
         """不存在的 job 应返回 False（不抛异常）。"""
         from core.pipeline import _is_cancelled

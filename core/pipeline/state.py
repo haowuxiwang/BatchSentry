@@ -236,6 +236,8 @@ async def _is_cancelled(job_id: str) -> bool:
     # Runtime resolution — tests rebuild core.pipeline.db_lock.
     from core.pipeline import db_lock
     db = await get_db()
+    cancelled = False
+    notify_cancelled = False
     async with db_lock:
         cursor = await db.execute("SELECT status FROM jobs WHERE id = ?", (job_id,))
         row = await cursor.fetchone()
@@ -248,6 +250,11 @@ async def _is_cancelled(job_id: str) -> bool:
                 except InvalidTransitionError as e:
                     # Race: another caller already transitioned; log and treat as cancelled
                     logger.warning(f"[{job_id}] Cancel transition race: {e}")
+                # 对抗审查（round-20）：取消终态此前无任何通知调用点——README
+                # 承诺"取消时推送飞书"。所有取消路径（stage0/stage1/stage2/
+                # stage3 检查点、OCR 线程中止）都经本函数确认，此处是唯一
+                # 收口点。仅在确认迁移本次触发（重复探测由 notify 审计查重兜底）。
+                notify_cancelled = True
             # Always set finished_at (transition_status doesn't set this column)
             await db.execute(
                 "UPDATE jobs SET finished_at = datetime('now','localtime') WHERE id = ?",
@@ -255,8 +262,16 @@ async def _is_cancelled(job_id: str) -> bool:
             )
             await db.commit()
             logger.info(f"[{job_id}] Pipeline cancelled")
-            return True
-    return False
+            cancelled = True
+    if notify_cancelled:
+        # 锁外通知（round-21 对抗审查）：飞书 HTTP 重试退避可达数秒，
+        # 持全局 db_lock 等网络会阻塞所有 DB 写入方。
+        try:
+            from core.notify import notify_job
+            await notify_job(job_id, "cancelled")
+        except Exception:
+            pass  # notify_job 自身已兜底，此处双保险防异常逃逸
+    return cancelled
 
 
 def is_job_stopping_sync(job_id: str) -> bool:
