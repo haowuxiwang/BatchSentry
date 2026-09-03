@@ -157,10 +157,30 @@ signatures: [{"role":"workshop_reviewer", "name":"李四", "sign_time":"2025.01.
     },
 }
 
-# v4：模板与 v3 完全一致 —— KB-2 的条文参考块是运行时按页动态追加到
-# user 侧的（system 静态不变，维持 prompt caching）。注册独立版本号是
-# 为了 RAG 审计可区分"带条文注入"的调用（llm_call_audit.kb_used）。
-PROMPTS["v4"] = PROMPTS["v3"]
+# v4：模板继承 v3 + KB-2 条文参考块（运行时注入 user 侧）+ 完整性
+# 检查收紧（降噪 N2）。注册独立版本号使审计可区分"带条文/新规范"调用。
+_v4 = dict(PROMPTS["v3"])
+# schema 示例中锚定 completeness 的输出位置（PARSE 论文：字段描述精确化）
+_v4["user_suffix"] = _v4["user_suffix"].replace(
+    '"ocr_noise":[],',
+    '"ocr_noise":[],\n'
+    ' "completeness_notes":"仅当可从原文确证缺失时逐项填写；禁止推测；同类合并",',
+    1,
+)
+PROMPTS["v4"] = {
+    **_v4,
+    "user_suffix": _v4["user_suffix"] + (
+        "\n\n[完整性检查规范] completeness 类 finding 仅允许以下情形，"
+        "且必须能在 OCR 原文中找到对应空白或缺失证据：\n"
+        "1. 签名栏存在但为空（缺操作人/复核人签名）\n"
+        "2. 必填字段无值（批号/日期/版本号等留白）\n"
+        "3. 复核勾选框矛盾或漏勾\n"
+        "4. 页面元素缺失（整栏/整表在原 PDF 布局中不存在）\n"
+        "禁止输出「无法准确识别」「可能缺失」「疑似遗漏」等推测性表述 —— "
+        "识别不清属于 overall_confidence=low 与 handwritten 标记的职责，"
+        "不属于 completeness。同类缺失合并为一条并逐项列举。"
+    ),
+}
 
 
 CURRENT_PROMPT_VERSION = "v4"  # v4: KB-2 条文参考块注入 user 侧（system 静态不变）

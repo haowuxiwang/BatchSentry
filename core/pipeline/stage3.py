@@ -119,11 +119,30 @@ async def _run_stage3_cross_analysis(
     # 双保险（idx_findings_dedup UNIQUE 索引兜底，v5）。避免逐条 select-then-
     # insert 的 2×N 次 DB 往返（51 页真实文件 400+ findings → 1000+ await）。
     dedup_seen: set[tuple] = set()
+    # 降噪 N1（本轮）：规则层已覆盖的同 (page, type) 不再重复接受
+    # llm_cross/llm_fallback 的语义重复报告 —— 同一问题在复核 UI 出现
+    # rule+LLM 两三份是用户可见噪声的主要来源之一。rule 为权威版本；
+    # 被抑制数量写入日志与审计（GMP 可追溯"为什么少了一条"）。
+    rule_covered: set[tuple] = {
+        (f["page"], f["type"]) for f in findings
+        if f.get("source") == "rule"
+    }
+    suppressed_overlap = 0
     batch_rows: list[tuple] = []
     for f in findings:
         # 跳过已在 Stage 2 写入的 page-level LLM findings
         if f.get("source") == "llm_page":
             skipped_llm_page += 1
+            continue
+        src = f.get("source", "rule")
+        # user_rule 豁免：用户显式规则与规则层撞 (page,type) 是正常共存
+        if src in ("llm_cross", "llm_fallback") and \
+                (f["page"], f["type"]) in rule_covered:
+            suppressed_overlap += 1
+            logger.debug(
+                f"[{job_id}] overlap suppressed: p{f['page']} {f['type']} "
+                f"({src}) — rule already covers this page/type"
+            )
             continue
         # robustness-B4: retry 会重新执行 Stage 3，确定性生成的 findings
         # 按 (job_id, source, page, type, description) 指纹去重。
@@ -163,8 +182,15 @@ async def _run_stage3_cross_analysis(
             await db.commit()
     logger.info(
         f"[{job_id}] DB: findings inserted ({inserted} new + {skipped_llm_page} "
-        f"llm_page skipped, severity={severity_counts})"
+        f"llm_page skipped + {suppressed_overlap} LLM-overlap suppressed, "
+        f"severity={severity_counts})"
     )
+    if suppressed_overlap:
+        await _audit_log(
+            db, job_id, "findings_overlap_suppressed",
+            f"count={suppressed_overlap} — llm findings whose (page,type) "
+            f"already covered by deterministic rule layer",
+        )
 
     # 门禁 3：双后端差异页逐页写入 completeness finding（复用 rule 链路的
     # 去重索引 / 复核 UI / 报告导出）。INSERT OR IGNORE + UNIQUE 指纹保证

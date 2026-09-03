@@ -170,8 +170,9 @@ class TestPromptConstruction:
         assert "提取数据" in user_prompt
         assert "style=" not in user_prompt
         assert "width=" not in user_prompt
-        # 末尾应拼接 v3 user_suffix
-        assert user_prompt.endswith(PROMPTS["v3"]["user_suffix"])
+        # 末尾应拼接当前版本 user_suffix（v4 = v3 + 完整性检查规范，降噪 N2）
+        assert user_prompt.endswith(PROMPTS[CURRENT_PROMPT_VERSION]["user_suffix"])
+        assert user_prompt.endswith(PROMPTS["v4"]["user_suffix"])
 
     @pytest.mark.asyncio
     async def test_chat_json_call_kwargs(self):
