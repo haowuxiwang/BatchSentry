@@ -10,7 +10,7 @@ BatchSentry 是面向制药企业的批生产记录（BPR）审核工具，通�
 - **上传内容去重**：流式上传时计算 MD5，相同文件二次上传返回 409 并提示已有任务（`force=1` 可绕过，用于规则变更后的合法重分析）
 - **结构化提取**：LLM 提取工序步骤、参数矩阵、签名、时间、事件年份分组
 - **实时进度**：SSE 流式推送任务状态（上传页行内 OCR/分析计数 + 复核页按页热更 findings）
-- **跨页合规分析**：规则引擎（R1-R8）+ LLM fallback + LLM 语义检查三层判定
+- **跨页合规分析**：规则引擎（R1-R10 及衍生规则）+ LLM fallback + LLM 语义检查三层判定；规则层已覆盖的 (page, type) 不再重复接受 LLM 语义重复报告（降噪，抑制量写审计）
   - R1 时间倒序（time_reversal，页内 + 跨页，critical）
   - R2 年份矛盾（year_contradiction）
   - R3 参数越界（param_out_of_spec，规则无法判定时进 LLM fallback 队列）
@@ -18,7 +18,9 @@ BatchSentry 是面向制药企业的批生产记录（BPR）审核工具，通�
   - R5 签名异常（signature_time_anomaly）
   - R6 完整性检查（completeness，缺操作/复核签名）
   - R7 批号一致性（batch_consistency，跨页批号漂移）
-  - R8 低置信度参数（low_confidence，标记人工复核）
+  - R8 低置信度参数（low_confidence，标记人工复核；R8b 勾选矛盾）
+  - R9 手写内容标记（handwritten，人工确认；R9a 跨角色签名顺序）
+  - R10 工序缺号（step_gap，缺页/漏页检测；R-M1/R-M2 测量矩阵规则）
 - **用户自定义合规规则**：设置页填写工厂/产品专属约束（如「XX 产品中间体储存温度必须 15-25°C」），跨页分析时注入 LLM 逐条核对，生成 `user_rule` 类型问题；变更写入审计日志，`prompt_version` 携带规则内容 hash（GMP 可追溯）
 - **多 LLM 服务商**：DeepSeek / SiliconFlow（内置，可通过 config.json 动态注册更多），Anthropic 协议适配
 - **GMP 审计追踪**：所有状态转换、LLM 调用、人工复核操作均写入审计日志
@@ -124,7 +126,7 @@ npm run dev
 $env:PBC_NO_FILE_LOG='1'
 python -m pytest tests/ --cov=. --cov-report=term --timeout=30
 
-# 当前状态：1020 passed, 90.29% coverage（目标 ≥90%）
+# 当前状态：1301 passed, 90.02% coverage（目标 ≥90%）
 ```
 
 ## 安全设计
