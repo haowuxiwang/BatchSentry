@@ -122,3 +122,9 @@ e2e_test.pdf
 docs/*.doc
 # dev-time temp patch scripts
 _patch_*.py
+
+# Dev-time artifacts archive (moved from repo root, all regenerable)
+devlogs/
+
+# 申报材料（含联系人 PII，禁止入库）
+AI智造典型案例申报表.docx

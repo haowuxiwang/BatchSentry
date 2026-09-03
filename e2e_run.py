@@ -17,7 +17,7 @@ Rounds:
                 partial_review)
 
 Every round also subscribes /api/jobs/{id}/stream and records SSE frames to
-e2e_sse_<stem>.jsonl (streaming-output evidence: event count / phase chain).
+devlogs/e2e_sse_<stem>.jsonl (streaming-output evidence: event count / phase chain).
 """
 import argparse
 import json
@@ -260,7 +260,14 @@ def main():
         print("[e2e] exe stopped")
 
 
-def run_upload(c, path, mime, expect_types, force, timeout_s=600, page_chars=False):
+# 常规轮预算：默认 600s；上游 LLM 拥堵日单页排队可达数分钟
+# （2026-09-02 实测 img 轮 1 页 482s），可用 E2E_PDF_TIMEOUT 覆盖。
+_PDF_TIMEOUT_S = int(os.environ.get("E2E_PDF_TIMEOUT", "600"))
+
+
+def run_upload(c, path, mime, expect_types, force, timeout_s=None, page_chars=False):
+    if timeout_s is None:
+        timeout_s = _PDF_TIMEOUT_S
     t0 = time.time()
     with open(path, "rb") as f:
         files = {"file": (path, f, mime)}
@@ -271,7 +278,7 @@ def run_upload(c, path, mime, expect_types, force, timeout_s=600, page_chars=Fal
     print(f"[e2e] upload {path} -> job {job_id}")
     # SSE 流式输出证据采集：全程订阅进度流，记录事件数/phase 覆盖
     sse_stats = {"events": 0, "transitions": [], "last_phase": None, "last": None}
-    sse_log = f"e2e_sse_{Path(path).stem}.jsonl"
+    sse_log = os.path.join("devlogs", f"e2e_sse_{Path(path).stem}.jsonl")
     sse_thread = _sse_recorder(job_id, sse_log, sse_stats)
     st, d = wait_terminal(c, job_id, timeout_s=timeout_s)
     sse_thread.join(timeout=15)
@@ -341,7 +348,7 @@ def run_cancel(c, path, mime="application/pdf"):
     job_id = r.json().get("job_id") or r.json().get("id")
     print(f"[e2e] upload {path} -> job {job_id}")
     sse_stats = {"events": 0, "transitions": [], "last_phase": None, "last": None}
-    sse_log = f"e2e_sse_cancel.jsonl"
+    sse_log = os.path.join("devlogs", "e2e_sse_cancel.jsonl")
     sse_thread = _sse_recorder(job_id, sse_log, sse_stats)
     # 等 OCR 真正开跑（避免对 pending 取消的无关路径），最长 20s
     entered = ""

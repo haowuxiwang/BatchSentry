@@ -28,6 +28,20 @@ appdata = os.path.join(tempfile.gettempdir(), "pbc_e2e_appdata")
 
 failures = []
 
+# Pre-seed config from the repo root (dev config holds real keys; the frozen
+# backend reads %APPDATA%/PBC/config.json). Without it the upload page blocks
+# all submissions with needs_setup — fresh temp appdata has no settings.
+# Overwrite every run: a stale config from a previous session would otherwise
+# win (possibly with revoked keys / wrong backend) and make rounds
+# non-deterministic.
+_cfg_src = os.path.abspath("config.json")
+_cfg_dst = os.path.join(appdata, "PBC", "config.json")
+if os.path.exists(_cfg_src):
+    os.makedirs(os.path.dirname(_cfg_dst), exist_ok=True)
+    import shutil
+    shutil.copy2(_cfg_src, _cfg_dst)
+    print(f"[info] seeded config -> {_cfg_dst}")
+
 
 def check(name, cond, detail=""):
     tag = "PASS" if cond else "FAIL"
@@ -61,7 +75,11 @@ assert up, "backend did not start"
 
 try:
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True, channel="msedge")
+        # 系统 Edge 优先；Edge 启动失败（如企业策略/损坏安装）回退 Chrome
+        try:
+            browser = p.chromium.launch(headless=True, channel="msedge")
+        except Exception:
+            browser = p.chromium.launch(headless=True, channel="chrome")
         ctx = browser.new_context(viewport={"width": 1440, "height": 900})
         page = ctx.new_page()
         errors = []
@@ -94,9 +112,14 @@ try:
         print(f"[info] review of {str(jid)[:8]}")
 
         # ── Phase 2: pipeline to terminal (real OCR + LLM) ──
+        # 预算默认 300s；上游 LLM 拥堵日单页排队可达数分钟
+        # （2026-09-02 实测 6 页 Stage2 超 5 分钟），UI_E2E_TIMEOUT 可覆盖
+        # —— 与 e2e_run.py 的 E2E_PDF_TIMEOUT/E2E_REAL_TIMEOUT 同策略。
         terminal = None
+        budget_s = int(os.environ.get("UI_E2E_TIMEOUT", "300"))
         with httpx.Client(timeout=10) as c:
-            for _ in range(150):
+            deadline = time.time() + budget_s
+            while time.time() < deadline:
                 st = c.get(f"{BASE}/api/jobs/{jid}").json().get("status")
                 if st in ("review", "partial_review", "error"):
                     terminal = st
