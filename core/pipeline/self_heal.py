@@ -46,15 +46,288 @@ def _has_missing_markers(text: str) -> bool:
     return bool(content_lines) and all(line.startswith("#") for line in content_lines)
 
 
+# 恢复验收（自愈两分支 + 旋转恢复共用）：非空、>100 字符、无缺失标记。
+# 抽取为函数消重 — 三处手写同一条件曾在对抗审查中被各自漂移。
+def _accept_heal_text(md: str | None) -> bool:
+    return bool(md) and len(md.strip()) > 100 and not _has_missing_markers(md)
+
+
+# 旋转恢复候选角度（round-23 A）：页面内容横置（扫描时纸横放，非
+# /Rotate 元数据）时 OCR 返回稀疏/空文本，切片重试无法恢复 — 逐角度
+# 重渲染探测。90/270 在前（横放扫描最常见），180 最后。
+_ROTATION_CANDIDATES = (90, 270, 180)
+
+# 嫌疑横置页升级裕度（round-23 A3，e2e 实证）：VL 对横排文本有旋转
+# 容忍度 —— 切片重跑能读出横置页的大部分表格但标题/细字乱码（e2e p3:
+# 「横置二百七十度参数表」→「横直一口」），>100 字通过验收后旋转探测
+# 从未运行。横向几何（aspect_ratio>1）+ 初判稀疏的切片恢复页列为嫌疑
+# 横置，补跑旋转探测；旋转读取须内容量明显更优（>1.1×）才替换 —
+# 正常横版宽表页（横向是合法排版）旋转后读取必然更差，不会误替换。
+_ROTATION_UPGRADE_FACTOR = 1.1
+
+# 旋转几何预筛阈值（round-23 A4 前置，e2e 实证）：原生页行/列强度投影
+# 方差比 ≥ 此值判横向文本。e2e_rot.pdf 实测横向 ratio 6.1-13.1、纵向
+# 0.08-0.16 —— 双峰间隔大，1.15 取中间偏保守值；两轴皆弱（空白页）或
+# 比值落入灰区时返回 None（回退探测全部角度，预筛永不阻塞恢复）。
+_PRESCREEN_RATIO = 1.15
+# 预筛渲染 DPI：只需行/列明暗统计，48dpi 灰度足够分辨文本朝向（原型
+# devlogs/_proto_prescreen.py 实证），单页渲染 <50ms。
+_PRESCREEN_DPI = 48
+
+
+def _variance(xs: list[float]) -> float:
+    """总体方差（与原型 devlogs/_proto_prescreen.py 一致的语义）。"""
+    n = len(xs)
+    if n < 2:
+        return 0.0
+    m = sum(xs) / n
+    return sum((v - m) ** 2 for v in xs) / n
+
+
+def _projection_variances(pdf_path: str, page_no: int) -> tuple[float, float]:
+    """原生页行/列强度投影方差（同步低 DPI 渲染，供 to_thread 调用）。
+
+    横向文本 → 行间明暗交替 → 行方差大、列方差小；纵向文本同理反转。
+    90°/270° 旋转交换两轴、180° 保持 —— 原生页单次渲染即可推出全部候选
+    角度的朝向，无需逐角度渲染（预筛成本 = 每目标页一次 <50ms 渲染）。
+    """
+    import fitz
+    from PIL import Image
+
+    with fitz.open(pdf_path) as doc:
+        page = doc[page_no - 1]
+        pix = page.get_pixmap(dpi=_PRESCREEN_DPI, colorspace=fitz.csGRAY)
+        w, h = pix.width, pix.height
+        img = Image.frombytes("L", (w, h), pix.samples[: w * h])
+    row_means = [float(v) for v in
+                 img.resize((1, h), Image.Resampling.BOX).getdata()]
+    col_means = [float(v) for v in
+                 img.resize((w, 1), Image.Resampling.BOX).getdata()]
+    return _variance(row_means), _variance(col_means)
+
+
+async def _prescreen_rotation_angles(
+    pdf_path: str, page_no: int,
+) -> tuple[int, ...] | None:
+    """几何预筛：判定哪些候选角度值得 OCR 探测（round-23 A4）。
+
+    根因（e2e 实证）：上游「系统错误-拆页」随机杀死 90°/270° 探测时，
+    180° 乱序读取因长度门槛被误采纳。预筛从几何上排除不可能正确的角度：
+    - 原生纵向文本（横置内容）→ 只探测 90/270（180° 仍纵向，永远跳过）
+    - 原生横向文本（正常页/180° 倒置页）→ 只探测 180（90/270 变纵向）
+    返回 None 表示预筛不定（灰区/空白/渲染失败）→ 探测全部候选角度。
+    """
+    try:
+        rv, cv = await asyncio.to_thread(
+            _projection_variances, pdf_path, page_no
+        )
+    except Exception as e:
+        logger.warning(
+            f"prescreen render failed p{page_no}: {redact_urls(str(e))[:120]}"
+        )
+        return None
+    if rv < 1e-6 and cv < 1e-6:
+        return None  # 空白页：无朝向信息
+    horizontal = rv >= _PRESCREEN_RATIO * cv
+    vertical = cv >= _PRESCREEN_RATIO * rv
+    if horizontal:
+        return (180,)
+    if vertical:
+        return (90, 270)
+    return None  # 灰区（混合朝向/图像主导）：全角度探测
+
+
+async def _probe_slice_text(
+    slice_path: str, backend: str, job_id: str, attempts: int = 2,
+) -> str:
+    """单角度旋转切片 OCR（含瞬态上游错误重试，round-23 A4）。
+
+    e2e 实证上游「系统错误-拆页」为随机瞬态失败：首试异常时退避 2s 重试
+    一次，显著提高正确角度存活率（90°/270° 探测不再被单次瞬态错误杀死
+    而让位给乱序角度）；重试耗尽后抛末次异常由调用方记录并继续下一角度。
+    """
+    import core.ocr_client as ocr_client  # runtime-visible for PyInstaller
+
+    last_err: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            if backend == "mineru":
+                from core.mineru_client import run_ocr_pages
+
+                retried = await asyncio.to_thread(
+                    run_ocr_pages, slice_path, [1],
+                    job_id=job_id, batch_size=1,
+                )
+                return retried[0][1] if retried else ""
+            slice_pages = await asyncio.to_thread(
+                ocr_client.run_ocr, slice_path
+            )
+            return (
+                slice_pages[0]["markdown"]["text"] if slice_pages else ""
+            )
+        except Exception as e:
+            last_err = e
+            if attempt < attempts:
+                logger.info(
+                    f"[{job_id}] Rotation probe transient error "
+                    f"({redact_urls(str(e))[:120]}) — retrying once"
+                )
+                await asyncio.sleep(2)
+    assert last_err is not None
+    raise last_err
+
+
+def _write_rotated_slice(src_path: str, page_no: int, angle: int,
+                          dst_path: str) -> None:
+    """把源 PDF 第 page_no 页旋转 angle 度后写成单页 PDF（同步磁盘 IO）。
+
+    目标页尺寸按角度交换宽高；show_pdf_page(rotate=) 在目标矩形内旋转
+    缩放源页。元数据 /Rotate 已被 page.rect 消化（源页按显示方向取尺寸），
+    本函数只处理"内容相对显示方向再横置"的场景。
+    """
+    import fitz
+    src = fitz.open(src_path)
+    try:
+        page = src[page_no - 1]
+        rect = page.rect
+        w, h = (rect.height, rect.width) if angle in (90, 270)             else (rect.width, rect.height)
+        out = fitz.open()
+        try:
+            np = out.new_page(width=w, height=h)
+            np.show_pdf_page(np.rect, src, page_no - 1, rotate=angle)
+            out.save(dst_path)
+        finally:
+            out.close()
+    finally:
+        src.close()
+
+
+async def _rotation_heal(
+    db, job_id: str, pdf_path: str, targets: list[int], backend: str,
+    pages_by_num: dict[int, dict], prior_diags: dict[int, dict],
+    upgrade_pages: dict[int, int] | None = None,
+) -> dict[int, int]:
+    """旋转恢复通道：切片重试仍空的页，逐角度重渲染后重 OCR（round-23 A）。
+
+    返回 {page: 采纳角度}。每页最多 3 次单页 OCR 调用（仅 still-empty 页，
+    通常 0-6 页/文档）；任一角度通过恢复验收即采纳并停止后续角度。
+    采纳结果与切片自愈同款落库（清 structured_json 触发补跑分析、
+    prior_diagnostics 保留、内存回写）；审计 stage1_rotation_recovered
+    由调用方合并写（GMP 可追溯"此页为何多了旋转字段"）。
+
+    upgrade_pages（round-23 A3，e2e 实证）：{page: 切片恢复内容长度} ——
+    VL 对横排文本有旋转容忍度，横置页可能被切片重跑"部分恢复"（表格可
+    读、标题乱码）；此类嫌疑页传入后旋转读取须内容量明显更优
+    （> _ROTATION_UPGRADE_FACTOR ×现有长度）才替换，未升级成功则保留
+    切片结果（诊断不动 — 页面已有内容，rotation_probed 空页语义不适用）。
+
+    几何预筛（round-23 A4，e2e 根因）：上游「系统错误-拆页」随机杀死
+    90°/270° 探测时，180° 乱序读取曾因长度门槛被误采纳。预筛按投影
+    方差只探测几何上可能正确的角度（横置页跳过 180°），配合瞬态错误
+    单次重试（_probe_slice_text）双保险：前者杜绝错误采纳，后者提高
+    正确角度存活率。
+    """
+    from core.pipeline import _is_cancelled as _run_is_cancelled
+
+    job_dir_p = Path(config["app"].output_dir) / job_id
+    _upgrades = upgrade_pages or {}
+    recovered: dict[int, int] = {}
+    for done_idx, pno in enumerate(targets, 1):
+        if await _run_is_cancelled(job_id):
+            logger.info(
+                f"[{job_id}] Rotation heal cancelled — keeping "
+                f"{len(recovered)} recovered pages"
+            )
+            break
+        chosen_angle, chosen_md = None, ""
+        candidates = await _prescreen_rotation_angles(pdf_path, pno)
+        if candidates is None:
+            candidates = _ROTATION_CANDIDATES
+        else:
+            logger.info(
+                f"[{job_id}] Rotation prescreen p{pno}: probing "
+                f"{list(candidates)}deg only (geometric)"
+            )
+        for angle in candidates:
+            slice_path = job_dir_p / f"rot{angle}-p{pno}.pdf"
+            try:
+                await asyncio.to_thread(
+                    _write_rotated_slice, pdf_path, pno, angle, str(slice_path)
+                )
+                md = await _probe_slice_text(str(slice_path), backend, job_id)
+                if _accept_heal_text(md):
+                    if pno in _upgrades:
+                        # 嫌疑横置页升级：旋转读取须明显富于切片恢复结果
+                        # 才替换（正常横版宽表旋转后读取更差，自然被拒）。
+                        if len(md.strip()) <= _upgrades[pno] * _ROTATION_UPGRADE_FACTOR:
+                            continue
+                        logger.info(
+                            f"[{job_id}] Rotation upgrade: p{pno} rotated "
+                            f"{angle}deg read {len(md.strip())} chars vs "
+                            f"slice { _upgrades[pno]} — replacing"
+                        )
+                    chosen_angle, chosen_md = angle, md
+                    logger.info(
+                        f"[{job_id}] Rotation heal: p{pno} recovered at "
+                        f"{angle}deg ({len(md.strip())} chars)"
+                    )
+                    break
+            except Exception as rot_err:
+                logger.warning(
+                    f"[{job_id}] Rotation probe p{pno}@{angle}deg failed: "
+                    f"{redact_urls(str(rot_err))[:200]}"
+                )
+            finally:
+                slice_path.unlink(missing_ok=True)
+        if chosen_angle is not None:
+            clean = _sanitize_ocr_text(chosen_md.strip())
+            await db.execute(
+                "UPDATE page_cache SET raw_html = ?, ocr_diagnostics = ?, "
+                "structured_json = NULL, analyzed_at = NULL "
+                "WHERE job_id = ? AND page = ?",
+                (clean,
+                 _self_heal_diag(prior_diags.get(pno), recovered=True,
+                                 content_len=len(clean),
+                                 rotation_deg=chosen_angle),
+                 job_id, pno),
+            )
+            if pno in pages_by_num:
+                pages_by_num[pno]["markdown"]["text"] = clean
+            recovered[pno] = chosen_angle
+        elif prior_diags.get(pno) and pno not in _upgrades:
+            # 旋转探测未果（90/270/180° 重渲染后 OCR 仍稀疏/空）：落
+            # rotation_probed 诊断（round-23 A2）— 复核页据此提示"系统
+            # 已尝试旋转恢复未果"，区别于未探测过的空页；GMP 可追溯
+            # 恢复尝试本身即是完整性证据。raw_html 不动（保留 stage1
+            # 空页警告横幅，走人工复核路径）。
+            await db.execute(
+                "UPDATE page_cache SET ocr_diagnostics = ? "
+                "WHERE job_id = ? AND page = ?",
+                (_self_heal_diag(prior_diags.get(pno), recovered=False,
+                                 rotation_probed=True),
+                 job_id, pno),
+            )
+        await _report_heal_progress(
+            db, job_id, done_idx, len(targets),
+            [p for p in targets if p not in recovered],
+        )
+        await db.commit()
+    return recovered
+
+
 def _self_heal_diag(prior: dict | None, *, recovered: bool = False,
-                    content_len: int = 0, round_num: int = 0) -> str | None:
+                    content_len: int = 0, round_num: int = 0,
+                    rotation_deg: int | None = None,
+                    rotation_probed: bool = False) -> str | None:
     """自愈恢复页的诊断 JSON：保留原始完整性证据，标记自愈状态。
 
     门禁 1（页级诊断可追溯）：旧实现自愈 UPDATE 把 ocr_diagnostics 置 NULL，
     该页"曾因空页/缺失占位被判不完整"的证据就此丢失。恢复页应能回答
     "此页为何被重跑" — 以 prior_diagnostics 存原始诊断 + self_healed 标记。
     新增：recovery_round / content_length / recovered 标记，便于审计追踪
-    自愈效果（哪一轮恢复、恢复后内容量）。
+    自愈效果（哪一轮恢复、恢复后内容量）。rotation_deg 为旋转恢复采纳角
+    （round-23 A）；rotation_probed=True 表示旋转探测已尝试但未过验收
+    （round-23 A2，复核页提示人工核对原图）。
     """
     if not prior:
         return None
@@ -68,6 +341,10 @@ def _self_heal_diag(prior: dict | None, *, recovered: bool = False,
         diag["recovery_round"] = round_num
     if content_len:
         diag["content_length"] = content_len
+    if rotation_deg is not None:
+        diag["rotation_deg"] = rotation_deg
+    if rotation_probed:
+        diag["rotation_probed"] = True
     return json.dumps(diag, ensure_ascii=False)
 
 async def _report_heal_progress(db, job_id: str, done: int, total: int, pages: list[int]) -> None:
@@ -106,7 +383,15 @@ async def _self_heal_empty_pages(
     # Runtime resolution — tests patch core.pipeline._is_cancelled.
     from core.pipeline import _is_cancelled as _run_is_cancelled
     recovered: list[int] = []  # 恢复页号（无自愈/异常路径保持空列表）
+    # 切片恢复内容的长度（round-23 A3 嫌疑横置页升级的比较基线）
+    healed_len: dict[int, int] = {}
     if backend in ("mineru", "paddle"):
+        # 切片落盘目录保障（round-23 单测实证）：Paddle selfheal-*.pdf 与
+        # 旋转 rot*-*.pdf 都写 job 目录 — 生产由上传层 mkdir（upload.py），
+        # 但 retry 复用缓存 / 测试直呼 run_pipeline 的路径无保障；目录缺失
+        # 时 fitz save 抛 FzErrorSystem code=2，整个自愈链静默失败。
+        (Path(config["app"].output_dir) / job_id).mkdir(
+            parents=True, exist_ok=True)
         # 空页判定增强（对抗审查 cr-17）：仅看 raw_html 长度会漏判
         # "标签多、文字少"的页（如 <table><tr><td></td></tr></table>
         # 无文字模板 >100 字符）。去 HTML 标签后按真实文本长度判定。
@@ -233,6 +518,7 @@ async def _self_heal_empty_pages(
                                 )
                                 if pno in pages_by_num:
                                     pages_by_num[pno]["markdown"]["text"] = clean
+                                healed_len[pno] = len(clean)
                                 recovered.append(pno)
                             else:
                                 next_pending.append(pno)
@@ -325,6 +611,7 @@ async def _self_heal_empty_pages(
                                 )
                                 if pno in pages_by_num:
                                     pages_by_num[pno]["markdown"]["text"] = clean
+                                healed_len[pno] = len(clean)
                                 recovered.append(pno)
                             else:
                                 still_empty.append(pno)
@@ -345,6 +632,37 @@ async def _self_heal_empty_pages(
                         db, job_id, "stage1_empty_recovered",
                         f"recovered_pages={recovered}",
                     )
+                # 嫌疑横置页升级（round-23 A3，e2e 实证）：切片恢复页中横向
+                # 几何（aspect_ratio>1）者 —— VL 旋转容忍度可能使其被
+                # "部分恢复"（表格可读、标题乱码），补跑旋转探测择优替换。
+                upgrade_pages = {
+                    p: healed_len[p] for p in recovered
+                    if p in healed_len
+                    and (prior_diags.get(p) or {}).get("aspect_ratio", 0) > 1.0
+                }
+                rot_targets = list(still_empty) + list(upgrade_pages)
+                if rot_targets:
+                    # 旋转恢复通道（round-23 A）：内容横置页切片重试必然
+                    # 仍空 — 逐角度重渲染探测，采纳首个通过验收的角度。
+                    rot_recovered = await _rotation_heal(
+                        db, job_id, pdf_path, rot_targets, backend,
+                        pages_by_num, prior_diags,
+                        upgrade_pages=upgrade_pages,
+                    )
+                    if rot_recovered:
+                        _seen = set(recovered)
+                        recovered.extend(
+                            p for p in rot_recovered if p not in _seen
+                        )
+                        await _audit_log(
+                            db, job_id, "stage1_rotation_recovered",
+                            f"recovered_pages={dict(rot_recovered)} — "
+                            f"content was sideways; re-rendered at the "
+                            f"adopted angle and re-OCR'd",
+                        )
+                        still_empty = [
+                            p for p in still_empty if p not in rot_recovered
+                        ]
                 if still_empty:
                     logger.warning(
                         f"[{job_id}] Empty-page retry: still empty "

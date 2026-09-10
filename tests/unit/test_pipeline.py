@@ -2667,6 +2667,523 @@ class TestSelfHealCoverageGaps:
         finally:
             pipeline_mod.config["app"].ocr_backend = orig_backend
 
+    @staticmethod
+    def _make_pdf(tmp_path, n_pages=12):
+        """fitz 生成 n 页真实 PDF，p5 内容横置 90°（与 e2e_rot.pdf p2 同
+        构造：正常排版源页 show_pdf_page(rotate=90) 整体旋转嵌入）。
+
+        三重用途：_write_rotated_slice 需要可打开的文档（fake bytes 会让
+        所有角度探测异常跳过）；预筛（round-23 A4）需要真实纵向文本几何
+        才会只探测 90/270；p5 横向几何（842×595 → aspect_ratio≈1.415>1）
+        命中嫌疑横置页升级判定。"""
+        import fitz
+        path = str(tmp_path / "real.pdf")
+        doc = fitz.open()
+        for i in range(n_pages):
+            if i == 4:
+                src = fitz.open()
+                sp = src.new_page(width=595, height=842)
+                y = 60
+                for _ in range(10):
+                    sp.insert_text(
+                        (50, y), "sideways content " + "s" * 24, fontsize=11
+                    )
+                    y += 22
+                np_ = doc.new_page(width=842, height=595)
+                np_.show_pdf_page(np_.rect, src, 0, rotate=90)
+                src.close()
+            else:
+                doc.new_page()
+                doc[i].insert_text((72, 100), f"page {i + 1} filler")
+        doc.save(path)
+        doc.close()
+        return path
+
+    @pytest.mark.asyncio
+    async def test_rotation_heal_recovers_sideways_page_mineru(
+        self, pipeline_db, tmp_path
+    ):
+        """round-23 A：切片重试仍空（内容横置）→ 旋转探测 90° 恢复。
+
+        断言：raw_html 替换为旋转后文本、诊断带 rotation_deg=90、
+        审计 stage1_rotation_recovered 落库。
+        """
+        from core import pipeline as pipeline_mod
+        import json as _json
+
+        pdf_path = self._make_pdf(tmp_path)
+        pages = [
+            {"markdown": {"text": f"page {i} content " + "x" * 200}}
+            for i in range(1, 13)
+        ]
+        pages[4]["markdown"]["text"] = ""  # p5 横置 → OCR 空 → 触发自愈链
+
+        def fake_retry(pdf_path, page_nums, batch_size=3, job_id=""):
+            if list(page_nums) == [1]:
+                # 旋转切片：run_ocr_pages 对单页新 PDF 提交，page_nums=[1]
+                return [(1, "rotated content p5 " + "y" * 200, 0)]
+            # 主 OCR 切片自愈：仍空（横置内容切片重试救不回来）
+            return [(pno, "", 0) for pno in page_nums]
+
+        orig_backend = pipeline_mod.config["app"].ocr_backend
+        pipeline_mod.config["app"].ocr_backend = "mineru"
+        job_id = await _insert_job(pipeline_db, status="pending")
+        try:
+            with patch(
+                "core.pipeline._get_ocr_backend",
+                return_value=lambda p, cb: pages,
+            ), patch(
+                "core.mineru_client.run_ocr_pages", side_effect=fake_retry,
+            ), patch(
+                "core.pipeline.analyze_page",
+                new=AsyncMock(return_value={
+                    "steps": [], "findings": [],
+                    "overall_confidence": "high"}),
+            ), patch(
+                "core.pipeline.analyze_cross_page",
+                new=AsyncMock(return_value=[]),
+            ):
+                await run_pipeline(job_id, pdf_path)
+        finally:
+            pipeline_mod.config["app"].ocr_backend = orig_backend
+
+        cursor = await pipeline_db.execute(
+            "SELECT raw_html, ocr_diagnostics FROM page_cache "
+            "WHERE job_id = ? AND page = 5", (job_id,))
+        row = await cursor.fetchone()
+        assert "rotated content p5" in row["raw_html"], (
+            f"rotation heal did not replace raw_html: {row['raw_html'][:80]}"
+        )
+        diag = _json.loads(row["ocr_diagnostics"])
+        assert diag["self_healed"] is True and diag["rotation_deg"] == 90
+
+        cursor = await pipeline_db.execute(
+            "SELECT detail FROM audit_log WHERE job_id = ? AND "
+            "action = 'stage1_rotation_recovered'", (job_id,))
+        log = await cursor.fetchone()
+        assert log is not None and "90" in log["detail"]
+
+    @pytest.mark.asyncio
+    async def test_rotation_heal_all_angles_fail_keeps_original(
+        self, pipeline_db, tmp_path
+    ):
+        """旋转探测全部角度未过验收 → 页保留原空状态，无旋转审计，
+        流水线照常终态（真无法识别走人工复核路径）。"""
+        from core import pipeline as pipeline_mod
+        import json as _json
+
+        pdf_path = self._make_pdf(tmp_path)
+        pages = [
+            {"markdown": {"text": f"page {i} content " + "x" * 200}}
+            for i in range(1, 13)
+        ]
+        pages[4]["markdown"]["text"] = ""
+
+        def fake_retry(pdf_path, page_nums, batch_size=3, job_id=""):
+            return [(pno, "", 0) for pno in page_nums]
+
+        orig_backend = pipeline_mod.config["app"].ocr_backend
+        pipeline_mod.config["app"].ocr_backend = "mineru"
+        job_id = await _insert_job(pipeline_db, status="pending")
+        try:
+            with patch(
+                "core.pipeline._get_ocr_backend",
+                return_value=lambda p, cb: pages,
+            ), patch(
+                "core.mineru_client.run_ocr_pages", side_effect=fake_retry,
+            ), patch(
+                "core.pipeline.analyze_page",
+                new=AsyncMock(return_value={
+                    "steps": [], "findings": [],
+                    "overall_confidence": "high"}),
+            ), patch(
+                "core.pipeline.analyze_cross_page",
+                new=AsyncMock(return_value=[]),
+            ):
+                await run_pipeline(job_id, pdf_path)
+        finally:
+            pipeline_mod.config["app"].ocr_backend = orig_backend
+
+        cursor = await pipeline_db.execute(
+            "SELECT raw_html, ocr_diagnostics FROM page_cache "
+            "WHERE job_id = ? AND page = 5", (job_id,))
+        row = await cursor.fetchone()
+        # 未被旋转文本污染：空页在 stage1 落库时带 [OCR 警告:] 完整性
+        # 横幅（设计行为 — 供复核页横幅与 LLM 低置信提示），旋转失败后
+        # 原样保留该横幅而非裸空串。
+        assert row["raw_html"].startswith("[OCR 警告:")
+        assert "rotated" not in row["raw_html"]
+        # round-23 A2：探测未果页落 rotation_probed 诊断 — 复核页提示
+        # "系统已尝试旋转恢复"，区别于未探测过的空页（GMP 可追溯）。
+        diag = _json.loads(row["ocr_diagnostics"])
+        assert diag.get("rotation_probed") is True
+        assert diag.get("recovered") is False
+        cursor = await pipeline_db.execute(
+            "SELECT 1 FROM audit_log WHERE job_id = ? AND "
+            "action = 'stage1_rotation_recovered'", (job_id,))
+        assert (await cursor.fetchone()) is None
+
+    @pytest.mark.asyncio
+    async def test_rotation_heal_paddle_branch(self, pipeline_db, tmp_path):
+        """Paddle 后端：切片重提（selfheal-*.pdf）返回空 → 旋转探测
+        （rot*-*.pdf）返回横置文本 → 恢复并写 rotation_deg。"""
+        from core import pipeline as pipeline_mod
+        import json as _json
+
+        pdf_path = self._make_pdf(tmp_path)
+        pages = [
+            {"markdown": {"text": f"page {i} content " + "x" * 200}}
+            for i in range(1, 13)
+        ]
+        pages[4]["markdown"]["text"] = ""
+
+        def fake_run_ocr(path):
+            if "selfheal" in str(path):
+                return []  # 单页重提仍空
+            return [{"markdown": {"text": "paddle rotated p5 " + "z" * 200}}]
+
+        orig_backend = pipeline_mod.config["app"].ocr_backend
+        pipeline_mod.config["app"].ocr_backend = "paddle"
+        job_id = await _insert_job(pipeline_db, status="pending")
+        try:
+            with patch(
+                "core.pipeline._get_ocr_backend",
+                return_value=lambda p, cb: pages,
+            ), patch(
+                "core.ocr_client.run_ocr", side_effect=fake_run_ocr,
+            ), patch(
+                "core.pipeline.analyze_page",
+                new=AsyncMock(return_value={
+                    "steps": [], "findings": [],
+                    "overall_confidence": "high"}),
+            ), patch(
+                "core.pipeline.analyze_cross_page",
+                new=AsyncMock(return_value=[]),
+            ):
+                await run_pipeline(job_id, pdf_path)
+        finally:
+            pipeline_mod.config["app"].ocr_backend = orig_backend
+
+        cursor = await pipeline_db.execute(
+            "SELECT raw_html, ocr_diagnostics FROM page_cache "
+            "WHERE job_id = ? AND page = 5", (job_id,))
+        row = await cursor.fetchone()
+        assert "paddle rotated p5" in row["raw_html"]
+        diag = _json.loads(row["ocr_diagnostics"])
+        assert diag["rotation_deg"] == 90
+
+    def test_write_rotated_slice_swaps_dimensions(self, tmp_path):
+        """_write_rotated_slice：90° 输出页宽高互换，/Rotate 元数据为 0
+        （内容旋转进新页面布局，非元数据标记 — 与"内容横置"场景一致）。"""
+        import fitz
+        from core.pipeline.self_heal import _write_rotated_slice
+
+        src_path = str(tmp_path / "src.pdf")
+        doc = fitz.open()
+        page = doc.new_page(width=200, height=400)
+        page.insert_text((20, 50), "sideways")
+        doc.save(src_path)
+        doc.close()
+
+        dst = str(tmp_path / "rot.pdf")
+        _write_rotated_slice(src_path, 1, 90, dst)
+        out = fitz.open(dst)
+        try:
+            assert out.page_count == 1
+            rect = out[0].rect
+            assert abs(rect.width - 400) < 1 and abs(rect.height - 200) < 1
+            assert int(out[0].rotation or 0) == 0
+        finally:
+            out.close()
+
+    @pytest.mark.asyncio
+    async def test_rotation_upgrade_partial_slice_recovery(
+        self, pipeline_db, tmp_path
+    ):
+        """round-23 A3：切片重跑"部分恢复"（>100 字验收通过但标题乱码）
+        + 横向几何 → 嫌疑横置页补跑旋转探测；旋转读取显著更优（>1.1×）
+        才替换。断言：raw_html 为旋转文本、诊断带 rotation_deg=90、
+        审计 stage1_rotation_recovered 落库。"""
+        from core import pipeline as pipeline_mod
+        import json as _json
+
+        pdf_path = self._make_pdf(tmp_path)
+        pages = [
+            {"markdown": {"text": f"page {i} content " + "x" * 200}}
+            for i in range(1, 13)
+        ]
+        pages[4]["markdown"]["text"] = ""  # p5 横置 → 初判空 → 触发自愈链
+
+        # VL 旋转容忍度：切片重跑读出横置页大部分表格（155 字过验收），
+        # 但标题/细字乱码；旋转后完整读取（417 字 > 1.1×155=170.5）。
+        partial = "slice partial p5 " + "a" * 140   # 155 字
+        rotated = "rotated full p5 " + "b" * 400    # 417 字
+
+        def fake_retry(pdf_path, page_nums, batch_size=3, job_id=""):
+            if list(page_nums) == [1]:
+                # 旋转切片：run_ocr_pages 对单页新 PDF 提交，page_nums=[1]
+                return [(1, rotated, 0)]
+            # 主切片自愈：部分恢复（>100 字通过验收，不进 still_empty）
+            return [(pno, partial, 0) for pno in page_nums]
+
+        orig_backend = pipeline_mod.config["app"].ocr_backend
+        pipeline_mod.config["app"].ocr_backend = "mineru"
+        job_id = await _insert_job(pipeline_db, status="pending")
+        try:
+            with patch(
+                "core.pipeline._get_ocr_backend",
+                return_value=lambda p, cb: pages,
+            ), patch(
+                "core.mineru_client.run_ocr_pages", side_effect=fake_retry,
+            ), patch(
+                "core.pipeline.analyze_page",
+                new=AsyncMock(return_value={
+                    "steps": [], "findings": [],
+                    "overall_confidence": "high"}),
+            ), patch(
+                "core.pipeline.analyze_cross_page",
+                new=AsyncMock(return_value=[]),
+            ):
+                await run_pipeline(job_id, pdf_path)
+        finally:
+            pipeline_mod.config["app"].ocr_backend = orig_backend
+
+        cursor = await pipeline_db.execute(
+            "SELECT raw_html, ocr_diagnostics FROM page_cache "
+            "WHERE job_id = ? AND page = 5", (job_id,))
+        row = await cursor.fetchone()
+        assert "rotated full p5" in row["raw_html"], (
+            f"rotation upgrade did not replace slice partial: "
+            f"{row['raw_html'][:80]}"
+        )
+        diag = _json.loads(row["ocr_diagnostics"])
+        assert diag["self_healed"] is True and diag["rotation_deg"] == 90
+
+        cursor = await pipeline_db.execute(
+            "SELECT detail FROM audit_log WHERE job_id = ? AND "
+            "action = 'stage1_rotation_recovered'", (job_id,))
+        log = await cursor.fetchone()
+        assert log is not None and "90" in log["detail"]
+
+    @pytest.mark.asyncio
+    async def test_rotation_upgrade_rejects_marginal_gain(
+        self, pipeline_db, tmp_path
+    ):
+        """round-23 A3 反向：旋转读取仅边际更优（未超 1.1× 裕度）→
+        不替换，保留切片恢复结果（正常横版宽表页旋转后读取更差，
+        旋转只会更短/乱码 — 长度门槛天然拒绝误替换）。"""
+        from core import pipeline as pipeline_mod
+        import json as _json
+
+        pdf_path = self._make_pdf(tmp_path)
+        pages = [
+            {"markdown": {"text": f"page {i} content " + "x" * 200}}
+            for i in range(1, 13)
+        ]
+        pages[4]["markdown"]["text"] = ""
+
+        partial = "slice partial p5 " + "a" * 140    # 155 字
+        marginal = "marginal gain p5 " + "c" * 145   # 161 字 < 1.1×155
+
+        def fake_retry(pdf_path, page_nums, batch_size=3, job_id=""):
+            if list(page_nums) == [1]:
+                return [(1, marginal, 0)]
+            return [(pno, partial, 0) for pno in page_nums]
+
+        orig_backend = pipeline_mod.config["app"].ocr_backend
+        pipeline_mod.config["app"].ocr_backend = "mineru"
+        job_id = await _insert_job(pipeline_db, status="pending")
+        try:
+            with patch(
+                "core.pipeline._get_ocr_backend",
+                return_value=lambda p, cb: pages,
+            ), patch(
+                "core.mineru_client.run_ocr_pages", side_effect=fake_retry,
+            ), patch(
+                "core.pipeline.analyze_page",
+                new=AsyncMock(return_value={
+                    "steps": [], "findings": [],
+                    "overall_confidence": "high"}),
+            ), patch(
+                "core.pipeline.analyze_cross_page",
+                new=AsyncMock(return_value=[]),
+            ):
+                await run_pipeline(job_id, pdf_path)
+        finally:
+            pipeline_mod.config["app"].ocr_backend = orig_backend
+
+        cursor = await pipeline_db.execute(
+            "SELECT raw_html, ocr_diagnostics FROM page_cache "
+            "WHERE job_id = ? AND page = 5", (job_id,))
+        row = await cursor.fetchone()
+        # 切片结果保留：边际增益未过升级门槛
+        assert "slice partial p5" in row["raw_html"]
+        assert "marginal gain" not in row["raw_html"]
+        # 诊断保持切片恢复态（无 rotation_deg — 升级未发生）
+        diag = _json.loads(row["ocr_diagnostics"])
+        assert diag.get("recovered") is True
+        assert "rotation_deg" not in diag
+        # 无旋转恢复审计（未采纳任何角度）
+        cursor = await pipeline_db.execute(
+            "SELECT 1 FROM audit_log WHERE job_id = ? AND "
+            "action = 'stage1_rotation_recovered'", (job_id,))
+        assert (await cursor.fetchone()) is None
+
+    @pytest.mark.asyncio
+    async def test_rotation_prescreen_blocks_180_adoption(
+        self, pipeline_db, tmp_path
+    ):
+        """round-23 A4 根因回归：上游「系统错误-拆页」杀死 90°/270° 探测
+        （重试耗尽）时，180° 乱序长文本不得被采纳 — 预筛已从几何上排除
+        该角度（横置页只探测 90/270）。页面保留空态 + rotation_probed。"""
+        from core import pipeline as pipeline_mod
+        import json as _json
+
+        pdf_path = self._make_pdf(tmp_path)
+        pages = [
+            {"markdown": {"text": f"page {i} content " + "x" * 200}}
+            for i in range(1, 13)
+        ]
+        pages[4]["markdown"]["text"] = ""
+
+        def fake_retry(pdf_path, page_nums, batch_size=3, job_id=""):
+            p = str(pdf_path)
+            if list(page_nums) == [1]:
+                if "rot180" in p:
+                    # 若 180° 被探测将返回长乱序文本（采纳即为缺陷）
+                    return [(1, "garbled reversed p5 " + "g" * 400, 0)]
+                # 90°/270° 探测：瞬态错误，两次重试均失败
+                raise RuntimeError("系统错误-拆页")
+            return [(pno, "", 0) for pno in page_nums]
+
+        orig_backend = pipeline_mod.config["app"].ocr_backend
+        pipeline_mod.config["app"].ocr_backend = "mineru"
+        job_id = await _insert_job(pipeline_db, status="pending")
+        try:
+            with patch(
+                "core.pipeline._get_ocr_backend",
+                return_value=lambda p, cb: pages,
+            ), patch(
+                "core.mineru_client.run_ocr_pages", side_effect=fake_retry,
+            ), patch(
+                "core.pipeline.analyze_page",
+                new=AsyncMock(return_value={
+                    "steps": [], "findings": [],
+                    "overall_confidence": "high"}),
+            ), patch(
+                "core.pipeline.analyze_cross_page",
+                new=AsyncMock(return_value=[]),
+            ):
+                await run_pipeline(job_id, pdf_path)
+        finally:
+            pipeline_mod.config["app"].ocr_backend = orig_backend
+
+        cursor = await pipeline_db.execute(
+            "SELECT raw_html, ocr_diagnostics FROM page_cache "
+            "WHERE job_id = ? AND page = 5", (job_id,))
+        row = await cursor.fetchone()
+        # 180° 乱序文本未被采纳：预筛从几何上排除了该角度
+        assert "garbled reversed" not in row["raw_html"]
+        assert row["raw_html"].startswith("[OCR 警告:")
+        diag = _json.loads(row["ocr_diagnostics"])
+        assert diag.get("rotation_probed") is True
+        assert diag.get("recovered") is False
+        cursor = await pipeline_db.execute(
+            "SELECT 1 FROM audit_log WHERE job_id = ? AND "
+            "action = 'stage1_rotation_recovered'", (job_id,))
+        assert (await cursor.fetchone()) is None
+
+    @pytest.mark.asyncio
+    async def test_rotation_transient_error_retry_recovers(
+        self, pipeline_db, tmp_path
+    ):
+        """round-23 A4：90° 探测首试瞬态失败（「系统错误-拆页」）→ 退避
+        重试第二次成功 → rotation_deg=90（重试保住正确角度）。"""
+        from core import pipeline as pipeline_mod
+        import json as _json
+
+        pdf_path = self._make_pdf(tmp_path)
+        pages = [
+            {"markdown": {"text": f"page {i} content " + "x" * 200}}
+            for i in range(1, 13)
+        ]
+        pages[4]["markdown"]["text"] = ""
+
+        probe_calls = {"n": 0}
+
+        def fake_retry(pdf_path, page_nums, batch_size=3, job_id=""):
+            p = str(pdf_path)
+            if list(page_nums) == [1]:
+                if "rot90" in p:
+                    probe_calls["n"] += 1
+                    if probe_calls["n"] == 1:
+                        raise RuntimeError("系统错误-拆页")
+                    return [(1, "rotated retry p5 " + "y" * 200, 0)]
+                return [(1, "", 0)]
+            return [(pno, "", 0) for pno in page_nums]
+
+        orig_backend = pipeline_mod.config["app"].ocr_backend
+        pipeline_mod.config["app"].ocr_backend = "mineru"
+        job_id = await _insert_job(pipeline_db, status="pending")
+        try:
+            with patch(
+                "core.pipeline._get_ocr_backend",
+                return_value=lambda p, cb: pages,
+            ), patch(
+                "core.mineru_client.run_ocr_pages", side_effect=fake_retry,
+            ), patch(
+                "core.pipeline.analyze_page",
+                new=AsyncMock(return_value={
+                    "steps": [], "findings": [],
+                    "overall_confidence": "high"}),
+            ), patch(
+                "core.pipeline.analyze_cross_page",
+                new=AsyncMock(return_value=[]),
+            ):
+                await run_pipeline(job_id, pdf_path)
+        finally:
+            pipeline_mod.config["app"].ocr_backend = orig_backend
+
+        cursor = await pipeline_db.execute(
+            "SELECT raw_html, ocr_diagnostics FROM page_cache "
+            "WHERE job_id = ? AND page = 5", (job_id,))
+        row = await cursor.fetchone()
+        assert "rotated retry p5" in row["raw_html"]
+        assert probe_calls["n"] == 2  # 首试失败 + 重试成功
+        diag = _json.loads(row["ocr_diagnostics"])
+        assert diag["self_healed"] is True and diag["rotation_deg"] == 90
+
+    @pytest.mark.asyncio
+    async def test_prescreen_rotation_angles(self, tmp_path):
+        """预筛纯函数：正常横排页 → (180,)；横置页（纵向文本）→
+        (90, 270)；空白页 → None（全角度回退，预筛不阻塞恢复）。"""
+        import fitz
+        from core.pipeline.self_heal import _prescreen_rotation_angles
+
+        # 正常横排文本页
+        normal = str(tmp_path / "normal.pdf")
+        doc = fitz.open()
+        p = doc.new_page()
+        for i in range(10):
+            p.insert_text((50, 60 + i * 22), "normal text " + "n" * 20)
+        doc.save(normal)
+        doc.close()
+
+        # 横置页（复用 _make_pdf 的 p5 构造）
+        sideways = self._make_pdf(tmp_path)
+
+        # 空白页
+        blank = str(tmp_path / "blank.pdf")
+        doc = fitz.open()
+        doc.new_page()
+        doc.save(blank)
+        doc.close()
+
+        assert await _prescreen_rotation_angles(normal, 1) == (180,)
+        assert await _prescreen_rotation_angles(sideways, 5) == (90, 270)
+        # 空白页：两轴方差皆 ~0 → None（回退全角度）
+        assert await _prescreen_rotation_angles(blank, 1) is None
+
 
 class TestSlicedCoverageGaps:
     """切片路径缺口补测：缓存页跳过 / 已分析页跳过 / discarded 前缀 /

@@ -15,6 +15,10 @@ Rounds:
   dual        — OCR_DUAL_COMPARE on: mineru primary + paddle secondary re-run of
                 same synthetic pdf (asserts audit dual_compare_done; diffs force
                 partial_review)
+  rot         — e2e_rot.pdf (synthetic sideways pages p2=90°, p3=270°, round-23 A):
+                asserts sideways markers visible in final raw_html (content not
+                lost — either VL reads rotated text directly or rotation heal
+                recovers; records which path + rotation_deg evidence)
 
 Every round also subscribes /api/jobs/{id}/stream and records SSE frames to
 devlogs/e2e_sse_<stem>.jsonl (streaming-output evidence: event count / phase chain).
@@ -244,6 +248,12 @@ def main():
                     results["dual"] = run_dual(
                         c, os.environ.get("E2E_PDF_SMALL", "e2e_test.pdf"))
                     c.post(f"{API}/api/settings", json={"ocr_dual_compare": False})
+                elif rnd == "rot":
+                    # round-23 A: sideways-page rotation self-heal (paddle primary)
+                    r = c.post(f"{API}/api/settings", json={"ocr_backend": "paddle"})
+                    print(f"[e2e] switch to paddle -> {r.status_code}")
+                    results["rot"] = run_rot(c, "e2e_rot.pdf",
+                                             timeout_s=_ROT_TIMEOUT_S)
             print("\n[e2e] SUMMARY:", json.dumps(
                 {k: {kk: vv for kk, vv in v.items() if kk != "findings"}
                  for k, v in results.items()}, ensure_ascii=False, indent=2))
@@ -263,6 +273,14 @@ def main():
 # 常规轮预算：默认 600s；上游 LLM 拥堵日单页排队可达数分钟
 # （2026-09-02 实测 img 轮 1 页 482s），可用 E2E_PDF_TIMEOUT 覆盖。
 _PDF_TIMEOUT_S = int(os.environ.get("E2E_PDF_TIMEOUT", "600"))
+
+# rot 轮专用预算：旋转自愈链固有成本远超常规轮 —— 初始 OCR + 空页切片
+# 自愈（两轮上游重提交）+ 逐页逐角度旋转探测（每页最多 2 角 × 2 重试，
+# 每次探测都是完整上游 OCR 任务 submit+poll，实测单轮总耗时 620s+
+# （2026-09-04 冻结版 e2e：job 620s 超默认 600s 预算 20s 被误杀，
+# 旋转证据本身完整 — 两页 90° 恢复、标记可见、审计落库）。默认 1200s，
+# 可用 E2E_ROT_TIMEOUT 覆盖。
+_ROT_TIMEOUT_S = int(os.environ.get("E2E_ROT_TIMEOUT", "1200"))
 
 
 def run_upload(c, path, mime, expect_types, force, timeout_s=None, page_chars=False):
@@ -413,6 +431,77 @@ def run_dual(c, path, mime="application/pdf"):
     res["dual_audit"] = dual_actions
     res["diff_findings"] = len(diff_findings)
     res["ok"] = bool(res.get("ok")) and "dual_compare_done" in dual_actions
+    return res
+
+
+def run_rot(c, path, mime="application/pdf", timeout_s=None):
+    """round-23 A: sideways-page rotation self-heal round.
+
+    合成样本（gen_e2e_rot_pdf.py）：p1/p4 正常，p2 内容横置 90°、p3 横置
+    270°（非 /Rotate 元数据 — show_pdf_page 旋转嵌入）。两条恢复路径均合法：
+    1. 直识：PaddleOCR-VL 直接识别横置文本 → raw_html 含页内标记；
+    2. 自愈：直识稀疏/空 → 切片重试仍空 → 旋转探测 90/270/180° 重渲染
+       重 OCR → 采纳（ocr_diagnostics.rotation_deg + 审计
+       stage1_rotation_recovered）。
+
+    硬断言（内容不丢失 — 用户核心诉求）：p2/p3 标记文本在最终 raw_html
+    可见；自愈路径额外断言 rotation_deg 落库与审计可追溯。p1 批号基准
+    （B2025001）同页可见性一并校验（对照页未受旋转污染）。
+    """
+    res = run_upload(c, path, mime, expect_types=[], force=True,
+                     timeout_s=timeout_s)
+    job_id = res.get("job_id")
+    if not job_id or not res.get("ok"):
+        return res
+    markers = {2: "横置九十度工序表", 3: "横置二百七十度参数表"}
+    paths, lost = [], []
+    rot_pages = {}
+    for p, marker in markers.items():
+        try:
+            r = c.get(f"{API}/api/jobs/{job_id}/pages/{p}", timeout=15)
+            pd = r.json() if r.status_code == 200 else {}
+        except Exception:
+            pd = {}
+        text = pd.get("raw_html") or ""
+        diag = pd.get("ocr_diagnostics") or {}
+        if diag.get("rotation_deg") is not None:
+            rot_pages[p] = diag["rotation_deg"]
+        if marker in text:
+            via = (f"rotation@{diag['rotation_deg']}°"
+                   if diag.get("rotation_deg") is not None else "direct")
+            paths.append({"page": p, "via": via})
+        else:
+            lost.append({"page": p, "rotation_deg": diag.get("rotation_deg"),
+                         "chars": len(text)})
+    # 对照页：p1 正常封面批号基准可见（旋转链不误伤正常页）
+    try:
+        r = c.get(f"{API}/api/jobs/{job_id}/pages/1", timeout=15)
+        p1_ok = r.status_code == 200 and "B2025001" in (r.json().get("raw_html") or "")
+    except Exception:
+        p1_ok = False
+    # 自愈路径须审计可追溯（直识路径无旋转事件，属正常）
+    audit_rot = []
+    if rot_pages:
+        try:
+            r = c.get(f"{API}/api/jobs/{job_id}/audit?limit=300", timeout=15)
+            body = r.json()
+            items = body if isinstance(body, list) else body.get("entries", [])
+            audit_rot = [a.get("action", "") for a in items
+                         if a.get("action") == "stage1_rotation_recovered"]
+        except Exception:
+            audit_rot = []
+    print(f"[e2e] rot: sideways pages via={paths} lost={lost} p1_batch_visible={p1_ok} "
+          f"rotation_deg={rot_pages} audit_rotation_events={len(audit_rot)}")
+    res["rot_paths"] = paths
+    res["rot_lost"] = lost
+    res["p1_batch_visible"] = p1_ok
+    res["rotation_deg"] = rot_pages
+    res["audit_rotation_events"] = len(audit_rot)
+    res["ok"] = (bool(res.get("ok")) and not lost and p1_ok
+                 and (not rot_pages or bool(audit_rot)))
+    if not res["ok"]:
+        print(f"[e2e] rot round FAIL: lost={lost} p1_batch_visible={p1_ok} "
+              f"rot_without_audit={bool(rot_pages) and not audit_rot}")
     return res
 
 

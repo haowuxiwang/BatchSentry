@@ -828,6 +828,20 @@
           if (diag.rotation) {
             parts.push(`旋转=${diag.rotation}°`);
           }
+          // round-23 A：自愈信息（切片重跑 / 横置页旋转重渲染）— 复核者
+          // 须知道"此页文本是恢复产物"而非原始识别，必要时以 PDF 原图核对。
+          if (diag.self_healed) {
+            parts.push(
+              diag.rotation_deg != null
+                ? `已自愈（横置页按 ${diag.rotation_deg}° 重渲染后识别）`
+                : "已自愈（切片重跑识别）",
+            );
+          }
+          // round-23 A2：旋转探测未果 — 提示复核者系统已尽力（90/270/180°
+          // 均试过），此页需人工核对原图，不要再怀疑横置可能性。
+          if (diag.rotation_probed) {
+            parts.push("已尝试 90/270/180° 旋转恢复未果，请人工核对原图");
+          }
           if (diag.aspect_ratio != null) {
             parts.push(`长宽比=${diag.aspect_ratio}`);
           }
