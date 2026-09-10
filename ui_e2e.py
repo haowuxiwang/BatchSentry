@@ -117,6 +117,9 @@ try:
         # —— 与 e2e_run.py 的 E2E_PDF_TIMEOUT/E2E_REAL_TIMEOUT 同策略。
         terminal = None
         budget_s = int(os.environ.get("UI_E2E_TIMEOUT", "300"))
+        # round-23 B：SSE 进度文案采样（分析 x/y 计数 + 可选 "剩余" ETA 后缀）
+        prog_texts = []
+        eta_seen = False
         with httpx.Client(timeout=10) as c:
             deadline = time.time() + budget_s
             while time.time() < deadline:
@@ -124,10 +127,50 @@ try:
                 if st in ("review", "partial_review", "error"):
                     terminal = st
                     break
+                try:
+                    t = page.evaluate(
+                        "() => (document.getElementById('progress-text')"
+                        "||{textContent:''}).textContent")
+                    if t:
+                        prog_texts.append(t)
+                        if "剩余" in t:
+                            eta_seen = True
+                except Exception:
+                    pass  # 页面导航瞬间采样失败不致命
                 time.sleep(2)
         check("Phase2 main flow terminal", terminal in ("review", "partial_review"),
               f"status={terminal}")
         assert terminal in ("review", "partial_review"), f"job ended {terminal}"
+
+        # round-23 B：Stage2 计数文案在真实 SSE 流上可见（"分析 x/y" 或分片
+        # 模式 "OCR x/y · 分析 x/y"）；ETA 后缀（"剩余约 N 分钟"）依赖上游
+        # 速率（≥8s 跨度 + 窗口内进展），拥堵日必现、空闲日可能全程不触发
+        # —— 记录为旁证不作硬断言（计算逻辑已被 test_eta_js.py 10 用例锁定）。
+        import re as _re2
+        check("Phase2 stage progress counting visible",
+              any(_re2.search(r"分析\s*\d+/\d+", t)
+                  or _re2.search(r"OCR\s*\d+/\d+", t) for t in prog_texts),
+              f"samples={len(prog_texts)} last={prog_texts[-1] if prog_texts else ''}")
+        print(f"[info] round-23 B: ETA suffix observed on review page: {eta_seen}")
+
+        # round-23 C：复核反馈统计面板（AJAX 载入，brief 必须被填充）+ 端点形状
+        brief_el = page.locator("#review-stats-brief")
+        brief_txt = ""
+        for _ in range(25):  # 最多 ~5s 等 AJAX 完成
+            brief_txt = brief_el.inner_text().strip() if brief_el.count() else ""
+            if brief_txt:
+                break
+            page.wait_for_timeout(200)
+        check("P3c review-stats brief populated",
+              brief_el.count() == 1 and bool(brief_txt),
+              f"brief={brief_txt[:40]}")
+        stats = httpx.get(f"{BASE}/api/jobs/{jid}/review-stats").json()
+        check("P3c review-stats endpoint shape",
+              isinstance(stats.get("by_status"), dict) and "total" in stats
+              and isinstance(stats.get("top_rejected_types"), list)
+              and isinstance(stats.get("by_source"), list),
+              f"total={stats.get('total')}")
+        print(f"[info] round-23 C: review-stats = {stats}")
 
         total = httpx.get(f"{BASE}/api/jobs/{jid}").json()["total_pages"]
         page.goto(f"{BASE}/jobs/{jid}/review?page=1",
