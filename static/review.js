@@ -128,6 +128,13 @@
       subscribeProgress(jobId);
     }
 
+    // round-23 C：复核反馈统计面板（确认/驳回率、高频驳回类型、按来源
+    // 驳回率）— 裁决操作后页面 reload 自动刷新；载入失败静默（统计是
+    // 增强项，不阻断复核主链路）。
+    if (jobId) {
+      loadReviewStats(jobId);
+    }
+
     function subscribeProgress(jid) {
       const bar = document.getElementById("progress-bar-container");
       const txt = document.getElementById("progress-text");
@@ -424,6 +431,54 @@
       log.warn("styleSheet 探测失败", e);
     }
   });
+
+  // round-23 C：复核反馈统计（确认/驳回率、高频驳回类型、按来源驳回率）
+  // — DOMContentLoaded 内调用；载入失败静默（统计是增强项，不阻断主链路）。
+  async function loadReviewStats(jid) {
+    const brief = document.getElementById("review-stats-brief");
+    const body = document.getElementById("review-stats-body");
+    if (!brief && !body) return;
+    try {
+      const r = await fetch(`/api/jobs/${encodeURIComponent(jid)}/review-stats`);
+      if (!r.ok) return;
+      const s = await r.json();
+      if (brief) {
+        brief.textContent = s.adjudicated
+          ? `已裁决 ${s.adjudicated}/${s.total} · 确认率 ${(s.confirm_rate * 100).toFixed(0)}% · 驳回率 ${(s.reject_rate * 100).toFixed(0)}%`
+          : `待裁决 ${s.pending} 条`;
+      }
+      if (!body) return;
+      const parts = [];
+      parts.push(
+        `已裁决 ${s.adjudicated}/${s.total} 条（确认 ${s.by_status.confirmed} · 驳回 ${s.by_status.rejected} · 修正 ${s.by_status.corrected} · 待复核 ${s.pending}）`,
+      );
+      if (s.adjudicated) {
+        parts.push(
+          `确认率 ${(s.confirm_rate * 100).toFixed(1)}% · 驳回率 ${(s.reject_rate * 100).toFixed(1)}%`,
+        );
+      }
+      if (Array.isArray(s.top_rejected_types) && s.top_rejected_types.length) {
+        const tops = s.top_rejected_types
+          .map((t) => `${t.type_zh}（${t.count} 条，${(t.share * 100).toFixed(0)}%）`)
+          .join("、");
+        parts.push(`高频驳回类型: ${tops}`);
+      }
+      if (Array.isArray(s.by_source) && s.by_source.length) {
+        const srcs = s.by_source
+          .map((x) => {
+            const rate = (x.reject_rate * 100).toFixed(0);
+            const flag = x.reject_rate > 0.5 && x.total >= 4 ? "!" : "";
+            return `${x.source}: ${x.rejected}/${x.total}（${rate}%）${flag}`;
+          })
+          .join(" · ");
+        parts.push(`按来源驳回率: ${srcs}`);
+      }
+      body.textContent = parts.join("\n");
+      body.style.whiteSpace = "pre-line";
+    } catch (err) {
+      log.warn("review-stats fetch failed", err);
+    }
+  }
 
   // 按钮加载状态管理 — 防止重复点击
   function setButtonLoading(btn, loading, originalText) {

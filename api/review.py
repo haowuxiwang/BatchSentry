@@ -6,6 +6,7 @@ from fastapi import APIRouter, HTTPException, Form, Request
 
 from db.client import get_db
 from core.pipeline import db_lock
+from core.zh_map import zh_finding_type
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["review"])
@@ -34,6 +35,111 @@ def _confidence_for(finding: dict, page_flagged: bool) -> float:
     if page_flagged:
         score -= _CONF_PAGE_FLAG_PENALTY
     return round(max(_CONF_MIN, min(_CONF_MAX, score)), 2)
+
+
+# ── 复核反馈统计（round-23 C）────────────────────────────────
+# confirm/reject 数据本已落库（findings.status + reviewed_at）但从未聚合
+# 利用。统计面回答三个问题：整体误报水平（驳回率）、哪类检查最易误报
+# （高频驳回类型）、哪一层最需要调优（按来源驳回率 — 规则层驳回率持续
+# 偏高即阈值过紧信号，LLM 层偏高即提示词收紧信号）。供 review-stats
+# 端点与报告导出共用（纯函数：对 SELECT 出的行聚合，不自查 DB）。
+_STATS_TOP_TYPES = 5
+
+
+def _review_stats_from_rows(rows: list[dict]) -> dict:
+    """聚合 findings 行（type/severity/source/status）为复核统计。"""
+    total = len(rows)
+    by_status: dict[str, int] = {}
+    for r in rows:
+        st = r.get("status") or "pending"
+        by_status[st] = by_status.get(st, 0) + 1
+    pending = by_status.get("pending", 0)
+    adjudicated = total - pending
+    confirmed = by_status.get("confirmed", 0)
+    rejected = by_status.get("rejected", 0)
+    corrected = by_status.get("corrected", 0)
+    confirm_rate = round(confirmed / adjudicated, 4) if adjudicated else None
+    reject_rate = round(rejected / adjudicated, 4) if adjudicated else None
+    # 高频驳回类型（Top N，占驳回总数份额）
+    rej_by_type: dict[str, int] = {}
+    for r in rows:
+        if (r.get("status") or "") == "rejected":
+            rej_by_type[r.get("type") or "?"] = (
+                rej_by_type.get(r.get("type") or "?", 0) + 1
+            )
+    top_rejected = [
+        {
+            "type": t,
+            "type_zh": zh_finding_type(t),
+            "count": c,
+            "share": round(c / rejected, 4) if rejected else 0,
+        }
+        for t, c in sorted(
+            rej_by_type.items(), key=lambda kv: (-kv[1], kv[0])
+        )[:_STATS_TOP_TYPES]
+    ]
+    # 按来源驳回率（规则阈值调优信号）：total/rejected/pending 全量给出，
+    # 未裁决完成时读者自行折算口径（驳回率分母=该来源全部 findings）。
+    by_src: dict[str, dict] = {}
+    for r in rows:
+        src = r.get("source") or "rule"
+        d = by_src.setdefault(src, {"total": 0, "rejected": 0, "pending": 0})
+        d["total"] += 1
+        st = r.get("status") or "pending"
+        if st == "rejected":
+            d["rejected"] += 1
+        elif st == "pending":
+            d["pending"] += 1
+    by_source = [
+        {
+            "source": s,
+            "total": d["total"],
+            "rejected": d["rejected"],
+            "pending": d["pending"],
+            "reject_rate": round(d["rejected"] / d["total"], 4),
+        }
+        for s, d in sorted(
+            by_src.items(), key=lambda kv: (-kv[1]["total"], kv[0])
+        )
+    ]
+    return {
+        "total": total,
+        "adjudicated": adjudicated,
+        "pending": pending,
+        "by_status": {
+            "pending": pending,
+            "confirmed": confirmed,
+            "rejected": rejected,
+            "corrected": corrected,
+        },
+        "confirm_rate": confirm_rate,
+        "reject_rate": reject_rate,
+        "top_rejected_types": top_rejected,
+        "by_source": by_source,
+    }
+
+
+@router.get("/jobs/{job_id}/review-stats")
+async def get_review_stats(job_id: str, request: Request = None):
+    """复核反馈统计（round-23 C）：确认/驳回率、高频驳回类型、按来源驳回率。
+
+    反哺规则阈值调优：某来源驳回率持续偏高（如 rule 层 > 50%）即阈值
+    过紧信号；高频驳回类型定位具体检查项。GET 本地守卫与其余读端点一致。
+    """
+    from core.security import is_local_request
+    if request is not None and not is_local_request(request):
+        raise HTTPException(403, "Forbidden (non-local request)")
+    db = await get_db()
+    cursor = await db.execute("SELECT 1 FROM jobs WHERE id = ?", (job_id,))
+    if not (await cursor.fetchone()):
+        raise HTTPException(404, "Job 不存在")
+    cursor = await db.execute(
+        "SELECT type, severity, source, status FROM findings WHERE job_id = ?",
+        (job_id,),
+    )
+    stats = _review_stats_from_rows([dict(r) for r in await cursor.fetchall()])
+    stats["job_id"] = job_id
+    return stats
 
 
 @router.get("/jobs/{job_id}/findings")

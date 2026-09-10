@@ -257,6 +257,16 @@
                 {% endif %}
             </div>
 
+            <!-- round-23 C：复核反馈统计（AJAX 载入，可折叠）— 确认/驳回率、
+                 高频驳回类型、按来源驳回率（规则阈值调优信号）。裁决操作后
+                 页面自动 reload，面板随之刷新。 -->
+            <details id="review-stats-panel" class="review-stats px-1 mt-1">
+              <summary class="text-[11px] text-muted-foreground cursor-pointer select-none hover:text-foreground">
+                复核反馈统计<span id="review-stats-brief" class="ml-1.5 tabular-nums"></span>
+              </summary>
+              <div id="review-stats-body" class="text-[11px] text-muted-foreground mt-1.5 leading-relaxed"></div>
+            </details>
+
             <!-- Critical banner — 仅 critical>0 时显示，红色左边框，不铺底。
                  sticky top-0：滚动 findings 列表时保持可见，持续提醒优先复核（GMP 合规）。-->
             {% set critical_count = findings | selectattr('severity', 'equalto', 'critical') | list | length %}

@@ -122,6 +122,10 @@ async def _generate_report_md_cached(job_id: str) -> str:
 
     # 生成报告（在锁外执行，避免长时间持锁）
     exemptions = await _load_exemptions(db, job_id)
+    # round-23 C：复核反馈统计（纯函数聚合已载入的 findings 行 —
+    # 缓存 key 的 status_hash 已含 (id,status) 对，裁决变化自动失效）
+    from api.review import _review_stats_from_rows
+    review_stats = _review_stats_from_rows(findings)
     # 对抗审查 P1：零 findings ≠ 全部合规。OCR 全空页/分析缺失时 job 照样
     # 终态 review，旧报告输出"✅ 无需人工复核"= 静默合规通过假象。
     # 报告头部与汇总必须声明 OCR 覆盖情况，供复核者判定可信度。
@@ -155,7 +159,8 @@ async def _generate_report_md_cached(job_id: str) -> str:
     # 生成报告（在锁外执行，避免长时间持锁）
     md = _generate_markdown(job, findings, total_pages, exemptions,
                             empty_pages=empty_pages,
-                            unanalyzed_pages=unanalyzed_pages)
+                            unanalyzed_pages=unanalyzed_pages,
+                            review_stats=review_stats)
 
     # 写入缓存，清理超出的项
     async with _report_cache_lock:
@@ -211,6 +216,9 @@ async def download_report_json(job_id: str, request: Request = None):
     )
     findings = [dict(r) for r in await cursor.fetchall()]
     exemptions = await _load_exemptions(db, job_id)
+    # round-23 C：复核反馈统计随 JSON 报告导出（下游做规则阈值调优分析）
+    from api.review import _review_stats_from_rows
+    review_stats = _review_stats_from_rows(findings)
     logger.info(f"[{job_id}] Report.json generated: {len(findings)} findings, {len(exemptions)} exemptions")
     await _audit_report_export(job_id, "json", len(findings))
     return {
@@ -231,6 +239,7 @@ async def download_report_json(job_id: str, request: Request = None):
         "findings": findings,
         "count": len(findings),
         "ocr_exemptions": exemptions,
+        "review_stats": review_stats,
     }
 
 
@@ -250,10 +259,59 @@ def _append_exemption_section(lines: list[str], exemptions: list[dict], esc) -> 
     lines.append("")
 
 
+def _append_review_stats_section(lines: list[str], stats: dict, esc) -> None:
+    """round-23 C：复核反馈统计章节（确认/驳回率 + 高频驳回类型 +
+    按来源驳回率）— 复核数据回流报告，反哺规则阈值调优。"""
+    from core.zh_map import zh_finding_type as _zh_type
+
+    lines.append("---")
+    lines.append("")
+    lines.append("## 复核反馈统计")
+    lines.append("")
+    lines.append(
+        f"- **已裁决**: {stats['adjudicated']}/{stats['total']} 条"
+        f"（确认 {stats['by_status']['confirmed']} · 驳回 "
+        f"{stats['by_status']['rejected']} · 修正 "
+        f"{stats['by_status']['corrected']} · 待复核 {stats['pending']}）"
+    )
+    if stats["adjudicated"]:
+        lines.append(
+            f"- **确认率**: {stats['confirm_rate'] * 100:.1f}% · "
+            f"**驳回率**: {stats['reject_rate'] * 100:.1f}%"
+        )
+    else:
+        lines.append("- 尚无已裁决条目（确认率/驳回率待复核后统计）。")
+    if stats["top_rejected_types"]:
+        lines.append("")
+        lines.append("### 高频驳回类型")
+        lines.append("")
+        for t in stats["top_rejected_types"]:
+            lines.append(
+                f"- {esc(_zh_type(t['type']))}"
+                f"（`{esc(t['type'])}`）: {t['count']} 条"
+                f"（占驳回 {t['share'] * 100:.1f}%）"
+            )
+    if stats["by_source"]:
+        lines.append("")
+        lines.append("### 按来源驳回率（规则阈值调优信号）")
+        lines.append("")
+        for s in stats["by_source"]:
+            flag = " ⚠️ 驳回率偏高，建议核查该层阈值/提示词" if (
+                s["reject_rate"] > 0.5 and s["total"] >= 4
+            ) else ""
+            lines.append(
+                f"- `{esc(s['source'])}`: {s['total']} 条中驳回 "
+                f"{s['rejected']} 条（{s['reject_rate'] * 100:.1f}%，"
+                f"待复核 {s['pending']}）{flag}"
+            )
+    lines.append("")
+
+
 def _generate_markdown(job: dict, findings: list[dict], total_pages: int,
                        exemptions: list[dict] | None = None,
                        empty_pages: int = 0,
-                       unanalyzed_pages: int = 0) -> str:
+                       unanalyzed_pages: int = 0,
+                       review_stats: dict | None = None) -> str:
     """Build Markdown report from findings."""
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
     SeverityIcon = {"critical": "🔴", "warning": "🟡", "info": "🔵"}
@@ -379,6 +437,11 @@ def _generate_markdown(job: dict, findings: list[dict], total_pages: int,
         if _kb_meta()["source_id"]:
             pass  # 知识库已装载但本报告无引用 —— 不输出空章节
         # 知识库未装载时同样静默：附录是增强项，非必需章节
+
+    # round-23 C：复核反馈统计章节（有 findings 才有意义 — 零 findings
+    # 无反馈数据，不输出空节）
+    if review_stats and review_stats.get("total"):
+        _append_review_stats_section(lines, review_stats, esc)
 
     # Summary
     pending = len([f for f in findings if f["status"] == "pending"])
