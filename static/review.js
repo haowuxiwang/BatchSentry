@@ -157,6 +157,16 @@
         // 自动 AJAX 刷新该页 findings，让用户在 Stage 2 进行中就能看到
         // 已分析页的结果，无需等全部页完成。
         let lastPagesAnalyzed = -1;
+        // round-23 B：Stage 2 进度 ETA 采样池（5 分钟时间窗口速率）—
+        // 15 分钟级的逐页分析只有计数时用户无从判断"还要多久"。
+        const etaSamples = [];
+        const etaSuffix = (total) => {
+          if (typeof PbcEta === "undefined" || !total) return "";
+          const eta = PbcEta.analyzeEta(etaSamples, total);
+          if (!eta || eta.etaSec == null) return "";
+          const txt = PbcEta.fmtEta(eta.etaSec);
+          return txt ? ` · 剩余${txt}` : "";
+        };
 
         es.onmessage = (e) => {
           try {
@@ -204,6 +214,10 @@
             // status 仍是 ocr_running 但分析已在进行（_analyze_one 每页
             // 完成即写库），用户无需等全部页 OCR 完就看到结果。
             const analyzedCount = d.pages_analyzed || 0;
+            // round-23 B：每帧追采样（SSE 3s 推送；n 回退自动清池重采）
+            if (typeof PbcEta !== "undefined" && analyzedCount > 0) {
+              PbcEta.pushSample(etaSamples, analyzedCount);
+            }
             if (
               analyzedCount > lastPagesAnalyzed &&
               analyzedCount > 0 &&
@@ -243,7 +257,7 @@
                   );
                 } else {
                   label = analyzedCount > 0
-                    ? `OCR ${ocrDone}/${ocrTotal} · 分析 ${analyzedCount}/${total}`
+                    ? `OCR ${ocrDone}/${ocrTotal} · 分析 ${analyzedCount}/${total}` + etaSuffix(total)
                     : `OCR ${ocrDone}/${ocrTotal}`;
                 }
               } else if (total > 0) {
@@ -267,7 +281,9 @@
               pct =
                 33 +
                 (total > 0 ? Math.round((analyzedCount / total) * 60) : 0);
-              label = `分析 ${analyzedCount}/${total}`;
+              // round-23 B：分析计数 + 时间窗口速率 ETA（首 ~8s 无速率，
+              // 只有计数 — 与旧行为一致，速率就绪后自动出现"剩余约 N 分钟"）
+              label = `分析 ${analyzedCount}/${total}` + etaSuffix(total);
             } else if (d.status === "cancelling" || d.status === "cancelled") {
               pct = 0;
               label = d.status === "cancelling" ? "取消中…" : "已取消";

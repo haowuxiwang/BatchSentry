@@ -1,4 +1,4 @@
-﻿/* ============================================================
+/* ============================================================
    Upload page — file upload + job archive/delete interactions
    依赖：window.__PBC__.jobs_count（可选，仅用于日志）
    ============================================================ */
@@ -393,6 +393,19 @@
 
   let liveSource = null; // single aggregated EventSource
   const pollTimers = new Map(); // jobId -> interval (fallback polling after SSE loss)
+  // round-23 B：Stage 2 分析进度 ETA 采样池（jobId -> [{n, t}]，5 分钟
+  // 时间窗口速率）— 上传页任务行的 "分析 x/y" 此前只有计数，15 分钟级
+  // 的逐页 LLM 分析无从判断还要多久。终态时清理防 Map 泄漏。
+  const etaSamplesByJob = new Map();
+  const etaSuffixFor = (jid, total) => {
+    if (typeof PbcEta === "undefined" || !total) return "";
+    const samples = etaSamplesByJob.get(jid);
+    if (!samples) return "";
+    const eta = PbcEta.analyzeEta(samples, total);
+    if (!eta || eta.etaSec == null) return "";
+    const txt = PbcEta.fmtEta(eta.etaSec);
+    return txt ? ` · 剩余${txt}` : "";
+  };
 
   // === Job 行实时状态（SSE 聚合） ===
   // 单条 /api/jobs/live 连接推送所有活跃任务快照，按 job_id 分发到行内。
@@ -492,6 +505,19 @@
   function updateJobRowLive(li, d) {
     const st = d.status;
     li.dataset.status = st;
+    // round-23 B：追 ETA 采样（SSE 与兜底轮询共用此入口）；
+    // 终态清理采样池（防 Map 泄漏）。
+    if (typeof PbcEta !== "undefined" && d.pages_analyzed > 0) {
+      let samples = etaSamplesByJob.get(li.dataset.jobId);
+      if (!samples) {
+        samples = [];
+        etaSamplesByJob.set(li.dataset.jobId, samples);
+      }
+      PbcEta.pushSample(samples, d.pages_analyzed);
+    }
+    if (TERMINAL_STATUSES.includes(st)) {
+      etaSamplesByJob.delete(li.dataset.jobId);
+    }
     const dot = li.querySelector(".status-dot");
     const stText = li.querySelector(".status-text");
     const pages = li.querySelector(".job-pages");
@@ -512,7 +538,8 @@
         // 分片模式（MinerU + OCR_SLICES>1）下分析与 OCR 并行 — 同时显示两路进度
         pages.textContent =
           d.pages_analyzed > 0
-            ? `OCR ${prog.done}/${prog.total} · 分析 ${d.pages_analyzed}/${d.total_pages || "?"}`
+            ? `OCR ${prog.done}/${prog.total} · 分析 ${d.pages_analyzed}/${d.total_pages || "?"}` +
+              etaSuffixFor(li.dataset.jobId, d.total_pages)
             : `OCR ${prog.done}/${prog.total}`;
       } else if (st === "analyzing" && d.phase === "cross") {
         // Todo 14: stage3 阶段指示 — 页分析完成后已进入跨页语义分析
@@ -522,7 +549,8 @@
           ? `跨页分析 ${cr.done}/${cr.total} · ${cr.label}`
           : `跨页分析中 · ${d.pages_analyzed || 0}/${d.total_pages || "?"} 页`;
       } else if (st === "analyzing") {
-        pages.textContent = `分析 ${d.pages_analyzed || 0}/${d.total_pages || "?"}`;
+        pages.textContent = `分析 ${d.pages_analyzed || 0}/${d.total_pages || "?"}` +
+          etaSuffixFor(li.dataset.jobId, d.total_pages);
       } else if (st === "partial_review" && d.error_message) {
         pages.textContent = `部分可复核 · ${d.pages_analyzed}/${d.total_pages || "?"} 页`;
       } else {
