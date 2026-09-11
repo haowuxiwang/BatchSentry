@@ -206,9 +206,19 @@
 
 > 每阶段严格遵守：**先定位（拿真值）→ 再解决（最小改动）→ 再测试（含覆盖率）→ 最后验打包信号**。
 
-- **M1a（门禁 92%）**：覆盖率 90% → **92%**，提交。
-- **M1b（门禁 95%）**：覆盖率 92% → **95%**，`--cov-fail-under=95` 落地，提交。
+- **M1a（门禁 92%）** ✅：覆盖率 90.26% → **92.29%**，`--cov-fail-under=92` 落地（093ebf8）。
+- **M1b（门禁 95%）** ✅：覆盖率 92% → **95.12%**（377/7718 未覆盖），`--cov-fail-under=95` 落地（ebf1d96）。
+  新增 5 个模块化补测文件共 55 例：`test_ocr_client_coverage` / `test_page_analyzer_coverage` /
+  `test_health_security_coverage` / `test_api_jobs_listings_coverage`（另含 M1b 首批 4 文件）。
+  过程中定位并修复真实缺陷：`api/jobs/listings.py:105` 对 `sqlite3.Row` 调 `.get()` → 终态快照缓存
+  崩溃、`/api/jobs/live` 静默降级（610f8c5）。
 - **M1c（打包信号）**：`scripts/release_gate.py` 一条命令串起全链路并落盘 `gate_report_<date>.json`。
+  > 沙箱陷阱：`pytest --cov` 收尾时 `pytest_cov.finish()` → `cov.combine()` 会**删除**自身
+  > 的并行数据文件（`<COVERAGE_FILE>.*.pid*`），在 WorkBuddy 沙箱下会触发 safe-delete
+  > 批量守卫 → `SystemExit(1)` → `INTERNALERROR`，覆盖表与 `--cov-fail-under` 均不产出。
+  > **release_gate.py 取覆盖率必须走 `coverage run --source=... -m pytest … && coverage report
+  > --fail-under=95`**（无 combine、无删除），不要依赖 pytest-cov 收尾。COVERAGE_FILE 应落在
+  > 真实系统临时目录（`%LOCALAPPDATA%/Temp`），不要用 `D:\tmp`。
 - **M2（质量可度量）**：金标集 + `eval_findings.py` + confidence 落库 + 语义去重 + 类型白名单。*产出：质量基线数字 + 误报清单。*
 - **M3（OCR 鲁棒性）**：O1/O2/O3/O6 规范化与样本。*产出：新增样本全过 + 无静默成功。*
 - **M4（规则扩展）**：R11–R17 全做 + 规则注册表。*产出：每规则 ≥4 单测。*
