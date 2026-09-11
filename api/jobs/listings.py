@@ -102,7 +102,7 @@ async def _live_jobs_snapshot(db) -> list[dict]:
                 if len(_terminal_snap_cache) > 100:
                     _terminal_snap_cache.clear()
                 _terminal_snap_cache[r["id"]] = (
-                    (r["status"], str(r.get("finished_at") or "")),
+                    (r["status"], str(r["finished_at"] or "")),
                     progress,
                 )
             snapshots.append(progress)
