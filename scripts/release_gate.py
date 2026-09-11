@@ -188,7 +188,11 @@ def check_kb_corpus(min_entries: int = 200, kb_dir: Path | None = None) -> Check
 
 
 def _parse_pytest_summary(output: str) -> tuple[int, int, list[str]]:
-    """从 pytest 输出解析 (passed, failed, failed_nodeids)。"""
+    """从 pytest 输出解析 (passed, failed, failed_nodeids)。
+
+    注意：`-q` 的实时进度行也以 "FAILED" 开头（形如 `FAILED ... [ 23%]`），
+    它不是 nodeid —— 只保留形如 `path::Case::test` 或 `path.py` 的条目。
+    """
     import re
 
     passed = failed = 0
@@ -198,11 +202,17 @@ def _parse_pytest_summary(output: str) -> tuple[int, int, list[str]]:
     m = re.search(r"(\d+) failed", output)
     if m:
         failed = int(m.group(1))
-    nodeids = []
+    nodeids: list[str] = []
     for line in output.splitlines():
         s = line.strip()
-        if s.startswith("FAILED ") or s.startswith("ERROR "):
-            nodeids.append(s.split(None, 1)[1].split(" - ")[0].strip())
+        if not (s.startswith("FAILED ") or s.startswith("ERROR ")):
+            continue
+        node = s.split(None, 1)[1].split(" - ")[0].strip()
+        # 进度行残片（如 "[ 23%]"）无 :: 且非 .py → 丢弃
+        if "::" not in node and not node.endswith(".py"):
+            continue
+        if node not in nodeids:
+            nodeids.append(node)
     return passed, failed, nodeids
 
 
@@ -248,10 +258,15 @@ def check_tests_and_coverage(fail_under: int = 95, python: str | None = None,
                            _ms() - t0)
 
     rc_rep, out_rep = run_cmd(
-        [py, "-m", "coverage", "report", f"--fail-under={fail_under}"],
+        [py, "-m", "coverage", "report", "--format=total", "--precision=2"],
         timeout=300, env=env,
     )
     total = _parse_coverage_total(out_rep)
+    if total is None:
+        # 旧版 coverage 无 --format=total → 回落到表格解析（整数精度）
+        rc_rep, out_rep = run_cmd([py, "-m", "coverage", "report"],
+                                  timeout=300, env=env)
+        total = _parse_coverage_total(out_rep)
 
     parts = [f"{passed} passed", f"{failed} failed",
              f"coverage={total if total is not None else '?'}% (门禁 {fail_under}%)"]
@@ -260,15 +275,18 @@ def check_tests_and_coverage(fail_under: int = 95, python: str | None = None,
     if real_failures:
         return CheckResult("tests_coverage", FAIL,
                            f"{detail}；真实失败：{real_failures[:5]}", _ms() - t0)
-    if total is not None and total < fail_under:
+    if failed and not nodeids:
+        return CheckResult("tests_coverage", FAIL,
+                           f"{detail}；pytest 报告 {failed} 项失败但未解析出用例", _ms() - t0)
+    if total is None:
+        return CheckResult("tests_coverage", WARN,
+                           f"{detail}；未能解析覆盖率（rc={rc_rep}）", _ms() - t0)
+    if total < fail_under:
         return CheckResult("tests_coverage", FAIL, detail, _ms() - t0)
     if env_only:
         return CheckResult("tests_coverage", WARN,
                            f"{detail}；仅环境专有失败（沙箱产物，非回归）：{env_only}",
                            _ms() - t0)
-    if rc_rep != 0:
-        return CheckResult("tests_coverage", WARN,
-                           f"{detail}；coverage report rc={rc_rep}", _ms() - t0)
     return CheckResult("tests_coverage", PASS, detail, _ms() - t0)
 
 

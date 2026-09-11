@@ -36,12 +36,19 @@ rg = _load()
 class TestParsers:
     def test_pytest_summary_counts(self):
         out = (
+            "FAILED                                                                   [ 23%]\n"
             "FAILED tests/x.py::TestA::test_b - AssertionError: nope\n"
             "1 failed, 1527 passed in 141.11s (0:02:21)\n"
         )
         passed, failed, nodeids = rg._parse_pytest_summary(out)
         assert passed == 1527 and failed == 1
+        # 实时进度残片 "[ 23%]" 必须被丢弃，只留真 nodeid
         assert nodeids == ["tests/x.py::TestA::test_b"]
+
+    def test_pytest_summary_whole_file_failure_kept(self):
+        out = "ERROR tests/broken.py\n1 error in 0.1s\n"
+        _, _, nodeids = rg._parse_pytest_summary(out)
+        assert nodeids == ["tests/broken.py"]
 
     def test_pytest_summary_all_green(self):
         passed, failed, nodeids = rg._parse_pytest_summary("42 passed in 3.1s")
