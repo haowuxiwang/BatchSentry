@@ -11,30 +11,14 @@ from core.zh_map import zh_finding_type
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["review"])
 
-# ── #8 字段级置信度（读时计算，验证信号加权 — 借鉴 invoice-parse：
-# 置信度来自客观信号而非 LLM 自报）────────────────────────────
-_CONF_BASE = 0.85
-_CONF_LLM_GEN_PENALTY = 0.15   # llm_cross/llm_fallback/user_rule（自然语言生成）
-_CONF_LLM_PAGE_PENALTY = 0.10  # llm_page（结构化提取，稍可靠）
-_CONF_PAGE_FLAG_PENALTY = 0.20  # 所在页带 OCR 警告/稀疏/截断/grounding 横幅
-_CONF_MIN, _CONF_MAX = 0.30, 0.95
-
-
-def _confidence_for(finding: dict, page_flagged: bool) -> float:
-    """单条 finding 的置信度评分 [0.30, 0.95]。
-
-    信号：来源确定性（规则层 > LLM 结构化 > LLM 自然语言）+ 所在页
-    完整性标记。已裁决条目不调分（人工裁决本身就是最终置信度）。
-    """
-    score = _CONF_BASE
-    src = finding.get("source") or "rule"
-    if src in ("llm_cross", "llm_fallback", "user_rule"):
-        score -= _CONF_LLM_GEN_PENALTY
-    elif src == "llm_page":
-        score -= _CONF_LLM_PAGE_PENALTY
-    if page_flagged:
-        score -= _CONF_PAGE_FLAG_PENALTY
-    return round(max(_CONF_MIN, min(_CONF_MAX, score)), 2)
+# ── #8 字段级置信度 ────────────────────────────────────────────────────────
+# M2/T2.4：评分逻辑下沉 core.finding_quality（stage3 写入期落库 + 此处读取期
+# 兜底共用同一实现，避免口径漂移）。`_confidence_for` 保留为薄别名，
+# 兼容既有调用点与历史引用。
+from core.finding_quality import (  # noqa: E402
+    confidence_for as _confidence_for,
+    page_is_flagged as _page_is_flagged,
+)
 
 
 # ── 复核反馈统计（round-23 C）────────────────────────────────
@@ -235,18 +219,19 @@ async def list_findings(
         flagged = False
         if r["structured_json"]:
             try:
-                sj = json.loads(r["structured_json"])
-                flagged = bool(
-                    sj.get("_ocr_warning") or sj.get("_ocr_sparse")
-                    or sj.get("_ocr_truncated") or sj.get("_grounding_warn")
-                    or sj.get("_truncated_warn") or sj.get("_schema_warn")
-                )
+                flagged = _page_is_flagged(json.loads(r["structured_json"]))
             except json.JSONDecodeError:
                 pass
         page_flags[r["page"]] = flagged
 
     for f in findings:
-        f["confidence"] = _confidence_for(f, page_flags.get(f.get("page"), False))
+        # M2/T2.4：优先用写入期已落库的 confidence（v10）；旧 job 该列为 NULL
+        # 时按同一 core 实现现算兜底 —— 口径一致，历史数据功能不降级。
+        stored = f.get("confidence")
+        f["confidence"] = (
+            float(stored) if stored is not None
+            else _confidence_for(f, page_flags.get(f.get("page"), False))
+        )
 
     if by_confidence:
         findings.sort(key=lambda x: (x["confidence"], x.get("id", 0)))

@@ -611,9 +611,11 @@ def load_config():
             # 关闭后仅保留后置引用富集（findings.kb_refs 不受影响）。
             kb_prompt_inject=os.getenv("KB_PROMPT_INJECT", "true").lower()
             in ("1", "true", "yes"),
-            # P1-7 结构化输出：默认关闭（部分兼容网关不支持 json_object，
-            # 开启后首次 400 会自动降级并会话内禁用）
-            llm_json_mode=os.getenv("LLM_JSON_MODE", "false").lower()
+            # P1-7 结构化输出：**默认开启**（M2/T2.10）—— json_object 显著降低
+            # "JSON 修复链"重试开销（实测曾触发 330s fix-hint 重试）。兼容网关
+            # 首次 400 会自动降级重试一次并**按 provider 会话内禁用**，故默认开
+            # 不会让不支持的网关失败。置 LLM_JSON_MODE=false 可强制关闭。
+            llm_json_mode=os.getenv("LLM_JSON_MODE", "true").lower()
             in ("1", "true", "yes"),
         ),
     }

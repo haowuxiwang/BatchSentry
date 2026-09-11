@@ -45,6 +45,8 @@ CREATE TABLE IF NOT EXISTS findings (
     user_rule_id TEXT,           -- Phase 11: 命中的用户规则 id（source='user_rule' 时，GMP 溯源）
     gmp_basis TEXT,
     kb_refs TEXT,                -- v8: 知识库引用 JSON [{entry_id,label,excerpt,score}]              -- v7: 法规依据引用（GMP 2010/ALCOA+ 等知识库映射，gmp_basis.py）
+    confidence REAL,             -- v10: 写入期置信度 [0.30,0.95]（core.finding_quality），旧行 NULL 时读取期兜底
+    raw_type TEXT,               -- v10: 归一前的原始 type（LLM 输出留痕；GMP 可追溯，仅在归一发生时写入）
     created_at TIMESTAMP DEFAULT (datetime('now','localtime')),
     reviewed_at TIMESTAMP,
     FOREIGN KEY (job_id) REFERENCES jobs(id)

@@ -49,8 +49,11 @@ class TestMigrationV8:
                 "AND name='kb_entries'")
             assert (await cur.fetchone()) is not None
 
+            from db.client import SCHEMA_VERSION
+
             cur = await db.execute("PRAGMA user_version")
-            assert (await cursor_version(cur)) == 9
+            # 断言对当前门禁版本，而非硬编码 —— 后续 bump 无需改此行
+            assert (await cursor_version(cur)) == SCHEMA_VERSION
 
             # 旧数据无损 + 新列可写
             cur = await db.execute("SELECT description FROM findings")

@@ -37,14 +37,23 @@ JOB_STATUS_ZH = {
     "archived": "已归档",
 }
 
-# Finding 类型（findings.type）
+# Finding 类型（findings.type）—— 覆盖 core.finding_quality.CANONICAL_TYPES
+# 全量（不变式由 tests/unit/test_finding_quality.py 守护）。新增规范类型时必须
+# 同步这里，否则前端 type_zh 会回落成英文原文。
 FINDING_TYPE_ZH = {
     "time_reversal": "时间倒序",
     "year_contradiction": "年份矛盾",
     "signature_time_anomaly": "签名时间异常",
+    "signature_mismatch": "签名不一致",
     "suspicious_date": "可疑日期",
     "param_out_of_spec": "参数越界",
     "completeness": "内容不完整",
+    "handwritten": "手写内容",
+    "batch_inconsistency": "批号不一致",
+    "step_gap": "步骤缺失",
+    "ocr_noise": "OCR 噪声",
+    "user_rule": "用户规则",
+    "uncategorized": "未分类",
 }
 
 # OCR 后端显示名（jobs.ocr_backend_used，GMP 审计字段 — 前端徽章/任务行

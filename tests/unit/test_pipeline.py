@@ -262,7 +262,7 @@ class TestPipelineRun:
         fake_findings = [
             {
                 "page": 1,
-                "type": "test",
+                "type": "param_out_of_spec",  # 规范类型（M2/T2.6 白名单）
                 "severity": "warning",
                 "description": "test finding",
                 "source": "rule",
@@ -290,7 +290,7 @@ class TestPipelineRun:
         rows = await cursor.fetchall()
         assert len(rows) == 1
         assert rows[0]["page"] == 1
-        assert rows[0]["type"] == "test"
+        assert rows[0]["type"] == "param_out_of_spec"
         assert rows[0]["severity"] == "warning"
         assert rows[0]["description"] == "test finding"
         assert rows[0]["source"] == "rule"

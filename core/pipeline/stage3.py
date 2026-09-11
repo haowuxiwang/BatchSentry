@@ -41,10 +41,16 @@ async def _run_stage3_cross_analysis(
     )
     page_structures = []
     empty_pages_count = 0
+    # M2/T2.4：写入期置信度需要"该页是否带完整性告警"——与 api/review.py
+    # 读取期判据共用 core.finding_quality.page_is_flagged（单一来源）。
+    from core.finding_quality import page_is_flagged
+    flagged_pages: set[int] = set()
     for row in await cursor.fetchall():
         if row["structured_json"]:
             try:
                 data = json.loads(row["structured_json"])
+                if page_is_flagged(data):
+                    flagged_pages.add(row["page"])
                 # Skip pages with parse errors
                 if not data.get("_parse_error") and not data.get("_ocr_empty"):
                     page_structures.append({"page": row["page"], "data": data})
@@ -123,11 +129,19 @@ async def _run_stage3_cross_analysis(
     # llm_cross/llm_fallback 的语义重复报告 —— 同一问题在复核 UI 出现
     # rule+LLM 两三份是用户可见噪声的主要来源之一。rule 为权威版本；
     # 被抑制数量写入日志与审计（GMP 可追溯"为什么少了一条"）。
+    # M2/T2.6：类型白名单 —— 归一后的 type 才是落库/去重/统计口径；原始 type
+    # 仅在发生归一时留痕到 raw_type（GMP 可追溯 LLM 实际输出）。
+    from core.finding_quality import confidence_for, normalize_finding_type
+
+    def _norm(f: dict) -> str:
+        return normalize_finding_type(f.get("type"))
+
     rule_covered: set[tuple] = {
-        (f["page"], f["type"]) for f in findings
+        (f["page"], _norm(f)) for f in findings
         if f.get("source") == "rule"
     }
     suppressed_overlap = 0
+    suppressed_detail: list[dict] = []
     batch_rows: list[tuple] = []
     for f in findings:
         # 跳过已在 Stage 2 写入的 page-level LLM findings
@@ -135,19 +149,26 @@ async def _run_stage3_cross_analysis(
             skipped_llm_page += 1
             continue
         src = f.get("source", "rule")
+        ftype = _norm(f)
         # user_rule 豁免：用户显式规则与规则层撞 (page,type) 是正常共存
         if src in ("llm_cross", "llm_fallback") and \
-                (f["page"], f["type"]) in rule_covered:
+                (f["page"], ftype) in rule_covered:
             suppressed_overlap += 1
+            # M2/T2.8：抑制可解释 —— 记录"哪条被谁覆盖"的明细（审计可回看）
+            suppressed_detail.append({
+                "page": f["page"], "type": ftype, "source": src,
+                "description": (f.get("description") or "")[:120],
+                "covered_by": "rule",
+            })
             logger.debug(
-                f"[{job_id}] overlap suppressed: p{f['page']} {f['type']} "
+                f"[{job_id}] overlap suppressed: p{f['page']} {ftype} "
                 f"({src}) — rule already covers this page/type"
             )
             continue
         # robustness-B4: retry 会重新执行 Stage 3，确定性生成的 findings
         # 按 (job_id, source, page, type, description) 指纹去重。
         fingerprint = (
-            job_id, f.get("source", "rule"), f["page"], f["type"], f["description"],
+            job_id, f.get("source", "rule"), f["page"], ftype, f["description"],
         )
         if fingerprint in dedup_seen:
             logger.debug(
@@ -162,10 +183,12 @@ async def _run_stage3_cross_analysis(
         sev = f.get("severity", "info")
         severity_counts[sev] = severity_counts.get(sev, 0) + 1
         batch_rows.append((
-            job_id, f["page"], f["type"], f["severity"], f["description"],
+            job_id, f["page"], ftype, f["severity"], f["description"],
             f.get("ocr_text"), f.get("operator"), f.get("source", "rule"),
             f.get("rule_id") if f.get("source") == "user_rule" else None,
             f.get("gmp_basis"), _refs_json(f),
+            confidence_for(f, f["page"] in flagged_pages),
+            f["type"] if ftype != f.get("type") else None,
         ))
         inserted += 1
     if batch_rows:
@@ -175,8 +198,8 @@ async def _run_stage3_cross_analysis(
         async with db_lock:
             await db.executemany(
                 "INSERT OR IGNORE INTO findings "
-                "(job_id, page, type, severity, description, ocr_text, operator, source, user_rule_id, gmp_basis, kb_refs, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','localtime'))",
+                "(job_id, page, type, severity, description, ocr_text, operator, source, user_rule_id, gmp_basis, kb_refs, confidence, raw_type, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','localtime'))",
                 batch_rows,
             )
             await db.commit()
@@ -186,10 +209,13 @@ async def _run_stage3_cross_analysis(
         f"severity={severity_counts})"
     )
     if suppressed_overlap:
+        # M2/T2.8 抑制可解释：除计数外落明细（哪页/哪类/被谁覆盖），
+        # 让"为什么少了一条"在审计里可逐条回看（GMP 可追溯）。
         await _audit_log(
             db, job_id, "findings_overlap_suppressed",
             f"count={suppressed_overlap} — llm findings whose (page,type) "
-            f"already covered by deterministic rule layer",
+            f"already covered by deterministic rule layer; "
+            f"detail={json.dumps(suppressed_detail[:50], ensure_ascii=False)}",
         )
 
     # 门禁 3：双后端差异页逐页写入 completeness finding（复用 rule 链路的
@@ -218,14 +244,15 @@ async def _run_stage3_cross_analysis(
                 job_id, x["page"], x["type"], x["severity"], x["description"],
                 x["ocr_text"], x["operator"], x["source"], None,
                 x.get("gmp_basis"), _refs_json(x),
+                confidence_for(x, x["page"] in flagged_pages), None,
             )
             for x in dual_dicts
         ]
         async with db_lock:
             await db.executemany(
                 "INSERT OR IGNORE INTO findings "
-                "(job_id, page, type, severity, description, ocr_text, operator, source, user_rule_id, gmp_basis, kb_refs, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','localtime'))",
+                "(job_id, page, type, severity, description, ocr_text, operator, source, user_rule_id, gmp_basis, kb_refs, confidence, raw_type, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','localtime'))",
                 dual_rows,
             )
             await db.commit()

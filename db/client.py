@@ -21,7 +21,7 @@ def _get_init_lock() -> asyncio.Lock:
     return _db_init_lock
 
 # Current schema migration level, persisted via PRAGMA user_version.
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 
 async def get_db() -> aiosqlite.Connection:
@@ -112,6 +112,9 @@ async def migrate(db: aiosqlite.Connection):
 
     if current_version < 9:
         await _migrate_v9(db)
+
+    if current_version < 10:
+        await _migrate_v10(db)
 
     # PRAGMA user_version cannot be parameterized; SCHEMA_VERSION is an int
     # constant defined in this module, so f-string is safe.
@@ -313,6 +316,29 @@ async def _migrate_v9(db: aiosqlite.Connection):
             logger.info("Migration: added llm_call_audit.kb_used")
     except Exception as e:
         logger.warning(f"Migration skip llm_call_audit.kb_used: {e}")
+    await db.commit()
+
+
+async def _migrate_v10(db: aiosqlite.Connection):
+    """v10: findings.confidence + findings.raw_type（M2 质量可度量/类型白名单）。
+
+    - confidence：写入期置信度，支持 SQL 排序/阈值筛选。旧行保持 NULL →
+      读取期（api/review.py）现算兜底，历史 job 无需回填、功能不降级。
+    - raw_type：类型归一前的原始 type，仅在发生归一时写入（GMP 可追溯）。
+    """
+    wanted = (
+        ("confidence", "confidence REAL"),
+        ("raw_type", "raw_type TEXT"),
+    )
+    try:
+        cur = await db.execute("PRAGMA table_info(findings)")
+        cols = {row["name"] for row in await cur.fetchall()}
+        for name, col_def in wanted:
+            if name not in cols:
+                await db.execute(f"ALTER TABLE findings ADD COLUMN {col_def}")
+                logger.info(f"Migration: added findings.{name}")
+    except Exception as e:
+        logger.warning(f"Migration skip findings v10 columns: {e}")
     await db.commit()
 
 

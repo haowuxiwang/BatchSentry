@@ -1,12 +1,15 @@
 """P1-7 结构化输出（json_object 模式）测试。
 
 覆盖：
-- LLM_JSON_MODE 关闭（默认）→ 不传 response_format
+- LLM_JSON_MODE 关闭 → 不传 response_format
 - 开启 + openai 协议 → chat_json 传 {"type": "json_object"}
 - 网关 400 拒绝 → 自动降级重试一次 + 会话级禁用
 - anthropic 协议不传（无等价参数）
+- M2/T2.10：环境默认值为 **开**（未设 LLM_JSON_MODE 时）
 """
 import asyncio
+import importlib
+import os
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -56,6 +59,30 @@ def _make_client(monkeypatch_adapter):
 
 
 class TestJsonMode:
+    def test_env_default_is_true(self, tmp_path):
+        """M2/T2.10：未设 LLM_JSON_MODE 时，导入 config 后默认应为开。
+
+        用子进程隔离：load_config 在导入期执行且可能落盘（auto-activate /
+        env→json 迁移），子进程可完全避免污染项目根与配置。
+        """
+        import subprocess
+        import sys
+        from pathlib import Path
+
+        repo_root = Path(__file__).resolve().parents[2]
+        env = {k: v for k, v in os.environ.items() if k != "LLM_JSON_MODE"}
+        env["DATABASE_PATH"] = str(tmp_path / "d.db")
+        env["OUTPUT_DIR"] = str(tmp_path / "out")
+        env["PBC_NO_FILE_LOG"] = "1"
+        proc = subprocess.run(
+            [sys.executable, "-c",
+             "from config import config; print(int(config['app'].llm_json_mode))"],
+            cwd=str(repo_root), env=env, capture_output=True, text=True,
+            timeout=180,
+        )
+        assert proc.returncode == 0, proc.stderr[-500:]
+        assert proc.stdout.strip().endswith("1")
+
     def test_rf_unsupported_detector(self):
         assert _looks_like_rf_unsupported(
             RuntimeError("400 Bad Request: response_format is not supported")

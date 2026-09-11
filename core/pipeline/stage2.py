@@ -214,22 +214,31 @@ async def _analyze_one(
                     return None
 
                 attach_kb_refs(dict_findings)
+                # M2/T2.4+T2.6：写入期置信度 + 类型白名单归一（含 raw_type 留痕）。
+                from core.finding_quality import (
+                    confidence_for as _conf, normalize_finding_type as _norm,
+                    page_is_flagged as _flagged,
+                )
+                _flagged_page = _flagged(structured)
                 for f in page_findings:
                     if not isinstance(f, dict):
                         continue
                     if not {"type", "severity", "description"}.issubset(f.keys()):
                         continue
+                    _ftype = _norm(f.get("type"))
                     llm_page_rows.append((
-                        job_id, page_num, f.get("type", "info"),
+                        job_id, page_num, _ftype,
                         f.get("severity", "info"), f.get("description", ""),
                         f.get("ocr_text", ""), f.get("operator", ""),
                         f.get("gmp_basis"), _refs_json(f),
+                        _conf({"source": "llm_page"}, _flagged_page),
+                        f.get("type") if _ftype != f.get("type") else None,
                     ))
                 if llm_page_rows:
                     await db.executemany(
                         "INSERT OR IGNORE INTO findings "
-                        "(job_id, page, type, severity, description, ocr_text, operator, source, gmp_basis, kb_refs, created_at) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, 'llm_page', ?, ?, datetime('now','localtime'))",
+                        "(job_id, page, type, severity, description, ocr_text, operator, source, gmp_basis, kb_refs, confidence, raw_type, created_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, 'llm_page', ?, ?, ?, ?, datetime('now','localtime'))",
                         llm_page_rows,
                     )
                 await db.commit()

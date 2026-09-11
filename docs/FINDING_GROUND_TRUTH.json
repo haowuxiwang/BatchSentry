@@ -1,0 +1,134 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-09-11",
+  "description": "Finding 质量金标（M2/T2.1）。只存**标签**，不存业务原文：每条期望/禁止以 (page, type) 表达，配套的合成输入由 scripts/synthetic_corpus.py 确定性构造（case_id 一一对应，由 eval_findings.py 交叉校验）。",
+  "scoring": {
+    "tp": "期望的 (page,type) 在产出中出现",
+    "fn": "期望的 (page,type) 未出现",
+    "fp": "产出的 (page,type) 既非期望、type 也不在 allowed_extra_types 内",
+    "noise": "type 属于 noise_types 的产出条数（单列为噪声 KPI，不计入 FP）"
+  },
+  "noise_types": [
+    "completeness"
+  ],
+  "cases": [
+    {
+      "case_id": "clean_page",
+      "intent": "精度护栏：干净页不得报出任何高价值缺陷（越界/倒序/批号/日期类）",
+      "expect": [],
+      "allowed_extra_types": [
+        "completeness"
+      ],
+      "known_gap": false
+    },
+    {
+      "case_id": "param_out_of_spec",
+      "intent": "参数越界必须报出",
+      "expect": [
+        {
+          "page": 1,
+          "type": "param_out_of_spec"
+        }
+      ],
+      "allowed_extra_types": [
+        "completeness"
+      ],
+      "known_gap": false
+    },
+    {
+      "case_id": "time_reversal_in_page",
+      "intent": "页内开始晚于结束必须报出",
+      "expect": [
+        {
+          "page": 1,
+          "type": "time_reversal"
+        }
+      ],
+      "allowed_extra_types": [
+        "completeness"
+      ],
+      "known_gap": false
+    },
+    {
+      "case_id": "batch_inconsistency",
+      "intent": "跨页批号不一致必须报出（critical）",
+      "expect": [
+        {
+          "page": 1,
+          "type": "batch_inconsistency"
+        }
+      ],
+      "allowed_extra_types": [
+        "completeness"
+      ],
+      "known_gap": false
+    },
+    {
+      "case_id": "suspicious_future_date",
+      "intent": "远超当前年份的日期必须报出",
+      "expect": [
+        {
+          "page": 1,
+          "type": "suspicious_date"
+        }
+      ],
+      "allowed_extra_types": [
+        "completeness"
+      ],
+      "known_gap": false
+    },
+    {
+      "case_id": "missing_exec_time",
+      "intent": "有操作描述但缺执行时间 —— 应报 completeness（warning）",
+      "expect": [
+        {
+          "page": 1,
+          "type": "completeness"
+        }
+      ],
+      "allowed_extra_types": [
+        "completeness"
+      ],
+      "known_gap": false
+    },
+    {
+      "case_id": "self_review_operator_eq_reviewer",
+      "intent": "操作人=复核人（自检自核）—— 当前规则未覆盖，M4/R12 落地的验收点",
+      "expect": [
+        {
+          "page": 1,
+          "type": "self_review"
+        }
+      ],
+      "allowed_extra_types": [
+        "completeness"
+      ],
+      "known_gap": true
+    }
+  ],
+  "real_baselines": {
+    "note": "真实 job 的类型分布基线（回归对照，非真值）。truth=false 表示未人工裁决，只用于检测'类型分布漂移'。",
+    "truth": false,
+    "jobs": [
+      {
+        "job_id": "749ead79-7b8",
+        "filename": "丝裂霉素提取批记录.pdf",
+        "total_pages": 51,
+        "total_findings": 784,
+        "by_type": {
+          "completeness": 678,
+          "handwritten": 24,
+          "param_out_of_spec": 26,
+          "time_reversal": 17,
+          "signature_time_anomaly": 11,
+          "suspicious_date": 10,
+          "year_contradiction": 8,
+          "signature_mismatch": 5,
+          "user_rule": 4,
+          "batch_inconsistency": 1
+        },
+        "noise_ratio": 0.8648
+      }
+    ]
+  }
+}
