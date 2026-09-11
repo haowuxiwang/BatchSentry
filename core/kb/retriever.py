@@ -42,6 +42,17 @@ TYPE_QUERIES: dict[str, list[str]] = {
     "year_contradiction": ["记录", "保存", "年限"],
     "low_confidence": ["记录", "填写", "及时"],
     "handwritten": ["记录", "填写", "及时"],
+    "step_gap": ["批记录", "工艺规程", "工序", "完整"],
+    "ocr_noise": ["批记录", "记录", "文件"],
+    "spec_unverifiable": ["质量标准", "检验", "规格", "复核"],
+    # ── M4：R11–R17（配 gmp_basis 同源类型）──
+    "mass_balance": ["物料平衡", "收率", "生产管理", "批记录"],
+    "self_review": ["复核", "签名", "职责", "记录"],
+    "equipment_state": ["设备", "清洁", "状态标志", "校验"],
+    "env_monitor": ["厂房设施", "洁净", "环境", "监测"],
+    "doc_version": ["文件管理", "版本", "文件", "作废"],
+    "deviation_link": ["偏差", "处理", "纠正", "预防"],
+    "alteration": ["记录", "填写", "更改", "签名"],
 }
 
 _GENERIC_TERMS = ["批记录", "记录"]

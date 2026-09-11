@@ -268,6 +268,36 @@ def uuid_str() -> str:
     return _uuid.uuid4().hex[:12]
 
 
+# 规则开关（M4/T4.0）：config.json 顶层 rules.disabled 数组，按规则 id 关闭。
+_RULES_KEY = "rules"
+
+
+def load_disabled_rule_ids() -> list[str]:
+    """读取被关闭的规则 id（config.json 的 `rules.disabled` 数组）。
+
+    供 core.rules.registry.enabled_rule_specs() 使用：允许按 id 关闭某条规则
+    （如现场无该工艺），使"规则是否合理"可配置可审计（T4.0）。
+    读取失败/结构非法一律返回空列表（= 全部启用）—— 绝不因配置问题而
+    静默禁用规则（合规检查宁可多报不可漏检）。
+    """
+    json_path = _config_path()
+    if not json_path.exists():
+        return []
+    try:
+        with open(json_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError, TypeError):
+        logger.warning(f"Failed to read rules config from {json_path}")
+        return []
+    rules = data.get(_RULES_KEY, {})
+    if not isinstance(rules, dict):
+        return []
+    disabled = rules.get("disabled", [])
+    if not isinstance(disabled, list):
+        return []
+    return [str(x) for x in disabled if isinstance(x, (str, int))]
+
+
 # ============================================================
 # Feishu notification (Phase 12)
 

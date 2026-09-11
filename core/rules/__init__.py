@@ -10,7 +10,14 @@ rule-domain modules (2026-08):
 - rule_spec.py   : R3 param_out_of_spec (cell + LLM-queue judgment)
 - rule_doc.py    : R6 completeness, R7 batch_consistency, R8 low_confidence,
                     R9 handwritten_notes, R-M1/R-M2 measurement rules
+- rule_gmp.py    : R11 mass_balance … R17 alteration (M4 GMP 运营合规)
+- registry.py    : RuleSpec/RULE_REGISTRY — 规则元数据单一来源（M4/T4.0）
 - llm_checks.py  : LLM fallback + semantic check + user-rule prompt assembly
+
+M4 (T4.0): the orchestration below is **registry-driven** — rule execution
+order, metadata (id/type/severity/basis) and per-rule enable/disable all come
+from `registry.RULE_REGISTRY` / `enabled_rule_specs()`, so adding a rule is a
+one-line registry append instead of editing this file's body.
 
 core/cross_page_analyzer.py remains as a backward-compat shim.
 """
@@ -43,6 +50,7 @@ from core.rules.rule_time import (
     _check_time_reversal_in_page,
     _check_year_contradiction,
 )
+from core.rules.registry import RuleContext, enabled_rule_specs
 from core.rules.parsing import SpecBounds as SpecBounds  # re-export for shim/tests
 
 logger = logging.getLogger(__name__)
@@ -64,6 +72,10 @@ async def analyze_cross_page(
         progress_cb: async (done, total, label) — Stage 3 子进度上报
             （SSE"跨页分析"文案），4 个里程碑：规则校验 / LLM 兜底 /
             LLM 语义 / 完成。None 时静默。
+
+    Rule layer is driven by `registry.RULE_REGISTRY` (M4/T4.0): each enabled
+    RuleSpec runs in registry order, its findings are logged under the rule id,
+    and cross-rule signals (OOS pages) accumulate in the shared RuleContext.
     """
     if not page_structures:
         return []
@@ -113,69 +125,18 @@ async def analyze_cross_page(
             f"carry low-confidence column/label tokens"
         )
 
+    # ── 规则层：由注册表驱动（M4/T4.0）──────────────────────────────────
+    ctx = RuleContext(job_id=job_id)
     rule_findings: list[dict] = []
-    llm_queue: list[dict] = []
-
-    # R1-a + R1-b: time_reversal
-    r1a = _check_time_reversal_in_page(pages)
-    r1b = _check_time_reversal_cross_page(pages)
-    rule_findings.extend(r1a)
-    rule_findings.extend(r1b)
-    logger.info(f"[{job_id}] R1 time_reversal: {len(r1a)} in-page + {len(r1b)} cross-page")
-    # R2: year_contradiction (per event type)
-    r2 = _check_year_contradiction(pages)
-    rule_findings.extend(r2)
-    logger.info(f"[{job_id}] R2 year_contradiction: {len(r2)}")
-    # R4: suspicious_date
-    r4 = _check_suspicious_dates(pages)
-    rule_findings.extend(r4)
-    logger.info(f"[{job_id}] R4 suspicious_date: {len(r4)}")
-    # R5: signature_time_anomaly
-    r5 = _check_signature_time_anomaly(pages)
-    rule_findings.extend(r5)
-    logger.info(f"[{job_id}] R5 signature_time_anomaly: {len(r5)}")
-    # R9a: signature ORDER across roles (reviewer/QA must sign after operator)
-    r9a = _check_signature_order(pages)
-    rule_findings.extend(r9a)
-    logger.info(f"[{job_id}] R9a signature_order: {len(r9a)}")
-    # R10: step-number gaps (缺页/漏页检测)
-    r10 = _check_step_number_gaps(pages)
-    rule_findings.extend(r10)
-    logger.info(f"[{job_id}] R10 step_number_gaps: {len(r10)}")
-    # R6: completeness (missing operator/reviewer signatures)
-    r6 = _check_completeness(pages)
-    rule_findings.extend(r6)
-    logger.info(f"[{job_id}] R6 completeness: {len(r6)}")
-    # R7: batch number consistency across pages
-    r7 = _check_batch_consistency(pages)
-    rule_findings.extend(r7)
-    logger.info(f"[{job_id}] R7 batch_consistency: {len(r7)}")
-    # R8: low-confidence parameter values — flag for human review
-    r8 = _check_low_confidence_params(pages)
-    rule_findings.extend(r8)
-    logger.info(f"[{job_id}] R8 low_confidence: {len(r8)}")
-    # R9: handwritten notes — surface for manual verification
-    r9 = _check_handwritten_notes(pages)
-    rule_findings.extend(r9)
-    logger.info(f"[{job_id}] R9 handwritten_notes: {len(r9)}")
-    # R8b: check consistency (QA checkbox answered 否 / unrecognizable)
-    r8b = _check_check_consistency(pages)
-    rule_findings.extend(r8b)
-    logger.info(f"[{job_id}] R8b check_consistency: {len(r8b)}")
-    # R-M1: cross-page measurement time sequence (same step, monotonic rows)
-    rm1 = _check_measurement_time_sequence(pages)
-    rule_findings.extend(rm1)
-    logger.info(f"[{job_id}] R-M1 measurement_time_sequence: {len(rm1)}")
-    # R-M2: cross-page measurement column consistency (missing columns)
-    rm2 = _check_measurement_column_consistency(pages)
-    rule_findings.extend(rm2)
-    logger.info(f"[{job_id}] R-M2 measurement_column_consistency: {len(rm2)}")
-    # R3: param_out_of_spec (collects llm_queue as side effect)
-    r3 = _check_param_out_of_spec(pages, llm_queue)
-    rule_findings.extend(r3)
+    specs = enabled_rule_specs()
+    for spec in specs:
+        found = spec.check(pages, ctx)
+        rule_findings.extend(found)
+        ctx.record(found)
+        logger.info(f"[{job_id}] {spec.id} {spec.type}: {len(found)}")
     logger.info(
-        f"[{job_id}] R3 param_out_of_spec: {len(r3)} findings, "
-        f"{len(llm_queue)} queued for LLM fallback"
+        f"[{job_id}] rule layer: {len(rule_findings)} findings across "
+        f"{len(specs)} rules, {len(ctx.llm_queue)} queued for LLM fallback"
     )
 
     # Per-page LLM findings pass-through:
@@ -193,7 +154,7 @@ async def analyze_cross_page(
             await progress_cb(1, _CROSS_TOTAL, "LLM 兜底判定")
         except Exception:
             pass
-    llm_fallback_findings = await _llm_fallback_check(llm_queue, job_id=job_id)
+    llm_fallback_findings = await _llm_fallback_check(ctx.llm_queue, job_id=job_id)
     rule_findings.extend(llm_fallback_findings)
 
     # LLM semantic check (catches what rules missed)

@@ -376,7 +376,10 @@ def _parse_spec(spec: Optional[str]) -> Optional[SpecBounds]:
     # "0.5-1.0 $m^{3}/h$" would fail to match the between pattern.
 
     # between: "0.5-1.0" / "1300~3200" / "0.5–1.0" (en-dash)
-    m = re.match(r"^(-?\d+\.?\d*)\s*[-~–]\s*(-?\d+\.?\d*)", s)
+    # 也支持带单位/百分号的写法："99%~101%"（首个界限后可选 %/％）——
+    # 真实批记录中物料平衡率/收率常写成 "99%~101%"，此前因 "%" 夹在 99 与 ~
+    # 之间而解析失败，整条规格被降级为 LLM 兜底（M4 实测发现）。
+    m = re.match(r"^(-?\d+\.?\d*)\s*[%％]?\s*[-~–]\s*(-?\d+\.?\d*)", s)
     if m:
         low, high = float(m.group(1)), float(m.group(2))
         return SpecBounds(op="between", low=low, high=high)

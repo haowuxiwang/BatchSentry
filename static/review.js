@@ -1142,6 +1142,15 @@
       ocr_noise: "OCR 噪音",
       time_anomaly: "时间异常",
       step_gap: "工序缺号",
+      spec_unverifiable: "规格无法核定",
+      uncategorized: "未分类",
+      mass_balance: "物料平衡/收率",
+      self_review: "自检自核",
+      equipment_state: "设备/清洁状态",
+      env_monitor: "环境监测",
+      doc_version: "文件版本",
+      deviation_link: "偏差关联",
+      alteration: "涂改规范",
     };
     const statusZh = {
       pending: "待复核",

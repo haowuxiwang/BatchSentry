@@ -33,6 +33,14 @@ CANONICAL_TYPES: tuple[str, ...] = (
     "step_gap",
     "ocr_noise",
     "spec_unverifiable",  # M2：实测值与规格单位不一致且无换算规则 → 需人工核定
+    # ── M4：R11–R17 运营合规检查（GMP 高频空洞）──
+    "mass_balance",     # R11 物料平衡/收率：已声明但未记录实测值 / 无可核定范围
+    "self_review",      # R12 操作人=复核人（ALCOA+ Attributable 独立复核失效）
+    "equipment_state",  # R13 设备/清洁状态：确认项未通过或声明未填写
+    "env_monitor",      # R14 环境监测：压差/洁净/温湿度项缺失或未通过
+    "doc_version",      # R15 文件版本：同一文件编号出现多个版本
+    "deviation_link",   # R16 超限偏差关联：有异常/超限但未记录偏差编号
+    "alteration",       # R17 涂改规范：疑似划改但缺签名/日期
     "user_rule",
     "uncategorized",
 )
@@ -62,6 +70,23 @@ TYPE_SYNONYMS: dict[str, str] = {
     "ocr_sparse": "ocr_noise",
     "sparse_text": "ocr_noise",
     "user_defined": "user_rule",
+    # ── M4/R11–R17 变体 ──
+    "yield": "mass_balance",
+    "material_balance": "mass_balance",
+    "balance_rate": "mass_balance",
+    "operator_reviewer_same": "self_review",
+    "self_check": "self_review",
+    "equipment_cleanliness": "equipment_state",
+    "cleaning_state": "equipment_state",
+    "cleanliness": "equipment_state",
+    "env_monitoring": "env_monitor",
+    "environment": "env_monitor",
+    "version_mismatch": "doc_version",
+    "document_version": "doc_version",
+    "deviation": "deviation_link",
+    "oos_link": "deviation_link",
+    "tamper": "alteration",
+    "correction": "alteration",
     # 中文名（LLM 偶尔直接回中文 type）
     "时间倒序": "time_reversal",
     "时间异常": "signature_time_anomaly",
@@ -72,10 +97,50 @@ TYPE_SYNONYMS: dict[str, str] = {
     "批号不一致": "batch_inconsistency",
     "手写": "handwritten",
     "步骤缺失": "step_gap",
+    "收率": "mass_balance",
+    "物料平衡": "mass_balance",
+    "自检自核": "self_review",
+    "设备状态": "equipment_state",
+    "清洁状态": "equipment_state",
+    "环境监测": "env_monitor",
+    "文件版本": "doc_version",
+    "偏差关联": "deviation_link",
+    "涂改": "alteration",
+    "划改": "alteration",
 }
 
 # 关键词兜底（按序匹配，先到先得）—— 覆盖未登记的变体。
+# 顺序敏感：M4 新类型（R11–R17）关键词更具体，置于通用词之前，避免被
+# "spec"/"missing" 等宽泛词提前截获（如 equipment_spec_mismatch 应归
+# equipment_state 而非 param_out_of_spec）。
 _TYPE_KEYWORDS: tuple[tuple[str, str], ...] = (
+    # ── M4：R11–R17 ──
+    ("mass_balance", "mass_balance"),
+    ("material_balance", "mass_balance"),
+    ("yield", "mass_balance"),
+    ("收率", "mass_balance"),
+    ("物料平衡", "mass_balance"),
+    ("self_review", "self_review"),
+    ("自检", "self_review"),
+    ("equipment", "equipment_state"),
+    ("clean", "equipment_state"),
+    ("设备", "equipment_state"),
+    ("清洁", "equipment_state"),
+    ("清洗", "equipment_state"),
+    ("env_monitor", "env_monitor"),
+    ("environment", "env_monitor"),
+    ("环境", "env_monitor"),
+    ("压差", "env_monitor"),
+    ("doc_version", "doc_version"),
+    ("version", "doc_version"),
+    ("文件版本", "doc_version"),
+    ("deviation", "deviation_link"),
+    ("偏差", "deviation_link"),
+    ("alter", "alteration"),
+    ("tamper", "alteration"),
+    ("涂改", "alteration"),
+    ("划改", "alteration"),
+    # ── 既有 ──
     ("batch", "batch_inconsistency"),
     ("year", "year_contradiction"),
     ("sign", "signature_time_anomaly"),

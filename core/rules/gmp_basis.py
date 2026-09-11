@@ -77,6 +77,35 @@ GMP_BASIS_MAP: dict[str, str] = {
         "《药品生产质量管理规范(2010修订)》批号管理与物料平衡；"
         "ALCOA+ Consistent（一致性）"
     ),
+    # ── M4：R11–R17 运营合规 ──
+    "mass_balance": (
+        "GMP 2010《药品生产质量管理规范(2010修订)》生产管理：物料平衡与收率"
+        "应记录并可核定（不得留空或无法复算）"
+    ),
+    "self_review": (
+        "《药品生产质量管理规范(2010修订)》批记录应由他人复核（操作与复核不得为同一人）；"
+        "ALCOA+ Attributable（可归因性）"
+    ),
+    "equipment_state": (
+        "GMP 2010《药品生产质量管理规范(2010修订)》设备管理与清洁规程"
+        "（设备状态标志、清洁合格与有效期确认）"
+    ),
+    "env_monitor": (
+        "GMP 2010《药品生产质量管理规范(2010修订)》厂房设施与空调净化系统；"
+        "洁净区环境监测规程（压差/温湿度/洁净度）"
+    ),
+    "doc_version": (
+        "《药品生产质量管理规范(2010修订)》文件管理（现行版本使用与作废文件控制）；"
+        "EU GMP Chapter 4 文档管理"
+    ),
+    "deviation_link": (
+        "《药品生产质量管理规范(2010修订)》偏差处理（超限/异常应记录并关联偏差编号）；"
+        "偏差管理规程"
+    ),
+    "alteration": (
+        "《药品生产质量管理规范(2010修订)》批记录填写（更改须划改、签名并注明日期，"
+        "不得涂改覆盖）；ALCOA+ Original（原始性）；江苏省药品生产记录填写规范"
+    ),
 }
 
 # 不映射依据的 type（技术噪音/用户规则自含依据/内部键）
@@ -86,6 +115,14 @@ _UNMAPPED = {"ocr_noise", "user_rule"}
 # 未枚举变体）。按 type 关键词归类到语义最近的依据，避免整类 finding
 # 无依据可引用。顺序敏感：先具体后宽泛。
 _KEYWORD_FALLBACK: list[tuple[tuple[str, ...], str]] = [
+    # ── M4 新类型（更具体，置于通用词之前）──
+    (("mass_balance", "balance", "yield", "收率", "物料平衡"), GMP_BASIS_MAP["mass_balance"]),
+    (("self_review", "自检"), GMP_BASIS_MAP["self_review"]),
+    (("equip", "clean", "设备", "清洁", "清洗"), GMP_BASIS_MAP["equipment_state"]),
+    (("env", "环境", "压差"), GMP_BASIS_MAP["env_monitor"]),
+    (("version", "版本"), GMP_BASIS_MAP["doc_version"]),
+    (("deviation", "偏差"), GMP_BASIS_MAP["deviation_link"]),
+    (("alter", "涂改", "划改"), GMP_BASIS_MAP["alteration"]),
     (("batch", "批号", "批logic"), GMP_BASIS_MAP["batch_inconsistency"]),
     (("signature", "签名"), GMP_BASIS_MAP["signature_time_anomaly"]),
     (("time", "date", "时间", "日期"), GMP_BASIS_MAP["time_reversal"]),

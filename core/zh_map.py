@@ -53,6 +53,14 @@ FINDING_TYPE_ZH = {
     "step_gap": "步骤缺失",
     "ocr_noise": "OCR 噪声",
     "spec_unverifiable": "规格无法核定",
+    # ── M4：R11–R17 ──
+    "mass_balance": "物料平衡/收率",
+    "self_review": "自检自核",
+    "equipment_state": "设备/清洁状态",
+    "env_monitor": "环境监测",
+    "doc_version": "文件版本",
+    "deviation_link": "偏差关联",
+    "alteration": "涂改规范",
     "user_rule": "用户规则",
     "uncategorized": "未分类",
 }
