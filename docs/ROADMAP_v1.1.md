@@ -212,7 +212,10 @@
   `test_health_security_coverage` / `test_api_jobs_listings_coverage`（另含 M1b 首批 4 文件）。
   过程中定位并修复真实缺陷：`api/jobs/listings.py:105` 对 `sqlite3.Row` 调 `.get()` → 终态快照缓存
   崩溃、`/api/jobs/live` 静默降级（610f8c5）。
-- **M1c（打包信号）**：`scripts/release_gate.py` 一条命令串起全链路并落盘 `gate_report_<date>.json`。
+- **M1c（打包信号）** ✅ `scripts/release_gate.py`（66203b4 + 修正 ea4ae97）：离线门禁五项
+  ——`worktree_clean` / `packaging_files` / `rules_wired`(15) / `kb_corpus`(300) / `tests_coverage`；
+  实测 **OVERALL: pass**（4 PASS + 1 WARN，WARN = 沙箱专有的 `TestServePdf` 失败，覆盖率 95.12%），
+  报告落盘 `devlogs/gate_report_<YYYYMMDD_HHMMSS>.json`。
   > 沙箱陷阱：`pytest --cov` 收尾时 `pytest_cov.finish()` → `cov.combine()` 会**删除**自身
   > 的并行数据文件（`<COVERAGE_FILE>.*.pid*`），在 WorkBuddy 沙箱下会触发 safe-delete
   > 批量守卫 → `SystemExit(1)` → `INTERNALERROR`，覆盖表与 `--cov-fail-under` 均不产出。

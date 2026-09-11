@@ -79,6 +79,13 @@ python server.py            # listens on 127.0.0.1:58765
 pytest
 pytest --cov=. --cov-report=term --cov-report=html
 
+# Release gate (packaging signal) — offline; runs structure checks + tests/coverage
+python scripts/release_gate.py                 # full; writes devlogs/gate_report_<ts>.json
+python scripts/release_gate.py --skip-tests    # structure checks only (seconds)
+
+# Runtime per-job data-quality gate (needs a running server + a finished job)
+python scripts/golden_gate.py --job-id <id> --expect-pages 51
+
 # Build local Tailwind CSS (15.8KB, no CDN)
 npx tailwindcss -i ./static/input.css -o ./static/app.css --minify
 
@@ -90,7 +97,12 @@ npx tailwindcss -i ./static/input.css -o ./static/app.css --minify
 # API docs (Swagger): http://127.0.0.1:8000/docs
 ```
 
-Test coverage target: ≥90%. Current: 90.22% (1210 tests, see `tests/` with unit + integration suites).
+Test coverage target: **≥95%** (enforced by `pytest.ini --cov-fail-under=95`). Current: 95.12% (1550 passed, see `tests/` with unit + integration suites).
+
+> Sandbox note: to read coverage, prefer `python scripts/release_gate.py` (which uses
+> `coverage run` + `coverage report`). Avoid `pytest --cov` under the IDE sandbox — its
+> `pytest_cov.finish()` → `cov.combine()` deletes its own parallel data file, which trips the
+> sandbox bulk-delete guard and aborts with `INTERNALERROR` before the coverage table prints.
 
 ---
 
