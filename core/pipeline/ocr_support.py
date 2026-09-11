@@ -53,27 +53,59 @@ def assess_ocr_page(page: dict, pdf_diag: dict | None = None) -> tuple[dict, lis
     if not text.strip() or diag["text_chars"] == 0:
         reasons.append("页面无可用文本")
     if pdf_diag:
-        # 合并 PDF 结构诊断（媒体盒/旋转/长宽比/像素/有效 DPI）。
+        # 合并 PDF 结构诊断（媒体盒/旋转/长宽比/像素/覆盖率/字号/有效 DPI）。
         # 仅合入有值的字段，不覆盖 block 级事实。
         for k, v in (
             ("media_box_pt", pdf_diag.get("media_box_pt")),
             ("rotation", pdf_diag.get("rotation")),
             ("aspect_ratio", pdf_diag.get("aspect_ratio")),
             ("image_pixels", pdf_diag.get("image_pixels")),
+            ("image_coverage", pdf_diag.get("image_coverage")),
             ("effective_dpi", pdf_diag.get("effective_dpi")),
+            ("min_font_pt", pdf_diag.get("min_font_pt")),
         ):
             if v is not None:
                 diag[k] = v
-        if pdf_diag.get("low_dpi"):
+        low_dpi = bool(pdf_diag.get("low_dpi"))
+        small_font = bool(pdf_diag.get("small_font"))
+        extreme = _is_extreme_aspect(diag.get("aspect_ratio"))
+        if low_dpi:
             diag["low_dpi"] = True
-            reasons.append(pdf_diag.get("low_dpi_reason") or "有效 DPI 过低")
-        if diag.get("media_box_pt"):
+        if small_font:
+            diag["small_font"] = True
+        # 超大页面盒（扫描 DPI 标注错误）与极端长宽比同属"几何异常"，
+        # 后者已单独标记 → 不重复告警（避免对已规范化的条状页误报
+        # "扫描 DPI 标注可能错误"）。
+        if not extreme and diag.get("media_box_pt"):
             box_long = max(diag["media_box_pt"])
             if box_long > _PDF_ABNORMAL_BOX_PT:
                 reasons.append(
                     f"PDF 页面盒异常（长边 {box_long:.0f}pt > "
                     f"{_PDF_ABNORMAL_BOX_PT}pt），扫描 DPI 标注可能错误"
                 )
+        # O2：极端长宽比 → 超长/超宽正文可能被压缩或切碎，无法无损修复，
+        # 强制人工复核（不得静默标记成功）。
+        if extreme:
+            diag["extreme_aspect"] = True
+            reasons.append(
+                f"页面长宽比 {diag['aspect_ratio']:.1f}:1 极端，"
+                f"超长/超宽正文可能被压缩，请对照原图核对"
+            )
+        # O6：小字号（<6pt）叠加低 DPI（<150）→ 识别风险叠加，
+        # 必须进入低置信度/人工复核。
+        mf = diag.get("min_font_pt")
+        if low_dpi and small_font:
+            reasons.append(
+                f"小字号（{mf:.1f}pt < {_SMALL_FONT_PT:.0f}pt）叠加低 DPI"
+                f"（{pdf_diag.get('effective_dpi')} < {_LOW_DPI_THRESHOLD}），"
+                f"识别风险高，需人工复核"
+            )
+        elif low_dpi:
+            reasons.append(pdf_diag.get("low_dpi_reason") or "有效 DPI 过低")
+        elif small_font:
+            reasons.append(
+                f"正文最小字号 {mf:.1f}pt 偏小，识别可能缺字，请抽查"
+            )
     diag["integrity"] = "incomplete" if reasons else "ok"
     diag["reasons"] = reasons
     return diag, reasons
@@ -188,38 +220,189 @@ def _pdf_page_count(pdf_path: str) -> int | None:
         return None
 
 
-# ── OCR 输入规范化（Stage 0，2026-08-20）──────────────────────────────
+# ── OCR 输入规范化（Stage 0，2026-08-20；M3 尺寸鲁棒性 2026-09-10）─────
 # 扫描件被错误导出为"超大页面盒"是真实缺陷（51 页实测全为 3000x4000pt
 # ≈41.7x55.6in，嵌入 3000x4000px JPEG，有效 DPI 仅 72）。MinerU 按 PDF
 # 坐标假设 1pt=1/72in 渲染，对畸形页面盒输出像素爆炸（×3 upscale 后
 # 直踩 JPEG 65500px 硬限 / VLM 2048px 输入上界），整表降级为字面量
 # simple_table stub（同页 Paddle 输出 991 字符完整表格，MinerU 仅 111
 # 字符 stub）。修复策略（行业最佳实践，调研来源见 CLAUDE.md）：
-#   - 检测页面盒异常（长边 >1600pt 且远超标准尺寸）→ 重新渲染为
-#     300 DPI 等效页面盒（页面图像素 / 300 * 72 pt），长边 cap 4096px，
-#     以灰度渲染（VLM 优先，PDF 提交给服务端后按 300dpi 还原出
-#     恰好原图像素，不再触发服务端二次放大）。
+#   - 规范化按"目标像素密度"统一（O3），不再只判长边 >1600pt：
+#     · O3 超大盒（>_PDF_ABNORMAL_BOX_PT）→ 重渲染为 300 DPI 等效页面盒
+#       （页面图像素 / 300 * 72 pt），长边 cap 4096px，灰度渲染（提交
+#       服务端后按 300dpi 还原出恰好原图像素，不再二次放大）；
+#     · O1 微型盒（<_PDF_SMALL_BOX_PT，栅格页）→ 放大到目标 DPI，
+#       避免整页欠采样；矢量/文本微型页保留保真不重渲染；
+#     · O2 极端长宽比（≥_PDF_EXTREME_ASPECT）→ 放宽长边上限并抬升
+#       短边下限，避免超长/超宽页正文被压碎。
 #   - 仅生成规范化的"工作副本"，原始 PDF 原件保留（GMP 追溯 +
 #     review 页预览仍用原件）。
-_PDF_ABNORMAL_BOX_PT = 1600  # 超过视为扫描 DPI 标注错误（A3=1191pt 封顶
-                              # 于正常印刷幅面；1600pt=22.2in 已是异常）
+_PDF_ABNORMAL_BOX_PT = 1600  # 上界（O3）：超过视为扫描 DPI 标注错误
+                             # （A3=1191pt 封顶于正常印刷幅面；1600pt=
+                             # 22.2in 已是异常）
+_PDF_SMALL_BOX_PT = 300      # 下界（O1）：长边低于此视为微型盒（≈1024px
+                             # @300dpi≈246pt，取整到 300 留余量）→ 放大到
+                             # 目标 DPI，避免整页欠采样（栅格微型页才会
+                             # 重渲染，矢量/文本页保留保真）
+_PDF_EXTREME_ASPECT = 4.0    # 长宽比 ≥ 此值视为极端（O2）
 _NORMALIZE_TARGET_DPI = 300  # 目标有效 DPI — 服务端安全区（150-300）
 _NORMALIZE_MAX_SIDE_PX = 4096  # 发送端长边上限（MinerU ×3 后 12288px
                                # 仍低于 JPEG 65500px 硬限）
+_NORMALIZE_EXTREME_MAX_SIDE_PX = 8192  # 极端长宽比页的长边上限（O2）：
+                                       # 放宽以保住短边细节
+_NORMALIZE_MIN_SHORT_SIDE_PX = 1024    # 短边像素下限（O2）：避免超长/超宽
+                                       # 页正文被压碎
 _LOW_DPI_THRESHOLD = 150  # 有效 DPI 低于此值视为低质量扫描（samples
                           # 登记表 low-dpi 样本验收：不得静默标记成功）
+_SMALL_FONT_PT = 6.0      # 正文最小字号低于此值 + 低 DPI → 联合标记（O6）
+
+
+def _is_extreme_aspect(aspect_ratio) -> bool:
+    """长宽比是否极端（O2）：max(a, 1/a) ≥ _PDF_EXTREME_ASPECT。"""
+    try:
+        a = float(aspect_ratio)
+    except (TypeError, ValueError):
+        return False
+    if a <= 0:
+        return False
+    return max(a, 1.0 / a) >= _PDF_EXTREME_ASPECT
+
+
+def _box_geometry_reason(w_pt: float, h_pt: float) -> str | None:
+    """页面盒几何分类（O1/O2/O3）：返回异常原因，正常页返回 None。
+
+    判定顺序：极端长宽比（O2）→ 超大盒（O3）→ 微型盒（O1）。落在
+    [_PDF_SMALL_BOX_PT, _PDF_ABNORMAL_BOX_PT] 的正常幅面返回 None，
+    原样提交以保证矢量/文本保真。
+    """
+    long_pt = max(w_pt, h_pt)
+    short_pt = min(w_pt, h_pt)
+    if long_pt <= 0 or short_pt <= 0:
+        return None
+    if long_pt / short_pt >= _PDF_EXTREME_ASPECT:
+        return "extreme_aspect"
+    if long_pt > _PDF_ABNORMAL_BOX_PT:
+        return "large_box"
+    if long_pt < _PDF_SMALL_BOX_PT:
+        return "small_box"
+    return None
+
+
+def _normalize_zoom(w_pt: float, h_pt: float, reason: str) -> float:
+    """按异常类别选择渲染缩放系数 zoom（O1/O2/O3）。
+
+    - small_box（O1）：放大到目标 DPI（300/72≈4.17），页盒尺寸保持不变
+      而像素密度升至可用水平 → 微型页不再整页稀疏；
+    - large_box（O3）：不放大（不伪造像素），仅受 _NORMALIZE_MAX_SIDE_PX
+      约束 → 输出的 300dpi 页盒即恢复真实物理尺寸；
+    - extreme_aspect（O2）：放宽长边上限并在必要时抬升短边，避免超长/
+      超宽页正文被压碎。
+    """
+    long_pt = max(w_pt, h_pt)
+    short_pt = min(w_pt, h_pt)
+    if long_pt <= 0:
+        return 1.0
+    if reason == "small_box":
+        return max(1.0, min(_NORMALIZE_TARGET_DPI / 72.0, _NORMALIZE_MAX_SIDE_PX / long_pt))
+    if reason == "extreme_aspect":
+        cap = _NORMALIZE_EXTREME_MAX_SIDE_PX
+        z = min(_NORMALIZE_TARGET_DPI / 72.0, cap / long_pt)
+        if short_pt > 0:
+            z = max(z, min(_NORMALIZE_MIN_SHORT_SIDE_PX / short_pt, cap / long_pt))
+        return max(1.0, z)
+    # large_box：不放大，仅受长边上限约束（不伪造像素）
+    return min(1.0, _NORMALIZE_MAX_SIDE_PX / long_pt)
+
+
+def _normalization_decision(
+    w_pt: float, h_pt: float, has_raster: bool
+) -> tuple[bool, str | None, float]:
+    """单页 OCR 输入规范化决策 → (是否重渲染, 原因, 渲染 zoom)。
+
+    O3：触发条件改为"按目标像素密度统一"——页面盒落在
+    [_PDF_SMALL_BOX_PT, _PDF_ABNORMAL_BOX_PT] 之外（欠采样或标注错误）
+    或长宽比极端（O2）才重渲染，不再只是"长边 >1600pt"。
+    微型盒仅在含嵌入栅格时重渲染（has_raster）——矢量/文本微型页保留
+    保真，交由后端自身按文本层光栅化。
+    """
+    reason = _box_geometry_reason(w_pt, h_pt)
+    if reason is None:
+        return False, None, 1.0
+    if reason == "small_box" and not has_raster:
+        return False, None, 1.0
+    return True, reason, _normalize_zoom(w_pt, h_pt, reason)
+
+
+def _page_image_stats(page) -> dict:
+    """页内最大嵌入图像的像素 / 覆盖率 / 有效 DPI（不渲染页面）。
+
+    取面积最大的嵌入图像作为该页"主栅格"（扫描批记录每页通常只有一张
+    整页图；混排页以最大图为准）。覆盖率用于判定栅格是否主导整页。
+    无图像页返回 {[0,0], 0.0, None}，text PDF 不被误判为低质量。
+    """
+    rect = page.rect
+    page_area = max(rect.width * rect.height, 1e-6)
+    bw = bh = 0
+    bdw = bdh = 0.0
+    for im in page.get_image_info(xrefs=True):
+        wpx = int(im.get("width") or 0)
+        hpx = int(im.get("height") or 0)
+        if wpx <= 0 or hpx <= 0 or wpx * hpx <= bw * bh:
+            continue
+        bb = im.get("bbox") or (0, 0, 0, 0)
+        dw = float(bb[2] - bb[0])
+        dh = float(bb[3] - bb[1])
+        if dw <= 0 or dh <= 0:
+            continue
+        bw, bh, bdw, bdh = wpx, hpx, dw, dh
+    if bw <= 0:
+        return {"image_pixels": [0, 0], "image_coverage": 0.0, "effective_dpi": None}
+    eff = None
+    if max(bdw, bdh) > 0:
+        eff = round(max(bw, bh) / (max(bdw, bdh) / 72.0), 1)
+    return {
+        "image_pixels": [bw, bh],
+        "image_coverage": round((bdw * bdh) / page_area, 3),
+        "effective_dpi": eff,
+    }
+
+
+def _page_min_font_pt(page) -> float | None:
+    """文本层最小字号（pt）；无文本层（纯扫描件）返回 None。
+
+    纯扫描页的质量由有效 DPI 反映，字号不可得；含文本层的 PDF（含
+    矢量小字标注）取所有非空白 span 的最小 size，作为 O6 小字号证据。
+    """
+    try:
+        data = page.get_text("dict")
+    except Exception:
+        return None
+    best: float | None = None
+    for block in data.get("blocks", []):
+        for line in block.get("lines", []):
+            for span in line.get("spans", []):
+                if not (span.get("text") or "").strip():
+                    continue
+                size = span.get("size")
+                if not size or size <= 0:
+                    continue
+                if best is None or size < best:
+                    best = float(size)
+    return round(best, 2) if best is not None else None
 
 
 def _pdf_page_diagnostics(pdf_path: str) -> dict[int, dict]:
     """扫描 PDF 每页的结构诊断（OCR 前，fitz 读取，不渲染页面）。
 
     门禁 1（页级诊断可追溯，docs/OCR_GOLDEN_CORPUS.md）：每页记录
-    页面盒、旋转、长宽比、页内图像物理像素与有效 DPI
-    （= 像素长边 / 图像显示尺寸英寸）。低 DPI 直接影响 OCR 识别质量
-    （服务端放大/降采样失真），作为完整性证据并入 assess_ocr_page。
+    页面盒、旋转、长宽比、页内主栅格像素/覆盖率与有效 DPI
+    （= 像素长边 / 图像显示尺寸英寸），以及文本层最小字号。低 DPI /
+    小字号直接影响 OCR 识别质量（服务端放大/降采样失真），作为完整性
+    证据并入 assess_ocr_page。
 
     返回 {page_index_1based: {media_box_pt, rotation, aspect_ratio,
-    image_pixels, effective_dpi, low_dpi, low_dpi_reason}}。
+    image_pixels, image_coverage, effective_dpi, low_dpi[, low_dpi_reason],
+    min_font_pt, small_font}}。
     无图像页 effective_dpi=None（text PDF 不误判为低质量）；
     PDF 打开/解析失败返回 {}（不阻断流程）。
     """
@@ -231,37 +414,28 @@ def _pdf_page_diagnostics(pdf_path: str) -> dict[int, dict]:
             for i, page in enumerate(doc, 1):
                 rect = page.rect
                 w_pt, h_pt = rect.width, rect.height
-                best_px_w = best_px_h = 0
-                best_disp_w = best_disp_h = 0.0
-                for im in page.get_image_info(xrefs=True):
-                    wpx = int(im.get("width") or 0)
-                    hpx = int(im.get("height") or 0)
-                    if wpx <= 0 or hpx <= 0 or wpx * hpx <= best_px_w * best_px_h:
-                        continue
-                    bb = im.get("bbox") or (0, 0, 0, 0)
-                    dw = float(bb[2] - bb[0])
-                    dh = float(bb[3] - bb[1])
-                    if dw <= 0 or dh <= 0:
-                        continue
-                    best_px_w, best_px_h = wpx, hpx
-                    best_disp_w, best_disp_h = dw, dh
+                stats = _page_image_stats(page)
+                min_font = _page_min_font_pt(page)
                 diag: dict = {
                     "media_box_pt": [round(w_pt, 1), round(h_pt, 1)],
                     "rotation": int(page.rotation or 0),
                     "aspect_ratio": round(w_pt / h_pt, 3) if h_pt else None,
-                    "image_pixels": [best_px_w, best_px_h],
-                    "effective_dpi": None,
+                    "image_pixels": stats["image_pixels"],
+                    "image_coverage": stats["image_coverage"],
+                    "effective_dpi": stats["effective_dpi"],
                     "low_dpi": False,
+                    "min_font_pt": min_font,
+                    "small_font": bool(
+                        min_font is not None and min_font < _SMALL_FONT_PT
+                    ),
                 }
-                if best_px_w > 0 and best_px_h > 0 and max(best_disp_w, best_disp_h) > 0:
-                    eff = max(best_px_w, best_px_h) / (max(best_disp_w, best_disp_h) / 72.0)
-                    diag["effective_dpi"] = round(eff, 1)
-                    if eff < _LOW_DPI_THRESHOLD:
-                        diag["low_dpi"] = True
-                        diag["low_dpi_reason"] = (
-                            f"有效 DPI {eff:.0f} 低于 {_LOW_DPI_THRESHOLD}，"
-                            f"识别质量可能不足"
-                        )
+                eff = stats["effective_dpi"]
+                if eff is not None and eff < _LOW_DPI_THRESHOLD:
+                    diag["low_dpi"] = True
+                    diag["low_dpi_reason"] = (
+                        f"有效 DPI {eff:.0f} 低于 {_LOW_DPI_THRESHOLD}，"
+                        f"识别质量可能不足"
+                    )
                 out[i] = diag
             return out
     except Exception as e:
@@ -274,37 +448,43 @@ def _pdf_page_diagnostics(pdf_path: str) -> dict[int, dict]:
 def _prepare_ocr_pdf(pdf_path: str, job_id: str) -> tuple[str, list[int]]:
     """OCR 提交前输入规范化。返回 (实际用于 OCR 的路径, 被规范化的页码)。
 
-    页面盒长边 > _PDF_ABNORMAL_BOX_PT 的页会被重新渲染进工作副本，
-    否则原文件直接返回。规范化永不修改原始 PDF。
+    逐页按 _normalization_decision 判定（O1 微型盒 / O2 极端长宽比 /
+    O3 超大盒），命中页重新渲染进工作副本并按目标 DPI 摆放；其余页原样
+    拷贝（避免无关页被重采样损失保真度）。规范化永不修改原始 PDF。
     """
     import fitz  # PyMuPDF — 页面盒检测 + 重渲染
 
     try:
         with fitz.open(pdf_path) as doc:
-            abnormal: list[tuple[int, fitz.Rect]] = []
+            plans: dict[int, tuple[str, float]] = {}
             for i, page in enumerate(doc, 1):
                 rect = page.rect
-                if max(rect.width, rect.height) > _PDF_ABNORMAL_BOX_PT:
-                    abnormal.append((i, rect))
-            if not abnormal:
+                stats = _page_image_stats(page)
+                px = stats["image_pixels"]
+                needs, reason, zoom = _normalization_decision(
+                    rect.width, rect.height, has_raster=bool(px[0] and px[1]),
+                )
+                if needs:
+                    plans[i] = (reason or "unknown", zoom)
+            if not plans:
                 return pdf_path, []
             logger.info(
-                f"[{job_id}] Input normalize: {len(abnormal)} page(s) have "
-                f"abnormal media box (> {_PDF_ABNORMAL_BOX_PT}pt): "
-                f"{[(p, f'{r.width:.0f}x{r.height:.0f}') for p, r in abnormal]}"
+                f"[{job_id}] Input normalize: {len(plans)} page(s) need "
+                f"normalization: "
+                f"{[(p, r, round(z, 3)) for p, (r, z) in plans.items()]}"
                 f" — re-rendering 300dpi working copy (original untouched)"
             )
             out_path = str(Path(pdf_path).with_name(f"{job_id}_normalized.pdf"))
             norm = fitz.open()
             try:
                 for i, page in enumerate(doc, 1):
-                    rect = page.rect
-                    if max(rect.width, rect.height) <= _PDF_ABNORMAL_BOX_PT:
+                    plan = plans.get(i)
+                    if plan is None:
                         # 正常页原样拷贝（避免无关页被重采样损失保真度）
                         norm.insert_pdf(doc, from_page=i - 1, to_page=i - 1)
                         continue
-                    # 畸形页：渲染为 ≤4096px 位图，按 300dpi 摆放
-                    zoom = min(1.0, _NORMALIZE_MAX_SIDE_PX / max(rect.width, rect.height))
+                    # 异常页：按计划 zoom 渲染位图，按 300dpi 摆放
+                    _reason, zoom = plan
                     pix = page.get_pixmap(
                         matrix=fitz.Matrix(zoom, zoom),
                         colorspace=fitz.csGRAY, alpha=False,
@@ -329,7 +509,7 @@ def _prepare_ocr_pdf(pdf_path: str, job_id: str) -> tuple[str, list[int]]:
             norm.close()
             logger.info(
                 f"[{job_id}] Input normalize: wrote {out_path} "
-                f"({len(abnormal)} re-rendered page(s))"
+                f"({len(plans)} re-rendered page(s))"
             )
     except Exception as e:
         logger.error(
@@ -337,7 +517,7 @@ def _prepare_ocr_pdf(pdf_path: str, job_id: str) -> tuple[str, list[int]]:
             f"{redact_urls(str(e))[:300]}"
         )
         return pdf_path, []
-    return out_path, [p for p, _ in abnormal]
+    return out_path, sorted(plans.keys())
 
 
 async def _run_ocr_with_failover(db, job_id: str, pdf_path: str, progress_cb) -> tuple[list, str, list[str]]:

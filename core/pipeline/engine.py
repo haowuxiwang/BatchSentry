@@ -237,7 +237,8 @@ async def _run_pipeline_impl(job_id: str, pdf_path: str, progress_futures: list)
             if normalized_pages:
                 await _audit_log(
                     db, job_id, "ocr_input_normalized",
-                    f"pages={normalized_pages} box>1600pt — sliced working copy",
+                    f"pages={normalized_pages} (O1/O2/O3 密度规范化) "
+                    f"— sliced working copy",
                 )
             # 页级 PDF 结构诊断（与整份路径同款 — 低 DPI / 异常页面盒
             # 证据；分片路径此前缺失该层完整性证据）。基于规范化工作

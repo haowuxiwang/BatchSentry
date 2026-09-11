@@ -54,8 +54,8 @@ async def _run_stage1_full(
     if normalized_pages:
         await _audit_log(
             db, job_id, "ocr_input_normalized",
-            f"pages={normalized_pages} box>1600pt — re-rendered 300dpi "
-            f"working copy, original untouched",
+            f"pages={normalized_pages} (O1/O2/O3 密度规范化) — re-rendered "
+            f"300dpi working copy, original untouched",
         )
     # （典型场景：Stage 2/3 失败后 retry），跳过真实 OCR，直接从缓存
     # 重建 pages 列表进入 Stage 2。省掉整个 PDF 重传重 OCR（上游配额
@@ -166,9 +166,9 @@ async def _run_stage1_full(
     existing_pages = await _get_existing_pages(db, job_id)
     # 门禁 1（doc 页级诊断）：基于 OCR 实际提交的规范化工作副本扫描每页
     # 结构诊断（媒体盒/旋转/有效 DPI），并入页级完整性证据 — 低 DPI 页
-    # 不静默标记成功。用工作副本而非原件：畸形页（>1600pt）已被
-    # _prepare_ocr_pdf 重渲染修复，按原件诊断会给已修复页挂过时的
-    # low_dpi/页面盒警告误导 LLM 与复核员；分片路径同语义。
+    # 不静默标记成功。用工作副本而非原件：畸形页（O1 微型/O2 极端长宽比/
+    # O3 超大盒）已被 _prepare_ocr_pdf 重渲染修复，按原件诊断会给已修复页
+    # 挂过时的 low_dpi/页面盒警告误导 LLM 与复核员；分片路径同语义。
     # 原件诊断另存审计（原始证据链保留，可回答"此件为何被规范化"）。
     pdf_diags = {}
     try:
