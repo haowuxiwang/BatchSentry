@@ -49,6 +49,11 @@ GMP_BASIS_MAP: dict[str, str] = {
         "《药品生产质量管理规范(2010修订)》批生产记录应完整覆盖全部工序；"
         "ALCOA+ Complete（完整性）"
     ),
+    "spec_unverifiable": (
+        "《药品生产质量管理规范(2010修订)》批记录数据应可审核、"
+        "单位与量纲须一致（无法换算时不得自动判定合格）；"
+        "ALCOA+ Accurate（准确性）与数据完整性"
+    ),
     "batch_inconsistency": (
         "《药品生产质量管理规范(2010修订)》批号管理与物料平衡；"
         "ALCOA+ Consistent（一致性）"

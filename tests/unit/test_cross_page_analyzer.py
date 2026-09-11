@@ -1533,8 +1533,11 @@ class TestUnitMismatchFailClosedIntegration:
     否则 0.1 ≤ 50 会误判合格，导致不合格品放行。
     """
 
-    def test_param_unit_mismatch_produces_completeness_finding(self):
-        """spec="≤50mg", actual="0.1mol" 应产出 completeness finding。"""
+    def test_param_unit_mismatch_produces_spec_unverifiable_finding(self):
+        """spec="≤50mg", actual="0.1mol" 应产出 spec_unverifiable finding。
+
+        M2 类型修正：原误标 completeness（"内容不完整"），实为"规格无法核定"。
+        """
         pages = _norm([
             _make_page(1, [
                 _make_step(1, parameters=[
@@ -1544,16 +1547,16 @@ class TestUnitMismatchFailClosedIntegration:
         ])
         llm_queue = []
         findings = _check_param_out_of_spec(pages, llm_queue)
-        # 应产出 completeness finding（人工复核），不进 llm_queue，不产出 param_out_of_spec
+        # 应产出 spec_unverifiable（人工复核），不进 llm_queue，不产出 param_out_of_spec
         assert len(findings) == 1
-        assert findings[0]["type"] == "completeness"
+        assert findings[0]["type"] == "spec_unverifiable"
         assert findings[0]["severity"] == "warning"
         assert "单位不一致" in findings[0]["description"]
         assert "需人工确认" in findings[0]["description"]
         assert llm_queue == []
 
-    def test_cell_unit_mismatch_produces_completeness_finding(self):
-        """cell 单位不一致且无换算规则时应产出 completeness finding。"""
+    def test_cell_unit_mismatch_produces_spec_unverifiable_finding(self):
+        """cell 单位不一致且无换算规则时应产出 spec_unverifiable finding。"""
         pages = _norm([
             _make_page(1, [
                 _make_step(1, measurements=[
@@ -1564,7 +1567,7 @@ class TestUnitMismatchFailClosedIntegration:
         llm_queue = []
         findings = _check_param_out_of_spec(pages, llm_queue)
         assert len(findings) == 1
-        assert findings[0]["type"] == "completeness"
+        assert findings[0]["type"] == "spec_unverifiable"
         assert "单位不一致" in findings[0]["description"]
         assert llm_queue == []
 

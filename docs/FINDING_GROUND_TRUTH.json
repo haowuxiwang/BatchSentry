@@ -107,7 +107,7 @@
     }
   ],
   "real_baselines": {
-    "note": "真实 job 的类型分布基线（回归对照，非真值）。truth=false 表示未人工裁决，只用于检测'类型分布漂移'。",
+    "note": "真实 job 的类型分布基线（回归对照，非真值）。truth=false 表示未人工裁决，只用于检测'类型分布漂移'。noise_reduction 为把该 job 的 findings **离线重放**过 core.finding_noise 的实测前后（非重新跑流水线，故为模型化估计）。",
     "truth": false,
     "jobs": [
       {
@@ -127,7 +127,28 @@
           "user_rule": 4,
           "batch_inconsistency": 1
         },
-        "noise_ratio": 0.8648
+        "noise_ratio": 0.8648,
+        "noise_reduction": {
+          "method": "离线重放 reduce_completeness_noise（含 spec_unverifiable 重分类）",
+          "before": 784,
+          "after": 268,
+          "reduction_ratio": 0.6582,
+          "warning_before": 572,
+          "warning_after": 87,
+          "critical_before": 33,
+          "critical_after": 33,
+          "aggregated": {
+            "qa": 34,
+            "time": 74,
+            "spec_unverifiable": 411
+          },
+          "downgraded_extraction_uncertain": 41,
+          "preserved_types": [
+            "param_out_of_spec", "handwritten", "time_reversal",
+            "signature_time_anomaly", "suspicious_date", "year_contradiction",
+            "signature_mismatch", "user_rule", "batch_inconsistency"
+          ]
+        }
       }
     ]
   }

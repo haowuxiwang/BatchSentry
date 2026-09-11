@@ -52,6 +52,7 @@ FINDING_TYPE_ZH = {
     "batch_inconsistency": "批号不一致",
     "step_gap": "步骤缺失",
     "ocr_noise": "OCR 噪声",
+    "spec_unverifiable": "规格无法核定",
     "user_rule": "用户规则",
     "uncategorized": "未分类",
 }

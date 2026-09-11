@@ -75,6 +75,23 @@ async def _run_stage3_cross_analysis(
     findings = await _run_analyze_cross(
         page_structures, job_id=job_id, progress_cb=_cross_progress_cb
     )
+    # M2 降噪：completeness 结构性缺失的"抽取不确定降级 + 文档级聚合"。
+    # 在 gmp_basis/kb_refs 富集**之前**执行 —— 只对精简后的集合做检索/映射，
+    # 省掉数百条同质条目的无谓开销。审计可追溯（report 落 audit）。
+    from core.finding_noise import reduce_completeness_noise
+    findings, _noise_report = reduce_completeness_noise(
+        findings,
+        flagged_pages=flagged_pages,
+        total_pages=len(page_structures),
+    )
+    if _noise_report["aggregated_total"] or \
+            _noise_report["downgraded_extraction_uncertain"]:
+        logger.info(
+            f"[{job_id}] noise reduction: downgraded="
+            f"{_noise_report['downgraded_extraction_uncertain']}, "
+            f"aggregated={_noise_report['aggregated_total']} "
+            f"({list(_noise_report['aggregated'])})"
+        )
     # GMP 依据引用（v7）：按 type 映射法规依据（幂等；无映射不设键，
     # ocr_noise/user_rule 不映射 — user_rule 依据是其自身规则文本）
     from core.rules.gmp_basis import attach_gmp_basis

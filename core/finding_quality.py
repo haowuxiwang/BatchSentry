@@ -32,6 +32,7 @@ CANONICAL_TYPES: tuple[str, ...] = (
     "batch_inconsistency",
     "step_gap",
     "ocr_noise",
+    "spec_unverifiable",  # M2：实测值与规格单位不一致且无换算规则 → 需人工核定
     "user_rule",
     "uncategorized",
 )

@@ -62,10 +62,12 @@ def _judge_param(p: dict, page: int, step_no, name: str,
     actual_unit = _extract_unit(str(actual))
     converted, note = _try_unit_normalize(actual_num, actual_unit, spec)
     if converted is None and note == "unit_mismatch":
-        # Units differ but no conversion available — fail-closed, human review
+        # Units differ but no conversion available — fail-closed, human review.
+        # M2：类型修正 —— 这是"规格无法核定"，不是"记录不完整"（原误标
+        # completeness 会污染类型分布与前端文案）。
         findings.append({
             "page": page,
-            "type": "completeness",
+            "type": "spec_unverifiable",
             "severity": "warning",
             "description": (
                 f"第{page}页 参数 {name} 单位不一致且无换算规则"
@@ -126,10 +128,11 @@ def _judge_cell(val: dict, page: int, step_no, col: str, t: str,
     actual_unit = _extract_unit(str(actual))
     converted, note = _try_unit_normalize(actual_num, actual_unit, spec)
     if converted is None and note == "unit_mismatch":
-        # Units differ but no conversion available — fail-closed, human review
+        # Units differ but no conversion available — fail-closed, human review.
+        # M2：类型修正（同上，参数分支）—— 归为 spec_unverifiable。
         findings.append({
             "page": page,
-            "type": "completeness",
+            "type": "spec_unverifiable",
             "severity": "warning",
             "description": (
                 f"第{page}页 {col} 在 {t} 时实测值单位不一致且无换算规则"
