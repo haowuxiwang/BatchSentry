@@ -131,6 +131,26 @@ class TestSpecBoundsAndParsing:
         assert bounds is not None
         assert bounds.high == 100.0
 
+    def test_parse_percent_range_spec(self):
+        """M4：带百分号的区间 "99%~101%"（物料平衡率/收率常见写法）须可解析。
+
+        此前 "%" 夹在 99 与 ~ 之间导致解析失败，整条规格降级为 LLM 兜底。
+        """
+        bounds = _parse_spec("99%~101%")
+        assert bounds is not None
+        assert bounds.op == "between"
+        assert bounds.low == 99.0 and bounds.high == 101.0
+
+    def test_parse_fullwidth_percent_range_spec(self):
+        bounds = _parse_spec("99％~101％")
+        assert bounds is not None
+        assert bounds.low == 99.0 and bounds.high == 101.0
+
+    def test_parse_plain_tilde_range_still_works(self):
+        bounds = _parse_spec("1300~3200")
+        assert bounds is not None
+        assert bounds.low == 1300.0 and bounds.high == 3200.0
+
     def test_parse_none_spec(self):
         assert _parse_spec(None) is None
 

@@ -93,7 +93,7 @@
     },
     {
       "case_id": "self_review_operator_eq_reviewer",
-      "intent": "操作人=复核人（自检自核）—— 当前规则未覆盖，M4/R12 落地的验收点",
+      "intent": "操作人=复核人（自检自核）—— M4/R12 已落地，由 known_gap 转为验收",
       "expect": [
         {
           "page": 1,
@@ -103,7 +103,63 @@
       "allowed_extra_types": [
         "completeness"
       ],
-      "known_gap": true
+      "known_gap": false
+    },
+    {
+      "case_id": "mass_balance_unverifiable",
+      "intent": "收率/物料平衡已声明合格范围但未记录实测值（R11）",
+      "expect": [
+        {
+          "page": 1,
+          "type": "mass_balance"
+        }
+      ],
+      "allowed_extra_types": [
+        "completeness"
+      ],
+      "known_gap": false
+    },
+    {
+      "case_id": "doc_version_conflict",
+      "intent": "同一文件编号出现两个版本（R15，旧版/作废版在用）",
+      "expect": [
+        {
+          "page": 1,
+          "type": "doc_version"
+        }
+      ],
+      "allowed_extra_types": [
+        "completeness"
+      ],
+      "known_gap": false
+    },
+    {
+      "case_id": "equipment_check_unfilled",
+      "intent": "设备/清洁确认项已声明（是/否）但未填写（R13）",
+      "expect": [
+        {
+          "page": 1,
+          "type": "equipment_state"
+        }
+      ],
+      "allowed_extra_types": [
+        "completeness"
+      ],
+      "known_gap": false
+    },
+    {
+      "case_id": "deviation_missing_link",
+      "intent": "记录有异常但未填写偏差编号，未关联偏差流程（R16）",
+      "expect": [
+        {
+          "page": 1,
+          "type": "deviation_link"
+        }
+      ],
+      "allowed_extra_types": [
+        "completeness"
+      ],
+      "known_gap": false
     }
   ],
   "real_baselines": {

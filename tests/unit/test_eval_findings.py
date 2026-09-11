@@ -158,10 +158,15 @@ class TestGroundTruthContract:
 
 
 def test_evaluate_end_to_end_baseline():
-    """跑全语料（离线规则层），断言基线达标且 known_gap 被正确排除。"""
+    """跑全语料（离线规则层），断言基线达标。
+
+    M4 起 R12 落地，`self_review` 用例由 known_gap 转为验收 → 无 known_gap；
+    用例总数 11（原 7 + M4 新增 4）。
+    """
     report = ef.evaluate()
     s = report["summary"]
-    assert s["cases_known_gap"] == 1
+    assert s["cases_known_gap"] == 0
+    assert s["cases_scored"] == 11
     assert s["fp"] == 0 and s["fn"] == 0
     assert s["precision"] == 1.0 and s["recall"] == 1.0 and s["f1"] == 1.0
     assert s["noise_findings"] > 0

@@ -93,12 +93,42 @@ def build_cases() -> dict[str, list[dict]]:
         _step(1, "物料称量"),  # 无 start/end
     ])]
 
-    # 7) 自检自核（操作人 == 复核人）—— **当前规则未覆盖（known_gap）**。
-    #    金标标记 known_gap=true：不计入 P/R，仅作可见 TODO；M4 的 R12 落地后
-    #    翻转为 expect，即成为 R12 的验收测试。
+    # 7) 自检自核（操作人 == 复核人）—— R12（M4）落地后由 known_gap 转为验收。
     cases["self_review_operator_eq_reviewer"] = [_page(1, [
         _step(1, "溶解配制", operator="操作员甲", reviewer="操作员甲",
               start="2025-01-20 08:30", end="2025-01-20 09:10"),
+    ])]
+
+    # ── M4（R11–R17）验收用例 ────────────────────────────────────────────
+    # 8) 收率/物料平衡无法核定 —— 已声明合格范围但未记录实测值（R11）。
+    cases["mass_balance_unverifiable"] = [_page(1, [
+        _step(1, "浓缩", start="2025-01-20 08:00", end="2025-01-20 09:00",
+              parameters=[{"name": "浓缩滤液收率", "spec_range": "≥50%",
+                           "value": "", "value_source": "handwritten"}]),
+    ])]
+
+    # 9) 文件版本冲突 —— 同一 file_code 出现两个版本（R15）。
+    #    用同编号不同版本构造"旧版/作废版在用"；不同表单编号（R20/R22…）
+    #    是合法的，绝不能作为缺陷（见 R15 反例单测）。
+    cases["doc_version_conflict"] = [
+        _page(1, [_step(1, "物料称量", start="2025-01-20 08:00", end="2025-01-20 08:30")],
+              page_info={"file_code": "SYN-MPD-10133-R23", "version": "R23"}),
+        _page(2, [_step(2, "溶解配制", start="2025-01-20 08:30", end="2025-01-20 09:10")],
+              page_info={"file_code": "SYN-MPD-10133-R23", "version": "09"}),
+    ]
+
+    # 10) 设备/清洁确认项已声明（是/否）但未填写（R13）。
+    cases["equipment_check_unfilled"] = [_page(1, [
+        _step(1, "设备清洗", start="2025-01-20 08:00", end="2025-01-20 08:30",
+              parameters=[{"name": "状态标志使用是否正确", "spec_range": "是/否",
+                           "value": ""}]),
+    ])]
+
+    # 11) 有异常但未记录偏差编号（R16）。
+    cases["deviation_missing_link"] = [_page(1, [
+        _step(1, "异常处置", start="2025-01-20 08:00", end="2025-01-20 09:00",
+              parameters=[{"name": "生产有无异常", "spec_range": "有/无",
+                           "value": "有"}]),
     ])]
 
     return cases

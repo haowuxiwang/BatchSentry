@@ -17,9 +17,10 @@
 | T0 门禁自愈 | ✅ | `1bbd387`；`OVERALL: pass`（4 PASS + 1 WARN），1567 passed |
 | M2 Finding 质量可度量 + 降噪 | ✅ | `93d7896`+`d978f88`；金标 P/R/F1=1.0；真实 51 页 job 784→268（-65.8%），critical 33→33 全保留 |
 | M3 OCR 尺寸/形态鲁棒性（O1/O2/O3/O6） | ✅ | 本文件 §2 M3；`test_ocr_robustness.py` 42 例 + `tests/e2e_ocr_integrity.py` 20 断言全通过 |
-| M4–M8 | ⬜ 待执行 | 本文件 §2 |
+| M4 规则扩展 R11–R17 + 注册表 | ✅ | `f0ebdc`；金标 **11 例 P/R/F1=1.0（0 known_gap）**；真实 51 页重放 **+9 findings（390→399，+2.3%）、critical 12→13**，全部为真信号（无 deviation_link/alteration 噪音） |
+| M5–M8 | ⬜ 待执行 | 本文件 §2 |
 
-**当前工作区**：干净；本地领先 `origin/main` **19+ 个提交**（未推送，缺 GitHub PAT）。
+**当前工作区**：干净；本地领先 `origin/main` **23 个提交**（未推送，缺 GitHub PAT）。
 
 **打包信号当前结论**：T0 自愈后 **OVERALL: pass**（`1bbd387`）；每次放行前须复跑 `scripts/release_gate.py`（注意 `--python` 需传 **Windows 路径**，POSIX `/c/...` 会判"python 不可用"）。
 
@@ -209,6 +210,21 @@
 | T4.10 | `gmp_basis.py::GMP_BASIS_MAP` + `retriever.py::TYPE_QUERIES` 补齐新类型 | —— | 每条有依据+可检索 |
 
 **依赖**：M2（评测口径就绪，才能证明新增规则**净增价值而非净增噪音**）。**产出**：每规则 ≥4 单测。
+
+**M4 落地结论（2026-09-11，`f0ebdc`）**
+- 触发键全部经**真实 51 页**（job `33495b33-761`）逐字段核查后确定，不做"理论上该查"的空规则：
+  收率/物料平衡在 `parameters[]`；操作人/复核人在 `step.operator/reviewer`+`signatures[]`；
+  设备/清洁与环境是"是/否"确认项（落在 `parameters[]`，**`checks[]` 实为空**）；
+  `page_info.file_code` 跨页**合法地各不相同**（R20/R22/R23… 是不同表单）→ R15 改为
+  "同一 file_code 多版本"，而非"全页同编号"（否则海量误报）。
+- **净效果实测**（`scripts/replay_rules.py`，离线规则层重放）：**+9 findings（390→399）**，
+  critical 12→13；新增 = doc_version 2（R23/R27 版本冲突，与定位预测一致）、self_review 1
+  （critical，真实自检自核）、equipment_state 5、env_monitor 1；deviation_link/alteration
+  真实数据零误报。金标 11 例 **P/R/F1=1.0**（R12 由 known_gap 翻为验收）。
+- 顺手修复：`parsing._parse_spec` 支持 `"99%~101%"`（"%" 夹在数字与 `~` 之间原会解析失败，
+  使物料平衡率规格整条降级为 LLM 兜底）——R3 与 R11 同时受益。
+- 新增不变式测试：注册表结构（id 唯一/type 规范/依据齐备/R3 先于 R16）、
+  类型六面同步（zh_map/前端双端/GMP 依据/检索词/白名单）、前端双端逐键一致。
 
 ---
 
