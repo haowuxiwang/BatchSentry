@@ -12,6 +12,11 @@
   kb_corpus         知识库语料可用（core/kb/data/*.json 条目数 ≥ 阈值）
   tests_coverage    单测通过 + 覆盖率 ≥ 门禁
 
+失败事实源：优先 `--junitxml`（机器可读，免疫 `log_cli` 日志交错）；XML 缺失/
+损坏才回落 stdout 文本解析。任何失败都会把原始 pytest 输出落盘
+`devlogs/gate_pytest_<ts>.log`；环境专有失败（`ENV_ONLY_FAILURE_PREFIXES`）在
+报告里显式登记为 `env_only_failures` 并降级 WARN。
+
 用法：
   python scripts/release_gate.py                    # 全量
   python scripts/release_gate.py --skip-tests       # 只做结构检查（秒级）
@@ -35,7 +40,8 @@ import subprocess
 import sys
 import tempfile
 import time
-from dataclasses import asdict, dataclass
+import xml.etree.ElementTree as ET
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 
@@ -51,6 +57,8 @@ PACKAGING_FILES = ("pbc-server.spec", "build.ps1", "package.json", "electron/mai
 
 # 环境专有失败：TestServePdf 清理项目内 output/ 探针被沙箱 safe-delete 拦截
 # （隔离单跑通过 → 非代码回归）。仅前缀匹配的失败降级为 WARN，其余照常 FAIL。
+# 该失败有 flaky 性（与沙箱 safe-delete 状态相关），且此前因文本解析脆弱而
+# 导致 failed>0 但 nodeid 解析为空 → 误判 FAIL（见 T0）。现改以 junitxml 为准。
 ENV_ONLY_FAILURE_PREFIXES = (
     "tests/integration/test_main_routes.py::TestServePdf",
 )
@@ -63,12 +71,18 @@ PASS, FAIL, WARN, SKIP = "pass", "fail", "warn", "skip"
 
 @dataclass
 class CheckResult:
-    """单项检查结果。status ∈ {pass, fail, warn, skip}。"""
+    """单项检查结果。status ∈ {pass, fail, warn, skip}。
+
+    raw_log  失败的原始 pytest 输出落盘路径（T0.2，可事后回溯）
+    env_only 被判定为"环境专有、非回归"的失败 nodeid（T0.3，机器可读标注）
+    """
 
     name: str
     status: str
     detail: str = ""
     duration_ms: int = 0
+    raw_log: str = ""
+    env_only: list = field(default_factory=list)
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -216,6 +230,59 @@ def _parse_pytest_summary(output: str) -> tuple[int, int, list[str]]:
     return passed, failed, nodeids
 
 
+def _junit_nodeid(classname: str, name: str) -> str:
+    """把 junit 的 (classname, name) 还原成 pytest nodeid。
+
+    pytest junitxml：`classname` = 模块点分路径[.类名]（如
+    `tests.integration.test_main_routes.TestServePdf`），`name` = 用例函数名。
+    还原：先按"最长且真实存在的 .py 前缀"确定文件，余下段落作为类名链，
+    再拼 `name`。这样得到的 nodeid 才能与 `ENV_ONLY_FAILURE_PREFIXES`
+    之类的文件级前缀匹配（避免"点分路径无 .py"导致的匹配失败）。
+    """
+    segs = [s for s in classname.split(".") if s] if classname else []
+    file_rel, rest_start = None, len(segs)
+    for cut in range(len(segs), 0, -1):
+        cand = "/".join(segs[:cut]) + ".py"
+        if (REPO_ROOT / cand).exists():
+            file_rel, rest_start = cand, cut
+            break
+    if file_rel is None:  # 兜底：无法定位真实文件 → 点分退斜杠
+        file_rel, rest_start = ("/".join(segs) + ".py") if segs else "", len(segs)
+    quals = segs[rest_start:] + ([name] if name else [])
+    return f"{file_rel}::{'::'.join(quals)}" if quals else file_rel
+
+
+def _parse_junit(xml_path: Path) -> tuple[int, int, list[str]] | None:
+    """从 junitxml 解析 (passed, failed, failed_nodeids)。
+
+    返回 None 表示 XML 缺失/损坏 → 调用方回落到文本解析（T0.1/T0.4）。
+    这是**首选事实源**：不再依赖 stdout 文本，免疫 `log_cli` 日志交错。
+    """
+    try:
+        root = ET.parse(str(xml_path)).getroot()
+    except (ET.ParseError, OSError):
+        return None
+    suites = root.findall(".//testsuite")
+    if not suites and root.tag == "testsuite":
+        suites = [root]
+    total = failures = errors = skipped = 0
+    nodeids: list[str] = []
+    for suite in suites:
+        total += int(suite.get("tests") or 0)
+        failures += int(suite.get("failures") or 0)
+        errors += int(suite.get("errors") or 0)
+        skipped += int(suite.get("skipped") or 0)
+        for case in suite.findall("testcase"):
+            if case.find("failure") is None and case.find("error") is None:
+                continue
+            node = _junit_nodeid(case.get("classname") or "", case.get("name") or "")
+            if node and node not in nodeids:
+                nodeids.append(node)
+    failed = failures + errors
+    passed = max(0, total - failed - skipped)
+    return passed, failed, nodeids
+
+
 def _parse_coverage_total(output: str) -> float | None:
     """从 coverage report 输出解析总覆盖率（百分比）。"""
     import re
@@ -231,31 +298,65 @@ def _parse_coverage_total(output: str) -> float | None:
     return None
 
 
+def _dump_pytest_log(raw: str, stamp: str | None = None) -> Path:
+    """失败时把原始 pytest 输出落盘（T0.2），供事后回溯，避免"未解析出用例"。"""
+    stamp = stamp or datetime.now().strftime("%Y%m%d_%H%M%S")
+    out = REPO_ROOT / "devlogs" / f"gate_pytest_{stamp}.log"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(raw, encoding="utf-8", errors="replace")
+    return out
+
+
 def check_tests_and_coverage(fail_under: int = 95, python: str | None = None,
                              timeout: int = 1800) -> CheckResult:
-    """单测通过 + 覆盖率达标（走 coverage run，规避沙箱 cov.combine 删除）。"""
+    """单测通过 + 覆盖率达标（走 coverage run，规避沙箱 cov.combine 删除）。
+
+    失败事实源优先取 **junitxml**（T0.1）；XML 缺失/损坏才回落到 stdout 文本解析。
+    """
     t0 = _ms()
     py = python or sys.executable
     if not Path(py).exists() and not py.startswith("py"):
         return CheckResult("tests_coverage", FAIL, f"python 不可用：{py}", _ms() - t0)
 
-    cov_file = Path(tempfile.gettempdir()) / "pbc_release_gate.coverage"
+    tmp = Path(tempfile.gettempdir())
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    cov_file = tmp / "pbc_release_gate.coverage"
+    junit = tmp / f"pbc_release_junit_{os.getpid()}_{stamp}.xml"
     env = {"COVERAGE_FILE": str(cov_file)}
 
     rc_run, out_run = run_cmd(
         [py, "-m", "coverage", "run", f"--source={COVERAGE_SOURCES}",
-         "-m", "pytest", "-o", "addopts=-q --tb=line", "-p", "no:cacheprovider"],
+         "-m", "pytest", "-o", "addopts=-q --tb=line", "-p", "no:cacheprovider",
+         f"--junitxml={junit}"],
         timeout=timeout, env=env,
     )
-    passed, failed, nodeids = _parse_pytest_summary(out_run)
-    env_only = [n for n in nodeids
-                if n.startswith(ENV_ONLY_FAILURE_PREFIXES)]
+
+    # ① 首选：junitxml（机器可读，免疫日志交错）
+    parsed = _parse_junit(junit)
+    source = "junitxml"
+    if parsed is None:
+        # ② 回落：stdout 文本解析
+        parsed = _parse_pytest_summary(out_run)
+        source = "stdout"
+    passed, failed, nodeids = parsed
+
+    env_only = [n for n in nodeids if n.startswith(ENV_ONLY_FAILURE_PREFIXES)]
     real_failures = [n for n in nodeids if n not in env_only]
+
+    # ③ 失败必落原始输出（T0.2）
+    raw_log = ""
+    if failed or rc_run != 0:
+        raw_log = str(_dump_pytest_log(
+            f"$ rc={rc_run}  source={source}  junit={junit}\n"
+            f"$ passed={passed} failed={failed} nodeids={nodeids}\n"
+            f"{'=' * 70}\n{out_run}",
+            stamp,
+        ))
 
     if rc_run != 0 and not nodeids:
         return CheckResult("tests_coverage", FAIL,
                            f"pytest 未能完成（rc={rc_run}）：{out_run.strip()[-240:]}",
-                           _ms() - t0)
+                           _ms() - t0, raw_log)
 
     rc_rep, out_rep = run_cmd(
         [py, "-m", "coverage", "report", "--format=total", "--precision=2"],
@@ -269,25 +370,29 @@ def check_tests_and_coverage(fail_under: int = 95, python: str | None = None,
         total = _parse_coverage_total(out_rep)
 
     parts = [f"{passed} passed", f"{failed} failed",
-             f"coverage={total if total is not None else '?'}% (门禁 {fail_under}%)"]
+             f"coverage={total if total is not None else '?'}% (门禁 {fail_under}%)",
+             f"fact={source}"]
     detail = ", ".join(parts)
 
     if real_failures:
         return CheckResult("tests_coverage", FAIL,
-                           f"{detail}；真实失败：{real_failures[:5]}", _ms() - t0)
+                           f"{detail}；真实失败：{real_failures[:5]}", _ms() - t0, raw_log)
     if failed and not nodeids:
+        # 失败计数与用例解析不一致 → 事实源不可信，fail-closed
         return CheckResult("tests_coverage", FAIL,
-                           f"{detail}；pytest 报告 {failed} 项失败但未解析出用例", _ms() - t0)
+                           f"{detail}；pytest 报告 {failed} 项失败但未能列出用例"
+                           f"（事实源 {source}）", _ms() - t0, raw_log)
     if total is None:
         return CheckResult("tests_coverage", WARN,
-                           f"{detail}；未能解析覆盖率（rc={rc_rep}）", _ms() - t0)
+                           f"{detail}；未能解析覆盖率（rc={rc_rep}）", _ms() - t0, raw_log)
     if total < fail_under:
-        return CheckResult("tests_coverage", FAIL, detail, _ms() - t0)
+        return CheckResult("tests_coverage", FAIL, detail, _ms() - t0, raw_log)
     if env_only:
-        return CheckResult("tests_coverage", WARN,
-                           f"{detail}；仅环境专有失败（沙箱产物，非回归）：{env_only}",
-                           _ms() - t0)
-    return CheckResult("tests_coverage", PASS, detail, _ms() - t0)
+        return CheckResult(
+            "tests_coverage", WARN,
+            f"{detail}；仅环境专有失败（沙箱产物，非回归，已登记 allowlist）：{env_only}",
+            _ms() - t0, raw_log, env_only)
+    return CheckResult("tests_coverage", PASS, detail, _ms() - t0, raw_log)
 
 
 # ── 编排 ────────────────────────────────────────────────────────────────────
@@ -321,6 +426,9 @@ def build_report(results: list[CheckResult], *, fail_under: int) -> dict:
         "coverage_gate": fail_under,
         "overall": FAIL if counts[FAIL] else PASS,
         "counts": counts,
+        # T0.3：环境专有失败（已登记 allowlist）与原始日志显式上浮到报告顶层
+        "env_only_failures": [n for r in results for n in (r.env_only or [])],
+        "raw_logs": [r.raw_log for r in results if r.raw_log],
         "checks": [r.as_dict() for r in results],
     }
 
@@ -344,6 +452,12 @@ def _print_report(report: dict, path: Path) -> None:
     print(f"\nOVERALL: {report['overall']}  "
           f"(pass={report['counts']['pass']} fail={report['counts']['fail']} "
           f"warn={report['counts']['warn']} skip={report['counts']['skip']})")
+    if report.get("env_only_failures"):
+        print("注意：以下失败为环境专有（沙箱产物，非回归，已登记 allowlist）：")
+        for n in report["env_only_failures"]:
+            print(f"  - {n}")
+    for lg in report.get("raw_logs", []):
+        print(f"原始 pytest 输出: {lg}")
     print(f"报告: {path}")
 
 

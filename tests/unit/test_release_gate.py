@@ -173,6 +173,167 @@ class TestOrchestration:
         assert rg.check_worktree_clean().status == rg.WARN
 
 
+# ── T0：junitxml 事实源 ──────────────────────────────────────────────────────
+
+
+_XML_ALL_PASS = """<?xml version="1.0" encoding="utf-8"?>
+<testsuites><testsuite name="pytest" errors="0" failures="0" skipped="0" tests="3">
+<testcase classname="tests.integration.test_main_routes" name="test_a" time="0.1" />
+<testcase classname="tests.integration.test_main_routes.TestServePdf" name="test_b" time="0.1" />
+</testsuite></testsuites>"""
+
+_XML_WITH_FAILURES = """<?xml version="1.0" encoding="utf-8"?>
+<testsuites><testsuite name="pytest" errors="1" failures="1" skipped="1" tests="4">
+<testcase classname="tests.integration.test_main_routes.TestServePdf" name="test_pdf_non_local_host_returns_403" time="0.2">
+  <failure message="SystemExit: 1">tb</failure>
+</testcase>
+<testcase classname="tests.unit.test_x" name="test_broken" time="0.1">
+  <error message="ImportError">boom</error>
+</testcase>
+<testcase classname="tests.unit.test_x" name="test_ok" time="0.1" />
+<testcase classname="tests.unit.test_x" name="test_skip" time="0.1"><skipped message="env" /></testcase>
+</testsuite></testsuites>"""
+
+
+_XML_ENV_ONLY = """<?xml version="1.0" encoding="utf-8"?>
+<testsuites><testsuite name="pytest" errors="0" failures="1" skipped="0" tests="3">
+<testcase classname="tests.integration.test_main_routes.TestServePdf" name="test_pdf_non_local_host_returns_403" time="0.2">
+  <failure message="SystemExit: 1">tb</failure>
+</testcase>
+<testcase classname="tests.unit.test_x" name="test_ok" time="0.1" />
+<testcase classname="tests.unit.test_x" name="test_ok2" time="0.1" />
+</testsuite></testsuites>"""
+
+
+class TestJunitParsing:
+    def test_nodeid_module_level(self):
+        assert rg._junit_nodeid("tests.integration.test_main_routes", "test_a") == \
+            "tests/integration/test_main_routes.py::test_a"
+
+    def test_nodeid_with_class(self):
+        got = rg._junit_nodeid("tests.integration.test_main_routes.TestServePdf", "test_b")
+        assert got == "tests/integration/test_main_routes.py::TestServePdf::test_b"
+
+    def test_nodeid_matches_env_only_prefix(self):
+        got = rg._junit_nodeid(
+            "tests.integration.test_main_routes.TestServePdf",
+            "test_pdf_non_local_host_returns_403",
+        )
+        assert got.startswith(rg.ENV_ONLY_FAILURE_PREFIXES)
+
+    def test_nodeid_unresolvable_module_falls_back(self):
+        got = rg._junit_nodeid("nonexistent.pkg.mod.Cls", "test_y")
+        assert got == "nonexistent/pkg/mod/Cls.py::test_y"
+
+    def test_parse_junit_all_pass(self, tmp_path):
+        p = tmp_path / "j.xml"
+        p.write_text(_XML_ALL_PASS, encoding="utf-8")
+        passed, failed, nodeids = rg._parse_junit(p)
+        assert (passed, failed, nodeids) == (3, 0, [])
+
+    def test_parse_junit_failures_and_errors(self, tmp_path):
+        p = tmp_path / "j.xml"
+        p.write_text(_XML_WITH_FAILURES, encoding="utf-8")
+        passed, failed, nodeids = rg._parse_junit(p)
+        assert (passed, failed) == (1, 2)  # 4 - 2 fail - 1 skip
+        assert nodeids == [
+            "tests/integration/test_main_routes.py::TestServePdf::test_pdf_non_local_host_returns_403",
+            "tests/unit/test_x.py::test_broken",
+        ]
+
+    def test_parse_junit_missing_returns_none(self, tmp_path):
+        assert rg._parse_junit(tmp_path / "nope.xml") is None
+
+    def test_parse_junit_corrupt_returns_none(self, tmp_path):
+        p = tmp_path / "bad.xml"
+        p.write_text("not xml <<<", encoding="utf-8")
+        assert rg._parse_junit(p) is None
+
+
+class TestDumpAndReportSurfacing:
+    def test_dump_pytest_log_writes(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(rg, "REPO_ROOT", tmp_path)
+        out = rg._dump_pytest_log("hello raw", "20260101_000000")
+        assert out.exists() and out.read_text(encoding="utf-8") == "hello raw"
+        assert out.name == "gate_pytest_20260101_000000.log"
+
+    def test_build_report_surfaces_env_only_and_logs(self, monkeypatch):
+        monkeypatch.setattr(rg, "run_cmd", lambda *a, **k: (0, "abc1234"))
+        results = [
+            rg.CheckResult("tests_coverage", rg.WARN, "w",
+                           raw_log="devlogs/gate_pytest_x.log",
+                           env_only=["tests/a.py::T::t"]),
+        ]
+        rep = rg.build_report(results, fail_under=95)
+        assert rep["overall"] == rg.PASS
+        assert rep["env_only_failures"] == ["tests/a.py::T::t"]
+        assert rep["raw_logs"] == ["devlogs/gate_pytest_x.log"]
+
+    def test_build_report_no_env_only(self, monkeypatch):
+        monkeypatch.setattr(rg, "run_cmd", lambda *a, **k: (0, "abc1234"))
+        rep = rg.build_report([rg.CheckResult("a", rg.PASS, "ok")], fail_under=95)
+        assert rep["env_only_failures"] == [] and rep["raw_logs"] == []
+
+
+def _fake_gate_run_cmd(*, junit_xml=None, pytest_out="", cov="95.12\n", rc=0):
+    """伪造 run_cmd：pytest 调用按需写 junitxml；coverage report 返回覆盖率。"""
+    def fake(cmd, **kwargs):
+        if "pytest" in cmd:
+            if junit_xml is not None:
+                for a in cmd:
+                    if str(a).startswith("--junitxml="):
+                        Path(str(a).split("=", 1)[1]).write_text(junit_xml, encoding="utf-8")
+            return rc, pytest_out
+        if "report" in cmd:
+            return 0, cov
+        return 0, ""
+    return fake
+
+
+class TestTestsCoverageCheck:
+    def _patch(self, monkeypatch, tmp_path, **kw):
+        monkeypatch.setattr(rg.tempfile, "gettempdir", lambda: str(tmp_path))
+        monkeypatch.setattr(rg, "run_cmd", _fake_gate_run_cmd(**kw))
+        # 不落真实 devlogs/
+        monkeypatch.setattr(rg, "_dump_pytest_log",
+                            lambda raw, stamp=None: tmp_path / "raw.log")
+
+    def test_mixed_failures_real_one_wins(self, monkeypatch, tmp_path):
+        # 同时含真实失败与 env-only → 真实失败优先，判 FAIL，且 raw_log 已落盘
+        self._patch(monkeypatch, tmp_path, junit_xml=_XML_WITH_FAILURES)
+        r = rg.check_tests_and_coverage(python="py")
+        assert r.status == rg.FAIL and r.raw_log.endswith("raw.log")
+
+    def test_env_only_only_is_warn_with_annotation(self, monkeypatch, tmp_path):
+        self._patch(monkeypatch, tmp_path, junit_xml=_XML_ENV_ONLY)
+        r = rg.check_tests_and_coverage(python="py")
+        assert r.status == rg.WARN
+        assert r.env_only == [
+            "tests/integration/test_main_routes.py::TestServePdf::test_pdf_non_local_host_returns_403"
+        ]
+        assert "allowlist" in r.detail
+
+    def test_junit_missing_falls_back_to_stdout(self, monkeypatch, tmp_path):
+        self._patch(monkeypatch, tmp_path, junit_xml=None,
+                    pytest_out="FAILED tests/x.py::T::t - boom\n1 failed, 5 passed\n")
+        r = rg.check_tests_and_coverage(python="py")
+        assert r.status == rg.FAIL and "fact=stdout" in r.detail
+
+    def test_all_green_passes(self, monkeypatch, tmp_path):
+        self._patch(monkeypatch, tmp_path, junit_xml=_XML_ALL_PASS)
+        r = rg.check_tests_and_coverage(python="py")
+        assert r.status == rg.PASS and "fact=junitxml" in r.detail
+
+    def test_coverage_below_gate_fails(self, monkeypatch, tmp_path):
+        self._patch(monkeypatch, tmp_path, junit_xml=_XML_ALL_PASS, cov="94.10\n")
+        assert rg.check_tests_and_coverage(python="py").status == rg.FAIL
+
+    def test_pytest_could_not_complete(self, monkeypatch, tmp_path):
+        self._patch(monkeypatch, tmp_path, junit_xml=None, pytest_out="", rc=3)
+        r = rg.check_tests_and_coverage(python="py")
+        assert r.status == rg.FAIL and "未能完成" in r.detail
+
+
 class TestMainExitCode:
     def test_main_returns_1_when_fail(self, monkeypatch, tmp_path):
         monkeypatch.setattr(rg, "run_all",
