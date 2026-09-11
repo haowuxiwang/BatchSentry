@@ -13,12 +13,15 @@
 |---|---|---|
 | M1a 覆盖率 92% | ✅ | `093ebf8`；`pytest.ini --cov-fail-under=92` |
 | M1b 覆盖率 95% | ✅ | `ebf1d96`；**95.12%**（377/7718 未覆盖），门禁已置 **95** |
-| M1c 打包信号脚本 | ⚠️ **需自愈** | `66203b4`+`ea4ae97`；脚本可用，但 2026-09-11 11:24 实测 **OVERALL: fail**（见 T0） |
-| M2–M8 | ⬜ 待执行 | 本文件 §2 |
+| M1c 打包信号脚本 | ✅ | `1bbd387`（T0）；junitxml 事实源 + 原始输出落盘 + 环境专有失败 WARN 标注 |
+| T0 门禁自愈 | ✅ | `1bbd387`；`OVERALL: pass`（4 PASS + 1 WARN），1567 passed |
+| M2 Finding 质量可度量 + 降噪 | ✅ | `93d7896`+`d978f88`；金标 P/R/F1=1.0；真实 51 页 job 784→268（-65.8%），critical 33→33 全保留 |
+| M3 OCR 尺寸/形态鲁棒性（O1/O2/O3/O6） | ✅ | 本文件 §2 M3；`test_ocr_robustness.py` 42 例 + `tests/e2e_ocr_integrity.py` 20 断言全通过 |
+| M4–M8 | ⬜ 待执行 | 本文件 §2 |
 
-**当前工作区**：干净；本地领先 `origin/main` **15 个提交**（未推送，缺 GitHub PAT）。
+**当前工作区**：干净；本地领先 `origin/main` **19+ 个提交**（未推送，缺 GitHub PAT）。
 
-**打包信号当前结论：不满足（fail）** —— 5 项检查 4 PASS + 1 FAIL，FAIL 源自 `release_gate.py` 自身对"环境专有失败"的解析健壮性，**非产品回归**。先修 T0，再谈放行。
+**打包信号当前结论**：T0 自愈后 **OVERALL: pass**（`1bbd387`）；每次放行前须复跑 `scripts/release_gate.py`（注意 `--python` 需传 **Windows 路径**，POSIX `/c/...` 会判"python 不可用"）。
 
 ---
 
@@ -167,6 +170,25 @@
 | T3.6 | e2e 断言"该页不得静默标记成功" | `e2e_*.py` | 断言通过 |
 
 **依赖**：无（可与 M2 并行）。**产出**：新增样本全过 + 无静默成功。
+
+**实现说明（已落地）**：
+
+- 触发条件从"仅长边 >1600pt"改为**几何带 + 长宽比**（O3 按目标像素密度统一）：
+  `_box_geometry_reason` 判定顺序 极端长宽比 → 超大盒 → 微型盒 → 正常。
+- 缩放策略按类别分流（`_normalize_zoom`）：**微型盒放大到目标 DPI**（300/72，
+  页盒尺寸不变、密度升到可用区）；**超大盒不放大**（不伪造像素，仅受
+  `_NORMALIZE_MAX_SIDE_PX` 约束 → 300dpi 输出即恢复真实物理尺寸）；
+  **极端长宽比**放宽长边上限至 8192px 且抬升短边至 ≥1024px（O2 "提高渲染
+  上限"路线；不做页面切分以免破坏 finding 的页号映射）。
+- **微型盒仅在含嵌入栅格时重渲染**（`has_raster`）：矢量/文本微型页保留
+  矢量保真，交由后端自身按文本层光栅化（避免把小尺寸矢量标签转成低质图）。
+- O6 联合标记：`_pdf_page_diagnostics` 新增 `image_coverage` / `min_font_pt` /
+  `small_font`；`assess_ocr_page` 在"小字号(<6pt) + 低 DPI(<150)"时输出合并
+  原因并置 `integrity=incomplete`（结构化键 `low_dpi`/`small_font`/
+  `extreme_aspect` 可机检）。极端长宽比与超大盒同属几何异常 → **不重复告警**。
+- 可重复合成样本：`scripts/gen_ocr_samples.py`（O1/O2/O3/O6 + 两个对照/守护）
+  写入 `devlogs/ocr_samples/`；离线 e2e `tests/e2e_ocr_integrity.py`（20 断言）；
+  冻结包轮次 `python e2e_run.py --rounds robust`（"不得静默标记成功"）。
 
 ---
 

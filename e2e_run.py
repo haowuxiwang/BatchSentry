@@ -19,11 +19,15 @@ Rounds:
                 asserts sideways markers visible in final raw_html (content not
                 lost — either VL reads rotated text directly or rotation heal
                 recovers; records which path + rotation_deg evidence)
+  robust      — M3 尺寸鲁棒性合成样本（scripts/gen_ocr_samples.py）：断言
+                "该页不得静默标记成功" —— 不可无损修复页（小字号+低 DPI /
+                极端长宽比）必须显式携带非完整信号；已规范化页不得稀疏。
 
 Every round also subscribes /api/jobs/{id}/stream and records SSE frames to
 devlogs/e2e_sse_<stem>.jsonl (streaming-output evidence: event count / phase chain).
 """
 import argparse
+import importlib.util
 import json
 import os
 import subprocess
@@ -254,6 +258,11 @@ def main():
                     print(f"[e2e] switch to paddle -> {r.status_code}")
                     results["rot"] = run_rot(c, "e2e_rot.pdf",
                                              timeout_s=_ROT_TIMEOUT_S)
+                elif rnd == "robust":
+                    # M3 尺寸鲁棒性：合成样本 + "不得静默标记成功"断言
+                    r = c.post(f"{API}/api/settings", json={"ocr_backend": "paddle"})
+                    print(f"[e2e] switch to paddle -> {r.status_code}")
+                    results["robust"] = run_robust(c)
             print("\n[e2e] SUMMARY:", json.dumps(
                 {k: {kk: vv for kk, vv in v.items() if kk != "findings"}
                  for k, v in results.items()}, ensure_ascii=False, indent=2))
@@ -502,6 +511,98 @@ def run_rot(c, path, mime="application/pdf", timeout_s=None):
     if not res["ok"]:
         print(f"[e2e] rot round FAIL: lost={lost} p1_batch_visible={p1_ok} "
               f"rot_without_audit={bool(rot_pages) and not audit_rot}")
+    return res
+
+
+def _ensure_ocr_samples():
+    """生成/复用 M3 合成样本 → {name: path}（scripts/gen_ocr_samples.py）。"""
+    gen_path = Path(__file__).resolve().parent / "scripts" / "gen_ocr_samples.py"
+    spec = importlib.util.spec_from_file_location("gen_ocr_samples", gen_path)
+    mod = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(mod)
+    return mod.build_all(Path(__file__).resolve().parent / "devlogs" / "ocr_samples")
+
+
+def _page_payload(c, job_id, pno):
+    try:
+        r = c.get(f"{API}/api/jobs/{job_id}/pages/{pno}", timeout=15)
+        if r.status_code == 200:
+            return r.json() or {}
+    except Exception:
+        pass
+    return {}
+
+
+def _has_non_ok_signal(pd):
+    """页是否显式携带"非完整/已降级"信号（"不得静默标记成功"契约）。
+
+    任一成立即视为未静默成功：完整性判定为 incomplete；自愈页保留了
+    prior_diagnostics.integrity=incomplete；旋转探测已尝试但未果；或
+    raw_html 带 [OCR 警告:] 横幅。
+    """
+    diag = pd.get("ocr_diagnostics") or {}
+    if diag.get("integrity") == "incomplete":
+        return True
+    if (diag.get("prior_diagnostics") or {}).get("integrity") == "incomplete":
+        return True
+    if diag.get("rotation_probed"):
+        return True
+    return "[OCR 警告:" in (pd.get("raw_html") or "")
+
+
+def run_robust(c, mime="application/pdf"):
+    """M3 尺寸鲁棒性轮（冻结包 e2e）：合成样本 + "不得静默标记成功"断言。
+
+    - o6_small_font_low_dpi：小字号 + 低 DPI（不可无损修复）→ 页必须显式
+      携带非完整信号（integrity=incomplete / prior_diagnostics / 旋转已
+      探测 / [OCR 警告:] 横幅之一）；
+    - o1_small_box：微型盒已放大到目标 DPI → 不得留下低密度/低 DPI 告警
+      （修复有效且无假告警）。
+    """
+    try:
+        samples = _ensure_ocr_samples()
+    except Exception as e:
+        return {"ok": False, "err": f"generate samples failed: {e}"}
+    res = {"ok": True}
+
+    # 1) 不可无损修复页：必须被显式标记（不得静默成功）
+    o6 = run_upload(c, samples["o6_small_font_low_dpi"], mime,
+                    expect_types=[], force=True)
+    res["o6"] = {k: v for k, v in o6.items() if k != "findings"}
+    if o6.get("ok") and o6.get("job_id"):
+        pd1 = _page_payload(c, o6["job_id"], 1)
+        res["o6_page1_signal"] = _has_non_ok_signal(pd1)
+        res["o6_page1_diag"] = pd1.get("ocr_diagnostics") or {}
+        if not res["o6_page1_signal"]:
+            res["ok"] = False
+            print("[e2e] robust FAIL: o6 page1 无任何非完整信号（静默成功）")
+    else:
+        res["ok"] = False
+        print(f"[e2e] robust FAIL: o6 轮未完成 {res['o6'].get('status')!r}")
+
+    # 2) 已规范化页：不得稀疏 / 不得误告警
+    o1 = run_upload(c, samples["o1_small_box"], mime,
+                    expect_types=[], force=True)
+    res["o1"] = {k: v for k, v in o1.items() if k != "findings"}
+    if o1.get("ok") and o1.get("job_id"):
+        diag = (_page_payload(c, o1["job_id"], 1)).get("ocr_diagnostics") or {}
+        prior = diag.get("prior_diagnostics") or {}
+        eff = diag.get("effective_dpi")
+        if eff is None:
+            eff = prior.get("effective_dpi")
+        low = diag.get("low_dpi")
+        if low is None:
+            low = prior.get("low_dpi")
+        res["o1_page1_dpi"] = eff
+        res["o1_page1_low_dpi"] = bool(low)
+        if not (low is not True and (eff is None or eff >= 150)):
+            res["ok"] = False
+            print(f"[e2e] robust FAIL: o1 page1 规范化后仍低密度 "
+                  f"eff={eff} low_dpi={low}")
+    else:
+        res["ok"] = False
+        print(f"[e2e] robust FAIL: o1 轮未完成 {res['o1'].get('status')!r}")
     return res
 
 

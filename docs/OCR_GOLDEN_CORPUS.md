@@ -39,6 +39,28 @@
 `expected_body=true` 的页面只要发生页眉页脚孤岛、表格缺失占位、空页或 OCR
 后端丢弃块，即判定失败；不得以“PDF 页数与 OCR 页数相等”豁免。
 
+## 合成样本（可重复最小回归）
+
+真实样本受权限限制不能入库；每类尺寸/形态缺陷另配一个**确定性合成样本**
+（`scripts/gen_ocr_samples.py`，无随机性），供单测与离线预检回归。生成：
+
+```bash
+python scripts/gen_ocr_samples.py            # → devlogs/ocr_samples/*.pdf
+python tests/e2e_ocr_integrity.py            # 离线完整性 e2e（20 条断言）
+```
+
+| 样本名 | 类别 | 结构特征 | 期望（不静默成功） |
+| --- | --- | --- | --- |
+| `o1_small_box` | O1 微型盒 | 200×120pt + 200×120px 栅格 + 8pt 标签 | 重渲染到 300dpi；页盒不变、有效 DPI ≥250、`integrity=ok` |
+| `o2_extreme_aspect` | O2 极端长宽比 | 250×2000pt（8:1）条状页 | 放宽长边上限并抬升短边（≥1024px）；`extreme_aspect` + `integrity=incomplete` |
+| `o3_mixed_size` | O3 混合尺寸 | A4@300dpi + 3000×4000pt + A4 横向 | 仅超大盒页重渲染为 720×960pt；三页均 `integrity=ok` |
+| `o3_normal` | O3 对照 | 全 A4@300dpi | 不产生工作副本、无告警 |
+| `o6_small_font_low_dpi` | O6 小字号+低 DPI | A4 + 72dpi 栅格 + 4pt 文本 | `low_dpi`+`small_font` 结构化键 + `integrity=incomplete` |
+| `guard_small_text_only` | 反例守护 | 200×120pt 纯文本微型页 | 不重渲染（保留矢量保真）、无假告警 |
+
+同一类别在真实受限样本上的验收见上表 `low-dpi` 行；冻结包的真实样本端到端
+复跑用 `python e2e_run.py --rounds robust`（断言“该页不得静默标记成功”）。
+
 ## 发布门禁
 
 1. 原始文件、规范化工作副本、后端原始产物和页级诊断均可追溯。
