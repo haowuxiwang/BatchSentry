@@ -192,13 +192,21 @@
 ### 7.2 GitHub 可引入项目（按用途）
 | 用途 | 项目 | 引入方式 |
 |---|---|---|
-| PDF/表格解析（备选后端/对照） | **MinerU**（opendatalab）、**docling**（IBM）、**marker/Surya**、**olmOCR**（AI2）、**HunyuanOCR**（腾讯 1B） | MinerU 已在用；docling 可作第三对照后端（门禁 3 双引擎 → 三引擎） |
+| PDF/表格解析（备选后端/对照） | **MinerU**（opendatalab）、**docling**（IBM→Linux Foundation, **MIT**）、**marker/Surya**、**olmOCR**（AI2）、**HunyuanOCR**（腾讯 1B） | MinerU 已在用；docling 可作第三对照后端（门禁 3 双引擎 → 三引擎） |
 | 结构化输出可靠性 | **Instructor**、**Outlines**、**Guardrails** | Instructor 式验证+Reask 补进 `llm/client.py` |
 | 表格结构识别 | **GMFT**、**TableTransformer**、**RapidTable**（MinerU 内） | 对矩阵页做独立结构校验，交叉验证 OCR |
 | 规则引擎/合规 | **regulated-multiagent-reference**（agents propose, rules decide）、**gxpeval** | "确定性规则裁决 + 证据轨迹"，与本项目"规则为权威版本"一致，可借鉴评测框架 |
 | 评测 | **gxpeval**（GxP 专用 LLM 评测，ALCOA+ 审计） | 对应 §2.1 金标评测 |
 
-**License 提醒**：docling 为 AGPL-3.0（商业分发需评估）；MinerU 为 AGPL-3.0；引入前逐项确认与本地部署/分发模式兼容。
+**License 提醒（2026-09-11 勘误）**：**docling 为 MIT 许可**（已由 IBM 捐给 Linux Foundation AI & Data，当前 v2.126.0）——商业分发无 AGPL 义务，M7 引入风险低于原评估；MinerU 为自定义协议/AGPL 系、Marker 为 GPL+OpenRAIL-M（二者分发需评估）。引入前逐项确认。
+
+### 7.3 2026-09-11 复检新增（详见 `docs/PLAN_v1.1_EXECUTION.md` §1-Q6）
+| 项目 | 价值 | 归属 |
+|---|---|---|
+| `1999XIAOZHANG/gmp-csv-validator-skill` | 现成 6 部法规原文语料（GMP2010/计算机化系统附录/21 CFR Part 11/Annex 11/WHO TRS996/ICH Q9），每条整改定位到条款 | M5 语料 |
+| `memopena/regulated-multiagent-reference` | "agents propose, rules decide" + 答案键 + precision/recall 门禁 | M2 范式 |
+| `MeyerThorsten/QAtrial`（AGPL-3.0） | 开源 QMS：风险/CAPA/电子签名/审计 | M6 参考 |
+| `Sukarth/ai-audit-aid` | 审计历史 + 跨版本对比 + SHA-256 内容去重 | M2/报告参考 |
 
 ---
 
