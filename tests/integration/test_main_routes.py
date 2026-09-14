@@ -53,7 +53,9 @@ class TestHealth:
     async def test_health_returns_ok(self, test_client):
         r = await test_client.get("/health")
         assert r.status_code == 200
-        assert r.json() == {"status": "ok", "version": "1.0.0"}
+        # 断言对 APP_VERSION 常量而非字面量 —— 版本升级时只改一处（main.py）。
+        from main import APP_VERSION
+        assert r.json() == {"status": "ok", "version": APP_VERSION}
 
 
 class TestIndex:

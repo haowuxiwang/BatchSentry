@@ -10,7 +10,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 用户上传 PDF 批生产记录 → OCR 识别 → LLM 结构化提取 → 规则+LLM 跨页合规分析 → 人工复核界面 → 导出报告。
 
-**Current phase**: Phase 12 (Feishu job notifications) + 2 rounds of adversarial review (22 fixes incl. sliced-OCR callback arity P0, poll non-JSON retry, report cache correctness; round 2: cr-13 upload CSRF guard, cr-17 config precedence JSON-wins, MinerU footer selective retention, failover threshold max(2,10%), empty-page tag-strip detection + small-file self-heal, page-mark HTML comments, MINERU_BASE_URL), v1.0.0, local single-user deployment via PyInstaller exe + Electron wrapper (folder portable, win-unpacked).
+**Current phase**: **v1.1.0 打包放行（M8）** — 已完成 v1.1 全部里程碑 M2–M7：Finding 质量可度量+降噪（M2）、OCR 尺寸/形态鲁棒性（M3）、规则扩展 R11–R17 + 注册表（M4）、多源 GMP 知识库（M5，6 源/441 条）、SSE 优化 + 三色复核分级（M6）、docling 第三对照引擎（M7）。覆盖率门禁 **95%**；真实 51 页全链路 frozen e2e 为放行前提。此前：Phase 12（Feishu job notifications）+ 2 轮对抗审查，v1.0.0，本地单用户部署（PyInstaller exe + Electron 便携版 win-unpacked）。
 
 **Round 15 (真实文档 e2e + GIL 隔离, 2026-08-24)**: 138MB/51 页真实手写批记录（丝裂霉素提取）全链路 e2e 三轮——① **P0 GIL 饿死事件循环**：Stage 0 规范化（51 页 3000x4000pt → 300dpi 重渲染）经 `asyncio.to_thread` 执行时 fitz C 调用持 GIL 数十秒，aiosqlite 毫秒级操作退化 1s+/条、status GET 10s ReadTimeout、SSE 停摆（pipeline.log 时间戳实证）。修复：新模块 `core/procpool.py`（spawn 单 worker 进程池 + `run_cpu`；不可 pickle 测试替身自动回退 to_thread；worker 父进程死亡守卫——e2e 实证孤儿 pbc-server.exe 锁死 dist 文件致构建 PermissionError）。② **规范化副本 JPEG 瘦身**：灰度 PNG 无损嵌入膨胀（51 页 → 224.8MB 超 200MB 上限）；改 `pix.tobytes("jpeg", jpg_quality=85)` 嵌入（OCR 无损，实测 224.8→43.8MB，5.1×）。③ **gmp_basis 补全**：LLM 生成 `batch_logic` 等变体 type 缺映射 → 显式映射 + 关键词回退（真实 PDF 50/50 全覆盖）。④ e2e harness：`e2e_run.py`（frozen exe 多轮驱动 + 逐页稀疏页检测 <40 字符 + gmp_basis 覆盖断言 + 轮询抗挫折），`gen_e2e_pdf.py`（合成埋点 PDF）。**e2e 结果**：真实 PDF paddle 轮 review/475 findings/critical 42/sparse 0/SSE 三阶段（ocr 39/51 → analyze 8→9 → cross）实测；img 轮 Paddle 队列满（HTTP 400 code 10010）3 次退避 → 自动 failover MinerU 成功——重试+兜底链实战验证。
 
@@ -306,3 +306,51 @@ The probe does NOT submit real OCR/LLM work — it just verifies auth + connecti
 - `electron/` — Electron main process
 - `samples/` — sample PDFs (gitignored binaries)
 - `spike/` — experimental ad-hoc test inputs and reports (not part of app)
+
+---
+
+## v1.1 变更（M2–M8, 2026-09）
+
+> 执行计划与逐任务验收见 `docs/PLAN_v1.1_EXECUTION.md`；变更摘要见 `CHANGELOG.md`。
+> 纪律：先定位（实测真值）→ 再解决（最小改动）→ 再测试（含覆盖率门禁）→ 最后验打包信号。
+
+**M2 Finding 质量可度量 + 降噪**：金标评测管线（`scripts/eval_findings.py`，`docs/FINDING_GROUND_TRUTH.json`），
+P/R/F1=1.0；真实 51 页 784→268 findings（-65.8%），critical 全保留。降噪核心是
+`core/finding_quality.py`（`CANONICAL_TYPES` 21 类为唯一来源）/ `core/finding_noise.py`。
+
+**M3 OCR 尺寸/形态鲁棒性**：`tests/unit/test_ocr_robustness.py`（42 例）+ `tests/e2e_ocr_integrity.py`（20 断言）——
+不可无损修复页必须显式携带非完整信号（不得静默标记成功）；样本生成 `scripts/gen_ocr_samples.py`（正常对照页须
+嵌 300dpi 栅格，否则被正确判 `low_dpi`）。
+
+**M4 规则扩展 R11–R17**：`core/rules/registry.py::RULE_REGISTRY` 成唯一入口（RuleSpec: id/type/severity/
+description/check，basis 取 `GMP_BASIS_MAP`）；新增规则只追加注册表 + 写 `_check_*`，不再手改调用序列。
+真实 51 页重放 +9 findings（399，+2.3%），全为真信号。离线重放：`scripts/replay_rules.py`。
+
+**M5 多源 GMP 知识库**：`core/kb/data/raw/*.md`（手工策展 + provenance 头，**是源，必须入 git**）→
+`scripts/seed_kb.py` 派生 `core/kb/data/<source_id>.json`（运行时载荷，也入 git）。检索 `core/kb/retriever.py`
+（字符 bigram 倒排 + 标准 BM25 对数 idf `_K1=1.5,_B=0.4,_TOPK=4`，改动须重跑金标）；`TYPE_QUERIES` 必须用
+**语料自身用词**（GMP 用"偏离"非"偏差"）；金标 `scripts/eval_kb_queries.py`（37 条，97.3%）。打包不变式：
+`pbc-server.spec` 用 `core/kb/data/*.json` glob 枚举，门禁 `kb_packaging` 校验覆盖（新增源忘记入包会 FAIL）。
+
+**M6 SSE 优化 + 对标落地**：T6.1 轮询常量 `api/jobs/_SSE_POLL_SECONDS=2` 单一来源（`test_sse_poll_constant.py`
+源码扫描锁死，禁 `retry:<数字>` / `asyncio.sleep(<数字>)` 字面量）；T6.2 终态快照缓存 `(status,finished_at)`
+为键（`test_api_jobs_listings_coverage.py` 锁稳态查询 16→1）；T6.3 `static/eta.js` 纯函数
+`tickPhase/showElapsed/fmtElapsed` + 1s 本地 ticker（node 单测）；T6.4 三色分级
+`REVIEW_TIER_BY_SOURCE`（rule/user_rule→rule，llm_*→llm）+ `rule_coverage()` 按 **type** 统计系统通过
+（最小可陈述单元是 type 非 rule id），SSR/AJAX 双端同源，`test_review_tier.py` 跨文件机检；T6.5 趋势筛查
+经真实库实测判 **v1.1 不做**（`docs/TREND_SCREENING_EVAL.md`）。
+
+**M7 docling 第三对照引擎**：`core/pipeline/ocr_support.py` 新增 `OcrCapabilities` 能力表（`describe_backend/
+supports_slicing/supports_page_subset/is_backend_available/remote_backend_configured`）为单一来源，
+engine/stage1/dual_compare 的字面能力假设全部改由能力表驱动；`core/docling_client.py`（MIT，本地）——
+`is_available()` 仅顶层探测（不拉 torch），未装 → `_get_ocr_backend` 抛 `OcrBackendUnavailable` →
+`_get_ocr_chain` 回退默认 PaddleOCR（主链不受影响）；`scripts/compare_ocr_engines.py` 三引擎逐页对比
+（复用 `dual_compare.compare_page` 阈值单一来源）；`core/health.py` 增 `probe_docling`。
+
+**M8 打包放行（v1.1.0）**：版本号单一来源 `main.APP_VERSION`（与 `package.json` 一致性由
+`tests/unit/test_version_consistency.py` 机检）；`build.ps1` 真实 PowerShell 重打包（非沙箱）；
+真实 51 页 full-chain frozen e2e（`e2e_run.py --rounds real`）+ `ui_e2e.py`（Playwright 逐页三断言）；
+tag `v1.1.0`。
+
+**关键路径陷阱**：`release_gate.py` 的 `worktree_clean` 项要求**先提交再跑**，否则必然 FAIL；
+`--python` 必须传 **Windows 路径**（POSIX `/c/...` 会判"python 不可用"）。

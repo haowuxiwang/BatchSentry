@@ -7,25 +7,36 @@ BatchSentry 是面向制药企业的批生产记录（BPR）审核工具，通�
 ## 核心能力
 
 - **多格式 PDF 解析**：PaddleOCR-VL / MinerU 双后端（主备 failover：主后端异常/0 页/缺页 >10% 且 >2 页自动切换，`ocr_backend_used` 留痕），支持扫描件、电子件、混合件；横置内容页（扫描时纸横放）自动旋转探测恢复——切片重试仍空时经投影方差几何预筛（行/列强度分布判文本朝向，横置页只探测 90/270°）+ 瞬态上游错误重试后重渲染重 OCR，采纳角度记 `ocr_diagnostics.rotation_deg` + 审计 `stage1_rotation_recovered`，探测未果页标记 `rotation_probed` 提示人工核对原图
+- **第三对照引擎（可选）**：可接入 docling（MIT，本地推理，无 token）作第三 OCR 后端，用于离线对照与差异页报告（`scripts/compare_ocr_engines.py`）；**未安装即优雅降级**，不影响主链运行
+- **OCR 后端能力表**：`core/pipeline/ocr_support.py` 声明各后端能力（切片/页子集/本地/凭据需求），engine/stage1/dual_compare 的字面假设全部改由能力表驱动（单一来源，防漂移）
 - **上传内容去重**：流式上传时计算 MD5，相同文件二次上传返回 409 并提示已有任务（`force=1` 可绕过，用于规则变更后的合法重分析）
 - **结构化提取**：LLM 提取工序步骤、参数矩阵、签名、时间、事件年份分组
-- **实时进度**：SSE 流式推送任务状态（上传页行内 OCR/分析计数 + 复核页按页热更 findings）；Stage 2 逐页分析带速率与预计剩余时间（5 分钟时间窗口自适应，拥堵日跟随近期实际速率）
-- **跨页合规分析**：规则引擎（R1-R10 及衍生规则）+ LLM fallback + LLM 语义检查三层判定；规则层已覆盖的 (page, type) 不再重复接受 LLM 语义重复报告（降噪，抑制量写审计）
-  - R1 时间倒序（time_reversal，页内 + 跨页，critical）
+- **实时进度**：SSE 流式推送任务状态（上传页行内 OCR/分析计数 + 复核页按页热更 findings）；Stage 2 逐页分析带速率与预计剩余时间（5 分钟时间窗口自适应，拥堵日跟随近期实际速率）；长阶段（OCR/逐页分析/跨页）另有**前端本地秒级计时**——不依赖 SSE 帧间隔即可看到"已用 45 秒 / 3 分 07 秒"，避免上游长调用时误判为卡死
+- **三色复核分级**：复核页顶栏按**检出来源**分三档——规则命中（红，权威）/ LLM 辅助（蓝）/ 系统校验通过（绿，按问题类型统计覆盖率并可展开明细），一眼分清"机器判定"与"人工必看"
+- **跨页合规分析**：规则引擎（R1-R17 及衍生规则）+ LLM fallback + LLM 语义检查三层判定；规则层已覆盖的 (page, type) 不再重复接受 LLM 语义重复报告（降噪，抑制量写审计）
+  - R1 时间倒序（time_reversal，页内 + 跨页）
   - R2 年份矛盾（year_contradiction）
   - R3 参数越界（param_out_of_spec，规则无法判定时进 LLM fallback 队列）
   - R4 可疑日期（suspicious_date，如 2000 年前 / 未来年份）
   - R5 签名异常（signature_time_anomaly）
   - R6 完整性检查（completeness，缺操作/复核签名）
-  - R7 批号一致性（batch_consistency，跨页批号漂移）
-  - R8 低置信度参数（low_confidence，标记人工复核；R8b 勾选矛盾）
+  - R7 批号一致性（batch_inconsistency，跨页批号漂移，critical）
+  - R8 低置信度参数（completeness，标记人工复核；R8b 勾选矛盾）
   - R9 手写内容标记（handwritten，人工确认；R9a 跨角色签名顺序）
   - R10 工序缺号（step_gap，缺页/漏页检测；R-M1/R-M2 测量矩阵规则）
+  - R11 物料平衡/收率可否核定（mass_balance）
+  - R12 操作人=复核人（self_review，自检自核，critical）
+  - R13 设备/清洁状态确认（equipment_state）
+  - R14 环境监测完备性（env_monitor）
+  - R15 文件版本一致性（doc_version）
+  - R16 超限偏差关联（deviation_link）
+  - R17 涂改规范（alteration，划改留痕）
+  - 规则以注册表 `core/rules/registry.py::RULE_REGISTRY` 为唯一入口（新增只追加注册表，支持按 id 经 `config.json` 的 `rules.disabled` 关闭）
 - **用户自定义合规规则**：设置页填写工厂/产品专属约束（如「XX 产品中间体储存温度必须 15-25°C」），跨页分析时注入 LLM 逐条核对，生成 `user_rule` 类型问题；变更写入审计日志，`prompt_version` 携带规则内容 hash（GMP 可追溯）
 - **多 LLM 服务商**：DeepSeek / SiliconFlow（内置，可通过 config.json 动态注册更多），Anthropic 协议适配
 - **GMP 审计追踪**：所有状态转换、LLM 调用、人工复核操作均写入审计日志
 - **复核反馈统计**：确认/驳回率、高频驳回类型 Top5、按来源驳回率（规则阈值调优信号）——复核页折叠面板实时查看，随 md/json 报告导出（驳回率偏高的来源层即阈值过紧/提示词需收紧的量化信号）
-- **内置 GMP 知识库**：《药品生产质量管理规范（2010 年修订）》全文条款化（14 章 286 条），问题自动引用具体条文依据（复核页可展开原文、导出报告附依据附录）；设置页支持条款浏览与检索
+- **多源 GMP 知识库**：GMP（2010 年修订）全文 + 附录 + NMPA 记录规范 + ALCOA+ + 21 CFR Part 11 等 **6 个来源 / 441 条**条款化语料，纯 BM25 检索（无向量库），问题自动引用具体条文依据（复核页可展开原文、导出报告附依据附录）；设置页多源浏览与检索、可按源启停
 - **飞书通知**：任务完成/部分完成/失败/取消时推送飞书（webhook 群机器人或自建应用 app_bot 私聊 DM，支持事件订阅 + 90 分钟去重缓存，通知失败不阻塞流水线）
 - **Electron 桌面应用**：Windows 便携版（解压即用），splash 启动、优雅关闭、卡死任务恢复
 
@@ -127,8 +138,13 @@ npm run dev
 $env:PBC_NO_FILE_LOG='1'
 python -m pytest tests/ --cov=. --cov-report=term --timeout=30
 
-# 当前状态：1301 passed, 90.02% coverage（目标 ≥90%）
+# 打包信号门禁（junitxml 事实源 + 覆盖率门禁，--python 必须传 Windows 路径）
+python scripts/release_gate.py --python "C:/path/to/python.exe" --fail-under 95
 ```
+
+> 覆盖率门禁 **95%**（仅统计 `api/ core/ llm/ db/ config/ main`）；沙箱环境下
+> `test_main_routes.TestServePdf::test_pdf_non_local_host_returns_403` 因删除探针被拦截
+> 而失败，属环境产物（已登记 allowlist，非回归）。
 
 ## 安全设计
 
@@ -171,11 +187,16 @@ python -m pytest tests/ --cov=. --cov-report=term --timeout=30
 │   ├── page_analyzer.py    # 单页 LLM 分析（v3 prompt）
 │   ├── rules/              # 跨页规则引擎（原 cross_page_analyzer）
 │   │   ├── base.py         #   编排 + 页面归一化
+│   │   ├── registry.py     #   规则注册表（唯一入口，R1-R17 + 衍生）
 │   │   ├── parsing.py      #   数值/规格/时间解析
 │   │   ├── rule_time.py    #   时间倒挂、签名时间异常
 │   │   ├── rule_spec.py    #   参数越限判定
 │   │   ├── rule_doc.py     #   批次一致性、完整性
 │   │   └── llm_checks.py   #   LLM 语义异常 + fallback
+│   ├── kb/                 # GMP 知识库（多源、纯 BM25）
+│   │   ├── retriever.py    #   检索（字符 bigram 倒排 + BM25）
+│   │   ├── store.py        #   语料加载
+│   │   └── data/           #   6 源条款化 JSON + raw/*.md 溯源
 │   ├── ocr_client.py       # PaddleOCR 客户端
 │   ├── mineru_client.py    # MinerU 客户端
 │   ├── notify.py           # 飞书任务完成通知

@@ -33,7 +33,7 @@ try:
         data = r.json()
         assert r.status_code == 200, f"status={r.status_code}"
         assert data["status"] == "ok", f"status={data['status']}"
-        assert data["version"] == "1.0.0", f"version={data['version']}"
+        assert data["version"] == "1.1.0", f"version={data['version']}"
         ok("health", f"v{data['version']}")
     except Exception as e:
         fail("health", str(e))
