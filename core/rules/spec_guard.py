@@ -24,6 +24,7 @@ from __future__ import annotations
 import re
 
 from core.rules.parsing import (
+    _decimal_loss_factor,
     _judge,
     _parse_number,
     _parse_spec,
@@ -78,9 +79,13 @@ def index_specs(structured: dict) -> list[tuple[str, str, str]]:
 
 
 def _triple_state(spec: str, actual: str) -> str:
-    """返回 ``"in"`` / ``"out"`` / ``"unknown"``。
+    """返回 ``"in"`` / ``"soft"`` / ``"out"`` / ``"unknown"``。
 
-    ``unknown`` = 规格或实测值不可解析 → **不得**据此剔除 LLM 结论（fail-closed）。
+    * ``in``：规则层判为合规（LLM 结论为误报）；
+    * ``soft``：疑似 OCR 丢小数点，规则层已以 info+hint 独立呈现同一三元组，
+      故 LLM 的重复条目可一并剔除（避免同一条目 severity 口径不一）；
+    * ``out``：规则层独立佐证为真超差 → 保留；
+    * ``unknown``：规格/实测值不可解析，或符号约定存疑 → **不得**据此剔除。
     """
     bounds = _parse_spec(spec)
     if bounds is None:
@@ -95,7 +100,11 @@ def _triple_state(spec: str, actual: str) -> str:
     # 符号约定存疑（负表压 vs 印版正限值）与规则层同源判定 → 不可据此剔除。
     if _sign_convention_uncertain(bounds, num):
         return "unknown"
-    return "in" if _judge(bounds, num) else "out"
+    if _judge(bounds, num):
+        return "in"
+    if _decimal_loss_factor(bounds, num, actual) is not None:
+        return "soft"
+    return "out"
 
 
 def drop_unfounded_spec_findings(
@@ -107,13 +116,15 @@ def drop_unfounded_spec_findings(
 
     * 非 ``param_out_of_spec`` 类 finding：原样保留；
     * 文案（description + ocr_text）中能定位到结构化三元组，且所有命中的三元组
-      都被规则层判为**合规**：剔除（LLM 误报）；
+      状态均为 ``in``/``soft``（合规、或规则层已独立以 info 呈现的疑似 OCR 丢
+      小数点）：剔除（LLM 误报 / 重复条目）；
     * 命中三元组中存在被判**超差**者：保留（真实偏差，规则层已独立佐证）；
     * 定位不到任何三元组，或命中三元组状态为 ``unknown``：保留（fail-closed）。
     """
     index = index_specs(structured)
     kept: list = []
     dropped = 0
+    _DROP_SAFE = {"in", "soft"}
     for f in findings:
         if not isinstance(f, dict):
             kept.append(f)
@@ -137,7 +148,7 @@ def drop_unfounded_spec_findings(
         if precise:
             matched = precise
         states = {_triple_state(spec, actual) for _, spec, actual in matched}
-        if states and states <= {"in"}:
+        if states and states <= _DROP_SAFE:
             dropped += 1
             continue
         kept.append(f)

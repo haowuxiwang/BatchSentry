@@ -27,6 +27,7 @@ from core.rules.llm_checks import (  # noqa: F401
     _user_rules_section,
 )
 from core.rules.parsing import (  # noqa: F401
+    _decimal_loss_factor,
     _expand_power_notation,
     _extract_unit,
     _extract_year,
@@ -49,6 +50,7 @@ from core.rules.rule_spec import (  # noqa: F401
     _check_param_out_of_spec,
     _judge_cell,
     _judge_param,
+    _severity_for_out_of_spec,
 )
 from core.rules.rule_time import (  # noqa: F401
     _check_signature_time_anomaly,

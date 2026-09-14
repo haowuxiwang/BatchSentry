@@ -472,6 +472,31 @@ def _sign_convention_uncertain(bounds: SpecBounds, actual: float) -> bool:
     return False
 
 
+# OCR 丢小数点会使数值整体放大 10/100 倍（4.6 -> 46 / 0.46 -> 46）。
+_DECIMAL_LOSS_FACTORS = (0.1, 0.01)
+
+
+def _decimal_loss_factor(bounds: SpecBounds, actual: float, raw: str = ""):
+    """若实测值疑似 OCR 丢失小数点、缩放后能落入规格，返回该因子，否则 None。
+
+    强判据是**"丢点后数字串不变"**：``4.6`` 丢点即 ``46``。因此仅当实测值本身
+    **没有小数点**时才可能"丢点"，据此可排除真实的大幅偏差（如 45.6 vs 0~5°C
+    的冷库失控——它自带小数点，不属于丢点形态）。作为软信号供调用方降级
+    severity 或去重，**不**据此静默丢弃偏差。
+    """
+    if actual == 0:
+        return None
+    if raw:
+        if "." in raw or "。" in raw or "．" in raw:
+            return None           # 已带小数点 → 不存在"丢点"
+    elif actual != int(actual):
+        return None               # 数值本身有小数部分 → 不存在"丢点"
+    for f in _DECIMAL_LOSS_FACTORS:
+        if _judge(bounds, actual * f):
+            return f
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Unit-aware comparison — avoids false positives when spec and actual use
 # different but convertible units (e.g. spec="≤50%" vs actual="99ppm").

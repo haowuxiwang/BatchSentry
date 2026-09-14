@@ -30,6 +30,8 @@ from core.cross_page_analyzer import (
     _step_sort_key,
     _check_param_out_of_spec,
     _judge_param,
+    _decimal_loss_factor,
+    _severity_for_out_of_spec,
     _check_suspicious_dates,
     _check_completeness,
     _check_batch_consistency,
@@ -263,6 +265,41 @@ class TestSignConventionUncertain:
         _judge_param(p, 14, "1", "浓缩开始真空度", findings, queue)
         assert findings == []
         assert p["in_spec"] is True
+
+
+class TestDecimalLossSoftening:
+    """OCR 丢小数点（4.6→46）软化（M8）——真实 p08 进料压力。"""
+
+    def test_factor_detected_for_tenfold_overshoot(self):
+        bounds = SpecBounds(op="between", low=3.0, high=5.0)
+        assert _decimal_loss_factor(bounds, 46.0) == 0.1
+
+    def test_no_factor_for_genuine_deviation(self):
+        bounds = SpecBounds(op="between", low=3.0, high=5.0)
+        assert _decimal_loss_factor(bounds, 7.0) is None
+
+    def test_no_factor_when_actual_has_decimal_point(self):
+        """45.6 vs 0~5°C：自带小数点 → 不是"丢点"形态，真实偏差必须保留。"""
+        bounds = SpecBounds(op="between", low=0.0, high=5.0)
+        assert _decimal_loss_factor(bounds, 45.6, "45.6") is None
+        assert _decimal_loss_factor(bounds, 45.6) is None
+
+    def test_zero_actual_safe(self):
+        bounds = SpecBounds(op="between", low=3.0, high=5.0)
+        assert _decimal_loss_factor(bounds, 0.0) is None
+
+    def test_severity_downgraded_to_info_with_hint(self):
+        """46 vs 3.0~5.0bar → info + 小数点提示（非硬性 warning）。"""
+        bounds = SpecBounds(op="between", low=3.0, high=5.0)
+        sev, hint = _severity_for_out_of_spec(bounds, 46.0, "3.0-5.0bar", "handwritten")
+        assert sev == "info"
+        assert "小数点" in hint
+
+    def test_printed_source_never_softened(self):
+        """印刷体实测值（文档级打印输出）不做 OCR 软化，维持 warning。"""
+        bounds = SpecBounds(op="between", low=3.0, high=5.0)
+        sev, hint = _severity_for_out_of_spec(bounds, 46.0, "3.0-5.0bar", "printed")
+        assert sev == "warning" and hint == ""
 
 
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 
 from core.rules.parsing import (
+    _decimal_loss_factor,
     _extract_unit,
     _judge,
     _parse_number,
@@ -103,7 +104,7 @@ def _judge_param(p: dict, page: int, step_no, name: str,
         # 明显超范围（>10%）维持 warning 铁口判定。spec 基准本身是
         # 印刷体（High Trust），此处只软化"实际值"这一侧的判定力度。
         severity, hint = _severity_for_out_of_spec(
-            bounds, compare_num, spec, p.get("value_source"))
+            bounds, compare_num, spec, p.get("value_source"), str(actual))
         findings.append({
             "page": page,
             "type": "param_out_of_spec",
@@ -179,7 +180,7 @@ def _judge_cell(val: dict, page: int, step_no, col: str, t: str,
     val["in_spec"] = in_spec
     if not in_spec:
         severity, hint = _severity_for_out_of_spec(
-            bounds, compare_num, spec, val.get("value_source"))
+            bounds, compare_num, spec, val.get("value_source"), str(actual))
         findings.append({
             "page": page,
             "type": "param_out_of_spec",
@@ -201,7 +202,8 @@ _EDGE_MARGIN = 0.10
 
 
 def _severity_for_out_of_spec(bounds, actual: float, spec: str,
-                              value_source: str = "unknown") -> tuple[str, str]:
+                              value_source: str = "unknown",
+                              raw: str = "") -> tuple[str, str]:
     """Decide severity + hint for an out-of-spec value.
 
     Returns (severity, hint_suffix). The printed spec is high-trust; the
@@ -227,4 +229,10 @@ def _severity_for_out_of_spec(bounds, actual: float, spec: str,
     rel_dev = abs(actual - bound) / abs(bound)
     if rel_dev <= _EDGE_MARGIN:
         return "info", "，超差幅度较小（≤10%），可能为手写 OCR 误读，请对照 PDF 原页人工核对"
+    # OCR 丢小数点：M8 真实 p08 实测 —— 手写 "4.6" 被 OCR 读成 "46"，而规格是
+    # 3.0~5.0bar（同页其余压力 2~4bar，46bar 在 TFF 上不可能）。特征：数值与规格
+    # 差约 10 的幂次，缩放后即可落回规格内。仍作 finding 表面化（info + 提示），
+    # 不静默丢弃，避免掩盖真实偏差。
+    if _decimal_loss_factor(bounds, actual, raw) is not None:
+        return "info", "，实测值与规格相差约 10 倍（疑似 OCR 丢失小数点，如 4.6 读成 46），请对照 PDF 原页人工核对"
     return "warning", ""

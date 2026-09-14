@@ -64,6 +64,10 @@ class TestTripleState:
         """负表压 vs 印版正限值 → 符号约定存疑，不得据此剔除 LLM 结论。"""
         assert _triple_state("≤0.08MPa", "-0.090 MPa") == "unknown"
 
+    def test_decimal_loss_is_soft(self):
+        """真实 p08：4.6 被读成 46 → 规则层已以 info 呈现，标 soft 供去重。"""
+        assert _triple_state("3.0-5.0bar", "46") == "soft"
+
 
 class TestIndexSpecs:
     def test_both_raw_and_base_column_names(self):
@@ -136,3 +140,14 @@ class TestDropUnfoundedSpecFindings:
                              "ocr_text": "浓缩结束温度 42.1 °C"}]
         kept, dropped = drop_unfounded_spec_findings(findings, _p14_structured())
         assert dropped == 1 and kept == ["junk"]
+
+    def test_drops_llm_duplicate_of_decimal_loss_with_inconsistent_severity(self):
+        """真实 p08：LLM 自报 critical「进料压力多次超出规格范围」与规则层
+        info+hint 的同一三元组重复且口径不一 → 剔除 LLM 重复条目。"""
+        structured = {"steps": [{"parameters": [
+            {"name": "进料压力", "spec_range": "3.0-5.0bar", "value": "46"},
+        ]}]}
+        findings = [{"type": "param_out_of_spec", "severity": "critical",
+                     "description": "进料压力多次超出规格范围", "ocr_text": "进料压力 46"}]
+        kept, dropped = drop_unfounded_spec_findings(findings, structured)
+        assert dropped == 1 and kept == []
