@@ -10,6 +10,7 @@ from core.rules.parsing import (
     _parse_spec,
     _sign_convention_uncertain,
     _try_unit_normalize,
+    _violated_bound,
 )
 
 logger = logging.getLogger(__name__)
@@ -214,16 +215,7 @@ def _severity_for_out_of_spec(bounds, actual: float, spec: str,
     """
     if value_source == "printed":
         return "warning", ""
-    bound = None
-    if bounds.op == "between":
-        if actual < bounds.low:
-            bound = bounds.low
-        else:
-            bound = bounds.high
-    elif bounds.op in ("le", "lt"):
-        bound = bounds.high
-    elif bounds.op in ("ge", "gt"):
-        bound = bounds.low
+    bound = _violated_bound(bounds, actual)
     if bound is None or bound == 0:
         return "warning", ""
     rel_dev = abs(actual - bound) / abs(bound)

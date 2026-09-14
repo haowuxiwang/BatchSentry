@@ -474,24 +474,53 @@ def _sign_convention_uncertain(bounds: SpecBounds, actual: float) -> bool:
 
 # OCR 丢小数点会使数值整体放大 10/100 倍（4.6 -> 46 / 0.46 -> 46）。
 _DECIMAL_LOSS_FACTORS = (0.1, 0.01)
+# 超差倍数须与"单次/双次小数点位移"一致（比值 ≈ 10 或 100），容差 ±60%。
+_DECIMAL_LOSS_RATIO_LOW = 0.6
+_DECIMAL_LOSS_RATIO_HIGH = 1.7
+
+
+def _violated_bound(bounds: SpecBounds, actual: float) -> Optional[float]:
+    """返回被越过的那个界（用于评估超差倍数）；无法判断返回 None。"""
+    if bounds.op == "between":
+        if bounds.low is not None and actual < bounds.low:
+            return bounds.low
+        if bounds.high is not None and actual > bounds.high:
+            return bounds.high
+        return None
+    if bounds.op in ("le", "lt"):
+        return bounds.high
+    if bounds.op in ("ge", "gt"):
+        return bounds.low
+    return None
 
 
 def _decimal_loss_factor(bounds: SpecBounds, actual: float, raw: str = ""):
     """若实测值疑似 OCR 丢失小数点、缩放后能落入规格，返回该因子，否则 None。
 
-    强判据是**"丢点后数字串不变"**：``4.6`` 丢点即 ``46``。因此仅当实测值本身
-    **没有小数点**时才可能"丢点"，据此可排除真实的大幅偏差（如 45.6 vs 0~5°C
-    的冷库失控——它自带小数点，不属于丢点形态）。作为软信号供调用方降级
-    severity 或去重，**不**据此静默丢弃偏差。
+    两条判据同时成立才算：
+    1. **"丢点后数字串不变"**：仅当实测值本身没有小数点时才可能丢点
+       （``4.6`` 丢点即 ``46``）。自带小数点的 ``45.6`` vs ``0~5°C``（冷库失控）
+       属真实偏差，不软化。
+    2. **超差倍数与单次/双次位移一致**（≈10×/100×）：``46 vs ≤5.0`` 比值 9.2 ✓；
+       而 ``25 vs ≤5.0`` 比值仅 5 —— 更可能是真实超差而非丢点，仍维持 warning。
+
+    作为软信号供调用方降级 severity 或去重，**不**据此静默丢弃偏差。
     """
     if actual == 0:
         return None
     if raw:
-        if "." in raw or "。" in raw or "．" in raw:
+        if any(ch in raw for ch in ".。．"):
             return None           # 已带小数点 → 不存在"丢点"
     elif actual != int(actual):
         return None               # 数值本身有小数部分 → 不存在"丢点"
+    bound = _violated_bound(bounds, actual)
+    if bound is None or bound == 0:
+        return None
+    ratio = abs(actual) / abs(bound)
     for f in _DECIMAL_LOSS_FACTORS:
+        shifted = ratio * f
+        if not (_DECIMAL_LOSS_RATIO_LOW <= shifted <= _DECIMAL_LOSS_RATIO_HIGH):
+            continue              # 超差倍数与位移不符 → 大概率真实偏差
         if _judge(bounds, actual * f):
             return f
     return None

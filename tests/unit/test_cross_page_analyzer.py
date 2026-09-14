@@ -284,6 +284,11 @@ class TestDecimalLossSoftening:
         assert _decimal_loss_factor(bounds, 45.6, "45.6") is None
         assert _decimal_loss_factor(bounds, 45.6) is None
 
+    def test_no_factor_when_overshoot_ratio_is_not_tenfold(self):
+        """25 vs ≤5.0（比值仅 5）→ 更可能是真实超差，不软化（维持 warning）。"""
+        bounds = SpecBounds(op="le", low=None, high=5.0)
+        assert _decimal_loss_factor(bounds, 25.0, "25") is None
+
     def test_zero_actual_safe(self):
         bounds = SpecBounds(op="between", low=3.0, high=5.0)
         assert _decimal_loss_factor(bounds, 0.0) is None
