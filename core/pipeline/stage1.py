@@ -8,9 +8,11 @@ import time
 
 from config import config
 from core.pipeline.ocr_support import (
+    _KNOWN_BACKENDS,
     _pdf_page_diagnostics,
     _sanitize_ocr_text,
     assess_ocr_page,
+    supports_page_subset,
 )
 from core.pipeline.state import _audit_log, transition_status
 
@@ -240,7 +242,7 @@ async def _run_stage1_full(
         row = await cursor.fetchone()
         self_heal_backend = row["ocr_backend_used"] if row else ""
 
-    if self_heal_backend in ("mineru", "paddle"):
+    if supports_page_subset(self_heal_backend):
         from core.pipeline import _self_heal_empty_pages as _run_heal
         await _run_heal(db, job_id, ocr_pdf_path, pages, self_heal_backend)
 
@@ -249,7 +251,7 @@ async def _run_stage1_full(
     # 差异页以 findings 呈现并强制 partial_review（stage3 消费）。
     # cached 复用路径跳过（无新 OCR 产物可比；历史任务如需对比走 retry）。
     dual_diff: list[dict] = []
-    if used_backend in ("paddle", "mineru"):
+    if used_backend in _KNOWN_BACKENDS:
         from core.pipeline.dual_compare import run_dual_compare
         dual_diff = await run_dual_compare(
             db, job_id, ocr_pdf_path, used_backend, pages

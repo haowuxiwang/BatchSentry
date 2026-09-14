@@ -199,10 +199,13 @@ async def _run_pipeline_impl(job_id: str, pdf_path: str, progress_futures: list)
         # 落库并开始该片页面分析，用户无需等全部页 OCR 完成才看到结果。
         # 整份 OCR（默认, 含 Paddle）保持原有阻塞式流程。
         slice_pages = int(getattr(config["app"], "ocr_slices", 1) or 1)
-        if ocr_backend == "paddle" and slice_pages > 1:
+        # T7.1：能力判定走单一来源（ocr_support.supports_slicing），
+        # 不再硬编码 `=="paddle"` / `=="mineru"`。
+        from core.pipeline.ocr_support import supports_slicing
+        if slice_pages > 1 and not supports_slicing(ocr_backend):
             logger.warning(
                 f"[{job_id}] OCR_SLICES={slice_pages} ignored — sliced mode "
-                f"is only supported by MinerU, falling back to whole-job Paddle"
+                f"该后端不支持分片流式，回退整份 OCR（backend={ocr_backend}）"
             )
             slice_pages = 1
         stage1_ms = 0
@@ -210,7 +213,7 @@ async def _run_pipeline_impl(job_id: str, pdf_path: str, progress_futures: list)
         failed_pages: list[int] = []
         # 门禁 3 双后端对比结果（整份路径填充；分片路径跳过并记审计）
         dual_diff: list[dict] = []
-        if ocr_backend == "mineru" and slice_pages > 1:
+        if supports_slicing(ocr_backend) and slice_pages > 1:
             logger.info(
                 f"[{job_id}] Stage 1 (sliced): OCR_SLICES={slice_pages} pages/slice, "
                 f"streaming per-slice analysis enabled"

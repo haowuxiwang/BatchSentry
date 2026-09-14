@@ -130,13 +130,9 @@ def compare_page(primary_html: str, secondary_html: str) -> tuple[bool, str]:
 
 
 def _secondary_available(secondary: str) -> bool:
-    """备选后端凭据完整性判断（与 _get_ocr_chain 同语义）。"""
-    if secondary == "paddle":
-        paddle_cfg = config["paddle_ocr"]
-        return bool(paddle_cfg.api_url and paddle_cfg.token)
-    if secondary == "mineru":
-        return bool(config["mineru"].token)
-    return False
+    """备选后端凭据完整性判断（单一来源：ocr_support.remote_backend_configured）。"""
+    from core.pipeline.ocr_support import remote_backend_configured
+    return remote_backend_configured(secondary)
 
 
 async def run_dual_compare(
@@ -148,16 +144,24 @@ async def run_dual_compare(
     绝不阻断主流程 —— 对比是增强证据，不是硬依赖。
     """
     from core.pipeline import _is_cancelled as _run_is_cancelled
+    from core.pipeline.ocr_support import _KNOWN_BACKENDS, _REMOTE_BACKENDS
 
     if not getattr(config["app"], "ocr_dual_compare", False):
         return []
-    if primary_backend not in ("paddle", "mineru"):
+    if primary_backend not in _KNOWN_BACKENDS:
         return []
-    secondary = "mineru" if primary_backend == "paddle" else "paddle"
-    if not _secondary_available(secondary):
+    # 备选选择：主侧之外的**远程**后端（docling 主侧 → paddle 优先、否则
+    # mineru；paddle↔mineru 互为主备，语义与旧实现一致）。取首个凭据完整者。
+    secondary = next(
+        (b for b in _REMOTE_BACKENDS
+         if b != primary_backend and _secondary_available(b)),
+        "",
+    )
+    if not secondary:
+        tried = [b for b in _REMOTE_BACKENDS if b != primary_backend]
         await _audit_log(
             db, job_id, "dual_compare_skipped",
-            f"secondary={secondary} 凭据不完整，无法对比",
+            f"primary={primary_backend} 无可用备选后端（候选 {tried} 凭据不完整）",
         )
         return []
     if await _run_is_cancelled(job_id):

@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 from config import config
@@ -109,17 +110,130 @@ def assess_ocr_page(page: dict, pdf_diag: dict | None = None) -> tuple[dict, lis
     diag["integrity"] = "incomplete" if reasons else "ok"
     diag["reasons"] = reasons
     return diag, reasons
+
+
+# ── OCR 后端统一接口 + 能力声明（T7.1，M7）──────────────────────────
+# 背景：后端"能力"（能否分片 / 能否按页子集重跑 / 是否本地）历史上散落
+# 在 engine.py / stage1.py / dual_compare.py，以字符串字面量
+# `== "paddle"` / `== "mineru"` 判定。新增第三后端（docling）时每处都要
+# 改、极易漏改漂移。现收敛为**单一来源**：静态能力表 + describe_backend()。
+#
+# 所有后端共享同一 **run_ocr 协议**（已在实现中成立，这里只做显式声明）：
+#   run_ocr(pdf_path, progress_callback=None, job_id="",
+#           cancel_check=None) -> list[dict]
+#   page dict = {"markdown": {"text": str}, "page_count": int,
+#                "_source": str, ...可选 _ocr_diagnostics}
+_KNOWN_BACKENDS = ("paddle", "mineru", "docling")
+# 远程服务式后端（需 token / 网络）—— failover 备选与双/三引擎对比的
+# 候选集合。本地后端（docling）不在内：它既可作主后端，但不作远程兜底。
+_REMOTE_BACKENDS = ("paddle", "mineru")
+
+
+class OcrBackendUnavailable(RuntimeError):
+    """配置了不可运行的后端（如 docling 可选依赖未安装）。
+
+    调用方（_get_ocr_chain）捕获后优雅降级到默认后端，主链不受影响 —
+    见 T7.2「缺失即降级」。
+    """
+
+
+@dataclass(frozen=True)
+class OcrCapabilities:
+    """单个 OCR 后端的静态能力声明（运行时可发现项见 is_backend_available）。"""
+    name: str
+    label: str                 # 展示名（日志 / 报告 / 前端）
+    local: bool                # 本地执行（无外部服务 / token）
+    requires_token: bool       # 需要配置 token / api_url
+    supports_slicing: bool     # 支持 OCR_SLICES>1 分片流式
+    supports_page_subset: bool # 支持 run_ocr_pages(pdf, [页号]) 子集重跑
+
+
+# 静态能力表（唯一来源；available 是动态项，用 is_backend_available()）。
+_CAPABILITIES: dict[str, OcrCapabilities] = {
+    "paddle": OcrCapabilities(
+        name="paddle", label="PaddleOCR-VL", local=False, requires_token=True,
+        supports_slicing=False, supports_page_subset=True,
+    ),
+    "mineru": OcrCapabilities(
+        name="mineru", label="MinerU", local=False, requires_token=True,
+        supports_slicing=True, supports_page_subset=True,
+    ),
+    "docling": OcrCapabilities(
+        name="docling", label="docling（本地）", local=True, requires_token=False,
+        supports_slicing=False, supports_page_subset=False,
+    ),
+}
+
+
+def describe_backend(name: str) -> OcrCapabilities:
+    """返回后端能力声明；未知后端按最保守假设（不可分片 / 不可子集 / 需 token）。"""
+    key = (name or "").lower()
+    if key in _CAPABILITIES:
+        return _CAPABILITIES[key]
+    return OcrCapabilities(
+        name=key or "unknown", label=key or "unknown", local=False,
+        requires_token=True, supports_slicing=False, supports_page_subset=False,
+    )
+
+
+def is_backend_available(name: str) -> bool:
+    """后端在当前环境是否可运行。
+
+    - docling：**可选依赖**，探测 `core.docling_client.is_available()`；
+    - paddle / mineru：远程服务式后端，可用性在运行时由 failover 链
+      发现（历史上链会无条件纳入主后端再靠异常切换），此处恒 True 以
+      保持既有 failover 语义不变。
+    """
+    if name == "docling":
+        from core import docling_client
+        return docling_client.is_available()
+    return name in ("paddle", "mineru")
+
+
+def supports_slicing(name: str) -> bool:
+    """该后端是否支持 OCR_SLICES>1 分片流式。"""
+    return describe_backend(name).supports_slicing
+
+
+def supports_page_subset(name: str) -> bool:
+    """该后端是否支持按页号子集重跑（run_ocr_pages）。"""
+    return describe_backend(name).supports_page_subset
+
+
+def remote_backend_configured(name: str) -> bool:
+    """远程后端凭据是否完整（可作 failover 备选）。单一来源，
+    与 dual_compare 的备选可用性判定共用。"""
+    if name == "paddle":
+        cfg = config["paddle_ocr"]
+        return bool(cfg.api_url and cfg.token)
+    if name == "mineru":
+        return bool(config["mineru"].token)
+    return False
+
+
 def _get_ocr_backend():
     """根据配置返回 OCR 后端的 run_ocr 函数。
 
     OCR_BACKEND=paddle (默认): 使用 PaddleOCR-VL
     OCR_BACKEND=mineru:        使用 MinerU 精准解析
+    OCR_BACKEND=docling:       使用 docling（本地，可选依赖；未安装抛
+                               OcrBackendUnavailable → 调用方降级）
     """
     backend = config["app"].ocr_backend.lower()
     if backend == "mineru":
         from core.mineru_client import run_ocr as mineru_run
         logger.info("[Pipeline] OCR 后端: MinerU")
         return mineru_run
+    if backend == "docling":
+        # T7.2：可选依赖 —— 未安装时抛可捕获的专用异常，主链回退默认后端。
+        from core import docling_client
+        if not docling_client.is_available():
+            raise OcrBackendUnavailable(
+                "docling 未安装（可选依赖）—— OCR_BACKEND=docling 需先 "
+                "`pip install docling`"
+            )
+        logger.info("[Pipeline] OCR 后端: docling（本地）")
+        return docling_client.run_ocr
     # 默认 PaddleOCR
     from core.ocr_client import run_ocr as paddle_run
     logger.info("[Pipeline] OCR 后端: PaddleOCR-VL")
@@ -132,25 +246,34 @@ def _get_ocr_chain() -> list[tuple[callable, str]]:
 
     """返回 OCR 主备链：[(run_ocr, name), ...]，首个为主后端。
 
-    双 OCR 兜底：主后端（OCR_BACKEND 配置）之外的另一个后端若已配置
-    token/api_url，则作为 failover 备选。仅当两个后端都可用时链长为 2。
+    双 OCR 兜底：主后端（OCR_BACKEND 配置）之外的**另一个**远程后端若
+    凭据完整，则作为 failover 备选（链长 ≤ 2）。
+
+    主后端不可运行（如 OCR_BACKEND=docling 但未安装）→ 优雅降级到默认
+    PaddleOCR，主链不受影响（T7.2「缺失即降级」）。
     """
     backend = config["app"].ocr_backend.lower()
-    primary = _run_get_ocr_backend()
-    chain = [(primary, backend if backend in ("paddle", "mineru") else "paddle")]
-    # 备选：未激活的后端配置完整时才加入 failover 链
-    if backend == "mineru":
-        paddle_cfg = config["paddle_ocr"]
-        if paddle_cfg.api_url and paddle_cfg.token:
-            from core.ocr_client import run_ocr as paddle_run
-            chain.append((paddle_run, "paddle"))
-            logger.info("[Pipeline] OCR failover 备选: PaddleOCR-VL")
-    else:
-        mineru_cfg = config["mineru"]
-        if mineru_cfg.token:
-            from core.mineru_client import run_ocr as mineru_run
-            chain.append((mineru_run, "mineru"))
-            logger.info("[Pipeline] OCR failover 备选: MinerU")
+    try:
+        primary = _run_get_ocr_backend()
+        primary_name = backend if backend in _KNOWN_BACKENDS else "paddle"
+    except OcrBackendUnavailable as e:
+        logger.warning(f"[Pipeline] 配置后端 {backend} 不可用：{e} → 回退 PaddleOCR-VL")
+        from core.ocr_client import run_ocr as paddle_run
+        primary, primary_name = paddle_run, "paddle"
+    chain = [(primary, primary_name)]
+    # 备选：按偏好序取"第一个凭据完整且非主后端"的远程后端
+    # （主=paddle→mineru；主=mineru→paddle；主=docling/本地→paddle 优先，
+    #  否则 mineru）。既保持既有语义，又天然支持第三后端。
+    for alt_name in _REMOTE_BACKENDS:
+        if alt_name == primary_name or not remote_backend_configured(alt_name):
+            continue
+        if alt_name == "paddle":
+            from core.ocr_client import run_ocr as alt_run
+        else:
+            from core.mineru_client import run_ocr as alt_run
+        chain.append((alt_run, alt_name))
+        logger.info(f"[Pipeline] OCR failover 备选: {describe_backend(alt_name).label}")
+        break
     return chain
 
 

@@ -59,6 +59,18 @@ def probe_mineru() -> dict:
     return {"ok": True, "reason": "Token 已配置（连通性在首个任务时探测）"}
 
 
+def probe_docling() -> dict:
+    """Probe docling（本地可选依赖）: 只探测是否可导入，无需网络/token。
+
+    M7/T7.2：docling 是本地后端，可用性 = 依赖是否安装；未装时
+    `_get_ocr_chain` 会优雅降级，此处如实反映"未安装"。
+    """
+    from core import docling_client
+    if docling_client.is_available():
+        return {"ok": True, "reason": "本地依赖已安装（无需网络）"}
+    return {"ok": False, "reason": "docling 可选依赖未安装（pip install docling）"}
+
+
 async def probe_llm() -> dict:
     """Probe LLM service: send a minimal chat completion via the adapter.
 
@@ -125,7 +137,12 @@ async def probe_llm() -> dict:
 async def probe_all() -> dict:
     """Probe all configured downstream services in parallel."""
     backend = config["app"].ocr_backend
-    ocr_probe = probe_mineru if backend == "mineru" else probe_paddle_ocr
+    if backend == "mineru":
+        ocr_probe = probe_mineru
+    elif backend == "docling":
+        ocr_probe = probe_docling
+    else:
+        ocr_probe = probe_paddle_ocr
 
     ocr_result, llm_result = await asyncio.gather(
         asyncio.to_thread(ocr_probe),

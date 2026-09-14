@@ -20,9 +20,10 @@
 | M4 规则扩展 R11–R17 + 注册表 | ✅ | `f0ebdc`；金标 **11 例 P/R/F1=1.0（0 known_gap）**；真实 51 页重放 **+9 findings（390→399，+2.3%）、critical 12→13**，全部为真信号（无 deviation_link/alteration 噪音） |
 | M5 知识库多源化 + 条款级溯源 | ✅ | `4270fd9`+`f9b73df`；**6 源 / 441 条**；金标 37 条命中率 **97.3%**（排除已登记缺口 100%，阈值 85%）；门禁 95.22%/1845 passed |
 | M6 SSE 优化 + 对标落地 | ✅ | 本文件 §2 M6 落地结论；S1 常量统一（源码扫描锁死）、S2 稳态查询 **16→1**、S4 秒级本地计时、T6.4 三色分级（六面同源机检）、T6.5 评估判**不做**（`docs/TREND_SCREENING_EVAL.md`） |
-| M7–M8 | ⬜ 待执行 | 本文件 §2 |
+| M7 docling 第三对照引擎 | ✅ | 本文件 §2 M7 落地结论；T7.1 能力表单一来源（源码扫描护栏）、T7.2 缺失即降级（`OcrBackendUnavailable`→回退 Paddle）、T7.3 三引擎对比脚本、T7.4 ROADMAP 许可残留改 MIT |
+| M8 打包放行（v1.1.0） | ⬜ 待执行 | 本文件 §2 |
 
-**当前工作区**：干净；本地领先 `origin/main` **23 个提交**（未推送，缺 GitHub PAT）。
+**当前工作区**：干净；本地领先 `origin/main` **28+ 个提交**（未推送，缺 GitHub PAT）。
 
 **打包信号当前结论**：T0 自愈后 **OVERALL: pass**（`1bbd387`）；每次放行前须复跑 `scripts/release_gate.py`（注意 `--python` 需传 **Windows 路径**，POSIX `/c/...` 会判"python 不可用"）。
 
@@ -347,6 +348,40 @@
 | T7.4 | 许可标注修正（docling = **MIT**，非 AGPL） | ✅ 已在 `ROADMAP_v1.1.md` 勘误（§决策锁定行4 / §7.2 / §7.3） |
 
 **依赖**：M3（OCR 接口抽象）。**产出**：docling 缺失不影响主链。
+
+**M7 落地结论（2026-09-14）**
+
+- **T7.1 OCR 后端统一接口 + 能力声明** —— 背景：后端"能力"（能否分片 /
+  能否按页子集重跑 / 是否本地）历史上散落在 `engine.py` / `stage1.py` /
+  `dual_compare.py`，以 `== "paddle"` / `== "mineru"` 字符串字面量判定 ——
+  新增第三后端时每处都要改、极易漏改漂移。现收敛为**单一来源**：
+  `core/pipeline/ocr_support.py` 的 `OcrCapabilities`（frozen dataclass：
+  name/label/local/requires_token/supports_slicing/supports_page_subset）
+  + `_CAPABILITIES` 表 + `describe_backend()` / `supports_slicing()` /
+  `supports_page_subset()` / `is_backend_available()` / `_REMOTE_BACKENDS`。
+  所有后端显式声明共享 **run_ocr 协议**
+  `run_ocr(pdf_path, progress_callback, job_id, cancel_check) -> list[dict]`。
+  `engine.py` 切片决策、`stage1.py` 自愈/对比守卫、`dual_compare.py` 备选
+  选择均改走能力表。**漂移护栏**：`tests/unit/test_ocr_backends.py`
+  源码扫描 `engine.py`/`stage1.py`，出现能力比较字面量即失败。
+- **T7.2 docling 接入（可选依赖）** —— 新增 `core/docling_client.py`
+  （本地后端，无需 token/网络；`run_ocr` 同签名，输出 page dict 形状对齐
+  `{"markdown":{"text"}, "page_count", "_source":"docling"}`）。**缺失即降级**：
+  `is_available()` 只做顶层 import 探测（不拉起 torch）；未装时
+  `_get_ocr_backend()` 抛可捕获的 `OcrBackendUnavailable`，`_get_ocr_chain()`
+  捕获后**回退默认 PaddleOCR**，主链不受影响。`health.probe_all` 增加
+  `probe_docling` 分支，如实上报本地依赖状态。
+- **T7.3 三引擎对比脚本** —— 新增 `scripts/compare_ocr_engines.py`：
+  对同一 PDF 跑可用的 2~3 个后端，逐页对比复用
+  `dual_compare.compare_page`（阈值单一来源），输出引擎概览 + 两两差异页
+  + 可选 JSON。缺失/无凭据的后端**优雅跳过并标注**（不抛栈，退出码 1）。
+- **T7.4 许可标注修正** —— 本轮补齐残留：`ROADMAP_v1.1.md` 决策锁定行 4
+  与 §7.4（原仍写 AGPL-3.0）已改为 **MIT**，与 §7.2/§7.3 一致。
+
+**端到端**：`tests/e2e_m7_docling_absent.py`（真实 uvicorn + HTTP）**6/6 过** ——
+`OCR_BACKEND=docling` 且未安装时：进程正常启动、链降级为 `['paddle']`、
+`/api/health/downstream` 返回 200 且 `ocr.ok=false`（reason=未安装）、
+对比脚本优雅跳过。
 
 ---
 
