@@ -37,9 +37,13 @@ class TestSearch:
         refs = retriever._get_index().search(
             retriever._bigrams("批记录 复核 签名 偏差 放行 洁净"), topk=4)
         assert len(refs) <= 4
+        known = set(store.source_ids())
         for r in refs:
             assert len(r["excerpt"]) <= 120
-            assert r["entry_id"].startswith("gmp2010-")
+            # M5：多源语料 ⇒ 每条引用必须归属一个已注册来源（可溯源）。
+            assert r["source_id"] in known
+            assert r["entry_id"].startswith(r["source_id"] + "-")
+            assert r["source_title"]
 
 
 class TestQueryFor:

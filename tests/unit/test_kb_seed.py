@@ -31,12 +31,36 @@ def test_chapter_count_is_14():
 
 def test_entry_count_and_ordering():
     en = _payload()["entries"]
-    # GMP2010 正文 313 条；本 .doc 实际含 286 条独立条款（允许 ±6 解析方差）
-    assert 280 <= len(en) <= 292
+    # GMP2010 正文共 313 条 —— 与官方文本条数一致，精确锁定（不再允许方差）。
+    assert len(en) == 313, f"GMP2010 正文应为 313 条，实得 {len(en)}"
     nos = [e["no"] for e in en]
     assert nos == sorted(nos), "entries must be ascending by article no"
     ids = [e["entry_id"] for e in en]
     assert len(set(ids)) == len(ids), "duplicate entry_id"
+
+
+def test_article_numbers_are_contiguous():
+    """条号必须 1..313 连续。
+
+    回归：早期 ``_ARTICLE_RE`` 的字符类漏了『零』，编码含零的条文
+    （第一百零一~一百零九 / 二百零一~二百零九 / 三百零一~三百零九，共 27 条）
+    从未被切分，正文被静默并入前一条 —— 这些条款既无法引用，前一条正文也被
+    污染。此测试锁定该缺陷不再复发。
+    """
+    nos = [e["no"] for e in _payload()["entries"]]
+    assert nos == list(range(1, 314)), (
+        "条号必须连续 1..313；缺号通常意味着中文数字正则又漏了字符"
+    )
+
+
+def test_zero_numbered_articles_exist_and_are_clean():
+    """含『零』的条文（如第二百零一条 清场记录）必须独立成条且正文干净。"""
+    en = {e["no"]: e for e in _payload()["entries"]}
+    e201 = en[201]
+    assert e201["article_label"] == "第二百零一条"
+    assert "清场记录" in e201["text"]
+    # 前一条不得再吞并后一条的正文
+    assert "第二百零一条" not in en[200]["text"], "第二百条正文被第二百零一条污染"
 
 
 def test_article_151_is_document_management():

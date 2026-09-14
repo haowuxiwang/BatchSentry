@@ -6,9 +6,8 @@ import pytest
 def empty_store(monkeypatch):
     from core.kb import store, retriever
 
-    monkeypatch.setattr(store, "_payload", {
-        "source_id": "", "title": "", "chapters": [], "entries": [],
-        "_version": ""})
+    # M5：store 从单源 _payload 改为多源 _sources 字典；空字典 ⇒ 零来源。
+    monkeypatch.setattr(store, "_sources", {})
     retriever._reset_index_for_tests()
     yield store
     monkeypatch.undo()
@@ -39,14 +38,18 @@ class TestDefensiveBranches:
         assert out == [f] and "kb_refs" not in f
 
     def test_store_missing_file_branch(self, monkeypatch, tmp_path):
+        """语料目录为空 ⇒ 零来源、空版本、空条目（绝不清空调用方）。"""
         from core.kb import store
 
-        monkeypatch.setattr(store, "_DATA_PATH",
-                            tmp_path / "nope.json", raising=False)
-        monkeypatch.setattr(store, "_payload", None)
-        p = store._load()
-        assert p["entries"] == [] and p["_version"] == ""
-        assert store.kb_version() == ""
+        monkeypatch.setattr(store, "_DATA_DIR", tmp_path)
+        store._reset_for_tests()
+        try:
+            assert store._load_all() == {}
+            assert store.entries() == []
+            assert store.sources() == []
+            assert store.kb_version() == ""
+        finally:
+            store._reset_for_tests()
 
     def test_get_entry_miss(self):
         from core.kb import store

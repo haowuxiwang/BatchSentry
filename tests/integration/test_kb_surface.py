@@ -50,8 +50,8 @@ class TestEnsureDbSeeded:
         from core import kb as kb_pkg
         from core.kb import store
 
-        monkeypatch.setattr(store, "_payload", {
-            "source_id": "", "title": "", "chapters": [], "entries": []})
+        # M5：多源 store 用 _sources（dict）作单一真源；空字典 = 零来源。
+        monkeypatch.setattr(store, "_sources", {})
         # 直接调用包级导出（走同一 store 实例）
         n = await kb_pkg.ensure_db_seeded(test_db)
         assert n == 0

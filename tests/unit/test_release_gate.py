@@ -121,6 +121,64 @@ class TestStructuralChecks:
         assert rg.check_kb_corpus(min_entries=5, kb_dir=tmp_path).status == rg.PASS
 
 
+class TestKbPackaging:
+    """kb_packaging：每个 KB 源都必须随包分发（防多源漏包漂移）。"""
+
+    @staticmethod
+    def _kb(tmp_path, names):
+        d = tmp_path / "kb"
+        d.mkdir()
+        for n in names:
+            (d / n).write_text("{}", encoding="utf-8")
+        return d
+
+    def test_glob_in_spec_passes(self, tmp_path):
+        kb = self._kb(tmp_path, ["a.json", "b.json", "c.json"])
+        spec = tmp_path / "x.spec"
+        spec.write_text(
+            'datas = [\n'
+            '    *[(str(p), "core/kb/data")\n'
+            '      for p in sorted((_ROOT / "core" / "kb" / "data").glob("*.json"))],\n'
+            ']\n', encoding="utf-8")
+        r = rg.check_kb_packaging(spec_path=spec, kb_dir=kb)
+        assert r.status == rg.PASS and "glob" in r.detail
+
+    def test_explicit_list_covering_all_passes(self, tmp_path):
+        kb = self._kb(tmp_path, ["a.json", "b.json"])
+        spec = tmp_path / "x.spec"
+        spec.write_text(
+            'datas = [("core/kb/data/a.json", "core/kb/data"),'
+            ' ("core/kb/data/b.json", "core/kb/data")]\n', encoding="utf-8")
+        assert rg.check_kb_packaging(spec_path=spec, kb_dir=kb).status == rg.PASS
+
+    def test_single_source_spec_fails_on_missing(self, tmp_path):
+        """回归：单源 spec（只列 gmp2010）在多源下必须 FAIL。"""
+        kb = self._kb(tmp_path, ["gmp2010.json", "alcoa_plus.json"])
+        spec = tmp_path / "x.spec"
+        spec.write_text(
+            'datas = [("core/kb/data/gmp2010.json", "core/kb/data")]\n',
+            encoding="utf-8")
+        r = rg.check_kb_packaging(spec_path=spec, kb_dir=kb)
+        assert r.status == rg.FAIL and "alcoa_plus.json" in r.detail
+
+    def test_empty_kb_dir_fails(self, tmp_path):
+        kb = tmp_path / "kb"
+        kb.mkdir()
+        spec = tmp_path / "x.spec"
+        spec.write_text("glob('*.json')\n", encoding="utf-8")
+        assert rg.check_kb_packaging(spec_path=spec, kb_dir=kb).status == rg.FAIL
+
+    def test_missing_spec_fails(self, tmp_path):
+        kb = self._kb(tmp_path, ["a.json"])
+        assert rg.check_kb_packaging(
+            spec_path=tmp_path / "nope.spec", kb_dir=kb).status == rg.FAIL
+
+    def test_real_spec_covers_real_corpus(self):
+        """实际仓库的 spec 必须覆盖实际的 6 个语料源（不 mock）。"""
+        r = rg.check_kb_packaging()
+        assert r.status == rg.PASS, r.detail
+
+
 # ── 编排 / 报告 ─────────────────────────────────────────────────────────────
 
 
@@ -131,7 +189,7 @@ class TestOrchestration:
         results = rg.run_all(skip_tests=True)
         names = [r.name for r in results]
         assert names == ["worktree_clean", "packaging_files", "rules_wired",
-                         "kb_corpus", "tests_coverage"]
+                         "kb_corpus", "kb_packaging", "tests_coverage"]
         assert results[-1].status == rg.SKIP
 
     def test_build_report_overall_fail_when_any_fail(self, monkeypatch):

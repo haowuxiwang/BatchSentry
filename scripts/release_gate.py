@@ -10,6 +10,7 @@
   packaging_files   打包前置文件齐备（spec / 构建脚本 / electron 入口）
   rules_wired       规则层已接线（core/rules/*.py 中 _check_* 数量 ≥ 阈值）
   kb_corpus         知识库语料可用（core/kb/data/*.json 条目数 ≥ 阈值）
+  kb_packaging      每个 KB 源都随包分发（spec datas 覆盖 core/kb/data/*.json）
   tests_coverage    单测通过 + 覆盖率 ≥ 门禁
 
 失败事实源：优先 `--junitxml`（机器可读，免疫 `log_cli` 日志交错）；XML 缺失/
@@ -36,6 +37,7 @@ import argparse
 import ast
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -199,6 +201,51 @@ def check_kb_corpus(min_entries: int = 200, kb_dir: Path | None = None) -> Check
                            f"知识库仅 {n} 条（下限 {min_entries}）", _ms() - t0)
     return CheckResult("kb_corpus", PASS,
                        f"知识库 {n} 条（下限 {min_entries}）", _ms() - t0)
+
+
+_KB_SPEC_GLOB_RE = re.compile(
+    r"""["']core["']\s*/\s*["']kb["']\s*/\s*["']data["']"""
+    r"""[\s\S]{0,200}?glob\(\s*["']\*\.json["']\s*\)"""
+)
+
+
+def check_kb_packaging(spec_path: Path | None = None,
+                       kb_dir: Path | None = None) -> CheckResult:
+    """每个 KB 源都必须随包分发（spec 的 datas 必须覆盖 core/kb/data/*.json）。
+
+    防的漂移：M5 把知识库从单源扩成多源后，`pbc-server.spec` 仍只硬编码
+    `gmp2010.json` → 冻结版其余 5 源静默缺失（引用退化、无法溯源）。
+    两种合法形态：① datas 用 `core/kb/data` + `glob("*.json")` 自动枚举；
+    ② 逐个显式列出每个源文件名。二者皆缺任一源即 FAIL。
+    """
+    t0 = _ms()
+    spec = spec_path or (REPO_ROOT / "pbc-server.spec")
+    kb_dir = kb_dir or KB_DATA_DIR
+
+    try:
+        text = spec.read_text(encoding="utf-8")
+    except OSError as e:
+        return CheckResult("kb_packaging", FAIL,
+                           f"无法读取 {spec.name}: {e}", _ms() - t0)
+
+    sources = sorted(p.name for p in kb_dir.glob("*.json"))
+    if not sources:
+        return CheckResult("kb_packaging", FAIL,
+                           f"{kb_dir} 下无 KB 源 JSON", _ms() - t0)
+
+    if _KB_SPEC_GLOB_RE.search(text):
+        return CheckResult(
+            "kb_packaging", PASS,
+            f"{len(sources)} 个 KB 源经 core/kb/data glob 自动入包", _ms() - t0)
+
+    missing = [n for n in sources if n not in text]
+    if missing:
+        return CheckResult(
+            "kb_packaging", FAIL,
+            f"{spec.name} 未覆盖 KB 源：{', '.join(missing)}（共 {len(sources)} 源）",
+            _ms() - t0)
+    return CheckResult("kb_packaging", PASS,
+                       f"{len(sources)} 个 KB 源已显式入包", _ms() - t0)
 
 
 def _parse_pytest_summary(output: str) -> tuple[int, int, list[str]]:
@@ -406,6 +453,7 @@ def run_all(*, skip_tests: bool = False, fail_under: int = 95,
         check_packaging_files(),
         check_rules_wired(),
         check_kb_corpus(),
+        check_kb_packaging(),
     ]
     if skip_tests:
         results.append(CheckResult("tests_coverage", SKIP, "已跳过（--skip-tests）"))
