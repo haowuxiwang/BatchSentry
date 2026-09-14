@@ -261,25 +261,35 @@ if (-not $SkipElectron) {
         }
     }
 
-    # ── 3.0 占用前置检查 ───────────────────────────────────────────
+    # ── 3.0 占用检测 + 输出目录自愈 ────────────────────────────────
     # electron-builder 先清空 win-unpacked 再重装 Electron。若上一次产物仍被
     # 占用（BatchSentry.exe 未退出；或安全软件正在扫描 190MB 的 app.asar/
     # exe），EnsureEmptyDir 会以 "The process cannot access the file" 失败，
-    # 报错栈是 app-builder 的 Go 内部栈，极难定位。此处提前检测并给出可操作提示。
-    $unpacked = "dist-electron\win-unpacked"
-    if (Test-Path $unpacked) {
-        $lockProbe = Join-Path $unpacked "resources\app.asar"
+    # 报错栈是 app-builder 的 Go 内部栈，极难定位。
+    #
+    # 自愈策略（M8 实测：火绒类实时防护会长期持有 app.asar 句柄，重启亦不释放）：
+    #   检测到占用 → 自动切到备用输出目录 dist-electron-locked；
+    #   构建成功后 → best-effort 归位到标准 dist-electron\win-unpacked；
+    #   归位仍失败 → 保留备用目录并打印可执行的归位命令（不使构建整体失败）。
+    $stdUnpacked = "dist-electron\win-unpacked"
+    $outDir = "dist-electron"
+    $locked = $false
+    if (Test-Path $stdUnpacked) {
+        $lockProbe = Join-Path $stdUnpacked "resources\app.asar"
         if (Test-Path $lockProbe) {
             try {
                 Rename-Item -Path $lockProbe -NewName "app.asar.lockprobe" -ErrorAction Stop
-                Rename-Item -Path (Join-Path $unpacked "resources\app.asar.lockprobe") -NewName "app.asar"
+                Rename-Item -Path (Join-Path $stdUnpacked "resources\app.asar.lockprobe") -NewName "app.asar"
             } catch {
-                Write-Host "  [WARN] $unpacked 被占用（resources\app.asar 无法重命名）。" -ForegroundColor Yellow
-                Write-Host "         可能原因：BatchSentry.exe 仍在运行，或安全软件正在扫描上次产物。" -ForegroundColor Yellow
-                Write-Host "         处理：关闭 BatchSentry.exe / 在杀软中把项目目录加入白名单后重试；" -ForegroundColor Yellow
-                Write-Host "         或改用备用输出目录：npx electron-builder --win --x64 -c.directories.output=dist-electron-tmp" -ForegroundColor Yellow
+                $locked = $true
             }
         }
+    }
+    if ($locked) {
+        $outDir = "dist-electron-locked"
+        Write-Host "  [WARN] $stdUnpacked 被占用（resources\app.asar 无法重命名）。" -ForegroundColor Yellow
+        Write-Host "         原因：BatchSentry.exe 未退出，或安全软件正持有上次产物句柄。" -ForegroundColor Yellow
+        Write-Host "         自愈：本次改用备用输出目录 $outDir，构建后自动尝试归位。" -ForegroundColor Yellow
     }
 
     # electron-builder 的进度/警告输出走 stderr — 落盘日志，失败可诊断。
@@ -287,7 +297,11 @@ if (-not $SkipElectron) {
     $prevEAP = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
     try {
-        & npx electron-builder --win --x64 *> $ebLog
+        if ($locked) {
+            & npx electron-builder --win --x64 "-c.directories.output=$outDir" *> $ebLog
+        } else {
+            & npx electron-builder --win --x64 *> $ebLog
+        }
     } finally {
         $ErrorActionPreference = $prevEAP
     }
@@ -297,19 +311,43 @@ if (-not $SkipElectron) {
         Write-Fail "electron-builder failed (完整日志: $ebLog)"
     }
 
+    # ── 3.1 best-effort 归位到标准路径 ────────────────────────────
+    $finalUnpacked = $stdUnpacked
+    if ($locked) {
+        $finalUnpacked = Join-Path $outDir "win-unpacked"
+        $moved = $false
+        try {
+            Remove-Item -Recurse -Force $stdUnpacked -ErrorAction Stop
+            Move-Item -Path $finalUnpacked -Destination $stdUnpacked -ErrorAction Stop
+            $moved = $true
+        } catch {
+            $moved = $false
+        }
+        if ($moved) {
+            Remove-Item -Recurse -Force $outDir -ErrorAction SilentlyContinue
+            $finalUnpacked = $stdUnpacked
+            Write-OK "占用已释放，产物已归位 $stdUnpacked"
+        } else {
+            Write-Host "  [WARN] 归位失败（占用仍未释放），产物保留在 $finalUnpacked" -ForegroundColor Yellow
+            Write-Host "         释放后手动归位：" -ForegroundColor Yellow
+            Write-Host "           Remove-Item -Recurse -Force $stdUnpacked" -ForegroundColor Yellow
+            Write-Host "           Move-Item $finalUnpacked $stdUnpacked" -ForegroundColor Yellow
+        }
+    }
+
     # dir target produces win-unpacked/ folder (not a single exe)
-    $exePath = "dist-electron\win-unpacked\BatchSentry.exe"
+    $exePath = Join-Path $finalUnpacked "BatchSentry.exe"
     if (Test-Path $exePath) {
         $size = (Get-Item $exePath).Length / 1MB
-        Write-OK ("win-unpacked\BatchSentry.exe built ({0:N1} MB)" -f $size)
-        $totalSize = (Get-ChildItem "dist-electron\win-unpacked" -Recurse | Measure-Object -Property Length -Sum).Sum / 1MB
+        Write-OK ("BatchSentry.exe built ({0:N1} MB)" -f $size)
+        $totalSize = (Get-ChildItem $finalUnpacked -Recurse | Measure-Object -Property Length -Sum).Sum / 1MB
         Write-Host ""
         # 注意：必须用括号包住 -f 格式化表达式，否则 PowerShell 会把 -f 当成
         # Write-Host 的参数（导致 "Cannot bind parameter 'ForegroundColor'" 错误）
-        Write-Host ("  Output: dist-electron\win-unpacked\ (total {0:N1} MB)" -f $totalSize) -ForegroundColor Yellow
-        Write-Host "  Run:    dist-electron\win-unpacked\BatchSentry.exe" -ForegroundColor Yellow
+        Write-Host ("  Output: $finalUnpacked\ (total {0:N1} MB)" -f $totalSize) -ForegroundColor Yellow
+        Write-Host "  Run:    $exePath" -ForegroundColor Yellow
     } else {
-        Write-Fail "win-unpacked\BatchSentry.exe not found"
+        Write-Fail "$finalUnpacked\BatchSentry.exe not found"
     }
 } else {
     Write-Step "Step 3/3: Skipping Electron build"

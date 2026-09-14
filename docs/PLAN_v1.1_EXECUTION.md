@@ -23,7 +23,7 @@
 | M7 docling 第三对照引擎 | ✅ | 本文件 §2 M7 落地结论；T7.1 能力表单一来源（源码扫描护栏）、T7.2 缺失即降级（`OcrBackendUnavailable`→回退 Paddle）、T7.3 三引擎对比脚本、T7.4 ROADMAP 许可残留改 MIT |
 | M8 打包放行（v1.1.0） | ⬜ 待执行 | 本文件 §2 |
 
-**当前工作区**：干净；本地领先 `origin/main` **28+ 个提交**（未推送，缺 GitHub PAT）。
+**当前工作区**：干净；本地领先 `origin/main`（未推送；经系统代理 `127.0.0.1:7897` 推送，凭据取 Windows 凭据管理器 `git:https://github.com`）。
 
 **打包信号当前结论**：T0 自愈后 **OVERALL: pass**（`1bbd387`）；每次放行前须复跑 `scripts/release_gate.py`（注意 `--python` 需传 **Windows 路径**，POSIX `/c/...` 会判"python 不可用"）。
 

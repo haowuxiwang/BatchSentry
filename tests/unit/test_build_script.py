@@ -57,6 +57,38 @@ def test_build_ps1_pyinstaller_output_is_logged(ps1_bytes):
     assert "PyInstaller build failed (完整日志" in src
 
 
+def test_build_ps1_electron_output_is_logged(ps1_bytes):
+    """electron-builder 调用同样必须落盘日志（其真实错误常在日志尾部，
+    如 app.asar 被占用）。"""
+    src = ps1_bytes.decode("utf-8-sig")
+    assert "electron-builder.log" in src, (
+        "electron-builder 输出应重定向到 build/electron-builder.log"
+    )
+
+
+def test_build_ps1_electron_lock_self_heals(ps1_bytes):
+    """electron 产物被常驻进程占用时，构建脚本必须**自愈**而非整体失败。
+
+    背景（M8 实测）：`dist-electron\\win-unpacked\\resources\\app.asar` 会被
+    安全软件类常驻进程长期独占（可读、可复制，但删除与重命名均失败），
+    重启应用亦不释放。旧行为只打印 WARN，随后 electron-builder 仍写标准
+    目录 → 以 app-builder 的 Go 内部栈失败，整次构建报废。
+
+    不变式：检测到占用 → 自动改用备用输出目录继续构建 → 构建后
+    best-effort 归位到标准路径。
+    """
+    src = ps1_bytes.decode("utf-8-sig")
+    assert "dist-electron-locked" in src, (
+        "占用时应自动切到备用输出目录，而不是仅告警后继续写被锁目录"
+    )
+    assert '"-c.directories.output=$outDir"' in src, (
+        "备用输出目录必须经 electron-builder 的 -c.directories.output 传入"
+    )
+    assert "Move-Item" in src and "Remove-Item -Recurse -Force $stdUnpacked" in src, (
+        "构建成功后应 best-effort 归位（删旧标准目录 + 移入新产物）"
+    )
+
+
 def test_build_bat_delegates_to_ps1():
     """项目约定：build.bat 只转发到 build.ps1，不在 .bat 内重复构建逻辑。"""
     src = _BAT.read_text(encoding="utf-8", errors="replace")
