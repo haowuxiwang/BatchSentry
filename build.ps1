@@ -1,4 +1,4 @@
-# ============================================================
+﻿# ============================================================
 # Pharma Batch Checker — Windows build script
 # ============================================================
 # Produces:
@@ -63,24 +63,48 @@ function Invoke-Native {
     }
 }
 
+# 同 Invoke-Native，但把输出读回为字符串（--version 类探测需要文本）。
+# 缺 PyInstaller 时 `python -m PyInstaller --version` 把
+# "No module named PyInstaller" 写到 stderr —— EAP=Stop 下会抛
+# NativeCommandError 直接中断构建（曾导致 pre-flight 后静默退出）。
+function Invoke-NativeText {
+    param([scriptblock]$Command)
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        return (& $Command 2>&1 | Out-String).Trim()
+    } finally {
+        $ErrorActionPreference = $prevEAP
+    }
+}
+
 # ── Pre-flight: verify required tools are on PATH ────────────────────
 Write-Step "Pre-flight checks"
 
-$pythonVersion = & python --version 2>&1
+$pythonVersion = Invoke-NativeText { & python --version }
 Write-Host "  Python: $pythonVersion"
 if ($LASTEXITCODE -ne 0) { Write-Fail "Python not found on PATH. Install Python 3.11+ and retry." }
 
-$nodeVersion = & node --version 2>&1
+# 解释器正确性校验：PATH 上的 python 必须是装了本项目运行时依赖的那个。
+# 若 PATH 首位是"干净"解释器（如未装依赖的 managed Python），PyInstaller
+# 会构建出残缺包或在中途才以晦涩错误失败。此处前置失败并给出可操作提示。
+$depProbe = Invoke-NativeText { & python -c "import fastapi, fitz, uvicorn, aiosqlite, httpx; print('deps-ok')" }
+if ($LASTEXITCODE -ne 0 -or $depProbe -notmatch "deps-ok") {
+    Write-Fail "PATH 上的 python 缺少项目依赖(fastapi/fitz/uvicorn/aiosqlite/httpx)。请把装了依赖的解释器目录放到 PATH 最前（如 Python311）后重试。当前: $pythonVersion"
+}
+Write-Host "  Python deps: OK"
+
+$nodeVersion = Invoke-NativeText { & node --version }
 Write-Host "  Node:   $nodeVersion"
 if ($LASTEXITCODE -ne 0) { Write-Fail "Node.js not found on PATH. Install Node.js 20+ and retry." }
 
-$npmVersion = & npm --version 2>&1
+$npmVersion = Invoke-NativeText { & npm --version }
 Write-Host "  npm:    $npmVersion"
 if ($LASTEXITCODE -ne 0) { Write-Fail "npm not found on PATH." }
 
 # Verify pyinstaller availability (will be auto-installed below if missing)
 $pyi = Get-Command pyinstaller -ErrorAction SilentlyContinue
-$pyiModule = & python -m PyInstaller --version 2>&1
+$pyiModule = Invoke-NativeText { & python -m PyInstaller --version }
 if (-not $pyi -and $LASTEXITCODE -ne 0) {
     Write-Host "  PyInstaller: NOT installed (will install)"
 } else {
@@ -142,10 +166,21 @@ if (-not $SkipPyInstaller) {
         Invoke-Native { & python -m pip install pyinstaller }
     }
 
-    # PyInstaller 的 INFO 日志走 stderr — Invoke-Native 处理 EAP 降级。
-    Invoke-Native { & python -m PyInstaller pbc-server.spec --noconfirm --clean }
+    # PyInstaller 的 INFO 日志走 stderr — 用 EAP 降级 + 落盘日志（失败时可诊断，
+    # 之前 Invoke-Native 把输出 Out-Null 掉，FAIL 时无从查因）。
+    $pyiLog = Join-Path $projectRoot "build\pyinstaller.log"
+    New-Item -ItemType Directory -Force -Path (Split-Path $pyiLog) | Out-Null
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        & python -m PyInstaller pbc-server.spec --noconfirm --clean *> $pyiLog
+    } finally {
+        $ErrorActionPreference = $prevEAP
+    }
     if ($LASTEXITCODE -ne 0) {
-        Write-Fail "PyInstaller build failed"
+        Write-Host "  --- PyInstaller 日志末尾 25 行 ---" -ForegroundColor Yellow
+        Get-Content $pyiLog -Tail 25 | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray }
+        Write-Fail "PyInstaller build failed (完整日志: $pyiLog)"
     }
 
     if (Test-Path "dist/pbc-server/pbc-server.exe") {
@@ -226,10 +261,40 @@ if (-not $SkipElectron) {
         }
     }
 
-    # electron-builder 的进度/警告输出走 stderr — Invoke-Native 处理 EAP 降级。
-    Invoke-Native { & npx electron-builder --win --x64 }
+    # ── 3.0 占用前置检查 ───────────────────────────────────────────
+    # electron-builder 先清空 win-unpacked 再重装 Electron。若上一次产物仍被
+    # 占用（BatchSentry.exe 未退出；或安全软件正在扫描 190MB 的 app.asar/
+    # exe），EnsureEmptyDir 会以 "The process cannot access the file" 失败，
+    # 报错栈是 app-builder 的 Go 内部栈，极难定位。此处提前检测并给出可操作提示。
+    $unpacked = "dist-electron\win-unpacked"
+    if (Test-Path $unpacked) {
+        $lockProbe = Join-Path $unpacked "resources\app.asar"
+        if (Test-Path $lockProbe) {
+            try {
+                Rename-Item -Path $lockProbe -NewName "app.asar.lockprobe" -ErrorAction Stop
+                Rename-Item -Path (Join-Path $unpacked "resources\app.asar.lockprobe") -NewName "app.asar"
+            } catch {
+                Write-Host "  [WARN] $unpacked 被占用（resources\app.asar 无法重命名）。" -ForegroundColor Yellow
+                Write-Host "         可能原因：BatchSentry.exe 仍在运行，或安全软件正在扫描上次产物。" -ForegroundColor Yellow
+                Write-Host "         处理：关闭 BatchSentry.exe / 在杀软中把项目目录加入白名单后重试；" -ForegroundColor Yellow
+                Write-Host "         或改用备用输出目录：npx electron-builder --win --x64 -c.directories.output=dist-electron-tmp" -ForegroundColor Yellow
+            }
+        }
+    }
+
+    # electron-builder 的进度/警告输出走 stderr — 落盘日志，失败可诊断。
+    $ebLog = Join-Path $projectRoot "build\electron-builder.log"
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        & npx electron-builder --win --x64 *> $ebLog
+    } finally {
+        $ErrorActionPreference = $prevEAP
+    }
     if ($LASTEXITCODE -ne 0) {
-        Write-Fail "electron-builder failed"
+        Write-Host "  --- electron-builder 日志末尾 25 行 ---" -ForegroundColor Yellow
+        Get-Content $ebLog -Tail 25 | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray }
+        Write-Fail "electron-builder failed (完整日志: $ebLog)"
     }
 
     # dir target produces win-unpacked/ folder (not a single exe)

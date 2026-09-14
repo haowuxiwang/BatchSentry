@@ -1,6 +1,9 @@
 # Build artifacts
 dist/
 dist-electron/
+# 备用输出目录（build.ps1 -c.directories.output=dist-electron-m8 等；
+# 主目录被安全软件锁住时用于绕开 —— 见 build.ps1 的占用前置检查提示）
+dist-electron*/
 build/
 *.spec.bak
 
