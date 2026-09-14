@@ -185,6 +185,77 @@ def is_canonical(raw: str | None) -> bool:
     return bool(raw) and str(raw).strip().lower() in CANONICAL_TYPES
 
 
+# ── 复核分级（三色，M6/T6.4）────────────────────────────────────────────────
+# 按**检出来源**分层，而非按严重度：严重度回答"多严重"（排序用），来源回答
+# "谁判定的、可信度如何"（复核方式用）。复核者据此分配注意力 —— 规则层是
+# 确定性判据（红：必须逐条看，机器已确认事实）、LLM 层是辅助提示（蓝：可
+# 快速批量扫），未命中任何规则的类型计入"系统校验通过"（绿：覆盖面证明，
+# 见 `core/rules/registry.py::rule_coverage`）。
+#
+# 取值来源经实测扫描（core/rules/*、core/pipeline/stage2|stage3 的写入点）：
+#   rule / user_rule / llm_page / llm_fallback / llm_cross。
+REVIEW_TIER_BY_SOURCE: dict[str, str] = {
+    "rule": "rule",
+    "user_rule": "rule",   # 用户自定义规则：同样是确定性判据（可复现）
+    "llm_page": "llm",
+    "llm_fallback": "llm",
+    "llm_cross": "llm",
+}
+# 三色层级（顺序即面板展示顺序）。
+REVIEW_TIERS: tuple[str, ...] = ("rule", "llm", "pass")
+REVIEW_TIER_ZH: dict[str, str] = {
+    "rule": "规则命中",
+    "llm": "LLM 辅助",
+    "pass": "系统校验通过",
+}
+# 由 finding 承载的分级（去重保序）—— `pass` 不在其中：它是覆盖面概念，
+# 不来自单条 finding，见 rule_coverage()。
+FINDING_TIERS: tuple[str, ...] = tuple(dict.fromkeys(REVIEW_TIER_BY_SOURCE.values()))
+
+
+def review_tier(source: str | None) -> str:
+    """finding.source → 复核分级（rule/llm/pass 三色中的前两色）。
+
+    - 缺省（空）来源 → `rule`：与写入路径一致（stage3 落库时
+      `f.get("source", "rule")`，置信度评分同样 `or "rule"`）。
+    - 未知非空来源 → `llm`（保守）：视为需人工判读的辅助提示，绝不
+      冒充确定性判据 —— 误标成"规则"会让复核者放松警惕。
+    """
+    src = str(source or "").strip().lower()
+    if src in REVIEW_TIER_BY_SOURCE:
+        return REVIEW_TIER_BY_SOURCE[src]
+    return "llm" if src else "rule"
+
+
+def attach_review_tier(findings: list[dict]) -> list[dict]:
+    """就地给每条 finding 附 `tier` 字段，并返回同一列表。
+
+    SSR（main.py 复核页）与 AJAX（api/review.py list_findings）共用此函数，
+    前端只读 `f.tier`，不再各持一份 source→颜色映射 —— 双端映射漂移是
+    `type_zh` 历史上踩过的坑（见 tests/unit/test_type_sync.py）。
+    """
+    for f in findings:
+        if isinstance(f, dict):
+            f["tier"] = review_tier(f.get("source"))
+    return findings
+
+
+def tier_counts(findings: list[dict]) -> dict[str, int]:
+    """按分级统计条数（面板三色计数条的前两色）。
+
+    只统计"由 finding 承载"的分级（rule/llm）；`pass` 是覆盖面概念、不来自
+    finding，由 `rule_coverage()` 提供，故不在此处硬编码。
+    """
+    counts = {t: 0 for t in FINDING_TIERS}
+    for f in findings:
+        if not isinstance(f, dict):
+            continue  # 与 attach_review_tier 同款容错（上游可能混入非 dict）
+        t = f.get("tier") or review_tier(f.get("source"))
+        if t in counts:
+            counts[t] += 1
+    return counts
+
+
 # ── 置信度评分（T2.4 迁出 api/review.py）─────────────────────────────────────
 _CONF_BASE = 0.85
 _CONF_LLM_GEN_PENALTY = 0.15   # llm_cross/llm_fallback/user_rule（自然语言生成）

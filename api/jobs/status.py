@@ -87,18 +87,35 @@ async def _get_job_progress(db, job_id: str) -> dict:
     """获取 job 进度快照（SSE 推送用）。
 
     复用 get_job_status 的查询逻辑，但返回精简字段。
-    对抗审查（中文化收尾）：每 3 秒一次的 SSE 轮询此前 SELECT * 全列 —
+    对抗审查（中文化收尾）：每轮 SSE 推送此前 SELECT * 全列 —
     pdf_path / md5 / error_message 全文等无关字段随每次推送传输；
     改为投影到推送实际使用的列（jobs 表行内多数列从不用于进度）。
+
+    S2（M6/T6.2）：**终态快照缓存**。终态 job 的快照在定义上不再变化
+    （findings 只新增于分析期；复核改的是 finding.status 而非计数），
+    但仍会被反复查询：`_live_jobs_snapshot` 每轮会带上"近 10 分钟内
+    完成的终态 job"，每个终态 job 要跑 4 条 COUNT + 1 条分组统计。
+    此处以 (status, finished_at) 为键缓存终态快照，命中直接复用 —
+    状态或完成时间变化即失效（retry 复用同一行 id 的场景）。
+    活跃 job 照常实时计算。缓存是**唯一一份**（原先 listings 另有一份，
+    双套易漂移，已合并到此处）。
     """
+    from api.jobs import _ACTIVE_STATUSES
+
     cursor = await db.execute(
         "SELECT id, status, total_pages, error_message, failed_pages, "
-        "stage1_ms, stage2_ms, stage3_ms, ocr_progress, ocr_backend_used "
-        "FROM jobs WHERE id = ?", (job_id,)
+        "finished_at, stage1_ms, stage2_ms, stage3_ms, ocr_progress, "
+        "ocr_backend_used FROM jobs WHERE id = ?", (job_id,)
     )
     job = await cursor.fetchone()
     if not job:
         return None
+
+    status = job["status"]
+    if status not in _ACTIVE_STATUSES:
+        cached = cached_terminal_snapshot(job_id, status, job["finished_at"])
+        if cached is not None:
+            return cached
 
     cursor = await db.execute(
         "SELECT COUNT(*) FROM page_cache WHERE job_id = ?", (job_id,)
@@ -118,7 +135,7 @@ async def _get_job_progress(db, job_id: str) -> dict:
 
     page_finding_counts = await _page_finding_counts(db, job_id)
 
-    return {
+    progress = {
         "id": job["id"],
         "status": job["status"],
         "total_pages": job["total_pages"] or 0,
@@ -139,6 +156,51 @@ async def _get_job_progress(db, job_id: str) -> dict:
         "ocr_backend_used": job["ocr_backend_used"] if "ocr_backend_used" in job.keys() else None,
         "ocr_backend_display": _ocr_backend_display(job),
     }
+    if status not in _ACTIVE_STATUSES:
+        _store_terminal_snapshot(job_id, _snap_key(status, job["finished_at"]), progress)
+    return progress
+
+
+# 终态快照缓存（S2）—— 见 _get_job_progress docstring。
+# 键 = job_id，值 = ((status, finished_at), snapshot)。
+_TERMINAL_SNAP_CACHE: dict[str, tuple[tuple, dict]] = {}
+_TERMINAL_SNAP_CACHE_MAX = 100
+
+
+def _snap_key(status: str, finished_at) -> tuple:
+    """缓存键：状态 + 完成时间。任一变化即失效（retry 复用同一 job 行）。"""
+    return (status, str(finished_at or ""))
+
+
+def cached_terminal_snapshot(job_id: str, status: str, finished_at) -> dict | None:
+    """命中则返回终态快照的浅拷贝，否则 None。
+
+    供**已持有** (status, finished_at) 的调用方直接取用 —— 例如聚合流
+    `_live_jobs_snapshot` 每轮先列出候选 job，本就带着这两列；若仍走
+    `_get_job_progress`，为了拼缓存键还得再查一次 jobs 行（终态 job 数 × 1
+    条查询/轮，白白吃掉缓存收益）。
+    """
+    hit = _TERMINAL_SNAP_CACHE.get(job_id)
+    if hit is not None and hit[0] == _snap_key(status, finished_at):
+        return dict(hit[1])
+    return None
+
+
+def _store_terminal_snapshot(job_id: str, key: tuple, progress: dict) -> None:
+    """写入缓存（存副本，与调用方持有的 dict 解耦）。
+
+    容量兜底：达上限整体清空重建，而非 LRU —— 终态集合是"近 10 分钟"的
+    滚动态，清空后下一轮自然重建，代价可控且实现简单。
+    """
+    if len(_TERMINAL_SNAP_CACHE) >= _TERMINAL_SNAP_CACHE_MAX:
+        _TERMINAL_SNAP_CACHE.clear()
+    # 浅拷贝：调用方改一个顶层字段不得改脏缓存节点（曾导致跨请求串数据）。
+    _TERMINAL_SNAP_CACHE[job_id] = (key, dict(progress))
+
+
+def _reset_terminal_snap_cache() -> None:
+    """测试钩子：清空终态快照缓存（跨用例隔离）。"""
+    _TERMINAL_SNAP_CACHE.clear()
 
 def _parse_ocr_progress(raw) -> dict:
     """解析 jobs.ocr_progress JSON 字符串 → {"done": N, "total": M}。
@@ -227,7 +289,9 @@ def _derive_phase(status: str, pages_analyzed: int, total_pages: int,
 async def stream_job_progress(job_id: str, request: Request = None):
     """SSE 端点：实时推送 job 进度，直到终态。
 
-    前端通过 EventSource 订阅，每 2 秒收到一次进度更新。
+    前端通过 EventSource 订阅，推送间隔见 `api.jobs._SSE_POLL_SECONDS`
+    （当前 2 秒）—— 该常量同时驱动 `retry:` 帧与服务端 sleep，两者必须
+    一致（客户端重连不能快过服务端推送）。
     遇到终态 (review/partial_review/error/cancelled/archived) 后推送最终状态并关闭。
     """
     # P2-1: 守卫统一
@@ -236,11 +300,12 @@ async def stream_job_progress(job_id: str, request: Request = None):
         raise HTTPException(403, "Forbidden (non-local request)")
     import asyncio
     from fastapi.responses import StreamingResponse
+    from api.jobs import _SSE_POLL_SECONDS  # 调用期解析（测试可 patch）
 
     async def event_generator():
         db = await get_db()
         seq = 0
-        yield "retry: 2000\n\n"
+        yield f"retry: {int(_SSE_POLL_SECONDS * 1000)}\n\n"
         try:
             while True:
                 if await request.is_disconnected():
@@ -256,7 +321,7 @@ async def stream_job_progress(job_id: str, request: Request = None):
                     seq += 1
                     yield (f"id: {seq}\n"
                            f"data: {json.dumps({'type': 'error', 'message': '进度查询失败'}, ensure_ascii=False)}\n\n")
-                    await asyncio.sleep(3)
+                    await asyncio.sleep(_SSE_POLL_SECONDS)
                     continue
                 if progress is None:
                     seq += 1
@@ -278,7 +343,7 @@ async def stream_job_progress(job_id: str, request: Request = None):
                     yield f"id: {seq}\nevent: done\ndata: {payload}\n\n"
                     return
 
-                await asyncio.sleep(3)
+                await asyncio.sleep(_SSE_POLL_SECONDS)
         except asyncio.CancelledError:
             # 客户端断开时 Starlette 取消生成器 — 正常路径，不算错误
             raise

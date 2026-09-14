@@ -67,6 +67,16 @@ except (TypeError, ValueError):
 _ACTIVE_STATUSES = ("pending", "ocr_running", "ocr_done", "analyzing", "cancelling")
 _TERMINAL_STATUSES = ("review", "partial_review", "error", "cancelled", "archived")
 
+# S1（M6/T6.1）：SSE 轮询间隔（秒）—— 单一来源。
+# 前后端三处必须一致，否则出现"客户端重连比服务端推送更快"的空转：
+#   - `retry: <ms>` 帧（EventSource 重连退避）
+#   - 服务端 event_generator 的推送/退避 sleep
+#   - 前端文案（"每 N 秒刷新"）
+# 历史缺陷：retry 写 2000ms、服务端 sleep(3)、docstring 写"每 2 秒"，
+# 三方互相矛盾。现统一由此常量派生（消费方在调用期 `from api.jobs import`
+# 取用，便于测试 monkeypatch）。
+_SSE_POLL_SECONDS = 2
+
 
 # Import submodules AFTER router/constants exist — they decorate the router
 # and read shared names from this namespace.
@@ -89,6 +99,7 @@ _invalidate_pdf_doc = page_image._invalidate_pdf_doc
 _page_finding_counts = page_image._page_finding_counts
 get_job_status = status.get_job_status
 _get_job_progress = status._get_job_progress
+_reset_terminal_snap_cache = status._reset_terminal_snap_cache
 _parse_ocr_progress = status._parse_ocr_progress
 stream_job_progress = status.stream_job_progress
 cancel_job = actions.cancel_job

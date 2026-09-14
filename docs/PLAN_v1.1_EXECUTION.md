@@ -19,7 +19,8 @@
 | M3 OCR 尺寸/形态鲁棒性（O1/O2/O3/O6） | ✅ | 本文件 §2 M3；`test_ocr_robustness.py` 42 例 + `tests/e2e_ocr_integrity.py` 20 断言全通过 |
 | M4 规则扩展 R11–R17 + 注册表 | ✅ | `f0ebdc`；金标 **11 例 P/R/F1=1.0（0 known_gap）**；真实 51 页重放 **+9 findings（390→399，+2.3%）、critical 12→13**，全部为真信号（无 deviation_link/alteration 噪音） |
 | M5 知识库多源化 + 条款级溯源 | ✅ | `4270fd9`+`f9b73df`；**6 源 / 441 条**；金标 37 条命中率 **97.3%**（排除已登记缺口 100%，阈值 85%）；门禁 95.22%/1845 passed |
-| M6–M8 | ⬜ 待执行 | 本文件 §2 |
+| M6 SSE 优化 + 对标落地 | ✅ | 本文件 §2 M6 落地结论；S1 常量统一（源码扫描锁死）、S2 稳态查询 **16→1**、S4 秒级本地计时、T6.4 三色分级（六面同源机检）、T6.5 评估判**不做**（`docs/TREND_SCREENING_EVAL.md`） |
+| M7–M8 | ⬜ 待执行 | 本文件 §2 |
 
 **当前工作区**：干净；本地领先 `origin/main` **23 个提交**（未推送，缺 GitHub PAT）。
 
@@ -292,6 +293,47 @@
 | T6.5 | **趋势筛查评估**（借鉴宝软 EIOS）：参数未超限但偏离历史区间 → 评估是否做 | `docs/` | 出评估结论 |
 
 **依赖**：无（T6.1–T6.3 可先做）。**产出**：S1 一致 + S2 可测。
+
+**M6 落地结论（2026-09-14）**
+
+- **T6.1（S1）轮询常量统一** —— 定位到三方矛盾：`retry: 2000`（2s）但我服务端
+  `asyncio.sleep(3)`、docstring 又写"每 2 秒"。后果是客户端重连快于服务端推送，
+  断线重连立即拿到旧帧、白跑一轮。现统一为 `api.jobs._SSE_POLL_SECONDS = 2`，
+  `retry:` 帧与两处 sleep 全部由此派生；`tests/unit/test_sse_poll_constant.py`
+  以**源码扫描**锁死（禁止再出现 `retry: <数字>` / `asyncio.sleep(<数字>)` 字面量，
+  并禁掉"每 3 秒"这类过时文案）。
+- **T6.2（S2）终态快照缓存** —— 原先只有 `listings.py` 自持一份缓存，`status.py`
+  的共用查询 `_get_job_progress` 没有 → 双套易漂移。现**收敛到
+  `status.py::_get_job_progress` 单一来源**（键 `(status, finished_at)`，容量 100），
+  并抽出 `cached_terminal_snapshot()` 供聚合流直接用**已查出的** `status/finished_at`
+  拼键，避免为拼键再查一次 jobs 行。
+  实测（`test_steady_state_query_count_drops`）：3 个终态 job 的聚合流一轮查询数
+  **16 → 1**（终态 job 每轮 5 条 → 0），即 S2 的"稳态 QPS 可测下降"。
+  *过程中修掉一个真实缺陷*：写入缓存时存的是同一个 dict 对象，调用方改字段会
+  改脏缓存（跨请求串数据）→ 改为存副本、命中返回副本。
+- **T6.3（S4）阶段内已耗时** —— `static/eta.js` 增纯函数 `tickPhase/showElapsed/
+  fmtElapsed`（node 单测 5 组锁定）；`review.js` 用 **1s 本地 ticker** 刷新"已用 X"
+  （不等 2s 一帧；Stage 3 单次 LLM 调用数分钟不再像卡死），`upload.js` 行内按帧
+  刷新并配 1s ticker 重写"已用"段。*两处隐患已消除*：计时器建在 `connect()` 内会
+  因重试叠加泄漏 → 上提到订阅作用域；`labelEditable` 防止断开/错误提示被 ticker 覆写。
+- **T6.4 三色复核分级** —— 按**检出来源**分层（与严重度正交）：
+  红=规则命中 / 蓝=LLM 辅助 / 绿=系统校验通过。映射**只在**
+  `core/finding_quality.REVIEW_TIER_BY_SOURCE` 一处，服务端
+  `attach_review_tier()` 挂 `tier` 到每条 finding（SSR 与 AJAX 共用），前端只读
+  `f.tier` 不持映射表 —— 由 `tests/unit/test_review_tier.py` 机检（含"产出端所有
+  `source` 字面量都必须有分级"的漂移护栏 + CSS 类名逐键对齐）。绿色 = 启用规则中
+  0 命中的**类型**数（`core/rules/registry.rule_coverage`），口径为**全批次**
+  （红/蓝为本页），并在面板上标明。
+- **T6.5 趋势筛查评估** —— 结论见 `docs/TREND_SCREENING_EVAL.md`，**判定 v1.1 不做**：
+  需求与法源成立（第二百三十五/二百三十八/二百五十三/二百六十六条 + 确认与验证
+  附录第二十九条），但**数据前提不满足** —— 真实库 23 个 job 中实质只有 **1 个批次**
+  （51 页 job 均为同一份丝裂霉素提取批记录 112701 的反复重跑；92 个"产品标识"实际
+  是同一产品的自由文本变体）；参数名 37% 只出现一次不可作主键；仅 30% 参数可机械
+  解析规格。单批次**无法标定阈值 → 验收不可证伪**，故不做，仅保留阶段 0
+  （测量序列结构化沉淀）作为 v1.2 起点。证据由入库脚本
+  `scripts/eval_trend_basis.py`（只读库）复现。
+
+**门禁**：见收尾报告（`devlogs/gate_report_*.json`）。
 
 ---
 

@@ -403,9 +403,47 @@
     if (!samples) return "";
     const eta = PbcEta.analyzeEta(samples, total);
     if (!eta || eta.etaSec == null) return "";
-    const txt = PbcEta.fmtEta(eta.etaSec);
-    return txt ? ` · 剩余${txt}` : "";
+    const etaTxt = PbcEta.fmtEta(eta.etaSec);
+    return etaTxt ? ` · 剩余${etaTxt}` : "";
   };
+
+  // S4（M6/T6.3）：阶段内已耗时 —— jobId -> {phase, startedAt}（跨帧保持，
+  // 故用 Map 而非行内变量）。Stage 3 跨页分析单次调用可达数分钟，帧间
+  // cross_progress 不动 → 行内文案看着像卡死；"已用 X" 每帧前进即证明
+  // 进程仍在工作。终态清理防 Map 泄漏。
+  const phaseTimerByJob = new Map();
+  const elapsedSuffixFor = (jid, phase) => {
+    if (typeof PbcEta === "undefined" || !phase) return "";
+    const st = PbcEta.tickPhase(phaseTimerByJob.get(jid) || null, phase);
+    phaseTimerByJob.set(jid, st);
+    if (!PbcEta.showElapsed(st)) return "";
+    const t = PbcEta.fmtElapsed(st.elapsedSec);
+    return t ? ` · 已用 ${t}` : "";
+  };
+  // 活跃行文案刷新表（jobId -> {el, base, phase}）：1s 本地 ticker 只重写
+  // "已用"段，不等 SSE 帧（服务端 2s 一帧，秒级观感要靠本地计时）。
+  // 生命周期与实时订阅配对：startLiveTracking 启动 / closeAllLiveSources 停止。
+  const stageRows = new Map();
+  let stageTicker = null;
+  function startStageTicker() {
+    if (stageTicker) return;
+    stageTicker = setInterval(() => {
+      stageRows.forEach((e, jid) => {
+        if (!e.el.isConnected) {
+          stageRows.delete(jid); // 行被 SPA 重建/替换 → 停止追踪
+          return;
+        }
+        e.el.textContent = e.base + elapsedSuffixFor(jid, e.phase);
+      });
+    }, 1000);
+  }
+  function stopStageTicker() {
+    if (stageTicker) {
+      clearInterval(stageTicker);
+      stageTicker = null;
+    }
+    stageRows.clear();
+  }
 
   // === Job 行实时状态（SSE 聚合） ===
   // 单条 /api/jobs/live 连接推送所有活跃任务快照，按 job_id 分发到行内。
@@ -413,6 +451,7 @@
   // 多标签页不会饿死普通请求。断线 3 次后降级为逐 job 10s 轮询。
   function startLiveTracking() {
     if (liveSource) return;
+    startStageTicker(); // S4：活跃行的"已用 X"本地秒级刷新
     const es = new EventSource("/api/jobs/live");
     liveSource = es;
     es.onmessage = (e) => {
@@ -517,6 +556,7 @@
     }
     if (TERMINAL_STATUSES.includes(st)) {
       etaSamplesByJob.delete(li.dataset.jobId);
+      phaseTimerByJob.delete(li.dataset.jobId);
     }
     const dot = li.querySelector(".status-dot");
     const stText = li.querySelector(".status-text");
@@ -528,15 +568,16 @@
     if (pages) {
       const prog = d.ocr_progress || {};
       const sh = d.self_heal_progress;
+      // S4（M6/T6.3）：先算出"基础文案"，再统一追加阶段已耗时 ——
+      // 统一出口避免各分支各自拼接导致漏加/重复加。
+      let base;
       if (
         (st === "ocr_running" || st === "ocr_done") &&
         sh && sh.total > 0
       ) {
-        // Todo 13: 空页自愈 — 主 OCR 进度已满但状态未前进，防止"卡死"误判
-        pages.textContent = `空页自愈 ${sh.done}/${sh.total}`;
+        base = `空页自愈 ${sh.done}/${sh.total}`;
       } else if ((st === "ocr_running" || st === "ocr_done") && prog.total > 0) {
-        // 分片模式（MinerU + OCR_SLICES>1）下分析与 OCR 并行 — 同时显示两路进度
-        pages.textContent =
+        base =
           d.pages_analyzed > 0
             ? `OCR ${prog.done}/${prog.total} · 分析 ${d.pages_analyzed}/${d.total_pages || "?"}` +
               etaSuffixFor(li.dataset.jobId, d.total_pages)
@@ -545,16 +586,24 @@
         // Todo 14: stage3 阶段指示 — 页分析完成后已进入跨页语义分析
         // P1-6: 子进度里程碑（规则校验/LLM 兜底/LLM 语义）
         const cr = d.cross_progress;
-        pages.textContent = cr && cr.total > 0
+        base = cr && cr.total > 0
           ? `跨页分析 ${cr.done}/${cr.total} · ${cr.label}`
           : `跨页分析中 · ${d.pages_analyzed || 0}/${d.total_pages || "?"} 页`;
       } else if (st === "analyzing") {
-        pages.textContent = `分析 ${d.pages_analyzed || 0}/${d.total_pages || "?"}` +
+        base = `分析 ${d.pages_analyzed || 0}/${d.total_pages || "?"}` +
           etaSuffixFor(li.dataset.jobId, d.total_pages);
       } else if (st === "partial_review" && d.error_message) {
-        pages.textContent = `部分可复核 · ${d.pages_analyzed}/${d.total_pages || "?"} 页`;
+        base = `部分可复核 · ${d.pages_analyzed}/${d.total_pages || "?"} 页`;
       } else {
-        pages.textContent = `${d.total_pages || "?"} 页`;
+        base = `${d.total_pages || "?"} 页`;
+      }
+      const phase = d.phase || st;
+      if (TERMINAL_STATUSES.includes(st)) {
+        pages.textContent = base; // 终态：不再追加计时
+        stageRows.delete(li.dataset.jobId);
+      } else {
+        pages.textContent = base + elapsedSuffixFor(li.dataset.jobId, phase);
+        stageRows.set(li.dataset.jobId, { el: pages, base: base, phase: phase });
       }
     }
     // cr-19：错误行实时显示失败原因（旧实现只有红点"出错"，原因需点进复核页）
@@ -606,6 +655,7 @@
     }
     pollTimers.forEach((t) => clearInterval(t));
     pollTimers.clear();
+    stopStageTicker();
   }
 
   function renderJobRow(job, i) {

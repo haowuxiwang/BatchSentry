@@ -260,6 +260,12 @@ async def list_findings(
             )
         total = (await count_cursor.fetchone())[0]
 
+    # 三色复核分级（M6/T6.4）：与 SSR（main.py 复核页）共用同一 core 函数，
+    # 前端只读 f.tier —— 避免"SSR 一套颜色、AJAX 又一套"的映射漂移。
+    from core.finding_quality import attach_review_tier, tier_counts
+    attach_review_tier(findings)
+    tier_count = tier_counts(findings)
+
     return {
         "findings": findings,
         "count": len(findings),
@@ -268,6 +274,7 @@ async def list_findings(
         "limit": limit,
         "offset": offset,
         "has_more": (offset + limit) < total,
+        "tier_counts": tier_count,
     }
 
 
@@ -285,7 +292,9 @@ async def get_finding(job_id: str, finding_id: int, request: Request = None):
     row = await cursor.fetchone()
     if not row:
         raise HTTPException(404, "问题记录不存在")
-    return dict(row)
+    # 与列表端点同源：单条详情也带三色分级（M6/T6.4）
+    from core.finding_quality import attach_review_tier
+    return attach_review_tier([dict(row)])[0]
 
 
 @router.post("/jobs/{job_id}/findings/{finding_id}")

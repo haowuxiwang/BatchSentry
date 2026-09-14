@@ -411,12 +411,51 @@
                     <h3 class="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">问题清单</h3>
                     <span class="text-[11px] text-muted-foreground tabular-nums">{{ findings|length }}</span>
                 </div>
+                {# 三色复核分级（M6/T6.4）— 按**检出来源**分层，与严重度正交：
+                   红=规则命中（确定性判据，必须逐条看）/ 蓝=LLM 辅助（可信度较低，
+                   可批量扫）/ 绿=系统校验通过（启用规则中未命中的类型，是覆盖面
+                   证明而非问题）。红蓝为**本页**口径（与下方清单一致），绿为
+                   **本批次**口径（规则是全批范围执行的，页级归因会失真）。 #}
+                <div id="tier-bar" class="tier-bar" role="group" aria-label="复核分级">
+                    <span class="tier-chip" title="本页由确定性规则判定命中的问题（必须逐条复核）">
+                        <span class="tier-dot tier-dot-rule"></span>规则命中
+                        <span class="tier-num" id="tier-count-rule">{{ tier_counts.rule }}</span>
+                    </span>
+                    <span class="tier-chip" title="本页由 LLM 辅助发现的问题（可信度较低，可批量复核）">
+                        <span class="tier-dot tier-dot-llm"></span>LLM 辅助
+                        <span class="tier-num" id="tier-count-llm">{{ tier_counts.llm }}</span>
+                    </span>
+                    <span class="tier-chip" title="本批次启用规则中未命中任何问题的类型（覆盖面证明）">
+                        <span class="tier-dot tier-dot-pass"></span>系统校验通过
+                        <span class="tier-num" id="tier-count-pass">{{ rule_coverage.passed_count }}</span>/<span class="tier-num">{{ rule_coverage.type_total }}</span>
+                    </span>
+                </div>
+                {% if rule_coverage %}
+                <details id="rule-coverage-panel" class="rule-coverage">
+                    <summary class="text-[11px] text-muted-foreground cursor-pointer select-none hover:text-foreground">
+                        本批次已通过的系统校验项（{{ rule_coverage.passed_count }} 类 / 共 {{ rule_coverage.rule_total }} 条规则）
+                    </summary>
+                    <ul class="rule-coverage-list space-y-1">
+                        {% for e in rule_coverage.passed %}
+                        <li class="text-[11px] text-muted-foreground leading-relaxed">
+                            <span class="font-medium text-foreground">{{ type_zh.get(e.type, e.type) }}</span>
+                            · {{ e.description }}
+                            <span class="opacity-70">({{ e.rule_ids|join('、') }})</span>
+                        </li>
+                        {% endfor %}
+                        {% if not rule_coverage.passed %}
+                        <li class="text-[11px] text-muted-foreground">无 — 本批次所有启用规则均有命中</li>
+                        {% endif %}
+                    </ul>
+                </details>
+                {% endif %}
                 <div id="findings-list" class="border-t border-border{% if critical_count > 0 %} findings-list-critical{% endif %}">
                     {% if findings %}
                         {% for f in findings %}
                         {% set sev_dot = 'bg-destructive' if f.severity == 'critical' else ('bg-warning' if f.severity == 'warning' else 'bg-info') %}
                         <div id="finding-{{ f.id }}"
-                             class="finding-card stagger-in hover-lift border-b border-border last:border-b-0 {% if f.status == 'confirmed' %}opacity-50{% elif f.status == 'rejected' %}opacity-40{% endif %} py-2.5 px-1"
+                             class="finding-card tier-{{ f.tier or 'rule' }} stagger-in hover-lift border-b border-border last:border-b-0 {% if f.status == 'confirmed' %}opacity-50{% elif f.status == 'rejected' %}opacity-40{% endif %} py-2.5 px-1"
+                             data-tier="{{ f.tier or 'rule' }}"
                              data-ocr="{{ f.ocr_text | e }}"
                              style="--i: {{ loop.index0 }}">
                             <div class="flex items-start gap-2">

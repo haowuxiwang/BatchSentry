@@ -150,6 +150,32 @@
       let pollTimer = null;
       let es = null;
 
+      // S4（M6/T6.3）：阶段内已耗时 —— 秒级**本地**计时。
+      // 服务端 2s 推一帧，但 Stage 3 跨页语义分析单次调用可达数分钟、
+      // 帧间 cross_progress 不动 → 文案看着像卡死。本地 1s ticker 只刷新
+      // "已用 X"段，不依赖下一帧到达。阶段（phase）变化即重置起点。
+      //
+      // 注意作用域：计时器必须建在 connect() **之外** —— connect 会因断线
+      // 重试被多次调用，建在里面会导致定时器叠加（每次重连多一个 ticker）。
+      let phaseState = null;
+      let lastLabel = "";
+      let labelEditable = true; // 断开/错误提示期间不由 ticker 覆写
+      const elapsedSuffix = () => {
+        if (typeof PbcEta === "undefined" || !phaseState) return "";
+        if (!PbcEta.showElapsed(phaseState)) return "";
+        const t = PbcEta.fmtElapsed(phaseState.elapsedSec);
+        return t ? ` · 已用 ${t}` : "";
+      };
+      const renderProgressText = () => {
+        txt.textContent = lastLabel + elapsedSuffix();
+      };
+      const elapsedTimer = setInterval(() => {
+        if (typeof PbcEta === "undefined" || !phaseState) return;
+        phaseState = PbcEta.tickPhase(phaseState, phaseState.phase);
+        if (labelEditable && lastLabel) renderProgressText();
+      }, 1000);
+      const stopElapsedTimer = () => clearInterval(elapsedTimer);
+
       const connect = () => {
         const url = `/api/jobs/${jid}/stream`;
         log("SSE subscribe", url);
@@ -171,8 +197,9 @@
           if (typeof PbcEta === "undefined" || !total) return "";
           const eta = PbcEta.analyzeEta(etaSamples, total);
           if (!eta || eta.etaSec == null) return "";
-          const txt = PbcEta.fmtEta(eta.etaSec);
-          return txt ? ` · 剩余${txt}` : "";
+          // 注意：不要命名 txt —— 外层 txt 是 #progress-text 元素
+          const etaTxt = PbcEta.fmtEta(eta.etaSec);
+          return etaTxt ? ` · 剩余${etaTxt}` : "";
         };
 
         es.onmessage = (e) => {
@@ -185,6 +212,8 @@
               log.err("SSE job error", d);
               es.close();
               if (pollTimer) clearInterval(pollTimer);
+              labelEditable = false;
+              stopElapsedTimer();
               txt.textContent = "任务不存在或已被删除";
               const barEl = document.getElementById("progress-bar-container");
               if (barEl) barEl.classList.add("opacity-60");
@@ -331,8 +360,17 @@
             }
 
             fill.style.width = pct + "%";
-            txt.textContent = label;
-            log("SSE progress", { status: d.status, pct, label });
+            // S4（M6/T6.3）：阶段内已耗时 —— 以服务端 phase 为计时维度
+            // （analyzing 同时含 Stage 2/3，只有 phase 能区分）。phase 变化
+            // 即重置起点；随后由 1s ticker 持续刷新，不等下一帧。
+            const phase = d.phase || d.status;
+            if (typeof PbcEta !== "undefined") {
+              phaseState = PbcEta.tickPhase(phaseState, phase);
+            }
+            lastLabel = label;
+            labelEditable = true;
+            renderProgressText();
+            log("SSE progress", { status: d.status, pct, label, phase });
           } catch (err) {
             log.warn("SSE parse error", err);
           }
@@ -341,6 +379,7 @@
         es.addEventListener("done", (e) => {
           log("SSE done — closing stream, reloading page");
           es.close();
+          stopElapsedTimer();
           // 终态：1.5s 后自动刷新页面，加载最终 findings
           safeAutoReload(1500);
         });
@@ -348,6 +387,7 @@
         es.onerror = () => {
           log.warn("SSE connection error", { retryCount });
           es.close();
+          labelEditable = false; // 提示文案不被 1s ticker 覆写
           if (retryCount < MAX_RETRIES) {
             // 指数退避重试：2s / 4s / 8s
             const delay = 2000 * Math.pow(2, retryCount);
@@ -357,6 +397,7 @@
           } else {
             // 重试耗尽：fallback 到 10s 轮询 /api/jobs/{id}
             log.warn("SSE retries exhausted, fallback to polling");
+            stopElapsedTimer();
             txt.textContent = "实时连接不可用，切换轮询…";
             pollTimer = setInterval(async () => {
               try {
@@ -377,10 +418,11 @@
 
       connect();
 
-      // 页面卸载时清理 SSE 连接 + 轮询定时器
+      // 页面卸载时清理 SSE 连接 + 轮询/阶段计时定时器
       window.addEventListener("beforeunload", () => {
         if (es) es.close();
         if (pollTimer) clearInterval(pollTimer);
+        stopElapsedTimer();
       });
     }
 
@@ -1114,6 +1156,20 @@
     return map[key] || (key ? `未知(${key})` : "");
   }
 
+  // 三色复核分级（M6/T6.4）计数条刷新 —— 红/蓝为本页口径，与下方清单一致；
+  // 绿色（系统校验通过）是全批次口径，由 SSR 渲染，翻页不重算。
+  function updateTierCounts(findings) {
+    const tally = { rule: 0, llm: 0 };
+    for (const f of findings || []) {
+      const t = f && f.tier === "llm" ? "llm" : "rule"; // 未知/缺省 → 规则（保守同后端）
+      tally[t] += 1;
+    }
+    const rEl = document.getElementById("tier-count-rule");
+    const lEl = document.getElementById("tier-count-llm");
+    if (rEl) rEl.textContent = String(tally.rule);
+    if (lEl) lEl.textContent = String(tally.llm);
+  }
+
   function renderFindings(findings, hasMore) {
     const list = document.getElementById("findings-list");
     if (!list) return;
@@ -1173,6 +1229,7 @@
     if (findings.length === 0) {
       list.innerHTML =
         '<div class="py-8 text-center text-[13px] text-muted-foreground">本页无问题</div>';
+      updateTierCounts(findings);
       return;
     }
 
@@ -1190,6 +1247,9 @@
             : f.status === "rejected"
               ? "opacity-40"
               : "";
+        // 三色分级（M6/T6.4）：tier 由后端 core.finding_quality 单一来源计算，
+        // 前端只读不做映射 —— 避免 SSR/AJAX 两套颜色漂移。
+        const tier = f.tier === "llm" ? "llm" : "rule";
         const statusTag =
           f.status !== "pending"
             ? `<span class="text-[11px] text-muted-foreground">· ${esc(zhOrUnknown(statusZh, f.status))}</span>`
@@ -1260,7 +1320,7 @@
                 </div>`
             : "";
         return `
-                <div id="finding-${fid}" class="finding-card stagger-in hover-lift border-b border-border last:border-b-0 ${statusOpacity} py-2.5 px-1" data-ocr="${esc(f.ocr_text || "")}" style="--i: ${i}">
+                <div id="finding-${fid}" class="finding-card tier-${tier} stagger-in hover-lift border-b border-border last:border-b-0 ${statusOpacity} py-2.5 px-1" data-tier="${tier}" data-ocr="${esc(f.ocr_text || "")}" style="--i: ${i}">
                     <div class="flex items-start gap-2">
                         <span class="w-1.5 h-1.5 rounded-full ${sevDot} mt-[7px] shrink-0"></span>
                         <div class="flex-1 min-w-0">
@@ -1292,6 +1352,8 @@
           ? `<div class="py-2 px-1 text-[11px] text-muted-foreground text-center">本页已显示 ${findings.length} 条，仍有多条未显示（请逐页翻页或处理后刷新）</div>`
           : "",
       );
+    // 三色计数条随本页清单同步（AJAX 翻页后红/蓝数字必须跟上）
+    updateTierCounts(findings);
   }
 
   function goPage(p) {

@@ -18,6 +18,8 @@ from config import config
 from db.client import get_db, close_db
 from logging_config import setup_logging, generate_request_id, request_id_var
 from core.pipeline import recover_stuck_jobs
+from core.finding_quality import attach_review_tier, tier_counts
+from core.rules.registry import rule_coverage
 
 setup_logging()
 logger = logging.getLogger(__name__)
@@ -530,6 +532,18 @@ async def review_page(job_id: str, request: Request, page: int = 1):
         except Exception:
             pass
 
+    # 三色复核分级（M6/T6.4）：本页 finding 按来源分层（规则=红 / LLM=蓝），
+    # 并给出全 job 的规则覆盖面（系统校验通过=绿）。tier 由 core 单一来源
+    # 计算，SSR 与 AJAX 共用同一函数（前端不各持映射表）。
+    attach_review_tier(findings)
+    tier_count = tier_counts(findings)
+    cursor = await db.execute(
+        "SELECT type, COUNT(*) AS cnt FROM findings WHERE job_id = ? GROUP BY type",
+        (job_id,),
+    )
+    type_count_map = {r["type"]: r["cnt"] for r in await cursor.fetchall()}
+    coverage = rule_coverage(type_count_map)
+
     return templates.TemplateResponse(request, "review.html", {
         "job_id": job_id,
         "filename": job["filename"],
@@ -543,6 +557,8 @@ async def review_page(job_id: str, request: Request, page: int = 1):
         "findings": findings,
         "severity_counts": severity_counts,
         "page_finding_counts": page_finding_counts,
+        "tier_counts": tier_count,
+        "rule_coverage": coverage,
         "failed_pages": failed_pages,
         "pdf_url": f"/api/jobs/{job_id}/pdf",
         "stage1_ms": job["stage1_ms"],

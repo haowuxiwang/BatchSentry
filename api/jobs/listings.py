@@ -71,6 +71,10 @@ async def _live_jobs_snapshot(db) -> list[dict]:
     只推活跃任务会让任务行永远卡在"分析中"、归档/删除按钮永不启用
     （对抗审查发现，需刷新页面才恢复）。archived 排除（归档区单独渲染）。
 
+    终态 job 的快照永不变，故其重算开销由 `_get_job_progress` 内置的
+    终态快照缓存吸收（M6/T6.2）—— 本函数不再自持缓存（历史上这里
+    另有一份，与 status 侧重复，易漂移）。
+
     抽成纯函数便于单测（httpx ASGITransport 无法交付永不结束的
     SSE 流——它要等 app 完成后才返回 Response）。
     """
@@ -86,30 +90,23 @@ async def _live_jobs_snapshot(db) -> list[dict]:
     )
     rows = await cursor.fetchall()
     snapshots = []
-    from api.jobs.status import _get_job_progress  # call-time (route order)
-    # 对抗审查 P2：终态 job 的快照永不变化，却每 3s 重算 5 条查询。
-    # 以 (id, status, finished_at) 为 key 缓存最近 100 个终态快照，
-    # 命中直接复用；活跃 job 照常实时计算。
-    global _terminal_snap_cache
+    # call-time (route order)：status 符号在调用期解析，避免模块导入顺序问题。
+    from api.jobs.status import (
+        _get_job_progress,
+        cached_terminal_snapshot,
+    )
     for r in rows:
-        cached = _terminal_snap_cache.get(r["id"])
-        if cached and r["status"] not in _ACTIVE_STATUSES:
-            snapshots.append(cached[1])
-            continue
+        # 候举行已带 status/finished_at → 直接拼缓存键，命中则零查询复用
+        # （T6.2 稳态 QPS 下降的关键：终态 job 每轮 5 条查询 → 0）。
+        if r["status"] not in _ACTIVE_STATUSES:
+            cached = cached_terminal_snapshot(r["id"], r["status"], r["finished_at"])
+            if cached is not None:
+                snapshots.append(cached)
+                continue
         progress = await _get_job_progress(db, r["id"])
         if progress:
-            if r["status"] not in _ACTIVE_STATUSES:
-                if len(_terminal_snap_cache) > 100:
-                    _terminal_snap_cache.clear()
-                _terminal_snap_cache[r["id"]] = (
-                    (r["status"], str(r["finished_at"] or "")),
-                    progress,
-                )
             snapshots.append(progress)
     return snapshots
-
-
-_terminal_snap_cache: dict[str, tuple[tuple, dict]] = {}
 
 @router.get("/live")
 async def stream_all_live_jobs(request: Request = None):
@@ -126,11 +123,12 @@ async def stream_all_live_jobs(request: Request = None):
         raise HTTPException(403, "Forbidden (non-local request)")
     import asyncio
     from fastapi.responses import StreamingResponse
+    from api.jobs import _SSE_POLL_SECONDS  # 调用期解析（测试可 patch）
 
     async def event_generator():
         db = await get_db()
         seq = 0
-        yield "retry: 2000\n\n"
+        yield f"retry: {int(_SSE_POLL_SECONDS * 1000)}\n\n"
         try:
             while True:
                 if await request.is_disconnected():
@@ -141,11 +139,11 @@ async def stream_all_live_jobs(request: Request = None):
                     # P0-4 修复：与单 job 流同款守卫 — DB 异常记录后跳过本轮，
                     # 不让聚合流静默中断（多任务进度全断）。
                     logger.error(f"SSE live snapshot query failed: {e!r}")
-                    await asyncio.sleep(3)
+                    await asyncio.sleep(_SSE_POLL_SECONDS)
                     continue
                 seq += 1
                 yield f"id: {seq}\ndata: {json.dumps({'jobs': snapshots}, ensure_ascii=False)}\n\n"
-                await asyncio.sleep(3)
+                await asyncio.sleep(_SSE_POLL_SECONDS)
         except asyncio.CancelledError:
             raise
         except Exception as e:

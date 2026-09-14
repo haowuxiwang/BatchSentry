@@ -104,13 +104,74 @@
     return (perMin >= 10 ? Math.round(perMin) : perMin.toFixed(1)) + " 页/分";
   }
 
+  /* ── S4（M6/T6.3）：阶段内已耗时 ────────────────────────────────────
+   *
+   * 背景：Stage 3 跨页语义分析单次 LLM 调用可达数分钟，其间服务端
+   * 进度帧可能毫无变化（cross_progress.done 不动）→ 文案看着像卡死。
+   * 服务端 2s 推一帧不足以表达"还活着"，故引入**前端本地秒级计时**：
+   * 阶段（phase）一变就重置起点，文案里追加"已用 X"。
+   *
+   * 计时维度用服务端 phase（ocr/analyze/cross/done/idle），而非 status ——
+   * analyzing 同时覆盖 Stage 2 与 Stage 3，只有 phase 能区分"页分析"与
+   * "跨页分析"，否则 Stage 3 的计时会从 Stage 2 起点开始算，虚高。 */
+
+  // 需要显示"已用"的阶段（终态/空闲不显示）。
+  var LONG_PHASES = ["ocr", "analyze", "cross"];
+  // 起步几秒内不显示（避免"已用 0 秒"闪一下）。
+  var MIN_ELAPSED_SHOW_SEC = 5;
+
+  /** 阶段计时推进：phase 变化即重置起点。
+   *
+   * prev: 上一次的 {phase, startedAt}（首次传 null/undefined）
+   * 返回 {phase, startedAt, elapsedSec}。纯函数（nowMs 注入，无 Date.now
+   * 依赖便于单测）。
+   */
+  function tickPhase(prev, phase, nowMs) {
+    var now = nowMs == null ? Date.now() : nowMs;
+    if (!prev || prev.phase !== phase || typeof prev.startedAt !== "number") {
+      return { phase: phase, startedAt: now, elapsedSec: 0 };
+    }
+    return {
+      phase: phase,
+      startedAt: prev.startedAt,
+      elapsedSec: Math.max(0, Math.round((now - prev.startedAt) / 1000)),
+    };
+  }
+
+  /** 该阶段是否需要显示"已用"（起步阈值内的不显示）。 */
+  function showElapsed(state) {
+    if (!state || typeof state.elapsedSec !== "number") return false;
+    if (LONG_PHASES.indexOf(state.phase) < 0) return false;
+    return state.elapsedSec >= MIN_ELAPSED_SHOW_SEC;
+  }
+
+  /** 已耗时文案："45 秒" / "3 分 07 秒" / "1 小时 05 分"。
+   *  null / 负数 / 非有限值返回 ""（调用方不加该段）。 */
+  function fmtElapsed(sec) {
+    if (sec == null || !isFinite(sec) || sec < 0) return "";
+    var s = Math.floor(sec);
+    if (s < 60) return s + " 秒";
+    var m = Math.floor(s / 60);
+    var pad = function (n) {
+      return (n < 10 ? "0" : "") + n;
+    };
+    if (m < 60) return m + " 分 " + pad(s % 60) + " 秒";
+    var h = Math.floor(m / 60);
+    return h + " 小时 " + pad(m % 60) + " 分";
+  }
+
   global.PbcEta = {
     analyzeEta: analyzeEta,
     pushSample: pushSample,
     fmtEta: fmtEta,
     fmtRate: fmtRate,
+    tickPhase: tickPhase,
+    showElapsed: showElapsed,
+    fmtElapsed: fmtElapsed,
     WINDOW_MS: WINDOW_MS,
     MIN_SPAN_MS: MIN_SPAN_MS,
     MAX_SAMPLES: MAX_SAMPLES,
+    LONG_PHASES: LONG_PHASES,
+    MIN_ELAPSED_SHOW_SEC: MIN_ELAPSED_SHOW_SEC,
   };
 })(typeof window !== "undefined" ? window : globalThis);

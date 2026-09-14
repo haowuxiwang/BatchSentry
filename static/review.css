@@ -44,3 +44,55 @@ mark.finding-locate-mark {
     min-height: 24px;
     font-size: 12px;
 }
+
+/* ── 三色复核分级（M6/T6.4）─────────────────────────────────────────────
+   按 **检出来源** 着色，与严重度（卡内小圆点，回答"多严重"）正交：
+     规则命中      = 红：确定性判据，机器已确认事实，必须逐条看
+     LLM 辅助      = 蓝：辅助提示，可信度较低，可批量快速扫
+     系统校验通过  = 绿：启用规则中未命中的类型（覆盖面证明，不是问题）
+   计数条与卡片色条共用这三个变量，改色只改此处。 */
+:root {
+    --tier-rule: hsl(var(--destructive));
+    --tier-llm: hsl(var(--info));
+    --tier-pass: hsl(var(--success));
+}
+.tier-bar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 12px;
+    padding: 2px 4px 6px;
+}
+.tier-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 11px;
+    color: hsl(var(--muted-foreground));
+    white-space: nowrap;
+}
+.tier-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 9999px;
+    display: inline-block;
+    flex: 0 0 auto;
+}
+.tier-dot-rule { background: var(--tier-rule); }
+.tier-dot-llm  { background: var(--tier-llm); }
+.tier-dot-pass { background: var(--tier-pass); }
+.tier-num {
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
+    color: hsl(var(--foreground));
+}
+.finding-card.tier-rule { border-left: 2px solid var(--tier-rule); padding-left: 6px; }
+.finding-card.tier-llm  { border-left: 2px solid var(--tier-llm);  padding-left: 6px; }
+.rule-coverage { margin: 0 4px 6px; }
+.rule-coverage > summary { list-style: none; }
+.rule-coverage > summary::-webkit-details-marker { display: none; }
+.rule-coverage-list {
+    margin-top: 4px;
+    padding-left: 6px;
+    border-left: 2px solid hsl(var(--success) / 0.5);
+}

@@ -190,3 +190,57 @@ def enabled_rule_specs() -> list[RuleSpec]:
         s for s in RULE_REGISTRY
         if s.enabled_by_default and s.id not in disabled
     ]
+
+
+def rule_coverage(type_counts: dict[str, int] | None = None) -> dict:
+    """系统校验覆盖面（M6/T6.4 三色复核的"绿"）。
+
+    "系统校验通过"必须在**同一可陈述单元**上与"命中"对齐，否则数字是编的。
+    规则与 finding 之间历史上没有落库 rule_id（findings 表只有 type），且
+    同一 type 可能由多条规则产出（completeness = R6/R8/R8b/R-M2），因此最小
+    可陈述单元是 **type** 而不是 rule id；rule id 作为可追溯信息一并给出。
+
+    Args:
+        type_counts: {finding_type: 该 job 命中条数}，由调用方一次 GROUP BY
+            取得（避免此处再查库，保持本模块无 IO）。
+
+    Returns:
+        {
+          "rule_total": 启用规则条数,
+          "type_total": 涉及的类型数,
+          "fired": [ {type, count, rule_ids[..], description} ],   # 有命中
+          "passed": [ {type, rule_ids[..], description} ],         # 0 命中
+          "fired_count", "passed_count",
+        }
+    """
+    counts = type_counts or {}
+    specs = enabled_rule_specs()
+    by_type: dict[str, list[RuleSpec]] = {}
+    for s in specs:
+        by_type.setdefault(s.type, []).append(s)
+
+    fired: list[dict] = []
+    passed: list[dict] = []
+    for ftype, group in by_type.items():
+        entry = {
+            "type": ftype,
+            "rule_ids": [s.id for s in group],
+            "description": group[0].description,
+            "basis": group[0].basis,
+        }
+        n = int(counts.get(ftype, 0))
+        if n > 0:
+            fired.append({**entry, "count": n})
+        else:
+            passed.append(entry)
+    # 稳定输出：按类型名排序，便于前端展示与测试断言
+    fired.sort(key=lambda e: e["type"])
+    passed.sort(key=lambda e: e["type"])
+    return {
+        "rule_total": len(specs),
+        "type_total": len(by_type),
+        "fired": fired,
+        "passed": passed,
+        "fired_count": len(fired),
+        "passed_count": len(passed),
+    }
