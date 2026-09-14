@@ -51,6 +51,24 @@ def _suppress_noisy_loggers():
     yield
 
 
+@pytest.fixture(autouse=True)
+def _reset_terminal_snap_cache():
+    """每个测试前后清空 SSE 终态快照缓存（T6.2）。
+
+    该缓存是 api.jobs.status 的模块级全局，跨用例会残留：若前一个用例
+    缓存了某个 job_id 的终态快照，后一个用例插入同名 job 时会命中陈旧
+    快照（且各用例的 test_db 相互独立，属真实的跨库污染）。故全局隔离。
+    """
+    try:
+        from api.jobs import _reset_terminal_snap_cache
+    except Exception:  # api 尚未可导入（极少见的收集期）不应阻断用例
+        yield
+        return
+    _reset_terminal_snap_cache()
+    yield
+    _reset_terminal_snap_cache()
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _kill_leaked_aiosqlite_threads():
     """会话结束兜底：强停所有存活的 aiosqlite 线程（防解释器退出挂起）。

@@ -161,3 +161,83 @@ eq(big.length, PbcEta.MAX_SAMPLES, "capped");
 Date.now = orig;
 """)
         assert r.returncode == 0, r.stderr
+
+
+class TestTickPhase:
+    """S4（M6/T6.3）：阶段内本地计时 —— phase 变化即重置起点。"""
+
+    def test_first_call_starts_at_zero(self):
+        r = _run_node("""
+const s = PbcEta.tickPhase(null, "analyze", 100000);
+eq(s.phase, "analyze", "phase");
+eq(s.startedAt, 100000, "startedAt");
+eq(s.elapsedSec, 0, "elapsed 0");
+""")
+        assert r.returncode == 0, r.stderr
+
+    def test_same_phase_accumulates(self):
+        """同阶段内多次推进 → startedAt 不变、elapsedSec 增长。"""
+        r = _run_node("""
+let s = PbcEta.tickPhase(null, "cross", 1000);
+s = PbcEta.tickPhase(s, "cross", 61000);
+eq(s.startedAt, 1000, "startedAt kept");
+eq(s.elapsedSec, 60, "elapsed 60s");
+s = PbcEta.tickPhase(s, "cross", 192000);
+eq(s.elapsedSec, 191, "elapsed still from same start");
+""")
+        assert r.returncode == 0, r.stderr
+
+    def test_phase_change_resets(self):
+        """阶段切换（analyze → cross）必须重置 —— 否则 Stage 3 的计时
+        会从 Stage 2 起点开始算，虚高数分钟。"""
+        r = _run_node("""
+let s = PbcEta.tickPhase(null, "analyze", 1000);
+s = PbcEta.tickPhase(s, "analyze", 301000);
+eq(s.elapsedSec, 300, "analyze 5min");
+s = PbcEta.tickPhase(s, "cross", 301500);
+eq(s.startedAt, 301500, "reset on phase change");
+eq(s.elapsedSec, 0, "elapsed back to 0");
+""")
+        assert r.returncode == 0, r.stderr
+
+    def test_clock_skew_never_negative(self):
+        """时钟回拨（NTP 校时）不得产出负数。"""
+        r = _run_node("""
+let s = PbcEta.tickPhase(null, "cross", 100000);
+s = PbcEta.tickPhase(s, "cross", 90000);
+eq(s.elapsedSec, 0, "clamped to 0");
+""")
+        assert r.returncode == 0, r.stderr
+
+
+class TestShowElapsedAndFmt:
+    def test_show_elapsed_only_for_long_phases_after_threshold(self):
+        """只在长阶段且已过起步阈值时显示 —— 避免"已用 0 秒"闪一下。"""
+        r = _run_node("""
+eq(PbcEta.showElapsed(null), false, "null");
+eq(PbcEta.showElapsed({phase: "done", elapsedSec: 100}), false, "done hidden");
+eq(PbcEta.showElapsed({phase: "idle", elapsedSec: 100}), false, "idle hidden");
+eq(PbcEta.showElapsed({phase: "ocr", elapsedSec: 0}), false, "below threshold");
+eq(PbcEta.showElapsed({phase: "ocr", elapsedSec: 4}), false, "below threshold 4");
+eq(PbcEta.showElapsed({phase: "ocr", elapsedSec: 5}), true, "at threshold");
+eq(PbcEta.showElapsed({phase: "analyze", elapsedSec: 30}), true, "analyze");
+eq(PbcEta.showElapsed({phase: "cross", elapsedSec: 30}), true, "cross");
+eq(PbcEta.LONG_PHASES, ["ocr", "analyze", "cross"], "LONG_PHASES");
+""")
+        assert r.returncode == 0, r.stderr
+
+    def test_fmt_elapsed_boundaries(self):
+        r = _run_node("""
+eq(PbcEta.fmtElapsed(0), "0 秒", "zero");
+eq(PbcEta.fmtElapsed(45), "45 秒", "seconds");
+eq(PbcEta.fmtElapsed(59), "59 秒", "59s");
+eq(PbcEta.fmtElapsed(60), "1 分 00 秒", "60s -> 1min");
+eq(PbcEta.fmtElapsed(67), "1 分 07 秒", "zero padding");
+eq(PbcEta.fmtElapsed(187), "3 分 07 秒", "3min07");
+eq(PbcEta.fmtElapsed(3600), "1 小时 00 分", "1h");
+eq(PbcEta.fmtElapsed(3900), "1 小时 05 分", "1h05");
+eq(PbcEta.fmtElapsed(null), "", "null");
+eq(PbcEta.fmtElapsed(-3), "", "negative");
+eq(PbcEta.fmtElapsed(Infinity), "", "infinite");
+""")
+        assert r.returncode == 0, r.stderr

@@ -63,12 +63,13 @@ class TestStreamQueryFailure:
             return {"id": job_id, "status": "review"}
 
         monkeypatch.setattr(status_mod, "_get_job_progress", flaky)
-        # 短路错误分支的 3s 退避（仅跳过精确的 3 秒，其余 sleep 透传）
+        # 短路错误分支的退避 sleep（跳过 SSE 轮询常量对应的 sleep，其余透传）
         import asyncio
+        from api.jobs import _SSE_POLL_SECONDS
         real_sleep = asyncio.sleep
 
         async def fast_sleep(d, *a, **k):
-            if d == 3:
+            if d == _SSE_POLL_SECONDS:
                 return None
             return await real_sleep(d, *a, **k)
 
