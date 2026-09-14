@@ -30,8 +30,10 @@ from core.cross_page_analyzer import (
     _step_sort_key,
     _check_param_out_of_spec,
     _judge_param,
+    _judge_cell,
     _decimal_loss_factor,
     _severity_for_out_of_spec,
+    _violated_bound,
     _check_suspicious_dates,
     _check_completeness,
     _check_batch_consistency,
@@ -288,6 +290,60 @@ class TestDecimalLossSoftening:
         """25 vs ≤5.0（比值仅 5）→ 更可能是真实超差，不软化（维持 warning）。"""
         bounds = SpecBounds(op="le", low=None, high=5.0)
         assert _decimal_loss_factor(bounds, 25.0, "25") is None
+
+    def test_no_factor_when_bound_is_zero(self):
+        """上限为 0（≤0）时不可按倍数缩放推断，直接不软化。"""
+        bounds = SpecBounds(op="le", low=None, high=0.0)
+        assert _decimal_loss_factor(bounds, 5.0, "5") is None
+
+
+class TestViolatedBound:
+    """被越过的界（供超差倍数评估）。"""
+
+    def test_between_low_side(self):
+        assert _violated_bound(SpecBounds(op="between", low=1.0, high=2.0), 0.5) == 1.0
+
+    def test_between_high_side(self):
+        assert _violated_bound(SpecBounds(op="between", low=1.0, high=2.0), 3.0) == 2.0
+
+    def test_between_in_range_returns_none(self):
+        assert _violated_bound(SpecBounds(op="between", low=1.0, high=2.0), 1.5) is None
+
+    def test_ge_returns_low(self):
+        assert _violated_bound(SpecBounds(op="ge", low=30.0, high=None), 10.0) == 30.0
+
+    def test_lt_returns_high(self):
+        assert _violated_bound(SpecBounds(op="lt", low=None, high=5.0), 9.0) == 5.0
+
+    def test_unknown_op_returns_none(self):
+        assert _violated_bound(SpecBounds(op="weird", low=1.0, high=2.0), 9.0) is None
+
+
+class TestJudgeCellSignConvention:
+    """矩阵单元格的符号约定降级（与 _judge_param 同源）。"""
+
+    def test_cell_vacuum_downgraded_to_spec_unverifiable(self):
+        findings, queue = [], []
+        val = {"spec": "≤0.08MPa", "actual": "-0.094", "unit": "MPa"}
+        _judge_cell(val, 24, "1", "浓缩结束真空度", "08:18", findings, queue)
+        assert len(findings) == 1
+        assert findings[0]["type"] == "spec_unverifiable"
+        assert queue == []
+        assert "in_spec" not in val
+
+
+class TestSeverityBoundUnavailable:
+    """_severity_for_out_of_spec：界不可用（None/0）时维持 warning。"""
+
+    def test_zero_bound_stays_warning(self):
+        sev, hint = _severity_for_out_of_spec(
+            SpecBounds(op="le", low=None, high=0.0), 5.0, "≤0", "handwritten")
+        assert sev == "warning" and hint == ""
+
+    def test_unknown_op_stays_warning(self):
+        sev, hint = _severity_for_out_of_spec(
+            SpecBounds(op="weird", low=1.0, high=2.0), 9.0, "?", "handwritten")
+        assert sev == "warning" and hint == ""
 
     def test_zero_actual_safe(self):
         bounds = SpecBounds(op="between", low=3.0, high=5.0)

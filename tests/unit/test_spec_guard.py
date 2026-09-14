@@ -68,6 +68,9 @@ class TestTripleState:
         """真实 p08：4.6 被读成 46 → 规则层已以 info 呈现，标 soft 供去重。"""
         assert _triple_state("3.0-5.0bar", "46") == "soft"
 
+    def test_unparseable_actual_is_unknown(self):
+        assert _triple_state("1-2", "") == "unknown"
+
 
 class TestIndexSpecs:
     def test_both_raw_and_base_column_names(self):
@@ -75,6 +78,27 @@ class TestIndexSpecs:
         names = {n for n, _, _ in idx}
         assert "温度 ( 40 3°C )" in names
         assert "温度" in names  # 去括号基名
+
+    def test_skips_empty_pairs(self):
+        """spec 与 actual 皆空 → 不产出三元组。"""
+        structured = {"steps": [{"parameters": [
+            {"name": "盐酸批号", "spec_range": "", "value": ""},
+            {"name": "有效项", "spec_range": "1-2", "value": "1.5"},
+        ]}]}
+        idx = index_specs(structured)
+        assert all(n != "盐酸批号" for n, _, _ in idx)
+        assert any(n == "有效项" for n, _, _ in idx)
+
+    def test_tolerates_malformed_containers(self):
+        """非 dict 的 step / measurement / 单元格须跳过而非抛错。"""
+        structured = {"steps": [
+            "junk",
+            {"parameters": ["nope", {"name": "P", "spec_range": "1-2", "value": "1.5"}],
+             "measurements": ["nope", {"time": "t", "values": {"列": "不是dict"}}]},
+        ]}
+        idx = index_specs(structured)
+        assert ("P", "1-2", "1.5") in idx
+        assert all(n != "列" for n, _, _ in idx)
 
 
 class TestDropUnfoundedSpecFindings:
@@ -151,3 +175,23 @@ class TestDropUnfoundedSpecFindings:
                      "description": "进料压力多次超出规格范围", "ocr_text": "进料压力 46"}]
         kept, dropped = drop_unfounded_spec_findings(findings, structured)
         assert dropped == 1 and kept == []
+
+    def test_drops_llm_false_positives_across_name_separator_styles(self):
+        """真实 p9：结构化列名 "T2101a_压力" vs 文案 "T2101a 压力"，
+        且 LLM 把 "<0.3MPa" 当成了下限（0.16 本应合规）。分隔符归一后须剔除。"""
+        structured = {"steps": [{"measurements": [
+            {"time": "10:00", "values": {
+                "T2101a_压力": {"spec": "<0.3MPa", "actual": "0.16"},
+                "T2101b_压力": {"spec": "<0.3MPa", "actual": "0.17"},
+            }},
+        ]}]}
+        findings = [
+            {"type": "param_out_of_spec", "severity": "critical",
+             "description": "T2101a 压力 0.16 MPa 超出规格范围 <0.3 MPa",
+             "ocr_text": "T2101a 压力 0.16 MPa"},
+            {"type": "param_out_of_spec", "severity": "critical",
+             "description": "T2101b 压力 0.17 MPa 超出规格范围 <0.3 MPa",
+             "ocr_text": "T2101b 压力 0.17 MPa"},
+        ]
+        kept, dropped = drop_unfounded_spec_findings(findings, structured)
+        assert dropped == 2 and kept == []

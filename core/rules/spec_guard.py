@@ -41,6 +41,15 @@ _SPEC_TYPES = frozenset({
 
 _NUM = re.compile(r"-?\d+\.?\d*")
 
+# 名称比对前先归一：LLM 文案与结构化列名的分隔符常不一致
+# （结构化 "T2101a_压力" vs 文案 "T2101a 压力"），原样子串匹配会漏配 →
+# 误报被 fail-closed 保留（M8 实测 p9 因此漏掉 7 条 critical 误报）。
+_NORM_DROP = str.maketrans({c: "" for c in " \t\u3000_-—–:：/（）()[]【】"})
+
+
+def _norm(s: str) -> str:
+    return str(s or "").strip().lower().translate(_NORM_DROP)
+
 
 def _base_name(name: str) -> str:
     """测量列名常带括号规格，如 ``温度 ( 40 3°C )`` → ``温度``。"""
@@ -92,11 +101,7 @@ def _triple_state(spec: str, actual: str) -> str:
         return "unknown"
     num = _parse_number(actual)
     if num is None:
-        # 实测值里可能夹着备注（如 "7.49/A"），退一步取首个数字。
-        m = _NUM.search(actual)
-        if not m:
-            return "unknown"
-        num = float(m.group(0))
+        return "unknown"
     # 符号约定存疑（负表压 vs 印版正限值）与规则层同源判定 → 不可据此剔除。
     if _sign_convention_uncertain(bounds, num):
         return "unknown"
@@ -133,11 +138,11 @@ def drop_unfounded_spec_findings(
             kept.append(f)
             continue
         text = f"{f.get('description', '')} {f.get('ocr_text', '')}"
-        nums = {m.group(0) for m in _NUM.finditer(text)}
+        ntext = _norm(text)
         matched = [
             (name, spec, actual)
             for name, spec, actual in index
-            if name and name in text
+            if name and (name in text or _norm(name) in ntext)
         ]
         if not matched:
             kept.append(f)

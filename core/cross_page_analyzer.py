@@ -37,6 +37,7 @@ from core.rules.parsing import (  # noqa: F401
     _parse_time,
     _sign_convention_uncertain,
     _try_unit_normalize,
+    _violated_bound,
 )
 from core.rules.rule_doc import (  # noqa: F401
     _check_batch_consistency,
