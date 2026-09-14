@@ -33,9 +33,13 @@ DB_PATH = REPO_ROOT / "data" / "pharma.db"
 M4_RULE_IDS = {"R11", "R12", "R13", "R14", "R15", "R16", "R17"}
 
 
-def load_job(job_id: str | None) -> tuple[str, list[dict], int]:
-    """从 page_cache 读某 job 的结构化页；job_id=None → 取页数最多者。"""
-    con = sqlite3.connect(str(DB_PATH))
+def load_job(job_id: str | None, db_path: str | None = None) -> tuple[str, list[dict], int]:
+    """从 page_cache 读某 job 的结构化页；job_id=None → 取页数最多者。
+
+    ``db_path`` 可指定非默认库（如 e2e 隔离运行时的
+    ``%TEMP%\\pbc_e2e_appdata\\PBC\\data.db``），否则用 ``data/pharma.db``。
+    """
+    con = sqlite3.connect(str(db_path or DB_PATH))
     con.row_factory = sqlite3.Row
     if not job_id:
         row = con.execute(
@@ -92,10 +96,13 @@ def _dist(findings: list[dict]) -> dict:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="规则层离线重放（M4）")
     ap.add_argument("--job", default=None, help="job_id（默认取页数最多者）")
+    ap.add_argument("--db", default=None,
+                    help="DB 路径（默认 data/pharma.db；e2e 隔离运行用 "
+                         "%%TEMP%%\\pbc_e2e_appdata\\PBC\\data.db）")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
 
-    job_id, pages, n_rows = load_job(args.job)
+    job_id, pages, n_rows = load_job(args.job, args.db)
     print(f"job={job_id}  page_cache 行={n_rows}  可用页={len(pages)}")
 
     base = _dist(asyncio.run(run_rule_layer(pages, m4_on=False)))

@@ -20,6 +20,7 @@ from core.cross_page_analyzer import (
     _extract_unit,
     _try_unit_normalize,
     _judge,
+    _sign_convention_uncertain,
     _parse_time,
     _extract_year,
     _normalize_pages,
@@ -28,6 +29,7 @@ from core.cross_page_analyzer import (
     _check_time_reversal_cross_page,
     _step_sort_key,
     _check_param_out_of_spec,
+    _judge_param,
     _check_suspicious_dates,
     _check_completeness,
     _check_batch_consistency,
@@ -151,6 +153,43 @@ class TestSpecBoundsAndParsing:
         assert bounds is not None
         assert bounds.low == 1300.0 and bounds.high == 3200.0
 
+    # ---- ± 形式（标称值±公差）与「± 被 OCR 读成 -」的反向区间重建 ----
+    # M8 真实 51 页：印版 "15±5℃" 被 OCR 读成 "15-5" → between(15,5) 恒为假
+    # → p08 温度列约 30 条误报「超差」。两条路径都必须回到 [10,20]。
+
+    def test_parse_plusminus_spec(self):
+        """印版 ± 形式："15±5℃" -> [10, 20]。"""
+        bounds = _parse_spec("15±5℃")
+        assert bounds is not None
+        assert bounds.op == "between"
+        assert bounds.low == 10.0 and bounds.high == 20.0
+        assert _judge(bounds, 14.0) is True
+
+    def test_parse_plusminus_with_percent(self):
+        bounds = _parse_spec("7.5±0.2%")
+        assert bounds is not None
+        assert bounds.low == 7.3 and bounds.high == 7.7
+
+    def test_parse_reversed_range_rebuilt_as_plusminus(self):
+        """OCR 把 ± 读成 -："15-5" -> 反向区间重建为 [10, 20]（非恒假）。"""
+        bounds = _parse_spec("15-5")
+        assert bounds is not None
+        assert bounds.op == "between"
+        assert bounds.low == 10.0 and bounds.high == 20.0
+        assert _judge(bounds, 14.0) is True
+        assert _judge(bounds, 25.0) is False
+
+    def test_parse_reversed_range_with_unit(self):
+        bounds = _parse_spec("40-3℃")
+        assert bounds is not None
+        assert bounds.low == 37.0 and bounds.high == 43.0
+
+    def test_parse_forward_range_untouched(self):
+        """正常正向区间不受重建逻辑影响。"""
+        bounds = _parse_spec("15-25")
+        assert bounds is not None
+        assert bounds.low == 15.0 and bounds.high == 25.0
+
     def test_parse_none_spec(self):
         assert _parse_spec(None) is None
 
@@ -176,6 +215,55 @@ class TestJudge:
         bounds = SpecBounds(op="between", low=20.0, high=30.0)
         assert _judge(bounds, 20.0) is True
         assert _judge(bounds, 30.0) is True
+
+
+class TestSignConventionUncertain:
+    """真空度/负压符号约定存疑（M8）——"负表压 vs 印版正限值" fail-closed。"""
+
+    def test_negative_actual_with_upper_bound_flagged(self):
+        """真实 p14：≤0.08MPa vs -0.090 MPa —— 数值比较恒真，须降级人工。"""
+        bounds = SpecBounds(op="le", low=None, high=0.08)
+        assert _sign_convention_uncertain(bounds, -0.09) is True
+
+    def test_positive_actual_with_upper_bound_ok(self):
+        bounds = SpecBounds(op="le", low=None, high=0.08)
+        assert _sign_convention_uncertain(bounds, 0.05) is False
+
+    def test_negative_actual_with_lower_bound_flagged(self):
+        """≥ 方向：负实测值会被数值比较判成超差（潜在误报），同样须人工。"""
+        bounds = SpecBounds(op="ge", low=0.08, high=None)
+        assert _sign_convention_uncertain(bounds, -0.09) is True
+
+    def test_between_spec_not_flagged(self):
+        bounds = SpecBounds(op="between", low=-1.0, high=1.0)
+        assert _sign_convention_uncertain(bounds, -0.5) is False
+
+    def test_negative_limit_with_positive_actual_not_flagged(self):
+        """负限值 + 正实测值（如 ≥-18℃ vs 3℃）通常无歧义，不制造噪声。"""
+        bounds = SpecBounds(op="ge", low=-18.0, high=None)
+        assert _sign_convention_uncertain(bounds, 3.0) is False
+
+    def test_rule_layer_emits_spec_unverifiable_for_vacuum(self):
+        """真实 p14：_judge_param 须把 -0.090 MPa / ≤0.08MPa 降级人工复核，
+        而不是静默判为合规则（原行为：-0.09 <= 0.08 → in_spec=True）。"""
+        findings, queue = [], []
+        p = {"name": "浓缩结束真空度", "spec_range": "≤0.08MPa",
+             "value": "-0.090 MPa", "unit": "MPa"}
+        _judge_param(p, 14, "1", "浓缩结束真空度", findings, queue)
+        assert len(findings) == 1
+        assert findings[0]["type"] == "spec_unverifiable"
+        assert findings[0]["severity"] == "warning"
+        assert queue == []
+        assert "in_spec" not in p  # 未静默下结论
+
+    def test_rule_layer_positive_vacuum_still_judged_normally(self):
+        findings, queue = [], []
+        p = {"name": "浓缩开始真空度", "spec_range": "≤0.08MPa",
+             "value": "0.05 MPa", "unit": "MPa"}
+        _judge_param(p, 14, "1", "浓缩开始真空度", findings, queue)
+        assert findings == []
+        assert p["in_spec"] is True
+
 
 
 class TestPowerNotationExpansion:

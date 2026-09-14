@@ -7,6 +7,7 @@ from core.rules.parsing import (
     _judge,
     _parse_number,
     _parse_spec,
+    _sign_convention_uncertain,
     _try_unit_normalize,
 )
 
@@ -79,6 +80,21 @@ def _judge_param(p: dict, page: int, step_no, name: str,
         })
         return
     compare_num = converted if converted is not None else actual_num
+    if _sign_convention_uncertain(bounds, compare_num):
+        # M8：真空度/负压符号约定存疑（负表压 vs 印版正限值）→ fail-closed 人工。
+        findings.append({
+            "page": page,
+            "type": "spec_unverifiable",
+            "severity": "warning",
+            "description": (
+                f"第{page}页 参数 {name} 实测 {actual_num}{p.get('unit') or ''} 为负值，"
+                f"而规格 {spec} 为上限型正限值，符号约定（真空度/负压）存疑，需人工确认"
+            ),
+            "ocr_text": f"{name}: spec={spec} value={actual}",
+            "operator": "",
+            "source": "rule",
+        })
+        return
     in_spec = _judge(bounds, compare_num)
     p["in_spec"] = in_spec
     if not in_spec:
@@ -144,6 +160,21 @@ def _judge_cell(val: dict, page: int, step_no, col: str, t: str,
         })
         return
     compare_num = converted if converted is not None else actual_num
+    if _sign_convention_uncertain(bounds, compare_num):
+        # M8：同 _judge_param —— 负表压 vs 印版正限值，符号约定存疑 → 人工。
+        findings.append({
+            "page": page,
+            "type": "spec_unverifiable",
+            "severity": "warning",
+            "description": (
+                f"第{page}页 {col} 在 {t} 时实测 {actual_num}{val.get('unit') or ''} 为负值，"
+                f"而规格 {spec} 为上限型正限值，符号约定（真空度/负压）存疑，需人工确认"
+            ),
+            "ocr_text": f"{t} {col}: spec={spec} actual={actual}",
+            "operator": "",
+            "source": "rule",
+        })
+        return
     in_spec = _judge(bounds, compare_num)
     val["in_spec"] = in_spec
     if not in_spec:

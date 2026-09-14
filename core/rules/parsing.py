@@ -382,7 +382,32 @@ def _parse_spec(spec: Optional[str]) -> Optional[SpecBounds]:
     m = re.match(r"^(-?\d+\.?\d*)\s*[%％]?\s*[-~–]\s*(-?\d+\.?\d*)", s)
     if m:
         low, high = float(m.group(1)), float(m.group(2))
+        # OCR 常把「±」认成「-」：印版 "15±5℃" 被读成 "15-5"。左界大于右界的
+        # 区间在数学上无意义，唯一合理解释是 A±B 形式，按 [A-B, A+B] 重建
+        # （否则 between(15,5) 恒为假 → 该列每个值都被误报超差；M8 真实 51 页
+        # 实测 p08 因此产生约 30 条误报）。公差取绝对值，避免 OCR 连负号一起读错。
+        if low > high:
+            tol = abs(high)
+            low, high = low - tol, low + tol
         return SpecBounds(op="between", low=low, high=high)
+
+    # ± 形式（印刷体）："40±3" / "15±5℃" / "7.5±0.2" -> [center-tol, center+tol]
+    # 真实批记录大量使用「标称值±公差」写法，此前完全不支持，整条规格被降级
+    # 为 LLM 兜底（而 LLM 不做可判性校验，见 M8 审计）。
+    m = re.match(r"^(-?\d+\.?\d*)\s*[%％]?\s*±\s*(-?\d+\.?\d*)", s)
+    if m:
+        c, t = float(m.group(1)), abs(float(m.group(2)))
+        return SpecBounds(op="between", low=c - t, high=c + t)
+
+    # 空格分隔的 A B 形式：OCR/版式把「±」整体丢成空格（M8 真实 p14 原文
+    # "浓缩液在 40 3°C 保温"、"用盐酸调缓冲液 pH 至 7.5 0.2"，印版应为 40±3 /
+    # 7.5±0.2）。仅当第二数明显小于第一数（公差 < 中心值）才按 A±B 解释，
+    # 避免把真正的 "10 20" 区间误读为 10±20；不满足则返回 None → 交人工复核。
+    m = re.match(r"^(-?\d+\.?\d*)\s+(-?\d+\.?\d*)", s)
+    if m:
+        a, b = float(m.group(1)), float(m.group(2))
+        if abs(b) < abs(a):
+            return SpecBounds(op="between", low=a - abs(b), high=a + abs(b))
 
     # <0.3 / <=0.3 / < 0.3 / <=0.3MPa / <=1000cfu/g (after power expand)
     m = re.match(r"^<(=)?\s*(-?\d+\.?\d*)", s)
@@ -422,6 +447,28 @@ def _judge(bounds: SpecBounds, actual: float) -> bool:
         return actual >= bounds.low
     # Fail-closed: unknown ops are treated as non-compliant to trigger
     # human review (GMP safety principle — never silently pass unknown rules).
+    return False
+
+
+def _sign_convention_uncertain(bounds: SpecBounds, actual: float) -> bool:
+    """单侧规格 + 实测为负、限值为正 → 符号约定存疑（真空度/负压）。
+
+    真实批记录中真空度/负压常以**负表压**记录（如 ``-0.090 MPa``），而印版规格
+    写成 ``≤0.08MPa``——按绝对值理解才是"工作真空度 ≤0.08"。此时数值比较
+    （``-0.09 ≤ 0.08``）恒真，会把真实偏差**静默放过**（``≥`` 方向则相反，会把
+    合规值判成超差）。工具无法确知印版意图，故 fail-closed 降级为
+    ``spec_unverifiable`` 交人工，不静默下结论。
+
+    M8 真实 51 页实测：``≤0.08MPa`` × 负实测值共 6 处（p14/p24，-0.068~-0.096），
+    两层此前一致静默放过。仅覆盖"负实测值 + 正限值"这一实际歧义形态；反向
+    （负限值 + 正实测值）在制药场景罕见且通常无歧义，不参与判定，避免噪声。
+    """
+    if actual is None or actual >= 0:
+        return False
+    if bounds.low is None and bounds.high is not None and bounds.high > 0:
+        return True
+    if bounds.high is None and bounds.low is not None and bounds.low > 0:
+        return True
     return False
 
 

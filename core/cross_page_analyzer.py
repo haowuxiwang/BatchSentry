@@ -34,6 +34,7 @@ from core.rules.parsing import (  # noqa: F401
     _parse_number,
     _parse_spec,
     _parse_time,
+    _sign_convention_uncertain,
     _try_unit_normalize,
 )
 from core.rules.rule_doc import (  # noqa: F401

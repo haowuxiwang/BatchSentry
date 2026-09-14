@@ -202,6 +202,19 @@ async def _analyze_one(
                 # GMP 依据引用（v7）：按 type 映射法规依据（幂等，无映射不设键）
                 from core.rules.gmp_basis import attach_gmp_basis
                 dict_findings = [f for f in page_findings if isinstance(f, dict)]
+                # M8/P0：LLM 自报的 param_out_of_spec 此前直接落库、不经可判性
+                # 校验，OCR 把 "40±3°C" 读成 "40 3°C" 时成片误报（真实 p14 实测
+                # 6 条中 5 条误报）。改用规则层同一解析器复核，判为合规则者剔除；
+                # 定位不到/不可判者保留（fail-closed）。
+                from core.rules.spec_guard import drop_unfounded_spec_findings
+                dict_findings, _dropped_spec = drop_unfounded_spec_findings(
+                    dict_findings, structured
+                )
+                if _dropped_spec:
+                    logger.info(
+                        f"[{job_id}] Stage 2: page {page_num} 剔除 "
+                        f"{_dropped_spec} 条 LLM 规格误报（规则层复核为合规）"
+                    )
                 attach_gmp_basis(dict_findings)
                 # 知识库条文引用（v8）：后置富集（幂等，纯内存检索）
                 from core.kb.retriever import attach_kb_refs
@@ -220,7 +233,7 @@ async def _analyze_one(
                     page_is_flagged as _flagged,
                 )
                 _flagged_page = _flagged(structured)
-                for f in page_findings:
+                for f in dict_findings:
                     if not isinstance(f, dict):
                         continue
                     if not {"type", "severity", "description"}.issubset(f.keys()):
@@ -243,7 +256,7 @@ async def _analyze_one(
                     )
                 await db.commit()
                 logger.info(
-                    f"[{job_id}] DB: page_cache updated + {len(page_findings)} "
+                    f"[{job_id}] DB: page_cache updated + {len(llm_page_rows)} "
                     f"page-level findings inserted (page={page_num})"
                 )
         except Exception as e:
