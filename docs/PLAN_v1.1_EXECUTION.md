@@ -21,11 +21,11 @@
 | M5 知识库多源化 + 条款级溯源 | ✅ | `4270fd9`+`f9b73df`；**6 源 / 441 条**；金标 37 条命中率 **97.3%**（排除已登记缺口 100%，阈值 85%）；门禁 95.22%/1845 passed |
 | M6 SSE 优化 + 对标落地 | ✅ | 本文件 §2 M6 落地结论；S1 常量统一（源码扫描锁死）、S2 稳态查询 **16→1**、S4 秒级本地计时、T6.4 三色分级（六面同源机检）、T6.5 评估判**不做**（`docs/TREND_SCREENING_EVAL.md`） |
 | M7 docling 第三对照引擎 | ✅ | 本文件 §2 M7 落地结论；T7.1 能力表单一来源（源码扫描护栏）、T7.2 缺失即降级（`OcrBackendUnavailable`→回退 Paddle）、T7.3 三引擎对比脚本、T7.4 ROADMAP 许可残留改 MIT |
-| M8 打包放行（v1.1.0） | 🔶 进行中 | 门禁 **OVERALL: pass**（2002 passed / 0 failed，覆盖率 **95.17%**）；真实 51 页 e2e **两轮通过**（首轮 paddle 落库 395 条 / 第二轮 mineru 落库 407 条，`ALL ROUNDS PASSED`）；**看图比对**（`docs/M8_VISUAL_VERIFICATION.md`）定位并修复 4 类规格缺陷（消除 **37 条误报 / 9 条 critical**）；待打 tag 推送 |
+| M8 打包放行（v1.1.0） | ✅ | 门禁 **OVERALL: pass**（2001 passed / 1 已登记沙箱专有失败，覆盖率 **95.17%**）；真实 51 页 e2e **两轮通过**（首轮 paddle 落库 395 条 / 第二轮 mineru 落库 407 条，`ALL ROUNDS PASSED`）；**看图比对**（`docs/M8_VISUAL_VERIFICATION.md`）定位并修复 4 类规格缺陷（消除 **37 条误报 / 9 条 critical**）；tag `v1.1.0` 已打并推送（commit `233a0ff`） |
 
-**当前工作区**：干净；本地领先 `origin/main`（未推送；经系统代理 `127.0.0.1:7897` 推送，凭据取 Windows 凭据管理器 `git:https://github.com`）。
+**当前工作区**：干净；**与 `origin/main` 同步**（`233a0ff`，tag `v1.1.0` 已推送）。推送要点：GitHub 须经系统代理 `127.0.0.1:7897`（**直连会被 RST**）；凭据在 Windows 凭据管理器，但端口默认的 `credential.helper=helper-selector` 是 GUI 选择器、**无凭据时会静默挂住** → 必须 `git -c credential.helper= -c credential.helper=wincred push`（先清空助手列表，否则 GUI 助手仍排在队首）。
 
-**打包信号当前结论**：T0 自愈后 **OVERALL: pass**；M8 收尾阶段复跑仍 **pass**（2002 passed / 0 failed，覆盖率 95.17%）。每次放行前须复跑 `scripts/release_gate.py`（注意 `--python` 需传 **Windows 路径**，POSIX `/c/...` 会判"python 不可用"）。
+**打包信号当前结论**：T0 自愈后 **OVERALL: pass**；M8 放行前复跑仍 **pass**（2001 passed / 1 已登记沙箱专有失败，覆盖率 95.17%）。每次放行前须复跑 `scripts/release_gate.py`（注意 `--python` 需传 **Windows 路径**，POSIX `/c/...` 会判"python 不可用"）。
 
 **M8 看图比对结论（新增）**：用多模态直接读 `samples/丝裂霉素提取批记录.pdf` 原页，与落库 findings 逐条对照，定位 4 类缺陷：`±`→空格（p08 温度 21 条）、OCR 丢小数点（p08 进料压力 8 条）、LLM 自报超差无复核（p09 压力 7 条 critical）、真空度符号约定未 fail-closed（首轮 6 处 / 第二轮实测 17 条改判人工）。**精确核对共消除 37 条误报（含 9 条 critical）**。另有 2 类未决项归抽取质量：p9 使用次数手写 `17` 被读成 `417`（根因：OCR 把批次号与使用次数粘进同一 `<td>`，raw_html = `A000626-221201/417 次`）；p19 手写纯度主备后端读数分歧（paddle `49.0` 误报 / mineru `99.0`，6× 实读确认为 **99.0**，`≥98%` 合规 → 印证"需后端分歧仲裁"而非"标注值失真"）。详见 `docs/M8_VISUAL_VERIFICATION.md`。
 
