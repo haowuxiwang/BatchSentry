@@ -366,6 +366,13 @@ tag `v1.1.0`。
 - **看图比对是定位规格缺陷的首选手段**：`docs/M8_VISUAL_VERIFICATION.md` 记录了方法与逐条实读结论。
   要点：**页面方向逐页不同**（p08 需 90°，p19 另一角度），最保真的读法是直接抽嵌入栅格
   （`doc.extract_image(page.get_images(full=True)[0][0])` → 3000×4000 原图），再按像素裁切放大 3~5×。
+- **降噪的方向与禁区**（调研见 `docs/NOISE_REDUCTION_RESEARCH.md`）：降噪只能靠**引入独立证据**
+  （第二读一致性 / 结构先验 / 列先验），**不得**靠"看起来像误报"的模糊判据——
+  `_decimal_loss_factor` 的回归已实证软化过宽会吃掉真实超差。
+  ⚠ **已知缺口（待 P0-2）**：`spec_guard` 的抑制目前是**直接剔除、只留计数**，无 `suppress_reason` /
+  无明细 / 不可回退；受监管场景（EU GMP Annex 11 第 16 条、中国附录《计算机化系统》第 15/16 条）
+  要求"修改关键数据需批准并记录理由"。改为**留痕抑制**（`status='suppressed'` + 理由 + 可恢复 + 可抽检）
+  是合规必需项，不是优化项。
 
 **关键路径陷阱**：`release_gate.py` 的 `worktree_clean` 项要求**先提交再跑**，否则必然 FAIL；
 `--python` 必须传 **Windows 路径**（POSIX `/c/...` 会判"python 不可用"）。
