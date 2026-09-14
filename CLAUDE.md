@@ -369,6 +369,12 @@ tag `v1.1.0`。
 - **降噪的方向与禁区**（调研见 `docs/NOISE_REDUCTION_RESEARCH.md`）：降噪只能靠**引入独立证据**
   （第二读一致性 / 结构先验 / 列先验），**不得**靠"看起来像误报"的模糊判据——
   `_decimal_loss_factor` 的回归已实证软化过宽会吃掉真实超差。
+  对齐粒度与 bbox 资格的**实测结论**见 `docs/NOISE_REDUCTION_SPIKE.md`，
+  分项执行清单见 `docs/NOISE_REDUCTION_TODO.md`。两条硬结论：
+  - **两个后端都不提供单元格级 bbox**（Paddle 整表一个 `block`、MinerU 整表一个 `span`），
+    只有块/区域级坐标 → 对齐只能用**表级 bbox 粗筛 + 字段级标签匹配**，高亮只能到区域级。
+  - **Paddle 的 `layout_det_res.boxes[].score` 是版面检测分，不是抽取置信度**
+    （实测 mean 0.579 / p50 0.545，小文本块天然低分）——不可当数值正确性信号。
   ⚠ **已知缺口（待 P0-2）**：`spec_guard` 的抑制目前是**直接剔除、只留计数**，无 `suppress_reason` /
   无明细 / 不可回退；受监管场景（EU GMP Annex 11 第 16 条、中国附录《计算机化系统》第 15/16 条）
   要求"修改关键数据需批准并记录理由"。改为**留痕抑制**（`status='suppressed'` + 理由 + 可恢复 + 可抽检）

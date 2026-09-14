@@ -98,6 +98,28 @@
 - 新增认知：降噪只能靠**引入独立证据**（第二读一致性 / 结构先验 / 列先验），不能靠"看起来像误报"的模糊判据
   （M8 的 `_decimal_loss_factor` 回归已实证软化过宽会吃掉真实超差）。
 
+**Q4 三次（Spike 实测，2026-09-14）**：P0-1/P0-3 的**粒度**已用真实产物定死，见
+**`docs/NOISE_REDUCTION_SPIKE.md`**；分项执行清单见 **`docs/NOISE_REDUCTION_TODO.md`**。要点：
+
+- **不能按单元格对齐**：Paddle 与 MinerU 都只给**块/区域级** bbox（Paddle
+  `prunedResult.parsing_res_list[].block_bbox` + `layout_det_res.boxes[].coordinate`；
+  MinerU `content_list_v2[].bbox` + `layout.json` 的 line/span 级，但整表只有 1 个 span）。
+  `_model.json` 里 `cell`/`rowspan`/`colspan` 出现 **0 次**。→ 可行粒度：**表级（bbox 粗筛）
+  + 字段级（标签文本匹配）**，页级兜底。
+- **PaddleOCR-VL 确实回传 bbox**，但是**区域级、不是单元格级**；另有 `layout_det_res` 的
+  **版面检测 score**（实测 mean 0.579 / p50 0.545），**不是**文字识别置信度。
+  坐标与 score 目前 **100% 被丢弃**（`page_cache` 无坐标列）→ 区域级证据锚是白拿的能力。
+- **Paddle 上游不可用是常态**：spike 期间两次实测 `code 10010 任务提交队列已满`
+  （与第二轮 e2e 触发 `ocr_failover paddle→mineru` 同因）→ P0-1 必须把"第二读取不到"
+  定义为 `needs_arbitration`（fail-closed），不得静默采信第一读。
+- **已修一项（T-P0-4）**：`_parse_spec` 的 7 种书写变体缺口（LaTeX `\pm`、全角 `～`、
+  **单位夹分隔符** `972 μg/mg ~1020 μg/mg` 等）；真实 3526 个 `(spec,value)` 对照验证：
+  22 处转为可判定、**解析结果变化 0 处、新增超差 0 处**。
+- **更正 M8 表述**：p9「417」的根因不是"两个相邻单元格粘连"，而是 **Paddle 把多行区块压成
+  1 个 `<tr>` + 两个多行 `<td>`（标签列/值列），标签↔值只靠行序对应；分隔符形态在同一文档内
+  不一致（p09 有字面 `\n`、p21 完全没有）→ 相邻两行的值融合**。属服务端非确定性行为，
+  不做启发式还原。
+
 ### Q5. 当前知识库构建如何？
 
 **结论：单源、可运行，但语料单薄；`source_id` 脚手架已在，扩源成本可控。**

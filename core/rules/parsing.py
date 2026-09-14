@@ -342,6 +342,51 @@ def _expand_power_notation(text: str) -> str:
     return text
 
 
+# ---------------------------------------------------------------------------
+# spec_range 书写变体归一化（M8-spike：真实落库 spec_range 实测定位）
+#
+# 三类写法与既有语义完全等价，只是"同一规格的不同书写"，此前无法解析 →
+# 整条规格被降级为 spec_unverifiable（送人工复核 = 噪音）。归一化只改形状、
+# 不改判定语义，因此不会软化真实的超差判定。
+#
+#   1. LaTeX ± 变体：PaddleOCR-VL 把印版「±」读成 `\pm`（51 页真实输出出现
+#      16 次 / 分布 12 页），外层还可能裹 `$`：`温度(15 \pm 5°C)`。
+#      LLM 目前多数会归一成 ±，但规则层是判定权威，必须自己读得懂 ——
+#      否则一旦 LLM 原样回填 `15 \pm 5` 就静默丢判定能力。
+#   2. 全角 / Unicode 变体：`～`(U+FF5E 全角波浪)、`－`(全角连字符)、
+#      `−`(U+2212 数学减号)、`—`(em dash)。真实库有 `99%～101%`（1 处）
+#      因全角波浪线解析失败，而同语义的 `99%~101%` 有 15 处成功。
+#   3. 单位夹在数字与分隔符之间：`972 μg/mg ~1020 μg/mg`（含量/效价规格，
+#      真实库 20 处，全部解析失败）。两侧单位一致时折叠掉中间那个单位，
+#      **串尾单位必须保留** —— `_try_unit_normalize` 依赖 spec 串里的单位
+#      做实测值单位换算，丢了单位会让比较本身出错。
+# ---------------------------------------------------------------------------
+# 外层包裹括号："(1300~3200)" -> "1300~3200"（真实库 1 处）
+_PAREN_WRAP_RE = re.compile(r"^[（(\[【]\s*(.+?)\s*[）)\]】]$")
+# `\pm` / `\mp` / `+/-` / `+-` / `+−` -> ±
+_PM_RE = re.compile(r"\\pm|\\mp|\+/-|\+-|\+\s*−")
+_FULLWIDTH_SPEC_TRANS = str.maketrans({
+    "～": "~", "％": "%", "－": "-", "−": "-", "—": "-", "﹣": "-", "＋": "+",
+})
+# 两侧同单位夹分隔符：组1=左数，组2=单位，组3=右数（组2 须与串尾单位逐字一致）
+_UNIT_BETWEEN_RE = re.compile(
+    r"^(-?\d+\.?\d*)\s*([^\d\s\-~–—−～]+)\s*[-~–—−～]\s*(-?\d+\.?\d*)\s*\2\s*$"
+)
+
+
+def _normalize_spec_notation(s: str) -> str:
+    """归一化 spec_range 的书写变体（见上方说明；不改变判定语义）。"""
+    m = _PAREN_WRAP_RE.match(s.strip())
+    if m:
+        s = m.group(1).strip()
+    s = s.translate(_FULLWIDTH_SPEC_TRANS)
+    s = _PM_RE.sub("±", s)
+    m = _UNIT_BETWEEN_RE.match(s)
+    if m:
+        s = f"{m.group(1)}~{m.group(3)}{m.group(2)}"
+    return s
+
+
 def _parse_spec(spec: Optional[str]) -> Optional[SpecBounds]:
     """Parse a spec_range string into SpecBounds.
 
@@ -354,6 +399,7 @@ def _parse_spec(spec: Optional[str]) -> Optional[SpecBounds]:
       - strip $...$ LaTeX残片
       - strip {{...}} template residue
       - 药典简写 NMT/NLT -> </>=
+      - _normalize_spec_notation: LaTeX ± / 全角符号 / 单位夹分隔符（见上）
     """
     if not spec or not isinstance(spec, str):
         return None
@@ -365,6 +411,9 @@ def _parse_spec(spec: Optional[str]) -> Optional[SpecBounds]:
     s = re.sub(r"\$+", "", s)
     # Strip {{...}} markers but keep content (e.g. "{{0.5-1.0}}" -> "0.5-1.0")
     s = s.replace("{{", "").replace("}}", "")
+    # 书写变体归一化（LaTeX ± / 全角符号 / 单位夹分隔符）——须在 ≤/≥ 归一
+    # 之前执行：± 分支依赖字符串里保留的「±」字形来区分「±」与「≤」。
+    s = _normalize_spec_notation(s)
     s = s.replace("NMT", "<=").replace("NLT", ">=")
     s = s.replace("≤", "<=").replace("≥", ">=")
     # Expand power notation BEFORE numeric matching: "≤10^3cfu/g" -> "<=1000cfu/g"

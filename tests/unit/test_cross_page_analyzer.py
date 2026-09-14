@@ -203,6 +203,73 @@ class TestSpecBoundsAndParsing:
     def test_parse_invalid_spec(self):
         assert _parse_spec("abc") is None
 
+    # ---- 书写变体归一化（M8-spike：真实落库 spec_range 实测定位）----
+    # 以下三类写法与既有语义完全等价，此前全部解析失败 → 整条规格降级
+    # spec_unverifiable（送人工 = 噪音）。归一化只改形状、不改判定语义。
+
+    def test_parse_latex_pm_spec(self):
+        """PaddleOCR-VL 把印版 ± 读成 LaTeX `\\pm`（51 页真实输出 16 处 / 12 页）。
+
+        规则层是判定权威，必须自己读得懂 —— 否则 LLM 一旦原样回填就静默
+        丢掉判定能力。外层裹 `$` 的形态同样要能读。
+        """
+        for raw in ("15 \\pm 5", "15 $ \\pm $5°C", "15\\pm5", "7.5 \\pm 0.2"):
+            bounds = _parse_spec(raw)
+            assert bounds is not None, raw
+            assert bounds.op == "between", raw
+        assert _parse_spec("15 \\pm 5").low == 10.0
+        assert _parse_spec("15 \\pm 5").high == 20.0
+        assert _parse_spec("7.5 \\pm 0.2").low == 7.3
+        assert _parse_spec("7.5 \\pm 0.2").high == 7.7
+
+    def test_parse_latex_pm_variants(self):
+        """`\\mp` / `+/-` / `+-` 同为 ± 的书写变体。"""
+        for raw in ("15 \\mp 5", "15 +/- 5", "15+-5"):
+            bounds = _parse_spec(raw)
+            assert bounds is not None, raw
+            assert (bounds.low, bounds.high) == (10.0, 20.0), raw
+
+    def test_parse_fullwidth_tilde_range(self):
+        """全角波浪线 `～`(U+FF5E)：真实库同语义的 `99%~101%` 有 15 处成功，
+        而 `99%～101%` 1 处失败 —— 仅是字形差异。"""
+        bounds = _parse_spec("99%～101%")
+        assert bounds is not None
+        assert (bounds.low, bounds.high) == (99.0, 101.0)
+
+    def test_parse_unicode_minus_and_fullwidth_hyphen(self):
+        """U+2212 数学减号 / 全角连字符 / em dash 均为区间分隔符变体。"""
+        for raw in ("15−25", "15－25", "15—25"):
+            bounds = _parse_spec(raw)
+            assert bounds is not None, raw
+            assert (bounds.low, bounds.high) == (15.0, 25.0), raw
+
+    def test_parse_unit_straddling_separator(self):
+        """单位夹在数字与分隔符之间：`972 μg/mg ~1020 μg/mg`（含量/效价规格，
+        真实库 20 处全失败）。折叠中间单位，**必须保留串尾单位** ——
+        `_try_unit_normalize` 靠 spec 串里的单位做实测值单位换算。"""
+        for raw in ("972 μg/mg ~1020 μg/mg", "972μg/mg ~1020μg/mg"):
+            bounds = _parse_spec(raw)
+            assert bounds is not None, raw
+            assert (bounds.low, bounds.high) == (972.0, 1020.0), raw
+            assert _extract_unit(raw) == "μg/mg", raw
+
+    def test_parse_parenthesised_range(self):
+        """外层括号："(1300~3200)" -> [1300, 3200]（真实库 1 处）。"""
+        bounds = _parse_spec("(1300~3200)")
+        assert bounds is not None
+        assert (bounds.low, bounds.high) == (1300.0, 3200.0)
+
+    def test_normalization_keeps_fail_closed(self):
+        """归一化不得放大可判范围：非数值/裸数字仍返回 None 交人工。"""
+        for raw in ("1.4", "14 L/min", "√是/□否", "1) IR\\n2) HPLC", "abc", ""):
+            assert _parse_spec(raw) is None, raw
+
+    def test_normalization_does_not_touch_inequalities(self):
+        """≤/≥ 分支不受归一化影响（± 归一必须发生在 ≤/≥ 之前）。"""
+        assert _parse_spec("≤0.3").op == "le"
+        assert _parse_spec("≥98%").op == "ge"
+        assert _parse_spec(">=30").low == 30.0
+
 
 class TestJudge:
     """_judge 参数判定。"""
