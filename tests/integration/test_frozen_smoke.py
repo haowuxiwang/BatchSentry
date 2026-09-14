@@ -14,12 +14,13 @@
 """
 import os
 import socket
-import subprocess
 import time
 from pathlib import Path
 
 import httpx
 import pytest
+
+from tests.e2e_proc import spawn_server, stop_server, tail_log
 
 EXE = Path(__file__).parent.parent.parent / "dist" / "pbc-server" / "pbc-server.exe"
 
@@ -47,13 +48,10 @@ def frozen_server(tmp_path_factory):
     env["APPDATA"] = str(fake_appdata)
     env["PORT"] = str(port)
 
-    proc = subprocess.Popen(
-        [str(EXE)],
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-    )
+    # stdout/stderr 落日志文件 —— 未排空的 PIPE 会因管道缓冲写满而把服务进程
+    # 阻塞在 write（asyncio 事件循环停摆，后续请求全超时）。见 tests/e2e_proc.py。
+    srv_log = fake_appdata / "frozen-smoke-server.log"
+    proc, logf = spawn_server([str(EXE)], env=env, log_path=srv_log)
     deadline = time.time() + 30
     ready = False
     while time.time() < deadline:
@@ -67,21 +65,13 @@ def frozen_server(tmp_path_factory):
         except Exception:
             time.sleep(0.5)
     if not ready:
-        out = ""
-        try:
-            out = proc.stdout.read() if proc.stdout else ""
-        except Exception:
-            pass
-        proc.kill()
+        out = tail_log(srv_log)
+        stop_server(proc, logf, timeout=5)
         pytest.fail(f"frozen server failed to become ready:\n{out[:2000]}")
 
     yield {"proc": proc, "appdata": fake_appdata, "base": base}
 
-    proc.terminate()
-    try:
-        proc.wait(timeout=10)
-    except subprocess.TimeoutExpired:
-        proc.kill()
+    stop_server(proc, logf, timeout=10)
 
 
 def test_health_ok(frozen_server):

@@ -1,5 +1,8 @@
 import subprocess, time, os, sys, requests, json
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from tests.e2e_proc import spawn_server, stop_server, tail_log  # noqa: E402
+
 EXE = r"D:\learn\claudecode\pharma-batch-checker\dist\pbc-server\pbc-server.exe"
 BASE = "http://127.0.0.1:58765"
 APPDATA = os.path.join(os.environ["TEMP"], "pbc-e2e-v2")
@@ -8,8 +11,10 @@ os.makedirs(os.path.join(APPDATA, "PBC"), exist_ok=True)
 env = os.environ.copy()
 env["APPDATA"] = APPDATA
 
+# 服务端输出落日志文件，勿用未排空的 PIPE（见 tests/e2e_proc.py）
+_SRV_LOG = os.path.join(APPDATA, "PBC", "manual-e2e-server.log")
 print("Starting server...")
-proc = subprocess.Popen([EXE], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+proc, _logf = spawn_server([EXE], env=env, log_path=_SRV_LOG)
 time.sleep(8)
 
 try:
@@ -95,15 +100,10 @@ try:
     print("\n=== E2E COMPLETE ===")
 
 finally:
-    proc.terminate()
-    try:
-        proc.wait(timeout=5)
-    except:
-        proc.kill()
-    # Print server output
-    if proc.stdout:
-        output = proc.stdout.read().decode(errors="replace")
-        if output.strip():
-            print("\n--- Server output (last 20 lines) ---")
-            for line in output.strip().split("\n")[-20:]:
-                print(f"  {line}")
+    stop_server(proc, _logf, timeout=5)
+    # Print server output tail
+    output = tail_log(_SRV_LOG, max_chars=20000)
+    if output.strip():
+        print("\n--- Server output (last 20 lines) ---")
+        for line in output.strip().split("\n")[-20:]:
+            print(f"  {line}")

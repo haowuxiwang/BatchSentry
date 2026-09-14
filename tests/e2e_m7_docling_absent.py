@@ -25,6 +25,9 @@ from pathlib import Path
 import requests
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tests.e2e_proc import spawn_server, stop_server  # noqa: E402
+
 PORT = 8124
 BASE = f"http://127.0.0.1:{PORT}"
 
@@ -87,11 +90,12 @@ def main() -> int:
         fail("chain_degraded", f"未按预期降级：{chain_txt}")
 
     # 2) 服务启动不受影响（无导入期硬依赖）
-    proc = subprocess.Popen(
+    # stdout 落日志文件（未排空的 PIPE 会把服务阻塞在 write，见 tests/e2e_proc.py）
+    proc, _logf = spawn_server(
         [sys.executable, "-m", "uvicorn", "main:app",
          "--host", "127.0.0.1", "--port", str(PORT)],
         cwd=str(tmp), env=env,
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        log_path=tmp / "e2e-m7-server.log",
     )
     try:
         up = False
@@ -139,11 +143,7 @@ def main() -> int:
             fail("compare_script_graceful",
                  f"rc={cr.returncode} out={cr.stdout.strip()[-120:]}")
     finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=5)
-        except Exception:
-            proc.kill()
+        stop_server(proc, _logf, timeout=5)
 
     passed = sum(1 for s, _, _ in RESULTS if s == "PASS")
     failed = sum(1 for s, _, _ in RESULTS if s == "FAIL")

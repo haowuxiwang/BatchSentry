@@ -1,6 +1,9 @@
 """Quick e2e smoke test - dev server, no pipeline wait."""
 import subprocess, time, os, sys, requests, json
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from tests.e2e_proc import spawn_server, stop_server  # noqa: E402
+
 BASE = "http://127.0.0.1:8000"
 RESULTS = []
 
@@ -12,12 +15,12 @@ def fail(name, detail=""):
     RESULTS.append(("FAIL", name, detail))
     print(f"  XX  {name} {detail}")
 
-# Start dev server
+# Start dev server（stdout 落日志文件，勿用未排空的 PIPE —— 见 tests/e2e_proc.py）
 print("Starting dev server...")
-proc = subprocess.Popen(
+proc, _logf = spawn_server(
     [sys.executable, "-m", "uvicorn", "main:app", "--host", "127.0.0.1", "--port", "8000"],
     cwd=r"D:\learn\claudecode\pharma-batch-checker",
-    stdout=subprocess.PIPE, stderr=subprocess.STDOUT
+    log_path=os.path.join(os.environ.get("TEMP", "."), "pbc-e2e-quick-server.log"),
 )
 time.sleep(5)
 
@@ -129,11 +132,7 @@ try:
             fail(name, str(e))
 
 finally:
-    proc.terminate()
-    try:
-        proc.wait(timeout=5)
-    except:
-        proc.kill()
+    stop_server(proc, _logf, timeout=5)
 
 print("\n" + "="*50)
 passed = sum(1 for s, _, _ in RESULTS if s == "PASS")

@@ -1,6 +1,9 @@
 """Frozen build e2e smoke tests."""
 import subprocess, time, requests, sys, os, json, signal
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from tests.e2e_proc import spawn_server, stop_server  # noqa: E402
+
 EXE = r"D:\learn\claudecode\pharma-batch-checker\dist\pbc-server\pbc-server.exe"
 BASE = "http://127.0.0.1:58765"
 APPDATA = os.path.join(os.environ["TEMP"], "pbc-e2e-frozen")
@@ -18,11 +21,16 @@ def section(title):
     print(f"\n=== {title} ===")
 
 # --- Start server ---
+# 关键：stdout/stderr 落日志文件（不得用未排空的 PIPE —— 服务端日志写满
+# 管道缓冲后子进程阻塞在 write，事件循环停摆，后续请求全超时）。
 print("Starting frozen pbc-server.exe ...")
 os.makedirs(os.path.join(APPDATA, "PBC"), exist_ok=True)
 env = os.environ.copy()
 env["APPDATA"] = APPDATA
-proc = subprocess.Popen([EXE], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+proc, _logf = spawn_server(
+    [EXE], env=env,
+    log_path=os.path.join(APPDATA, "PBC", "frozen-e2e-server.log"),
+)
 time.sleep(8)
 
 try:
@@ -206,11 +214,7 @@ try:
         fail("swagger_ui", str(e))
 
 finally:
-    proc.terminate()
-    try:
-        proc.wait(timeout=5)
-    except:
-        proc.kill()
+    stop_server(proc, _logf, timeout=5)
 
 section("Results")
 passed = sum(1 for s, _, _ in RESULTS if s == "PASS")
