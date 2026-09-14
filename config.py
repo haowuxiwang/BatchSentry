@@ -272,6 +272,35 @@ def uuid_str() -> str:
 _RULES_KEY = "rules"
 
 
+_KB_KEY = "kb"
+
+
+def load_disabled_kb_sources() -> list[str]:
+    """读取被关闭的知识库来源 id（config.json 的 `kb.disabled_sources`）。
+
+    供 core.kb.retriever.enabled_source_ids() 使用：允许按来源关闭语料
+    （如现场只认中国法规、不需要 FDA/EU 条款）。与 load_disabled_rule_ids
+    同构：读取失败/结构非法一律返回空列表（= 全部启用）——知识库是增强项，
+    绝不因配置问题而静默清空检索结果。
+    """
+    json_path = _config_path()
+    if not json_path.exists():
+        return []
+    try:
+        with open(json_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError, TypeError):
+        logger.warning(f"Failed to read kb config from {json_path}")
+        return []
+    kb = data.get(_KB_KEY, {})
+    if not isinstance(kb, dict):
+        return []
+    disabled = kb.get("disabled_sources", [])
+    if not isinstance(disabled, list):
+        return []
+    return [str(x) for x in disabled if isinstance(x, (str, int))]
+
+
 def load_disabled_rule_ids() -> list[str]:
     """读取被关闭的规则 id（config.json 的 `rules.disabled` 数组）。
 

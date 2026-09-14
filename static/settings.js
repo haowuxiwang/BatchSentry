@@ -586,17 +586,139 @@
     const meta = document.getElementById("kb-meta");
     const count = document.getElementById("kb-count");
     const search = document.getElementById("kb-search");
+    const sourcesEl = document.getElementById("kb-sources");
+    const sourceFilter = document.getElementById("kb-source-filter");
+    const sourceMsg = document.getElementById("kb-source-msg");
     if (!list) return;
+
+    // 最近一次 /api/settings/kb 返回的来源清单（开关状态由 disabled 派生）
+    let sources = [];
+    let disabled = new Set();
+
+    function renderSources() {
+      if (!sourcesEl) return;
+      sourcesEl.innerHTML = "";
+      if (!sources.length) {
+        const p = document.createElement("p");
+        p.className = "text-[12px] text-muted-foreground px-1 py-1";
+        p.textContent = "无可用来源";
+        sourcesEl.appendChild(p);
+        return;
+      }
+      for (const s of sources) {
+        const row = document.createElement("div");
+        row.className = "flex items-center gap-2 px-1 py-1";
+
+        const cb = document.createElement("input");
+        cb.type = "checkbox";
+        cb.className = "w-4 h-4 accent-foreground cursor-pointer shrink-0";
+        cb.checked = !disabled.has(s.source_id);
+        cb.title = "启用/停用该来源（停用后不再参与引用）";
+        cb.addEventListener("change", () => onToggle(s.source_id, cb));
+
+        const label = document.createElement("span");
+        label.className = "text-[12px] text-foreground truncate";
+        label.textContent = s.title || s.source_id;
+        label.title = `${s.source_id}${s.document_no ? " · " + s.document_no : ""}`;
+
+        const kind = document.createElement("span");
+        kind.className = "shrink-0 px-1.5 py-0.5 rounded text-[10px] " +
+          (s.text_kind === "original"
+            ? "bg-muted text-muted-foreground"
+            : "bg-foreground/10 text-foreground");
+        kind.textContent = s.text_kind === "original" ? "原文" : "摘编";
+
+        const info = document.createElement("span");
+        info.className =
+          "ml-auto shrink-0 text-[11px] text-muted-foreground tabular-nums";
+        info.textContent = `${s.entries} 条 · v${s.version}`;
+
+        row.appendChild(cb);
+        row.appendChild(label);
+        row.appendChild(kind);
+        row.appendChild(info);
+        sourcesEl.appendChild(row);
+      }
+    }
+
+    async function onToggle(sourceId, cb) {
+      const next = new Set(disabled);
+      if (cb.checked) next.delete(sourceId); else next.add(sourceId);
+      // 不允许停用全部来源（后端亦拒绝；前端先拦，避免无谓请求）
+      if (next.size >= sources.length) {
+        cb.checked = true;
+        if (sourceMsg) sourceMsg.textContent = "✗ 至少保留一个来源";
+        return;
+      }
+      const prev = disabled;
+      disabled = next;
+      if (sourceMsg) sourceMsg.textContent = "保存中…";
+      try {
+        const r = await fetch("/api/settings/kb/sources", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ disabled: [...disabled] }),
+        });
+        const d = await r.json();
+        if (r.ok && d.ok) {
+          disabled = new Set(d.disabled || []);
+          if (sourceMsg) {
+            sourceMsg.textContent = disabled.size
+              ? `✓ 已停用 ${disabled.size} 个来源`
+              : "✓ 全部来源已启用";
+          }
+        } else {
+          disabled = prev;
+          const errs = d.detail && d.detail.errors
+            ? d.detail.errors : [d.detail || "保存失败"];
+          if (sourceMsg) sourceMsg.textContent = `✗ ${errs.join("；")}`;
+        }
+      } catch (err) {
+        disabled = prev;
+        if (sourceMsg) sourceMsg.textContent = `✗ ${err.message}`;
+        log.err("kb source toggle failed", err);
+      }
+      renderSources();
+    }
+
+    function renderFilterOptions() {
+      if (!sourceFilter) return;
+      const cur = sourceFilter.value;
+      sourceFilter.innerHTML = "";
+      const all = document.createElement("option");
+      all.value = "";
+      all.textContent = "全部来源";
+      sourceFilter.appendChild(all);
+      for (const s of sources) {
+        const o = document.createElement("option");
+        o.value = s.source_id;
+        o.textContent = s.title || s.source_id;
+        sourceFilter.appendChild(o);
+      }
+      sourceFilter.value = cur;
+    }
 
     async function loadKb(q) {
       try {
-        const url =
-          "/api/settings/kb?limit=200" + (q ? "&q=" + encodeURIComponent(q) : "");
+        const src = sourceFilter ? sourceFilter.value : "";
+        let url = "/api/settings/kb?limit=200";
+        if (q) url += "&q=" + encodeURIComponent(q);
+        if (src) url += "&source=" + encodeURIComponent(src);
         const r = await fetch(url);
         if (!r.ok) throw new Error("HTTP " + r.status);
         const d = await r.json();
-        meta.textContent = `${d.source.title}（${d.source.effective} 起施行）`;
-        count.textContent = `显示 ${d.returned} / 共 ${d.total_entries} 条`;
+        sources = d.sources || [];
+        // 来源开关状态来自 config（后端随 sources 一并返回）——首屏据此回填
+        if (Array.isArray(d.disabled_sources)) {
+          disabled = new Set(d.disabled_sources);
+        }
+        renderFilterOptions();
+        renderSources();
+        meta.textContent =
+          `知识库 v${d.kb_version} · ${sources.length} 个来源`;
+        count.textContent = src
+          ? `显示 ${d.returned} / 共 ${d.total_entries} 条`
+          : `显示 ${d.returned} / 共 ${d.total_entries} 条（全部来源）`;
         list.innerHTML = "";
         if (!d.entries.length) {
           const p = document.createElement("p");
@@ -605,6 +727,8 @@
           list.appendChild(p);
           return;
         }
+        // 跨源浏览时标出来源，避免"同名条款号"混淆（多条法规都有第一条）
+        const multi = !src && sources.length > 1;
         for (const e of d.entries) {
           const row = document.createElement("details");
           row.className = "px-3 py-2";
@@ -612,7 +736,8 @@
           sum.className =
             "cursor-pointer text-[12px] font-medium text-foreground " +
             "hover:text-muted-foreground select-none";
-          sum.textContent = `${e.article_label} · ${e.chapter}`;
+          const tag = multi && e.source_title ? `【${e.source_title}】` : "";
+          sum.textContent = `${tag}${e.article_label} · ${e.chapter}`;
           const body = document.createElement("p");
           body.className =
             "text-[12px] leading-relaxed text-muted-foreground mt-1 whitespace-pre-wrap";
@@ -636,6 +761,9 @@
       clearTimeout(debounce);
       debounce = setTimeout(() => loadKb(search.value.trim()), 300);
     });
+    if (sourceFilter) {
+      sourceFilter.addEventListener("change", () => loadKb(search.value.trim()));
+    }
     loadKb("");
   }
 

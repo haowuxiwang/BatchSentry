@@ -34,9 +34,11 @@ yarn-error.log*
 Thumbs.db
 desktop.ini
 
-# App data (dev)
-data/
-output/
+# App data (dev) — repo-root only. NOTE: the pattern must stay root-anchored
+# (`/data/`), otherwise it also swallows `core/kb/data/`, which is the
+# *committed* knowledge-base corpus (see seed_kb.py / .gitignore line ~122).
+/data/
+/output/
 *.db
 *.db-journal
 *.db-wal

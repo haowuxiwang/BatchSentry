@@ -33,8 +33,14 @@ datas = [
     (str(_PROJECT_ROOT / "templates"), "templates"),
     (str(_PROJECT_ROOT / "static"), "static"),
     (str(_PROJECT_ROOT / "db" / "schema.sql"), "db"),
-    (str(_PROJECT_ROOT / "core" / "kb" / "data" / "gmp2010.json"),
-     "core/kb/data"),  # v8 知识库种子（派生 JSON，源 .doc 不入包）
+    # M5: the knowledge base is multi-source — every core/kb/data/*.json must
+    # ship (gmp2010 正文 + 附录 + NMPA 记录规范 + ALCOA+ + 21 CFR Part 11).
+    # 源 .doc 不入包；raw/*.md 只作 dev 溯源，也不入包。
+    # release_gate::kb_packaging 校验此清单与实际语料一一对应，防漏源漂移。
+    *[
+        (str(p), "core/kb/data")
+        for p in sorted((_PROJECT_ROOT / "core" / "kb" / "data").glob("*.json"))
+    ],
 ]
 
 # Hidden imports — modules PyInstaller can't detect via static analysis

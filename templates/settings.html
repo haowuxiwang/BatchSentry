@@ -513,17 +513,30 @@
             </div>
           </section>
 
-          <!-- ════════════════════ 知识库（只读浏览） ════════════════════ -->
+          <!-- ════════════════ 知识库（多源浏览 + 来源开关） ════════════════ -->
           <section data-section="kb" class="stagger-in hidden" style="--i: 7">
             <div class="flex items-center justify-between mb-2">
               <div>
                 <h2 class="text-[15px] font-semibold text-foreground">知识库</h2>
                 <p class="text-[12px] text-muted-foreground mt-0.5">
-                  内置法规条文，跨页分析自动为问题引用依据。只读浏览；来源变更需更新应用内置数据。
+                  内置多源法规条文，跨页分析自动为问题引用依据。可停用不需要的来源（如现场只认中国法规，可关闭 FDA/ALCOA）。
                 </p>
               </div>
               <span id="kb-meta" class="text-[11px] text-muted-foreground tabular-nums shrink-0 ml-4"></span>
             </div>
+
+            <!-- 来源开关（写 config.json kb.disabled_sources，即时生效） -->
+            <div class="border border-border rounded-md mb-3">
+              <div class="px-3 py-2 border-b border-border flex items-center justify-between gap-3">
+                <span class="text-[12px] font-medium text-foreground">来源</span>
+                <span id="kb-source-msg" class="text-[11px] text-muted-foreground" role="status" aria-live="polite"></span>
+              </div>
+              <div id="kb-sources" class="p-2 flex flex-col gap-1">
+                <p class="text-[12px] text-muted-foreground px-1 py-1">加载中…</p>
+              </div>
+            </div>
+
+            <!-- 条款浏览（可按来源过滤） -->
             <div class="flex items-center gap-2 mb-3">
               <input
                 type="text"
@@ -531,7 +544,14 @@
                 placeholder="搜索条款内容 / 条款号 / 章名…"
                 class="w-full max-w-md px-3 py-1.5 text-[13px] bg-card border border-border rounded-md focus:outline-none focus:ring-1 focus:ring-ring"
               />
-              <span id="kb-count" class="text-[11px] text-muted-foreground tabular-nums"></span>
+              <select
+                id="kb-source-filter"
+                title="按来源过滤"
+                class="px-2 py-1.5 text-[12px] bg-card border border-border rounded-md focus:outline-none focus:ring-1 focus:ring-ring"
+              >
+                <option value="">全部来源</option>
+              </select>
+              <span id="kb-count" class="text-[11px] text-muted-foreground tabular-nums shrink-0"></span>
             </div>
             <div
               id="kb-list"

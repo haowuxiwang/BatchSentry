@@ -418,19 +418,39 @@ def _generate_markdown(job: dict, findings: list[dict], total_pages: int,
     # v8 知识库：本次 findings 引用的法规条文附录（去重，全文）
     kb_cited = dedup_refs_for_report(findings)
     if kb_cited:
+        from core.kb.retriever import group_refs_by_source as _group_kb
         from core.kb.store import get_entry as _kb_entry
 
         lines.append("## 依据条文附录")
         lines.append("")
-        lines.append("> 以下为本次问题清单引用的《药品生产质量管理规范（2010年修订）》条文原文。")
+        lines.append(
+            "> 以下为本次问题清单引用的法规条文，**按来源分组**；每条引用可追溯到"
+            "具体法规、文号与知识库版本。标注「要点摘编」的条目为外文法规的中文"
+            "摘编，非条文原文。"
+        )
         lines.append("")
-        for r in sorted(kb_cited, key=lambda x: x.get("entry_id", "")):
-            e = _kb_entry(r["entry_id"])
-            body = e["text"] if e else r.get("excerpt", "")
-            lines.append(f"### {r['label']}（{r.get('chapter', '')}）")
+        for meta, _refs in _group_kb(kb_cited):
+            title = meta.get("title") or meta.get("source_id") or "未标注来源"
+            bits = []
+            if meta.get("document_no"):
+                bits.append(str(meta["document_no"]))
+            if meta.get("version"):
+                bits.append(f"版本 {meta['version']}")
+            suffix = f"（{'，'.join(bits)}）" if bits else ""
+            lines.append(f"### {title}{suffix}")
             lines.append("")
-            lines.append(esc(body))
-            lines.append("")
+            for r in _refs:
+                e = _kb_entry(r["entry_id"])
+                body = e["text"] if e else r.get("excerpt", "")
+                kind = (r.get("text_kind")
+                        or (e or {}).get("text_kind") or "original")
+                mark = "" if kind == "original" else "（要点摘编）"
+                lines.append(
+                    f"#### {r['label']}{mark}（{r.get('chapter', '')}）"
+                )
+                lines.append("")
+                lines.append(esc(body))
+                lines.append("")
     else:
         from core.kb.store import source_meta as _kb_meta
 
