@@ -352,5 +352,20 @@ engine/stage1/dual_compare 的字面能力假设全部改由能力表驱动；`c
 真实 51 页 full-chain frozen e2e（`e2e_run.py --rounds real`）+ `ui_e2e.py`（Playwright 逐页三断言）；
 tag `v1.1.0`。
 
+**规格可判性（M8 看图比对后固化，唯一来源均在 `core/rules/parsing.py`）**：
+- `_parse_spec` 支持的写法：`A-B` / `A~B` / `A±B` / **空格 `A B`**（仅 `|B|<|A|` 才按 `A±B`，
+  防 `10 20` 被误读为 `10±20`）/ **反向区间按 `A±B` 重建**（OCR 把 `±` 读成 `-`）。
+- `_violated_bound`（被越过的界，供超差倍数评估）、`_sign_convention_uncertain`
+  （负表压 × 印版正限值 → `spec_unverifiable` 交人工，勿静默判合规/超差）、
+  `_decimal_loss_factor`（OCR 丢小数点软化，判据：**实测值不含小数点** 且 **超差倍数 ≈10×/100×**；
+  反例 `45.6 vs 0~5°C`、`25 vs ≤5.0` 必须维持 `warning` 铁口）。
+- **LLM 自报超差必须复核**：`core/rules/spec_guard.py::drop_unfounded_spec_findings` 用**规则层同一
+  解析器**复核 `source=llm_page` 的 `param_out_of_spec`，命中状态 `in`/`soft` 才剔除；定位不到、
+  不可判、符号存疑一律保留（fail-closed）。名称比对先过 `_norm`（去空白/下划线/连字符/括号），
+  因结构化列名 `T2101a_压力` 与 LLM 文案 `T2101a 压力` 分隔符常不一致。
+- **看图比对是定位规格缺陷的首选手段**：`docs/M8_VISUAL_VERIFICATION.md` 记录了方法与逐条实读结论。
+  要点：**页面方向逐页不同**（p08 需 90°，p19 另一角度），最保真的读法是直接抽嵌入栅格
+  （`doc.extract_image(page.get_images(full=True)[0][0])` → 3000×4000 原图），再按像素裁切放大 3~5×。
+
 **关键路径陷阱**：`release_gate.py` 的 `worktree_clean` 项要求**先提交再跑**，否则必然 FAIL；
 `--python` 必须传 **Windows 路径**（POSIX `/c/...` 会判"python 不可用"）。
