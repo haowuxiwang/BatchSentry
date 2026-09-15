@@ -48,6 +48,22 @@ REAL_TIMEOUT_S = int(os.environ.get("E2E_REAL_TIMEOUT", "5400"))
 _TERMINAL = ("review", "partial_review", "error", "cancelled")
 
 
+def backend_mismatch(expect_backend, used_backend):
+    """返回后端不一致的说明；一致（或未指定期望）时返回 ``None``。
+
+    独立成纯函数是为了可测：这个判定是"到底哪个 OCR 引擎跑的"的唯一防线，
+    必须能被单测覆盖（见 tests/unit/test_e2e_backend_assert.py）。
+
+    为什么需要它：主后端提交失败会**自动 failover** 到备选后端，而终态、
+    findings、SSE 全都照常 —— 只有 ``jobs.ocr_backend_used`` 能揭穿。
+    2026-09-15 实测：Paddle 上游返回 10010「任务提交队列已满」，51 页真实
+    文档整轮实际跑的却是 MinerU，报告里却写着 paddle。
+    """
+    if not expect_backend or used_backend == expect_backend:
+        return None
+    return f"expected {expect_backend}, got {used_backend}"
+
+
 def _sse_recorder(job_id, out_path, stats):
     """后台线程：订阅 /api/jobs/{id}/stream，记录 SSE 帧到 jsonl。
 
@@ -153,11 +169,23 @@ def findings_of(client, job_id):
     return []
 
 
+def _require(value, flag: str, env_name: str):
+    """参数缺失时报错并指出环境变量注入通道。
+
+    密钥不允许写在命令行里 —— 命令行会进 shell history、进程表
+    （``tasklist`` / ``/proc/<pid>/cmdline``）与 CI 日志，等同于泄漏。
+    环境变量是既有的密钥注入通道（见 tests/e2e_proc.LLM_KEY_ENV）。
+    """
+    if not value:
+        raise SystemExit(f"缺少 {flag}（也可用环境变量 {env_name} 注入）")
+    return value
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--sf-key", required=True)
-    ap.add_argument("--paddle-token", required=True)
-    ap.add_argument("--mineru-token", required=True)
+    ap.add_argument("--sf-key", default=os.environ.get("PBC_E2E_SILICONFLOW_KEY"))
+    ap.add_argument("--paddle-token", default=os.environ.get("PBC_E2E_PADDLE_TOKEN"))
+    ap.add_argument("--mineru-token", default=os.environ.get("PBC_E2E_MINERU_TOKEN"))
     ap.add_argument("--rounds", default="pdf,img,mineru")
     ap.add_argument(
         "--exe", default=os.environ.get("PBC_E2E_EXE", ""),
@@ -167,6 +195,9 @@ def main():
              "或设 PBC_E2E_EXE 环境变量。",
     )
     args = ap.parse_args()
+    args.sf_key = _require(args.sf_key, "--sf-key", "PBC_E2E_SILICONFLOW_KEY")
+    args.paddle_token = _require(args.paddle_token, "--paddle-token", "PBC_E2E_PADDLE_TOKEN")
+    args.mineru_token = _require(args.mineru_token, "--mineru-token", "PBC_E2E_MINERU_TOKEN")
     rounds = args.rounds.split(",")
 
     appdata = os.path.join(tempfile.gettempdir(), "pbc_e2e_appdata")
@@ -225,17 +256,21 @@ def main():
                                                 expect_types=["step_gap", "time_reversal",
                                                               "batch_inconsistency",
                                                               "param_out_of_spec"],
-                                                force=True)
+                                                force=True, expect_backend="paddle")
                 elif rnd == "img":
+                    # 图像→PDF 转换路径：不关心哪个 OCR 引擎（取决于前序轮次
+                    # 切换后的当前设置），显式传 None 表示"本轮不校验后端"。
                     results["img"] = run_upload(c, "test1.jpg", "image/jpeg",
-                                                expect_types=[], force=True)
+                                                expect_types=[], force=True,
+                                                expect_backend=None)
                 elif rnd == "mineru":
                     # switch backend to mineru and re-run same pdf with force
                     r = c.post(f"{API}/api/settings", json={"ocr_backend": "mineru"})
                     print(f"[e2e] switch to mineru -> {r.status_code}")
                     results["mineru"] = run_upload(c, os.environ.get("E2E_PDF", "e2e_test.pdf"),
                                                    "application/pdf",
-                                                   expect_types=[], force=True)
+                                                   expect_types=[], force=True,
+                                                   expect_backend="mineru")
                 elif rnd == "real":
                     # real-world scanned batch record (handwriting), paddle primary
                     r = c.post(f"{API}/api/settings", json={"ocr_backend": "paddle"})
@@ -243,7 +278,8 @@ def main():
                     results["real"] = run_upload(
                         c, os.environ.get("E2E_PDF", "丝裂霉素提取批记录.pdf"),
                         "application/pdf", expect_types=[], force=True,
-                        timeout_s=REAL_TIMEOUT_S, page_chars=True)
+                        timeout_s=REAL_TIMEOUT_S, page_chars=True,
+                        expect_backend="paddle")
                 elif rnd == "real-mineru":
                     # same real pdf with mineru backend (dual-engine completeness)
                     r = c.post(f"{API}/api/settings", json={"ocr_backend": "mineru"})
@@ -251,7 +287,8 @@ def main():
                     results["real-mineru"] = run_upload(
                         c, os.environ.get("E2E_PDF", "丝裂霉素提取批记录.pdf"),
                         "application/pdf", expect_types=[], force=True,
-                        timeout_s=REAL_TIMEOUT_S, page_chars=True)
+                        timeout_s=REAL_TIMEOUT_S, page_chars=True,
+                        expect_backend="mineru")
                 elif rnd == "cancel":
                     # cancel-during-OCR: OCRCancelled abort semantics (frozen exe)
                     r = c.post(f"{API}/api/settings", json={"ocr_backend": "paddle"})
@@ -264,19 +301,21 @@ def main():
                         "ocr_backend": "mineru", "ocr_dual_compare": True})
                     print(f"[e2e] dual-compare enabled -> {r.status_code}")
                     results["dual"] = run_dual(
-                        c, os.environ.get("E2E_PDF_SMALL", "e2e_test.pdf"))
+                        c, os.environ.get("E2E_PDF_SMALL", "e2e_test.pdf"),
+                        expect_backend="mineru")
                     c.post(f"{API}/api/settings", json={"ocr_dual_compare": False})
                 elif rnd == "rot":
                     # round-23 A: sideways-page rotation self-heal (paddle primary)
                     r = c.post(f"{API}/api/settings", json={"ocr_backend": "paddle"})
                     print(f"[e2e] switch to paddle -> {r.status_code}")
                     results["rot"] = run_rot(c, "e2e_rot.pdf",
-                                             timeout_s=_ROT_TIMEOUT_S)
+                                             timeout_s=_ROT_TIMEOUT_S,
+                                             expect_backend="paddle")
                 elif rnd == "robust":
                     # M3 尺寸鲁棒性：合成样本 + "不得静默标记成功"断言
                     r = c.post(f"{API}/api/settings", json={"ocr_backend": "paddle"})
                     print(f"[e2e] switch to paddle -> {r.status_code}")
-                    results["robust"] = run_robust(c)
+                    results["robust"] = run_robust(c, expect_backend="paddle")
             print("\n[e2e] SUMMARY:", json.dumps(
                 {k: {kk: vv for kk, vv in v.items() if kk != "findings"}
                  for k, v in results.items()}, ensure_ascii=False, indent=2))
@@ -306,7 +345,17 @@ _PDF_TIMEOUT_S = int(os.environ.get("E2E_PDF_TIMEOUT", "600"))
 _ROT_TIMEOUT_S = int(os.environ.get("E2E_ROT_TIMEOUT", "1200"))
 
 
-def run_upload(c, path, mime, expect_types, force, timeout_s=None, page_chars=False):
+def run_upload(c, path, mime, expect_types, force, timeout_s=None, page_chars=False,
+               expect_backend=None):
+    """上传 → 跑到终态 → 汇总证据。
+
+    ``expect_backend``：断言 ``jobs.ocr_backend_used`` 等于该值。
+
+    **必须显式传**。主后端提交失败会自动 failover 到备选（见
+    ``_get_ocr_chain``）：Paddle 上游返回 10010「任务提交队列已满」时，
+    整轮会静默改用 MinerU，而终态仍是 ``review`` —— 不校验后端就会把
+    一次"用 Paddle 跑"的结论记成通过（2026-09-15 实测踩到）。
+    """
     if timeout_s is None:
         timeout_s = _PDF_TIMEOUT_S
     t0 = time.time()
@@ -324,7 +373,9 @@ def run_upload(c, path, mime, expect_types, force, timeout_s=None, page_chars=Fa
     st, d = wait_terminal(c, job_id, timeout_s=timeout_s)
     sse_thread.join(timeout=15)
     dur = int(time.time() - t0)
-    print(f"[e2e] {path}: status={st} in {dur}s (pages={d.get('total_pages')})")
+    used_backend = d.get("ocr_backend_used")
+    print(f"[e2e] {path}: status={st} in {dur}s (pages={d.get('total_pages')})"
+          f" backend={used_backend}")
     fs = findings_of(c, job_id) if st in ("review", "partial_review") else []
     types = {}
     with_basis = 0
@@ -356,6 +407,12 @@ def run_upload(c, path, mime, expect_types, force, timeout_s=None, page_chars=Fa
     ok = st in ("review", "partial_review") and not missing
     if missing:
         print(f"[e2e] {path}: MISSING expected types: {missing}")
+    # 后端校验：failover 发生后终态依然正常，只有 ocr_backend_used 能揭穿
+    backend_err = backend_mismatch(expect_backend, used_backend)
+    if backend_err:
+        ok = False
+        print(f"[e2e] {path}: BACKEND MISMATCH — {backend_err}"
+              f"（主后端失败已 failover；本轮**不得**记为 {expect_backend} 的成果）")
     # SSE 证据摘要：事件数 / phase 迁移链 / 终帧
     phases = [t.split(":")[0] for t in sse_stats["transitions"]]
     sse_ok = bool(sse_stats["events"]) and "done" in phases
@@ -364,6 +421,8 @@ def run_upload(c, path, mime, expect_types, force, timeout_s=None, page_chars=Fa
     return {"ok": ok, "status": st, "duration_s": dur,
             "pages": d.get("total_pages"), "findings": len(fs),
             "job_id": job_id,
+            "ocr_backend_used": used_backend,
+            "backend_mismatch": backend_err,
             "types": types, "gmp_basis": with_basis, "missing": missing,
             "sparse_pages": len(sparse_pages),
             "sse_events": sse_stats["events"],
@@ -421,7 +480,7 @@ def run_cancel(c, path, mime="application/pdf"):
             "sse_events": sse_stats["events"], "sse_phases": phases}
 
 
-def run_dual(c, path, mime="application/pdf"):
+def run_dual(c, path, mime="application/pdf", expect_backend=None):
     """Gate-3 dual-compare round: primary mineru + secondary paddle re-run.
 
     已知该合成 PDF 在两引擎下 p2/p4 覆盖率 <0.85 —— 预期门禁产生差异
@@ -429,7 +488,8 @@ def run_dual(c, path, mime="application/pdf"):
     终态为 review/partial_review（差异页数仅作证据输出，不作硬断言 ——
     LLM 抽取存在轮次方差，两引擎可能偶发一致）。
     """
-    res = run_upload(c, path, mime, expect_types=[], force=True)
+    res = run_upload(c, path, mime, expect_types=[], force=True,
+                     expect_backend=expect_backend)
     job_id = res.get("job_id")
     if not job_id or not res.get("ok"):
         return res
@@ -457,7 +517,7 @@ def run_dual(c, path, mime="application/pdf"):
     return res
 
 
-def run_rot(c, path, mime="application/pdf", timeout_s=None):
+def run_rot(c, path, mime="application/pdf", timeout_s=None, expect_backend=None):
     """round-23 A: sideways-page rotation self-heal round.
 
     合成样本（gen_e2e_rot_pdf.py）：p1/p4 正常，p2 内容横置 90°、p3 横置
@@ -472,7 +532,7 @@ def run_rot(c, path, mime="application/pdf", timeout_s=None):
     （B2025001）同页可见性一并校验（对照页未受旋转污染）。
     """
     res = run_upload(c, path, mime, expect_types=[], force=True,
-                     timeout_s=timeout_s)
+                     timeout_s=timeout_s, expect_backend=expect_backend)
     job_id = res.get("job_id")
     if not job_id or not res.get("ok"):
         return res
@@ -565,7 +625,7 @@ def _has_non_ok_signal(pd):
     return "[OCR 警告:" in (pd.get("raw_html") or "")
 
 
-def run_robust(c, mime="application/pdf"):
+def run_robust(c, mime="application/pdf", expect_backend=None):
     """M3 尺寸鲁棒性轮（冻结包 e2e）：合成样本 + "不得静默标记成功"断言。
 
     - o6_small_font_low_dpi：小字号 + 低 DPI（不可无损修复）→ 页必须显式
@@ -582,7 +642,7 @@ def run_robust(c, mime="application/pdf"):
 
     # 1) 不可无损修复页：必须被显式标记（不得静默成功）
     o6 = run_upload(c, samples["o6_small_font_low_dpi"], mime,
-                    expect_types=[], force=True)
+                    expect_types=[], force=True, expect_backend=expect_backend)
     res["o6"] = {k: v for k, v in o6.items() if k != "findings"}
     if o6.get("ok") and o6.get("job_id"):
         pd1 = _page_payload(c, o6["job_id"], 1)
@@ -597,7 +657,7 @@ def run_robust(c, mime="application/pdf"):
 
     # 2) 已规范化页：不得稀疏 / 不得误告警
     o1 = run_upload(c, samples["o1_small_box"], mime,
-                    expect_types=[], force=True)
+                    expect_types=[], force=True, expect_backend=expect_backend)
     res["o1"] = {k: v for k, v in o1.items() if k != "findings"}
     if o1.get("ok") and o1.get("job_id"):
         diag = (_page_payload(c, o1["job_id"], 1)).get("ocr_diagnostics") or {}
