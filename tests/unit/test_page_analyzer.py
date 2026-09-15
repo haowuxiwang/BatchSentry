@@ -848,6 +848,86 @@ class TestGroundingCheck:
         data2["steps"][0]["measurements"][0]["values"]["设备A_流速"]["actual"] = "1,250"
         assert _grounding_check(html2, data2) == []
 
+    # ── 短数字（<4 位）重复出现于相邻单元格 ─────────────────────────
+    # 回归：`text` 是**去空白**归一化的，相邻单元格会被粘成 "0.150.15"，
+    # 短数字的"前后非数字"边界判据随之永不成立 —— 真实存在的值被误判为
+    # 幻觉。真实第 9 页 21 处 "0.15"（压力列）全被误判，致 31/51 页挂
+    # "疑似幻觉"横幅；被标记的清一色是 3 位数字，而 4 位数字因走 token
+    # 分支从不被标记（症状与根因一致）。修复：token 精确匹配提前到长度
+    # 分支之前，不论数字长短都先走 token。
+
+    def test_repeated_short_number_in_adjacent_cells_is_grounded(self):
+        """相邻单元格重复的短数字（0.15 ×3）—— 真实存在，必须判 grounded。"""
+        html = "<table><tr><td>0.15</td><td>0.15</td><td>0.15</td></tr></table>"
+        data = {"steps": [{"measurements": [{"time": "11:04", "values": {
+            "T2101a_压力": {"actual": "0.15"},
+            "T2101b_压力": {"actual": "0.15"},
+            "T2101c_压力": {"actual": "0.15"}}}]}]}
+        assert _grounding_check(html, data) == []
+
+    def test_real_page_density_short_and_long_values_grounded(self):
+        """真实第 9 页形态：压力列重复 0.15 + 流速列 4 位值，混合下全过。"""
+        cells = "".join(f"<td>0.15</td><td>0.{v}</td>"
+                        for v in ("974", "979", "983"))
+        html = f"<table><tr>{cells}</tr></table>"
+        data = {"steps": [{"measurements": [{"time": "11:04", "values": {
+            "a_压力": {"actual": "0.15"}, "a_流速": {"actual": "0.974"},
+            "b_压力": {"actual": "0.15"}, "b_流速": {"actual": "0.979"},
+            "c_压力": {"actual": "0.15"}, "c_流速": {"actual": "0.983"}}}]}]}
+        assert _grounding_check(html, data) == []
+
+    def test_absent_short_number_still_flagged(self):
+        """修过头防护：原文只有 0.15，输出 0.99 → 仍须报幻觉。"""
+        html = "<table><tr><td>0.15</td><td>0.15</td></tr></table>"
+        data = {"steps": [{"measurements": [{"time": "t", "values": {
+            "col": {"actual": "0.99"}}}]}]}
+        suspects = _grounding_check(html, data)
+        assert len(suspects) == 1 and "0.99" in suspects[0]
+
+    def test_short_number_not_matched_by_prefix_token(self):
+        """短数字不得被更长的 token 前缀命中（"15" ⊄ "0.150"）。"""
+        html = "<table><tr><td>0.150</td><td>0.150</td></tr></table>"
+        data = {"steps": [{"measurements": [{"time": "t", "values": {
+            "col": {"actual": "15"}}}]}]}
+        suspects = _grounding_check(html, data)
+        assert len(suspects) == 1 and "15" in suspects[0]
+
+    # ── token 与数值分量的"附属字符不对称" ──────────────────────────
+    # 回归：比对原始 token 时，OCR 把符号/单位/前后缀粘进同一单元格
+    # （"-0.094 MPa"、"100.4%"、"见附表14"）→ token 与 LLM 输出的分量不同形
+    # → 真实存在的值被判幻觉。真实数据上这批占剩余误报的大头（真空度负值、
+    # 含量百分比、附表引用）。修复：比对 token 内的数字核心。
+
+    def test_negative_value_grounded(self):
+        """负号附属："-0.094 MPa" 与值 "0.094" 应判 grounded。"""
+        html = "<table><tr><td>真空度 -0.094 MPa</td></tr></table>"
+        data = {"steps": [{"measurements": [{"time": "t", "values": {
+            "浓缩开始真空度": {"actual": "-0.094 MPa"}}}]}]}
+        assert _grounding_check(html, data) == []
+
+    def test_percent_glued_value_grounded(self):
+        """单位黏连："100.4%" 与值 "100.4%" 应判 grounded。"""
+        html = "<table><tr><td>含量（干计）100.4%</td></tr></table>"
+        data = {"steps": [{"measurements": [{"time": "t", "values": {
+            "含量（干计）": {"actual": "100.4%"}}}]}]}
+        assert _grounding_check(html, data) == []
+
+    def test_prefix_text_value_grounded(self):
+        """前缀文字："见附表14" 与值 "见附表14" 应判 grounded。"""
+        html = "<table><tr><td>干燥记录 见附表14</td></tr></table>"
+        data = {"steps": [{"measurements": [{"time": "t", "values": {
+            "干燥记录": {"actual": "见附表14"}}}]}]}
+        assert _grounding_check(html, data) == []
+
+    def test_integer_zero_extension_rejected(self):
+        """修过头防护：整数补零是 10× 量级错误，不是格式差异 ——
+        原文 1250，输出 125 必须判幻觉（仅小数部分容忍尾零延展）。"""
+        html = "<table><tr><td>1250</td><td>1250</td></tr></table>"
+        data = {"steps": [{"measurements": [{"time": "t", "values": {
+            "col": {"actual": "125"}}}]}]}
+        suspects = _grounding_check(html, data)
+        assert len(suspects) == 1 and "125" in suspects[0]
+
     @pytest.mark.asyncio
     async def test_analyze_page_sets_grounding_warn(self):
         """analyze_page 端到端：数值找不到 → _grounding_warn 随结果透出。"""

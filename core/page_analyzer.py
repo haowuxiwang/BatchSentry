@@ -861,9 +861,11 @@ def _value_grounded(text: str, value: str,
     不再造成假阴性；尾部归一化（0.974 命中 "0.9740"）靠子串包含�?
     短数字要求边界防误命中�?
 
-    tokens（可选）：token 保留版归一化的词元列表 —— 提供时长数字优先
-    走 token 精确/尾零匹配，根除"相邻单元格拼接幻观数字"与
-    "前向嵌入量级错误"两条假阴性通道；未提供时保持旧子串语义。
+    tokens（可选）：token 保留版归一化的词元列表 —— 不论数字长短都优先
+    走 token 精确/尾零匹配。这既根除"相邻单元格拼接幻观数字"与"前向嵌入
+    量级错误"两条假阴性通道，也是短数字（"0.15"）唯一可用的判据：去空白
+    的 text 把相邻单元格粘成 "0.150.15"，边界判据必然失效。未提供时保持
+    旧子串语义。
     """
     v = _normalize_grounding_text(value)
     if not v or not re.search(r"\d", v):
@@ -873,32 +875,47 @@ def _value_grounded(text: str, value: str,
         return True
     for part in parts:
         digits = re.sub(r"[^0-9]", "", part)
+        # token 保留版命中（长度分支之前统一判定）。与 `text` 不同，token 按
+        # 单元格切分，保住了边界 —— 这是短数字唯一可用的判据（`text` 去空白
+        # 后把相邻单元格粘成 "0.150.15"，边界判据必然失效；实证：真实第 9 页
+        # 21 处 "0.15" 全被误判，31/51 页挂"疑似幻觉"横幅，被标记的清一色是
+        # 3 位数字，4 位数字因走 token 分支从不被标记 —— 症状与根因一致）。
+        #
+        # 比对 token 内的**数字核心**而非原始 token：OCR 常把符号/单位/前后缀
+        # 粘进同一单元格（"-0.094 MPa"、"100.4%"、"见附表14"），原始 token 与
+        # 分量不同形 → 真实存在的值被判幻觉。取数字核心消除这层不对称。
+        #
+        # 两条不变式（防"修过头"把幻觉放过）：
+        # ① 匹配只在**单个 token 内部**发生 —— "12"+"50" 不得合成 "1250"；
+        # ② 只允许**相等**或**小数尾零延展** —— "0.974" ↔ "0.9740" 是格式差异，
+        #    而整数补零（"125" ↔ "1250"）是 10× 量级错误，必须拒绝。
+        tok_ok = False
+        if tokens is not None:
+            decimal = "." in part
+            for t in tokens:
+                for cand in re.findall(r"\d+\.?\d*", t):
+                    if cand == part or (
+                        decimal
+                        and len(cand) > len(part)
+                        and cand.startswith(part)
+                        and set(cand[len(part):]) <= {"0"}
+                    ):
+                        tok_ok = True
+                        break
+                if tok_ok:
+                    break
+        if tok_ok:
+            return True
         if len(digits) >= _GROUNDING_MIN_DIGITS:
-            # 长数字（对抗审查 P2 通道二加固）：
-            # ① 前向嵌入拒绝 —— "2500" 不得命中 "12500" 内部（量级错误）；
-            # ② 后向仅容忍纯零延展（尾部归一化："0.974" ↔ "0.9740"），
-            #    且延展后不得再接数字/句点；
-            # ③ 全部匹配须发生在单个 token 内部（token 保留版归一化），
-            #    杜绝相邻单元格拼接出的幻观数字。
-            tok_ok = tokens is not None and any(
-                (t == part)
-                or (
-                    len(t) > len(part)
-                    and t.startswith(part)
-                    and set(t[len(part):]) <= {"0"}
-                )
-                for t in tokens
-            )
-            if tok_ok:
-                return True
             if tokens is not None:
                 continue  # token 语义下未命中 → 本分量不通过
             # 旧语义（tokens 未提供）：纯子串包含，保持既有调用方行为
             if part in text:
                 return True
         else:
-            # 短数字：要求以句点/比较符/范围符为边界，避免误命中
-            # 长数字的头部（如 "25" 命中 "250" 的部分）
+            # 短数字兜底：要求以句点/比较符/范围符为边界，避免误命中
+            # 长数字的头部（如 "25" 命中 "250" 的部分）。此支仅在 token
+            # 未命中时走到，处理 "25℃"、"25," 这类 token 与值不同形的值。
             for m in re.finditer(re.escape(part), text):
                 start, end = m.start(), m.end()
                 prev_ok = start == 0 or text[start - 1] not in "0123456789."
