@@ -148,3 +148,33 @@ class TestSsrAnchor:
         r = await anchor_client.get("/jobs/anchor-job/review?page=2")
         assert r.status_code == 200
         assert "locateFinding(event," not in r.text, "锚不上时不得显示入口"
+
+    @pytest.mark.asyncio
+    async def test_ssr_tolerates_bad_kb_refs_json(self, anchor_client, test_db):
+        """kb_refs 坏 JSON 不得拖垮整页渲染（安全退化）。
+
+        kb_refs 是**可选**依据富集（v8 引入）：一条脏数据若让复核页 500，
+        等于把整页 finding 都藏起来 —— 比少显示一条依据严重得多。
+        """
+        await test_db.executemany(
+            "INSERT INTO findings (job_id, page, type, severity, source, "
+            "description, ocr_text, status, kb_refs) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)",
+            [
+                ("anchor-job", 2, "param_out_of_spec", "info", "rule",
+                 "备注一：坏 kb_refs", "温度 42.1", "{不是合法 JSON"),
+                ("anchor-job", 2, "param_out_of_spec", "info", "rule",
+                 "备注二：好 kb_refs", "温度 42.1",
+                 json.dumps([{"source": "gmp2010", "article": "第 75 条"}],
+                            ensure_ascii=False)),
+                # 合法 JSON 但**不是**列表 → 也必须退化为空，不得把 dict 当引用渲染
+                ("anchor-job", 2, "param_out_of_spec", "info", "rule",
+                 "备注三：非列表 kb_refs", "温度 42.1", '{"source": "gmp2010"}'),
+            ],
+        )
+        await test_db.commit()
+
+        r = await anchor_client.get("/jobs/anchor-job/review?page=2")
+        assert r.status_code == 200, r.text
+        assert "备注一：坏 kb_refs" in r.text, "坏依据不得让该条目从页面上消失"
+        assert "备注三：非列表 kb_refs" in r.text

@@ -189,6 +189,28 @@ async def test_suppression_rows_rejects_blank_reason_python_side():
 
 
 @pytest.mark.asyncio
+async def test_suppression_rows_skips_malformed_items_without_blank_reason_trap():
+    """结构不完整的明细（非 dict / 缺 finding）→ **跳过**而非抛错。
+
+    为什么必须区分：``suppression_rows`` 对"有 finding 但无 reason"抛 ValueError
+    是**法规硬要求**（禁止无理由抑制）；而"根本没有 finding"是上游传参脏数据，
+    两者混淆会让一次脏传参把整批留痕写入全部打断 —— 留痕宁可少一条也不能整批丢失。
+    """
+    rows = suppression_rows("j", 1, [
+        "not a dict",                       # 非 dict → 跳过
+        {"reason": "理由在但无 finding"},     # 缺 finding → 跳过
+        {"finding": "not a dict", "reason": "同上"},
+        {                                    # 唯一合法项，必须保留
+            "finding": {"type": "param_out_of_spec", "severity": "info",
+                        "description": "d", "ocr_text": "o"},
+            "reason": "规则层复核为合规", "evidence": {},
+        },
+    ])
+    assert len(rows) == 1, f"只应保留合法项，实际 {rows}"
+    assert rows[0][0] == "j" and rows[0][2] == "param_out_of_spec"
+
+
+@pytest.mark.asyncio
 async def test_ledger_dedup_index_is_idempotent(tmp_path):
     """重分析/重试重放同一指纹 → 只留一条台账（INSERT OR IGNORE）。"""
     schema = SCHEMA_SQL.read_text(encoding="utf-8")

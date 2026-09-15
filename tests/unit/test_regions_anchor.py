@@ -159,15 +159,44 @@ class TestExtractPaddle:
         assert extract_regions({}) is None
         assert extract_regions(None) is None
 
+    def test_skips_malformed_blocks_and_bad_space(self):
+        """脏块（非 dict / bbox 非序列）跳过；坐标系非法则整页不产出。"""
+        page = _paddle_page([
+            "not a dict",
+            {"block_label": "text"},                      # 无 bbox
+            {"block_label": "text", "block_bbox": "0,0,1,1"},  # bbox 非序列
+            {"block_label": "seal", "block_bbox": [0, 0, 100, 100],
+             "block_content": "章"},
+        ])
+        out = extract_regions(page)
+        assert out is not None and len(out["regions"]) == 1
+        assert out["regions"][0]["label"] == "seal"
+        # 坐标系非法（width=0）→ 不得产出（宁缺勿错）
+        assert extract_regions(_paddle_page(
+            [{"block_label": "text", "block_bbox": [0, 0, 10, 10],
+              "block_content": "x"}], w=0, h=1920,
+        )) is None
+
+    def test_non_text_block_content_yields_empty_snippet(self):
+        """块内容为数字/None（非文本）时文本为空，但区域本身仍有效。"""
+        out = extract_regions(_paddle_page([
+            {"block_label": "image", "block_bbox": [0, 0, 10, 10],
+             "block_content": 12345},
+            {"block_label": "seal", "block_bbox": [20, 20, 40, 40],
+             "block_content": None},
+        ]))
+        assert [r["text"] for r in out["regions"]] == ["", ""]
+
     def test_region_cap_enforced(self):
+        # 坐标系要足够大，否则退化框会被剔除而触不到上限分支
         blocks = [
             {"block_label": "text", "block_bbox": [i, i, i + 1, i + 1],
              "block_content": f"t{i}"}
             for i in range(_MAX_REGIONS_PER_PAGE + 40)
         ]
-        out = extract_regions(_paddle_page(blocks, w=1, h=1))
+        out = extract_regions(_paddle_page(blocks, w=100000, h=100000))
         assert out is not None
-        assert len(out["regions"]) <= _MAX_REGIONS_PER_PAGE
+        assert len(out["regions"]) == _MAX_REGIONS_PER_PAGE
 
     def test_duplicate_bboxes_deduped(self):
         blocks = [
@@ -207,6 +236,19 @@ class TestExtractMinerU:
         assert extract_regions({"_regions": [
             {"label": "text", "bbox": [0, 0, 10, 10], "text": "x"},
         ]}) is None
+
+    def test_skips_malformed_region_blocks(self):
+        out = extract_regions({
+            "_space": [100, 100],
+            "_regions": [
+                "not a dict",
+                {"label": "text"},                                  # 无 bbox
+                {"label": "text", "bbox": [0, 0, 1]},               # 长度不足
+                {"label": "table", "bbox": [0, 0, 50, 50], "text": "t"},
+            ],
+        })
+        assert out is not None and len(out["regions"]) == 1
+        assert out["regions"][0]["label"] == "table"
 
 
 class TestAnchorTokens:
@@ -267,6 +309,29 @@ class TestRegionAnchor:
 
     def test_none_when_no_tokens(self):
         assert region_anchor("缺少签名与日期", self._payload()) is None
+
+    def test_none_when_tokens_present_but_no_region_matches(self):
+        """有特征词但无区域命中 → 不锚；**不得**锚到得分为 0 的区域。
+
+        与上面两条的区别：此处的 None 出自"扫完全部区域仍无所获"的分支，
+        而非提前从"无特征词"返回 —— 否则会误把 0 分区域当作命中。"""
+        assert region_anchor("温度 12.3 异常", self._payload()) is None
+
+    def test_skips_malformed_regions_and_empty_text(self):
+        """脏区域（非 dict / 文本为空）跳过，不得干扰计分与选优。"""
+        payload = {
+            "backend": "paddle", "space": [100, 100], "space_aspect": 1.0,
+            "regions": [
+                "not a dict",                                            # 非 dict
+                {"label": "text", "bbox": [0.0, 0.0, 0.1, 0.1],
+                 "text": None},                                          # 空文本
+                {"label": "table", "bbox": [0.0, 0.0, 0.5, 0.5],
+                 "text": "纯度 99.0"},
+            ],
+        }
+        a = region_anchor("纯度 99.0", payload)
+        assert a is not None
+        assert a["index"] == 2 and a["bbox"] == [0.0, 0.0, 0.5, 0.5]
 
     def test_none_for_empty_payload(self):
         assert region_anchor("压力 0.16", {}) is None

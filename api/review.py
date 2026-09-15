@@ -281,7 +281,14 @@ async def revert_suppression(
                 conf, reviewer_note,
             ),
         )
-        new_id = getattr(cur, "lastrowid", None)
+        # ⚠️ 不能用 lastrowid 判断"是否被 UNIQUE 去重忽略"：sqlite3 在
+        # INSERT OR IGNORE 被忽略时**不更新** lastrowid，它返回的是**上一次**
+        # 成功插入的 rowid —— 实测（id=1,2 已存在，插 'a' 被忽略）得到
+        # rowcount=0 而 lastrowid=2。据此会把去重命中误判为新插入，把
+        # reverted_finding_id / audit_log 指向一个**无关的 finding**（审计追踪
+        # 被污染）。rowcount 才是可靠信号（插入 1 / 被忽略 0）。
+        inserted = cur.rowcount == 1
+        new_id = cur.lastrowid if inserted else None
         if not new_id:
             # UNIQUE 去重命中（同 job/source/page/type/description 已存在）—
             # 回退是幂等的：挂到既存行上，不制造重复 finding。

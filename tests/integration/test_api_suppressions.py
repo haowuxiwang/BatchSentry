@@ -182,6 +182,15 @@ class TestRevertSuppression:
             ("sup-job", sup["page"], sup["type"], sup["severity"],
              sup["source"], sup["description"], sup["ocr_text"]),
         )
+        # 关键：再插一条**无关** finding，使 sqlite 的 lastrowid 指向它 ——
+        # INSERT OR IGNORE 被去重忽略时 lastrowid 不更新，会返回上一次插入的
+        # rowid。若实现靠 lastrowid 判断，这里就会把 reverted_finding_id 记成
+        # 这条无关行的 id（审计追踪被污染）。本用例即锁定该陷阱。
+        await test_db.execute(
+            "INSERT INTO findings (job_id, page, type, severity, source, "
+            "description, status) VALUES (?, ?, ?, ?, ?, ?, 'pending')",
+            ("sup-job", 1, "completeness", "info", "rule", "无关条目（lastrowid 陷阱）"),
+        )
         await test_db.commit()
         cur = await test_db.execute(
             "SELECT id FROM findings WHERE job_id = ? AND page = ? AND type = ? "
@@ -189,6 +198,12 @@ class TestRevertSuppression:
             ("sup-job", sup["page"], sup["type"], sup["description"]),
         )
         existing_id = (await cur.fetchone())["id"]
+        cur = await test_db.execute(
+            "SELECT MAX(id) AS m FROM findings WHERE job_id = ?", ("sup-job",)
+        )
+        assert (await cur.fetchone())["m"] != existing_id, (
+            "用例前提：lastrowid 指向的行必须与既存行不同，否则测不出陷阱"
+        )
 
         r = await sup_client.post(
             f"/api/jobs/sup-job/suppressions/{sup['id']}/revert"
@@ -203,6 +218,13 @@ class TestRevertSuppression:
         )
         assert (await cur.fetchone())["n"] == 1, "不得产生重复 finding"
 
+        # 台账里记的必须是**那个**既存行，不是 lastrowid 指向的无关行
+        cur = await test_db.execute(
+            "SELECT reverted_finding_id FROM finding_suppressions WHERE id = ?",
+            (sup["id"],),
+        )
+        assert (await cur.fetchone())["reverted_finding_id"] == existing_id
+
     @pytest.mark.asyncio
     async def test_revert_rejects_overlong_note(self, sup_client, test_db):
         cur = await test_db.execute("SELECT id FROM finding_suppressions LIMIT 1")
@@ -212,3 +234,47 @@ class TestRevertSuppression:
             data={"reviewer_note": "x" * 2001},
         )
         assert r.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_revert_tolerates_corrupt_page_cache_json(self, sup_client, test_db):
+        """page_cache.structured_json 为坏 JSON 时不得阻断回退 —— 安全退化。
+
+        坏数据只应用来判定 confidence（页面标志位），不是回退的前置条件；
+        若在这里抛异常，一次 OCR 写入异常就会让整条台账**永久无法回退**。"""
+        cur = await test_db.execute(
+            "SELECT * FROM finding_suppressions WHERE page = 9 ORDER BY id LIMIT 1"
+        )
+        sup = dict(await cur.fetchone())
+        await test_db.execute(
+            "INSERT OR REPLACE INTO page_cache (job_id, page, structured_json) "
+            "VALUES (?, ?, ?)",
+            ("sup-job", sup["page"], "{不是合法 JSON"),
+        )
+        await test_db.commit()
+
+        r = await sup_client.post(f"/api/jobs/sup-job/suppressions/{sup['id']}/revert")
+        assert r.status_code == 200, r.text
+        assert r.json()["finding_id"]
+
+    @pytest.mark.asyncio
+    async def test_revert_survives_kb_unavailable(self, sup_client, test_db,
+                                                  monkeypatch):
+        """知识库不可用时回退照常完成（法规依据是**可选**富集，非硬前置）。"""
+        import core.kb.retriever as retriever
+
+        def _boom(*_a, **_k):
+            raise RuntimeError("kb down")
+
+        monkeypatch.setattr(retriever, "attach_kb_refs", _boom)
+        cur = await test_db.execute(
+            "SELECT id FROM finding_suppressions ORDER BY id LIMIT 1"
+        )
+        sid = (await cur.fetchone())["id"]
+
+        r = await sup_client.post(f"/api/jobs/sup-job/suppressions/{sid}/revert")
+        assert r.status_code == 200, r.text
+        fid = r.json()["finding_id"]
+        assert fid
+        # 依据缺失不影响条目本身可裁决
+        cur = await test_db.execute("SELECT gmp_basis FROM findings WHERE id = ?", (fid,))
+        assert (await cur.fetchone())["gmp_basis"], "GMP 依据来自本地映射，不依赖知识库"

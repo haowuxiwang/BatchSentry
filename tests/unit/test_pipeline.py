@@ -1249,6 +1249,65 @@ class TestRetryReuseOcr:
         )
         assert (await cursor.fetchone())["c"] == 0
 
+    @pytest.mark.asyncio
+    async def test_backfills_regions_for_existing_pages(self, pipeline_db, tmp_path):
+        """已有原文但此前没区域锚的页 → **补写**区域锚（不改写原文）。
+
+        为什么必须允许补写：P0-3 上线前入库的历史 job 在复核页会一直显示
+        "该页不支持定位"——其实只是缺一行 regions_json。原文本身是证据链，
+        任何时候都不得覆盖。本用例同时锁定"补写"与"不覆盖"两个方向。
+        """
+        job_id = await _insert_job(pipeline_db, job_id="reuse-3", status="pending")
+        pdf_path = str(tmp_path / "fake.pdf")
+        Path(pdf_path).write_bytes(b"%PDF-1.4 fake")
+        await pipeline_db.execute(
+            "UPDATE jobs SET total_pages = 2, ocr_backend_used = 'paddle' WHERE id = ?",
+            (job_id,),
+        )
+        # 页 1 已有原文但无 regions_json；页 2 完全无缓存
+        await pipeline_db.execute(
+            "INSERT INTO page_cache (job_id, page, raw_html) VALUES (?, ?, ?)",
+            ("reuse-3", 1, "<p>旧原文 p1</p>"),
+        )
+        await pipeline_db.commit()
+
+        # 页 1 的 OCR 产物带回坐标系 + 区域（MinerU 形态：`_space` + `_regions`）
+        fake_pages = [
+            {"markdown": {"text": "new p1"}, "_space": [1440, 1920],
+             "_regions": [{"label": "table", "bbox": [72, 96, 1368, 960],
+                           "text": "进料压力 0.16 MPa"}]},
+            {"markdown": {"text": "new p2"}},
+        ]
+
+        async def _spy_failover(db, job_id, pdf_path, progress_callback=None):
+            return fake_pages, "paddle", []
+
+        with patch(
+            "core.pipeline._run_ocr_with_failover", side_effect=_spy_failover
+        ), patch(
+            "core.pipeline.analyze_page",
+            new=AsyncMock(return_value={"steps": [], "findings": [],
+                                        "overall_confidence": "high"}),
+        ), patch(
+            "core.pipeline.analyze_cross_page", new=AsyncMock(return_value=[])
+        ):
+            await run_pipeline(job_id, pdf_path)
+
+        cursor = await pipeline_db.execute(
+            "SELECT raw_html, regions_json FROM page_cache "
+            "WHERE job_id = ? AND page = 1",
+            (job_id,),
+        )
+        row = await cursor.fetchone()
+        assert "旧原文 p1" in row["raw_html"], "已有原文不得被 OCR 产物覆盖（证据链）"
+        assert row["regions_json"], "空缺的 regions_json 必须被补写（否则历史 job 永远无锚）"
+        got = json.loads(row["regions_json"])
+        # backend 记的是**载荷形态**的来源：`_space`+`_regions` 属 MinerU 形态分支
+        # （Paddle 形态走 prunedResult/parsing_res_list）。
+        assert got["backend"] == "mineru" and got["space"] == [1440, 1920]
+        # 写入的必须是**归一化**坐标（裸坐标禁止入库）
+        assert all(0.0 <= v <= 1.0 for v in got["regions"][0]["bbox"])
+
 
 # ─── 2.5 健壮性改进（robustness A/B 组）───────────────────────────
 
