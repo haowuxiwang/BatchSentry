@@ -10,7 +10,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 用户上传 PDF 批生产记录 → OCR 识别 → LLM 结构化提取 → 规则+LLM 跨页合规分析 → 人工复核界面 → 导出报告。
 
-**Current phase**: **v1.1.2** — 已完成 v1.1 全部里程碑 M2–M7：Finding 质量可度量+降噪（M2）、OCR 尺寸/形态鲁棒性（M3）、规则扩展 R11–R17 + 注册表（M4）、多源 GMP 知识库（M5，6 源/441 条）、SSE 优化 + 三色复核分级（M6）、docling 第三对照引擎（M7）。此后 v1.1.1 落地**降噪 P0-2 抑制留痕**与 **P0-3 区域级证据锚**，v1.1.2 补完 P0-3 的**服务端转正页面逆映射**（第 8 页 `angle=270`，此前只做宽高比闸门 → 该页明示不可定位）并补齐**分发一致性机检**（配置↔文档↔实物）。覆盖率门禁 **95%**；真实 51 页全链路 frozen e2e 为放行前提。此前：Phase 12（Feishu job notifications）+ 2 轮对抗审查，v1.0.0，本地单用户部署（PyInstaller exe + Electron 便携版 win-unpacked）。
+**Current phase**: **v1.1.2** — 已完成 v1.1 全部里程碑 M2–M7：Finding 质量可度量+降噪（M2）、OCR 尺寸/形态鲁棒性（M3）、规则扩展 R11–R17 + 注册表（M4）、多源 GMP 知识库（M5，6 源/441 条）、SSE 优化 + 三色复核分级（M6）、docling 第三对照引擎（M7）。此后 v1.1.1 落地**降噪 P0-2 抑制留痕**与 **P0-3 区域级证据锚**，v1.1.2 补完 P0-3 的**服务端转正页面逆映射**（第 8 页 `angle=270`，此前只做宽高比闸门 → 该页明示不可定位）并补齐**分发一致性机检**（配置↔文档↔实物）与**上传页数上限**（此前只有体积上限，低密度极长 PDF 会先撞 OCR 1 小时轮询上限；见 `docs/UPLOAD_LIMITS.md`）。覆盖率门禁 **95%**；真实 51 页全链路 frozen e2e 为放行前提。此前：Phase 12（Feishu job notifications）+ 2 轮对抗审查，v1.0.0，本地单用户部署（PyInstaller exe + Electron 便携版 win-unpacked）。
 
 **Round 15 (真实文档 e2e + GIL 隔离, 2026-08-24)**: 138MB/51 页真实手写批记录（丝裂霉素提取）全链路 e2e 三轮——① **P0 GIL 饿死事件循环**：Stage 0 规范化（51 页 3000x4000pt → 300dpi 重渲染）经 `asyncio.to_thread` 执行时 fitz C 调用持 GIL 数十秒，aiosqlite 毫秒级操作退化 1s+/条、status GET 10s ReadTimeout、SSE 停摆（pipeline.log 时间戳实证）。修复：新模块 `core/procpool.py`（spawn 单 worker 进程池 + `run_cpu`；不可 pickle 测试替身自动回退 to_thread；worker 父进程死亡守卫——e2e 实证孤儿 pbc-server.exe 锁死 dist 文件致构建 PermissionError）。② **规范化副本 JPEG 瘦身**：灰度 PNG 无损嵌入膨胀（51 页 → 224.8MB 超 200MB 上限）；改 `pix.tobytes("jpeg", jpg_quality=85)` 嵌入（OCR 无损，实测 224.8→43.8MB，5.1×）。③ **gmp_basis 补全**：LLM 生成 `batch_logic` 等变体 type 缺映射 → 显式映射 + 关键词回退（真实 PDF 50/50 全覆盖）。④ e2e harness：`e2e_run.py`（frozen exe 多轮驱动 + 逐页稀疏页检测 <40 字符 + gmp_basis 覆盖断言 + 轮询抗挫折），`gen_e2e_pdf.py`（合成埋点 PDF）。**e2e 结果**：真实 PDF paddle 轮 review/475 findings/critical 42/sparse 0/SSE 三阶段（ocr 39/51 → analyze 8→9 → cross）实测；img 轮 Paddle 队列满（HTTP 400 code 10010）3 次退避 → 自动 failover MinerU 成功——重试+兜底链实战验证。
 
@@ -363,6 +363,27 @@ tag `v1.1.0`。
   **只到区域级**（两后端都无单元格级 bbox）；**宽高比闸门**：`space_aspect` 与渲染图
   不一致（如服务端旋转过的页）时明示无法定位，不画错位的框。锚定是**读时推导**，
   SSR 与 AJAX 共用 `region_anchor`。
+
+**上传限额：页数上限 + 单一真值（v1.1.2 续）**：依据与市面 10 家产品做法调研见
+`docs/UPLOAD_LIMITS.md`。
+- **单一真值 `config.UPLOAD_LIMITS`** 同时驱动后端强制 / 前端预检 / 页面文案。
+  此前同一个 200MB 被**四处各自写死**（后端常量、后端消息、`static/upload.js`、
+  `templates/upload.html`）—— 任一处改动即静默漂移成"前端放行、后端拒绝"。
+  前端**刻意不设兜底数值**（兜底副本正是漂移来源）：注入缺失即跳过预检交服务端判定。
+- **判定是纯函数** `config.check_upload_page_limits(page_count, limits)`，返回
+  `(reject_detail, warn_text)`。硬上限 **200 页**（`MAX_UPLOAD_PAGES`）拒绝并给出
+  真实页数 + 上限 + "按批次拆分"；软阈值 **80 页**（`WARN_UPLOAD_PAGES`）放行但
+  响应带 `page_warning` + `audit_log` 留痕 + 前端跳转延迟延至 5s。
+  **页数读取失败（=0）一律放行**（部分损坏 PDF 云端 OCR 仍有容错，此条由测试钉死）。
+- **定标依据是实测而非照抄**：真实 51 页 Stage1 OCR 460.5s（**9.0 s/页**）、
+  Stage2 逐页 LLM 1163.7s（**22.8 s/页**）。200 页 → OCR 预估 1800s，对既有
+  `ocr_client.POLL_TIMEOUT_MAX=3600s`（**100 页即封顶**）留 2× 余量。
+  ⚠️ 云厂商的 1,000~3,000 页**不可移植** —— 其单页成本 1–2s，**可移植的量是墙钟时间，不是页数**。
+- **与厂商上限的关系**：`core/mineru_client.MINERU_MAX_UPLOAD_BYTES` 是 MinerU
+  **厂商**上限（与本产品策略同值纯属巧合）；MinerU 是 failover 备选，准入上限超过它
+  会导致"放行后流程中途失败"。护栏机检 `UPLOAD_LIMITS["max_bytes"] <= 厂商上限`。
+- 护栏：`tests/unit/test_upload_limits.py`（21）+ `tests/integration/test_api_upload_page_limit.py`（5）。
+  ⚠️ 200 页是**基于 51 页实测的线性外推**，未以 200 页文件实跑。
 
 **规格可判性（M8 看图比对后固化，唯一来源均在 `core/rules/parsing.py`）**：
 - `_parse_spec` 支持的写法：`A-B` / `A~B` / `A±B` / **空格 `A B`**（仅 `|B|<|A|` 才按 `A±B`，

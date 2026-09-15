@@ -21,6 +21,19 @@
   // 图片上传（Phase 13）：与后端 _IMAGE_EXTENSIONS 同步 — 客户端预检
   const IMAGE_EXTS = [".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"];
 
+  // 上传限额：**只认服务端注入**（单一真值 config.UPLOAD_LIMITS，见
+  // templates/upload.html）。这里刻意**不设兜底数值** —— 兜底副本会随服务端
+  // 调整而漂移，"前端放行、后端拒绝"正是本次要根除的缺陷。注入缺失时跳过
+  // 前端预检，交由服务端判定（服务端本来就权威，且其 detail 会被下方
+  // HTTP 错误分支展示），只是多一次往返。
+  const LIMITS = ctx.limits || null;
+  if (!LIMITS) {
+    log.warn(
+      "window.__PBC__.limits 缺失 — 跳过前端体积预检，交由服务端判定",
+    );
+  }
+  const limitMB = LIMITS ? Math.floor(LIMITS.max_bytes / 1024 / 1024) : 0;
+
   log("upload.html loaded", {
     has_input: !!input,
     has_area: !!area,
@@ -112,12 +125,13 @@
       setStatus("仅支持 PDF 或图片（jpg/jpeg/png/webp/bmp/tif/tiff）", "err");
       return;
     }
-    if (file.size > 200 * 1024 * 1024) {
+    // 体积预检（仅当服务端注入了限额时）—— 省一次往返；判定权威仍在服务端
+    if (LIMITS && file.size > LIMITS.max_bytes) {
       log.warn("uploadFile — rejected (too large)", {
         sizeMB: (file.size / 1024 / 1024).toFixed(1),
-        limitMB: 200,
+        limitMB: limitMB,
       });
-      setStatus("文件超过 200MB 上限", "err");
+      setStatus(`文件超过 ${limitMB}MB 上限`, "err");
       return;
     }
     // 前端预检：未配置 LLM 时引导用户先去设置（与后端 400 拦截双保险）
@@ -162,7 +176,7 @@
 
     const xhr = new XMLHttpRequest();
     xhr.open("POST", `/api/jobs${force ? "?force=1" : ""}`);
-    // 大文件上传超时保护：200MB 上限 × 慢速网络 ≈ 120s 超时
+    // 大文件上传超时保护：限额上限 × 慢速网络 ≈ 120s 超时
     xhr.timeout = 120000;
 
     // 上传进度（大文件反馈关键）
@@ -191,13 +205,25 @@
           log("uploadFile — success response", data);
           if (data.job_id) {
             if (progressBar) progressBar.classList.add("hidden");
-            setStatus(`任务已创建 ${data.job_id}，1.5s 后跳转复核页…`, "ok");
+            // 大文件软告警（后端 page_warning）：如实告知预估耗时。存在告警时
+            // 延长跳转延迟 —— 1.5s 读不完一句耗时提示，等于没有告知。
+            let warning = "";
+            let delayMs = 1500;
+            if (data.page_warning) {
+              log.warn("uploadFile — page_warning", data.page_warning);
+              warning = `（${data.page_warning}）`;
+              delayMs = 5000;
+            }
+            setStatus(
+              `任务已创建 ${data.job_id}${warning}，${delayMs / 1000}s 后跳转复核页…`,
+              "ok",
+            );
             const target = `/jobs/${data.job_id}/review`;
-            log("uploadFile — scheduling redirect", { target, delayMs: 1500 });
+            log("uploadFile — scheduling redirect", { target, delayMs });
             setTimeout(() => {
               log("uploadFile — redirecting now", target);
               window.location.href = target;
-            }, 1500);
+            }, delayMs);
           } else {
             log.err("uploadFile — response missing job_id", data);
             setStatus(`上传失败: ${JSON.stringify(data)}`, "err");

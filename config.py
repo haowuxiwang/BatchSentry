@@ -539,6 +539,103 @@ def _env_int(key: str, default: int) -> int:
         return default
 
 
+# ── 上传限额（单一真值）──────────────────────────────────────────────
+#
+# **三处都由这里派生**：后端强制（api/jobs）、前端预检（static/upload.js）、
+# 页面文案（templates/upload.html）。历史缺陷：200MB 被分别写死在
+# `api/jobs/__init__._MAX_PDF_BYTES`、`api/jobs/upload.py` 的错误消息、
+# `static/upload.js` 的比较式、`templates/upload.html` 的提示文字 —— 四处
+# 各自独立，任一处调整都会静默漂移（前端放行、后端拒绝，反之亦然）。
+#
+# 页数上限的**定标依据**（实测推导，非照抄云厂商）：
+#   实测真实 51 页批记录（job 95a27d88-52b，Paddle）：
+#     Stage1 OCR   460.5s（9.0 s/页）
+#     Stage2 逐页 LLM 分析 1163.7s（22.8 s/页）
+#     全链 1889s（32.7 s/页）
+#   ① 云厂商的 1,000~3,000 页**不可移植** —— 它们单页成本约 1–2s，比本链路
+#      快 10~30 倍。可移植的量是**墙钟时间**，不是页数。
+#   ② 既有的 core/ocr_client.POLL_TIMEOUT_MAX=3600s 在 100 页即封顶
+#      （600 + 30×页数）。按 OCR 9.0 s/页，400 页即打满 1 小时；而拥堵日
+#      单页可达数十秒（见 static/eta.js 注释中"单页排队 500-1000s"的记载），
+#      故不能贴边取值。
+#   ③ 取 200 页 = OCR 预估 1800s，对 3600s 上限留 **2× 余量**，同时高于任何
+#      单批记录的合理规模（典型 20~120 页，本样本 51 页）。200 页全链预估
+#      ≈ 1.8 小时，已属"必须事先告知用户"的量级。
+#
+# 两者正交：体积上限挡"巨文件"，页数上限挡"低密度但极长"的 PDF
+# （数字排版件可能 50KB/页，200MB 能装下数千页而体积检查毫无察觉）。
+#
+# ⚠️ 页数读取失败时（pdf_page_count==0，见 upload.py 的容错分支）**不得**
+# 以此为据拒绝 —— 部分损坏 PDF 云端 OCR 可能仍能处理。
+UPLOAD_LIMITS = {
+    "max_bytes": _env_int("MAX_UPLOAD_BYTES", 200 * 1024 * 1024),
+    "max_pages": _env_int("MAX_UPLOAD_PAGES", 200),
+    "warn_pages": _env_int("WARN_UPLOAD_PAGES", 80),
+    # 单页耗时先验（秒）— 用于软告警里的"预估耗时"，取自上述实测。
+    # 随上游拥堵波动，故表述为"预估"而非承诺。
+    "sec_per_page_ocr": 9.0,
+    "sec_per_page_total": 32.7,
+}
+
+
+def _normalize_upload_limits(limits: dict) -> dict:
+    """把误配置的限额收敛到自洽区间（非法值不崩溃、不产生荒谬语义）。
+
+    - 页数上限必须 ≥2：1 页上限等于拒绝一切多页批记录，必是误配置；
+    - 软告警阈值必须落在 [1, max_pages)：等于或超过硬上限会让告警永不触发，
+      小于 1 会每份文件都告警。
+    """
+    out = dict(limits)
+    max_pages = out.get("max_pages", 200)
+    if not isinstance(max_pages, int) or max_pages < 2:
+        logger.warning(f"Invalid max_pages={max_pages!r}, using 200")
+        max_pages = 200
+    out["max_pages"] = max_pages
+    warn = out.get("warn_pages", 80)
+    if not isinstance(warn, int) or not (1 <= warn < max_pages):
+        logger.warning(
+            f"Invalid warn_pages={warn!r} (max_pages={max_pages}), using default"
+        )
+        warn = min(80, max_pages - 1)
+    out["warn_pages"] = warn
+    return out
+
+
+UPLOAD_LIMITS = _normalize_upload_limits(UPLOAD_LIMITS)
+
+
+def check_upload_page_limits(
+    page_count: int, limits: dict | None = None
+) -> tuple[str | None, str | None]:
+    """页数限额判定 —— 返回 ``(reject_detail, warn_text)``。
+
+    **纯函数**：上下限文案与判定留在一处（与数值同源），既避免"数值改了、
+    文案没改"的漂移，也让策略语义可脱离 HTTP 层直接单测（无需构造真实 PDF）。
+
+    - ``page_count <= 0``：页数未知 / 读取失败 → 一律放行。部分损坏 PDF 云端
+      OCR 可能仍能处理，拦掉等于把"可能成功"变成"必然失败"（既有行为，
+      见 upload.py 的容错分支）。
+    - 超硬上限：拒绝，提示含真实页数与上限，并给出可执行动作（按批次拆分）。
+    - 超软阈值：放行并返回预估耗时文案 —— 对常态文件不吭声，否则等于没告警。
+    """
+    lim = limits if limits is not None else UPLOAD_LIMITS
+    if page_count <= 0:
+        return None, None
+    if page_count > lim["max_pages"]:
+        return (
+            f"PDF 共 {page_count} 页，超过单文件上限 {lim['max_pages']} 页。"
+            f"请按批次拆分后分别上传。",
+            None,
+        )
+    if page_count > lim["warn_pages"]:
+        est_minutes = page_count * lim["sec_per_page_total"] / 60
+        return None, (
+            f"页数较多（{page_count} 页），预估耗时约 {est_minutes:.0f} 分钟，"
+            f"并会消耗较多 OCR / LLM 配额。"
+        )
+    return None, None
+
+
 # 测试/占位 Key 模式 — 单一来源（T2.4：settings API 的 configured 标志
 # 与启动时的 auto-activate 判定共用此常量，加新模式只改一处）
 TEST_KEY_PATTERNS = (

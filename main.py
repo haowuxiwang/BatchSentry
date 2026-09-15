@@ -14,7 +14,7 @@ from fastapi.templating import Jinja2Templates
 from fastapi.responses import HTMLResponse, FileResponse
 from markupsafe import Markup
 
-from config import config
+from config import config, UPLOAD_LIMITS
 from db.client import get_db, close_db
 from logging_config import setup_logging, generate_request_id, request_id_var
 from core.pipeline import recover_stuck_jobs
@@ -316,6 +316,9 @@ async def index(request: Request, page: int = 1):
             "total_pages": total_pages,
             "total_jobs": total_jobs,
             "log_dir": log_dir,
+            # 上传限额下发前端（单一真值 = config.UPLOAD_LIMITS）——
+            # 前端的预检与提示文案不再各自写死，避免"前端放行、后端拒绝"漂移
+            "limits": UPLOAD_LIMITS,
         },
     )
 

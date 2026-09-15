@@ -91,7 +91,8 @@
           <div class="px-5 py-4 border-b border-border">
             <h2 class="text-[14px] font-medium">上传文件</h2>
             <p class="text-[11px] text-muted-foreground mt-0.5">
-              支持 PDF 或图片（jpg/jpeg/png/webp/bmp/tif/tiff），最大 200MB
+              {# 限额由 config.UPLOAD_LIMITS 派生（单一真值）—— 不再手写死值 #}
+              支持 PDF 或图片（jpg/jpeg/png/webp/bmp/tif/tiff），最大 {{ (limits.max_bytes // 1024 // 1024) }}MB、{{ limits.max_pages }} 页
             </p>
           </div>
           <div class="p-5">
@@ -217,6 +218,9 @@
       window.__PBC__ = {
         jobs_count: {{ jobs | length }},
         needs_setup: {{ needs_setup | tojson }},
+        {# 上传限额（单一真值 config.UPLOAD_LIMITS）—— upload.js 的预检与
+           提示文案都读这里，不再各自写死 200MB #}
+        limits: {{ limits | tojson }},
       };
     </script>
     <script src="/static/eta.js?v={{ asset_ver('eta.js') }}" defer></script>

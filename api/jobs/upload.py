@@ -11,7 +11,7 @@ import fitz  # PyMuPDF — 图片合成 PDF
 
 from fastapi import UploadFile, File, HTTPException, Request
 
-from config import config
+from config import config, check_upload_page_limits, UPLOAD_LIMITS
 from db.client import get_db
 from api.jobs import (
     _CHUNK_SIZE,
@@ -140,8 +140,13 @@ async def create_job(
                     f.close()
                     pdf_path.unlink(missing_ok=True)
                     # H5（对抗性审查）：原消息写死 "PDF too large"，图片超限
-                    # 时误导用户；统一为"文件"表述
-                    raise HTTPException(400, "文件过大（上限 200MB）")
+                    # 时误导用户；统一为"文件"表述。
+                    # 数值由 _MAX_PDF_BYTES 派生 —— 写死字面量会与常量漂移
+                    # （前端预检/页面文案同源，见 config.UPLOAD_LIMITS）。
+                    raise HTTPException(
+                        400,
+                        f"文件过大（上限 {_MAX_PDF_BYTES // 1024 // 1024}MB）",
+                    )
                 f.write(chunk)
                 file_md5.update(chunk)
     except HTTPException:
@@ -318,6 +323,25 @@ async def create_job(
             logger.warning(f"[{job_id}] Failed to read PDF page count: {e}")
             pdf_page_count = 0
 
+    # ── 页数限额（单一真值/策略见 config.check_upload_page_limits）──────
+    # 与体积上限**正交**：体积检查挡不住"低密度但极长"的 PDF —— 数字排版件
+    # 可能 50KB/页，200MB 能装下数千页，而体积检查毫无察觉。而数千页按实测
+    # 9.0 s/页 OCR 会先撞上 core/ocr_client.POLL_TIMEOUT_MAX=3600s（100 页即
+    # 封顶）→ 用户等满 1 小时后收到"轮询超时"。上传时以明确提示拒绝，远好于
+    # 让用户在服务端超时后才得知。
+    #
+    # 判定为纯函数：上限的数值、文案与边界语义同源，可脱离 HTTP 直接单测。
+    # ⚠️ 页数读取失败（0）时该函数一律放行。
+    reject_detail, page_warning = check_upload_page_limits(
+        pdf_page_count, UPLOAD_LIMITS
+    )
+    if reject_detail:
+        shutil.rmtree(job_dir, ignore_errors=True)
+        logger.warning(f"[{job_id}] Upload rejected: {reject_detail}")
+        raise HTTPException(400, reject_detail)
+    if page_warning:
+        logger.warning(f"[{job_id}] Large document: {page_warning}")
+
     # INSERT 在 db_lock 内（与去重检查 + 其他 DB 写入序列化，避免两个相同
     # 上传并发都通过检查）。去重：内容 md5 相同 → 409 提示已有任务，不创建
     # 重复 job（重复全流程 OCR/LLM 是纯浪费）。force=1 绕过（同一批记录在
@@ -347,9 +371,16 @@ async def create_job(
                 "VALUES (?, ?, 'pending', ?, ?, ?, datetime('now','localtime'))",
                 (job_id, safe_name, str(pdf_path), pdf_page_count or None, content_md5),
             )
+            audit_detail = (
+                f"Uploaded {safe_name} ({total_bytes} bytes, {pdf_page_count} pages, "
+                f"source={ 'image' if is_image else 'pdf' })"
+            )
+            # 大文件软告警留痕（GMP 追溯：影响复核员对耗时的预期，须可回溯）
+            if page_warning:
+                audit_detail += f" [告警] {page_warning}"
             await db.execute(
                 "INSERT INTO audit_log (job_id, action, detail, created_at) VALUES (?, 'pipeline_start', ?, datetime(\'now\',\'localtime\'))",
-                (job_id, f"Uploaded {safe_name} ({total_bytes} bytes, {pdf_page_count} pages, source={ 'image' if is_image else 'pdf' })"),
+                (job_id, audit_detail),
             )
             await db.commit()
         except HTTPException:
@@ -369,4 +400,10 @@ async def create_job(
     launch_pipeline(job_id, str(pdf_path))
     logger.info(f"[{job_id}] Upload complete: {total_bytes} bytes, pipeline launched")
 
-    return {"job_id": job_id, "filename": safe_name, "status": "pending"}
+    # page_warning：仅超软阈值时非 None —— 前端据此提示"较大文件，预估耗时"
+    return {
+        "job_id": job_id,
+        "filename": safe_name,
+        "status": "pending",
+        "page_warning": page_warning,
+    }

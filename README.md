@@ -136,6 +136,9 @@ npm run dev
 | `llm_provider` | 默认 LLM 服务商 | `deepseek` |
 | `ocr_backend` | OCR 后端 (`paddle`/`mineru`) | `paddle` |
 | `max_concurrent_jobs` | 最大并发任务数 | `3` |
+| `MAX_UPLOAD_BYTES`（env） | 单文件体积上限 | `200 MB` |
+| `MAX_UPLOAD_PAGES`（env） | 单文件**页数**上限（超出即拒绝，提示含真实页数与拆分建议） | `200` |
+| `WARN_UPLOAD_PAGES`（env） | 页数软阈值（超出则放行但告知预估耗时） | `80` |
 | `app_host` / `app_port` | 监听地址/端口 | `127.0.0.1` / `58765`（开发模式 8000） |
 | `deepseek.api_key` | DeepSeek API key | — |
 | `siliconflow.api_key` | SiliconFlow API key | — |
@@ -143,6 +146,12 @@ npm run dev
 | `mineru.token` | MinerU token | — |
 
 > `.env` 已弃用，仅作为旧版本迁移源（首次启动且 `config.json` 不存在时自动迁移）。新增 LLM 服务商通过设置页面或直接编辑 `config.json` 的 `providers` 字段添加，无需改代码。
+
+> 上传限额（体积 / 页数）的**定标依据**（实测单页耗时、与既有 OCR 轮询上限的
+> 余量、与 MinerU 厂商上限的关系）与市面 10 家产品的做法调研，见
+> [docs/UPLOAD_LIMITS.md](./docs/UPLOAD_LIMITS.md)。三个限额由单一真值
+> `config.UPLOAD_LIMITS` 同时驱动后端强制、前端预检与页面文案 —— 改动只应发生
+> 在该处（源码扫描护栏会拦下重复写死）。
 
 ## 测试
 
@@ -174,7 +183,7 @@ python scripts/release_gate.py --python "C:/path/to/python.exe" --fail-under 95
 ```
 ├── api/                    # FastAPI 路由层
 │   ├── jobs/               # 任务管理（上传、列表、状态、页面渲染、动作）
-│   │   ├── upload.py       #   上传（8MB 分块、200MB 上限、图片转 PDF）
+│   │   ├── upload.py       #   上传（8MB 分块、体积/页数限额、图片转 PDF）
 │   │   ├── listings.py     #   任务历史列表 + 活跃快照
 │   │   ├── page_image.py   #   PDF 页码 PNG 渲染
 │   │   ├── status.py       #   任务状态 + SSE 进度流

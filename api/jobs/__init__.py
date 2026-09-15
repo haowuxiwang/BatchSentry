@@ -15,6 +15,8 @@ from pathlib import Path
 
 from fastapi import APIRouter
 
+from config import UPLOAD_LIMITS
+
 from core.pipeline import (
     InvalidTransitionError,
     db_lock,
@@ -33,7 +35,9 @@ open = builtins.open  # noqa: A001
 # memory. 8 MB chunks keep peak memory low even for 200 MB PDFs and let us
 # enforce the size limit without ever holding the full file in RAM.
 _CHUNK_SIZE = 8 * 1024 * 1024  # 8 MB
-_MAX_PDF_BYTES = 200 * 1024 * 1024  # 200 MB
+# 体积上限来自 config.UPLOAD_LIMITS（单一真值）—— 前端预检与页面文案同样
+# 从那里派生，避免"前端放行、后端拒绝"的静默漂移。
+_MAX_PDF_BYTES = UPLOAD_LIMITS["max_bytes"]
 
 # 图片上传（Phase 13）：纸质批记录扫描件常为 jpg/png 单图。
 # 设计决策 —"后端统一转 PDF"方案（最佳实践）：

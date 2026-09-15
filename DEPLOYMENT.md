@@ -224,6 +224,25 @@ curl -X POST http://127.0.0.1:58765/api/settings \
   -d '{"ocr_backend":"mineru","mineru_token":"sk-xxx"}'
 ```
 
+### 上传限额调整（按客户文档规模）
+
+体积与页数限额由**单一真值** `config.UPLOAD_LIMITS` 驱动，可用环境变量覆盖
+（非法值会被收敛到自洽区间并告警，不会导致启动失败）：
+
+```powershell
+$env:MAX_UPLOAD_BYTES  = "524288000"   # 单文件体积上限（字节），默认 200 MB
+$env:MAX_UPLOAD_PAGES  = "300"         # 页数硬上限，默认 200
+$env:WARN_UPLOAD_PAGES = "120"         # 页数软阈值（放行但告知预估耗时），默认 80
+```
+
+⚠️ **不要盲目调高页数**：上限的定标依据是实测单页耗时（OCR 9.0 s/页 +
+逐页 LLM 22.8 s/页）与既有 `core/ocr_client.POLL_TIMEOUT_MAX = 3600s` 的余量。
+调高前请先读 [docs/UPLOAD_LIMITS.md](./docs/UPLOAD_LIMITS.md) —— 特别是
+"页数数字不可跨产品照抄"这一条。另外 `MAX_UPLOAD_BYTES` 不得超过 MinerU 通道
+的厂商上限（`core/mineru_client.MINERU_MAX_UPLOAD_BYTES`），否则文件会在
+failover 到 MinerU 时**流程中途失败**（护栏
+`test_policy_limit_does_not_exceed_mineru_vendor_limit` 会拦下）。
+
 ### Secret 轮换流程
 
 1. 在 LLM 服务商平台生成新 API key

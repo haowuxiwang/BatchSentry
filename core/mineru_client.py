@@ -48,6 +48,13 @@ logger.addFilter(JobIdFilter())
 POLL_INTERVAL = 5  # 秒
 POLL_TIMEOUT = 1800  # 30 分钟（批记录 PDF 较大，MinerU 解析耗时较长）
 
+# MinerU 通道的**上游厂商上限**（不是本产品的策略）：超过即被 MinerU 拒收。
+# ⚠️ 与 config.UPLOAD_LIMITS["max_bytes"] 当前**数值巧合相同**，但语义不同 ——
+# 前者是厂商事实，后者是本产品的准入策略。二者一旦分叉就会产生"上传放行、
+# 流程中途被 MinerU 拒绝"（MinerU 还是 failover 备选，Paddle 提交失败时会
+# 切到它），故由 tests/unit/test_upload_limits.py 机检两者的大小关系。
+MINERU_MAX_UPLOAD_BYTES = 200 * 1024 * 1024
+
 # MinerU API 入口 — 默认官方地址；私有化部署/代理场景可用
 # MINERU_BASE_URL 覆盖（对抗审查 cr-17：此前硬编码无法配置）。
 # T2.2：改为运行时动态读取（Settings 页保存 MINERU_BASE_URL 后
@@ -92,9 +99,10 @@ def submit_pdf(pdf_path: str) -> tuple[str, str]:
     pdf_name = Path(pdf_path).name
     file_size = Path(pdf_path).stat().st_size
 
-    if file_size > 200 * 1024 * 1024:
+    if file_size > MINERU_MAX_UPLOAD_BYTES:
         raise RuntimeError(
-            f"文件 {file_size/1024/1024:.1f}MB 超过 MinerU 200MB 限制"
+            f"文件 {file_size/1024/1024:.1f}MB 超过 MinerU "
+            f"{MINERU_MAX_UPLOAD_BYTES // 1024 // 1024}MB 限制"
         )
 
     logger.info(
