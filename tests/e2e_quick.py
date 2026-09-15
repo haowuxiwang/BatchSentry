@@ -2,7 +2,9 @@
 import subprocess, time, os, sys, requests, json
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from tests.e2e_proc import spawn_server, stop_server  # noqa: E402
+from tests.e2e_proc import (  # noqa: E402
+    LLM_KEY_ENV, REPO_ROOT, llm_key, spawn_server, stop_server,
+)
 
 BASE = "http://127.0.0.1:8000"
 RESULTS = []
@@ -19,7 +21,7 @@ def fail(name, detail=""):
 print("Starting dev server...")
 proc, _logf = spawn_server(
     [sys.executable, "-m", "uvicorn", "main:app", "--host", "127.0.0.1", "--port", "8000"],
-    cwd=r"D:\learn\claudecode\pharma-batch-checker",
+    cwd=str(REPO_ROOT),
     log_path=os.path.join(os.environ.get("TEMP", "."), "pbc-e2e-quick-server.log"),
 )
 time.sleep(5)
@@ -50,10 +52,13 @@ try:
         fail("settings_get", str(e))
 
     section("Configure LLM")
+    _key = llm_key()
+    if not _key:
+        print(f"    [WARN] 未设置 {LLM_KEY_ENV} —— LLM 不配置（不是缺陷）")
     try:
         r = requests.post(f"{BASE}/api/settings", json={
             "llm_provider": "deepseek",
-            "deepseek_api_key": "sk-vprnpmjfzbcinduybbsboawtjxtrnrhfldbargfwzkieuczu",
+            "deepseek_api_key": _key,
         }, timeout=5)
         ok("settings_post", f"{r.status_code}")
     except Exception as e:

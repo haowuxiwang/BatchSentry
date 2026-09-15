@@ -1,9 +1,11 @@
 import subprocess, time, os, sys, requests, json
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from tests.e2e_proc import spawn_server, stop_server, tail_log  # noqa: E402
+from tests.e2e_proc import (  # noqa: E402
+    EXE_ENV, LLM_KEY_ENV, llm_key, resolve_exe, spawn_server, stop_server, tail_log,
+)
 
-EXE = r"D:\learn\claudecode\pharma-batch-checker\dist\pbc-server\pbc-server.exe"
+EXE = resolve_exe()
 BASE = "http://127.0.0.1:58765"
 APPDATA = os.path.join(os.environ["TEMP"], "pbc-e2e-v2")
 os.makedirs(os.path.join(APPDATA, "PBC"), exist_ok=True)
@@ -22,10 +24,13 @@ try:
     r = requests.get(f"{BASE}/health", timeout=5)
     print(f"Health: {r.status_code} {r.json()}")
     
-    # Configure LLM
+    # Configure LLM（密钥只从环境取，绝不入库）
+    _key = llm_key()
+    if not _key:
+        print(f"[WARN] 未设置 {LLM_KEY_ENV} —— LLM 不配置，流水线走降级路径")
     r = requests.post(f"{BASE}/api/settings", json={
         "llm_provider": "deepseek",
-        "deepseek_api_key": "sk-vprnpmjfzbcinduybbsboawtjxtrnrhfldbargfwzkieuczu",
+        "deepseek_api_key": _key,
     }, timeout=10)
     print(f"Settings POST: {r.status_code}")
     

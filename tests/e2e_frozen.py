@@ -2,9 +2,14 @@
 import subprocess, time, requests, sys, os, json, signal
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from tests.e2e_proc import spawn_server, stop_server  # noqa: E402
+from tests.e2e_proc import (  # noqa: E402
+    EXE_ENV, LLM_KEY_ENV, llm_key, resolve_exe, spawn_server, stop_server,
+)
 
-EXE = r"D:\learn\claudecode\pharma-batch-checker\dist\pbc-server\pbc-server.exe"
+# 被测产物：默认 PyInstaller 的直接产物；用 PBC_E2E_EXE 指向 Electron 打包后
+# **内嵌**的那份副本（dist-electron*/win-unpacked/resources/pbc-server），
+# 那才是用户双击 BatchSentry.exe 时实际运行的东西。
+EXE = resolve_exe()
 BASE = "http://127.0.0.1:58765"
 APPDATA = os.path.join(os.environ["TEMP"], "pbc-e2e-frozen")
 RESULTS = []
@@ -23,7 +28,7 @@ def section(title):
 # --- Start server ---
 # 关键：stdout/stderr 落日志文件（不得用未排空的 PIPE —— 服务端日志写满
 # 管道缓冲后子进程阻塞在 write，事件循环停摆，后续请求全超时）。
-print("Starting frozen pbc-server.exe ...")
+print(f"Starting frozen pbc-server.exe ...\n  target = {EXE}")
 os.makedirs(os.path.join(APPDATA, "PBC"), exist_ok=True)
 env = os.environ.copy()
 env["APPDATA"] = APPDATA
@@ -91,11 +96,17 @@ try:
         fail("jobs_list", str(e))
 
     # 5. Configure LLM provider
+    # 密钥只从环境取（PBC_E2E_DEEPSEEK_KEY），绝不写进仓库。
+    # 未提供时如实登记为"未配置"，不伪造通过。
     section("Configure LLM")
+    _key = llm_key()
+    if not _key:
+        print(f"    [WARN] 未设置 {LLM_KEY_ENV} —— 跳过 LLM 配置，"
+              f"下游流水线将走降级路径（不是缺陷）")
     try:
         r = requests.post(f"{BASE}/api/settings", json={
             "llm_provider": "deepseek",
-            "deepseek_api_key": "sk-vprnpmjfzbcinduybbsboawtjxtrnrhfldbargfwzkieuczu",
+            "deepseek_api_key": _key,
         }, timeout=5)
         print(f"    POST settings status={r.status_code} body={r.text[:300]}")
         # Verify GET returns the key
@@ -227,6 +238,7 @@ section("Results")
 passed = sum(1 for s, _, _ in RESULTS if s == "PASS")
 failed = sum(1 for s, _, _ in RESULTS if s == "FAIL")
 print(f"\n{'='*50}")
+print(f"target: {EXE}")
 print(f"Total: {passed} passed, {failed} failed")
 for s, name, detail in RESULTS:
     marker = "OK" if s == "PASS" else "XX"

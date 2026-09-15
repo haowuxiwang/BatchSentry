@@ -159,6 +159,13 @@ def main():
     ap.add_argument("--paddle-token", required=True)
     ap.add_argument("--mineru-token", required=True)
     ap.add_argument("--rounds", default="pdf,img,mineru")
+    ap.add_argument(
+        "--exe", default=os.environ.get("PBC_E2E_EXE", ""),
+        help="被测 pbc-server.exe。默认 dist/pbc-server（PyInstaller 直接产物）；"
+             "要测**真正分发的那份**请指向 "
+             "dist-electron*/win-unpacked/resources/pbc-server/pbc-server.exe，"
+             "或设 PBC_E2E_EXE 环境变量。",
+    )
     args = ap.parse_args()
     rounds = args.rounds.split(",")
 
@@ -166,7 +173,14 @@ def main():
     os.makedirs(appdata, exist_ok=True)
     env = dict(os.environ, APPDATA=appdata, PORT="58799", NO_WINDOW="1")
 
-    exe = os.path.join("dist", "pbc-server", "pbc-server.exe")
+    # 别写死产物路径：默认测 PyInstaller 直接产物，但用户双击运行的是 Electron
+    # 包里内嵌的那一份 —— 只测前者等于"测了 A、发了 B"（见 DEPLOYMENT.md 检查清单）。
+    exe = args.exe or os.path.join("dist", "pbc-server", "pbc-server.exe")
+    if not os.path.isfile(exe):
+        print(f"[e2e] FAIL: 被测产物不存在 {exe}")
+        sys.exit(2)
+    exe = os.path.abspath(exe)
+    print(f"[e2e] target exe = {exe}")
     proc = subprocess.Popen([exe], env=env,
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     print(f"[e2e] exe started pid={proc.pid} appdata={appdata}")

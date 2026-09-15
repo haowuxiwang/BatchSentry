@@ -25,6 +25,178 @@ from tests.e2e_proc import spawn_server, stop_server, tail_log  # noqa: E402
 
 _PIPE_RE = re.compile(r"stdout\s*=\s*subprocess\.PIPE")
 
+# 曾经被硬编码进 3 个 e2e 脚本、随提交进入 git 历史的真实 LLM 密钥
+# （2026-09-15 发现）。这里**故意用拼接**构造，使本文件自身不含 32 连串的
+# `sk-` 字面量 —— 否则下面那条通用扫描规则会命中它自己，只能靠白名单放行，
+# 而白名单会让"往这个文件里加密钥"也逃过检查。
+_LEAKED_KEY = "sk-vprnpmjfzbcinduybbsboaw" + "tjxtrnrhfldbargfwzkieuczu"
+
+# 通用规则：`sk-` 后跟 32+ 个不含分隔符的字符 = 形似真实密钥。
+# 仓库里的占位符均显著短于该阈值（如 sk-test-key-for-unit-test-only 含短横、
+# sk-realkey1234567890abcdef 仅 24 字符），故不会被误报。
+_KEY_RE = re.compile(r"sk-[A-Za-z0-9]{32,}")
+
+# 源码扫描范围：产品与工程脚本（排除第三方、产物、本地日志目录）
+_SCAN_DIRS = ("api", "core", "db", "llm", "scripts", "tests", "tools", "models")
+_SCAN_SUFFIX = {".py", ".js", ".md", ".ps1", ".json", ".sql", ".html"}
+_SCAN_SKIP = {"node_modules", "dist", "build", "htmlcov", "devlogs",
+              "dist-electron", "dist-electron-locked", "dist-electron-m8",
+              "dist-electron-v112"}
+
+
+def _source_files():
+    for d in _SCAN_DIRS:
+        base = _ROOT / d
+        if not base.is_dir():
+            continue
+        for p in sorted(base.rglob("*")):
+            if not p.is_file() or p.suffix.lower() not in _SCAN_SUFFIX:
+                continue
+            parts = set(p.relative_to(_ROOT).parts)
+            if parts & _SCAN_SKIP:
+                continue
+            yield p
+
+
+def test_no_true_llm_key_in_repo_sources():
+    """工作树任何源文件都不得出现那把已泄漏的真实密钥。
+
+    注意：删除**不能**抹掉 git 历史 —— 该密钥自 2026-08-24（``81964a3``）起
+    就在历史中且已推送，唯一补救是到服务商处**轮换**。本用例只保证不再扩散。
+    """
+    offenders = []
+    for p in _source_files():
+        if _LEAKED_KEY in p.read_text(encoding="utf-8", errors="replace"):
+            offenders.append(p.relative_to(_ROOT).as_posix())
+    assert not offenders, (
+        "以下文件仍硬编码着已泄漏的 LLM 密钥（应改为从环境变量读取）：\n"
+        + "\n".join(f"  - {o}" for o in offenders)
+    )
+
+
+def test_no_hardcoded_long_api_keys():
+    """通用护栏：源码里不得出现形似真实密钥的 32+ 连串 ``sk-`` 字面量。"""
+    offenders = []
+    for p in _source_files():
+        for i, line in enumerate(p.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+            if _KEY_RE.search(line):
+                offenders.append(f"{p.relative_to(_ROOT).as_posix()}:{i}")
+    assert not offenders, (
+        "以下位置疑似硬编码了真实 API key（请改为环境变量注入）：\n"
+        + "\n".join(f"  - {o}" for o in offenders)
+    )
+
+
+_ABS_PATH_RE = re.compile(r"""["'](?:[A-Za-z]:[\\/]|/Users/|/home/)""")
+
+# 本护栏文件豁免自身的字面量扫描：它必须写出这些模式才能描述规则。
+# 为免豁免把护栏变成空转，另设 `test_path_guard_positive_control` 做阳性对照。
+_PATH_GUARD_SKIP = {"tests/unit/test_e2e_proc_helper.py"}
+
+# 家目录形态：Windows 用户目录 / macOS / Linux
+_HOME_PATH_RE = re.compile("[A-Za-z]:" + r"[\\\\/]" + "Users" + r"[\\\\/]" + "|"
+                           + "/" + "Users" + "/" + "|" + "/" + "home" + "/")
+
+
+def _repo_path_literals(text: str):
+    """返回 ``text`` 中本仓库绝对路径 / 家目录路径的出现位置（用于扫描与自测）。"""
+    low = text.replace("\\", "/").lower()
+    roots = (str(_ROOT).replace("\\", "/").lower(), str(_ROOT).lower())
+    return [v for v in roots if v in low], _HOME_PATH_RE.search(text)
+
+
+def test_no_hardcoded_paths_pointing_at_this_repo():
+    """tests/ 下不得写死**本仓库自身**的绝对路径或用户家目录路径。
+
+    护栏口径（刻意收窄，避免假阳性）：只禁两类真正会造成"换台机器即失效 /
+    绑定个人目录"的字面量 ——
+      1. 以本仓库根目录开头的绝对路径；
+      2. 用户家目录形态（Windows 用户目录 / macOS / Linux 各一种）。
+
+    **不禁**合成 OS 路径：比如指向系统目录的攻击载荷、以及伪造解释器内置路径
+    的字符串 —— 它们是测试**数据**而非宿主绑定，属合法用法。
+    """
+    offenders = []
+    for p in sorted((_ROOT / "tests").rglob("*.py")):
+        rel = p.relative_to(_ROOT).as_posix()
+        if "node_modules" in rel or rel in _PATH_GUARD_SKIP:
+            continue
+        for i, line in enumerate(p.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+            roots, home = _repo_path_literals(line)
+            if roots or home:
+                offenders.append(f"{rel}:{i}")
+    assert not offenders, (
+        "以下测试写死了本仓库/家目录的绝对路径（应改用 tests.e2e_proc.REPO_ROOT 派生）：\n"
+        + "\n".join(f"  - {o}" for o in offenders)
+    )
+
+
+def test_path_guard_positive_control():
+    """阳性对照：证明上面的护栏**真的会报**，而不是因豁免而空转。"""
+    fake = "exe = r'" + str(_ROOT) + r"\dist\pbc-server\pbc-server.exe'"
+    roots, _ = _repo_path_literals(fake)
+    assert roots, "护栏未能识别本仓库绝对路径（会给出虚假的'干净'结论）"
+
+    fake_home = "p = " + '"' + "C" + ":" + "\\" + "Users" + "\\" + "someone" + "\\" + "x" + '"'
+    _, home = _repo_path_literals(fake_home)
+    assert home, "护栏未能识别用户家目录路径"
+
+    # 反例：合成 OS 路径（合法测试数据）不得被误报
+    for ok_line in ('assert r.status_code == 403  # C:/Windows/win.ini',
+                    'Path("C:/fake/meipass")'):
+        roots, home = _repo_path_literals(ok_line)
+        assert not roots and not home, f"误报合法测试数据: {ok_line}"
+
+
+def test_no_drive_letter_literal_in_e2e_proc():
+    """统一助手模块里不得出现绝对路径字面量（默认产物路径必须由 REPO_ROOT 派生）。"""
+    src = (_ROOT / "tests" / "e2e_proc.py").read_text(encoding="utf-8", errors="replace")
+    assert not _ABS_PATH_RE.search(src), "tests/e2e_proc.py 不应写死绝对路径"
+
+
+# ── 产物路径解析 / 密钥注入 ─────────────────────────────────────────
+
+
+def test_resolve_exe_prefers_env_override(tmp_path, monkeypatch):
+    fake = tmp_path / "pbc-server.exe"
+    fake.write_bytes(b"MZ")
+    monkeypatch.setenv("PBC_E2E_EXE", str(fake))
+    from tests.e2e_proc import resolve_exe
+    assert resolve_exe() == str(fake)
+
+
+def test_resolve_exe_missing_target_raises(tmp_path, monkeypatch):
+    monkeypatch.setenv("PBC_E2E_EXE", str(tmp_path / "nope.exe"))
+    from tests.e2e_proc import resolve_exe
+    with pytest.raises(FileNotFoundError):
+        resolve_exe()
+
+
+def test_resolve_exe_default_is_repo_relative(monkeypatch):
+    """默认产物路径必须由仓库根派生（而非写死盘符）。
+
+    注意：运行时 ``str(DEFAULT_EXE)`` 当然带盘符 —— 那是"在这台机器上解析出来
+    的绝对路径"，正确且必要。要禁的是**源码里的字面量**，故断言改为结构性 +
+    源码扫描（见 ``test_no_drive_letter_literal_in_e2e_proc``）。
+    """
+    monkeypatch.delenv("PBC_E2E_EXE", raising=False)
+    from tests.e2e_proc import DEFAULT_EXE, REPO_ROOT
+    assert DEFAULT_EXE == REPO_ROOT / "dist" / "pbc-server" / "pbc-server.exe"
+    assert REPO_ROOT.is_dir() and (REPO_ROOT / "main.py").is_file()
+
+
+def test_llm_key_absent_yields_empty(monkeypatch):
+    monkeypatch.delenv("PBC_E2E_DEEPSEEK_KEY", raising=False)
+    from tests.e2e_proc import llm_key
+    assert llm_key() == ""
+
+
+def test_llm_key_from_env(monkeypatch):
+    monkeypatch.setenv("PBC_E2E_DEEPSEEK_KEY", "sk-from-env-only")
+    from tests.e2e_proc import llm_key
+    assert llm_key() == "sk-from-env-only"
+
+
 # 允许保留该字面量的文件（含说明性文字或有意演示反例），均需给出理由
 _PIPE_ALLOW = {
     # 助手模块自身：docstring 中引用该反例以解释"为什么不能这么写"

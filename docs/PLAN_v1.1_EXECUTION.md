@@ -23,7 +23,8 @@
 | M7 docling 第三对照引擎 | ✅ | 本文件 §2 M7 落地结论；T7.1 能力表单一来源（源码扫描护栏）、T7.2 缺失即降级（`OcrBackendUnavailable`→回退 Paddle）、T7.3 三引擎对比脚本、T7.4 ROADMAP 许可残留改 MIT |
 | M8 打包放行（v1.1.0） | ✅ | 门禁 **OVERALL: pass**（2001 passed / 1 已登记沙箱专有失败，覆盖率 **95.17%**）；真实 51 页 e2e **两轮通过**（首轮 paddle 落库 395 条 / 第二轮 mineru 落库 407 条，`ALL ROUNDS PASSED`）；**看图比对**（`docs/M8_VISUAL_VERIFICATION.md`）定位并修复 4 类规格缺陷（消除 **37 条误报 / 9 条 critical**）；tag `v1.1.0` 已打并推送（commit `233a0ff`） |
 
-**当前工作区**：干净；**与 `origin/main` 同步**（`233a0ff`，tag `v1.1.0` 已推送）。推送要点：GitHub 须经系统代理 `127.0.0.1:7897`（**直连会被 RST**）；凭据在 Windows 凭据管理器，但端口默认的 `credential.helper=helper-selector` 是 GUI 选择器、**无凭据时会静默挂住** → 必须 `git -c credential.helper= -c credential.helper=wincred push`（先清空助手列表，否则 GUI 助手仍排在队首）。
+**当前工作区**：干净；**与 `origin/main` 同步**（`8cd0dc1`，v1.1.2）。推送要点：凭据在 Windows 凭据管理器，但端口默认的 `credential.helper=helper-selector` 是 GUI 选择器、**无凭据时会静默挂住** → 必须 `git -c credential.helper= -c credential.helper=wincred push`（先清空助手列表，否则 GUI 助手仍排在队首）。
+⚠️ **网络结论已更新（2026-09-15 实测）**：此处原写"GitHub 直连会被 RST、必须走系统代理 `127.0.0.1:7897`"——**已不成立**。实测该端口未监听（`netstat` 无输出、经代理请求返回 000），而**直连 GitHub 返回 200 且 push 成功**。正解是**两条路都备着**：先探测代理是否在听，代理不可用就清空 `HTTP(S)_PROXY` 走直连；不要把任一条写死（写死代理会在代理未开时直接失败，掩盖可用的直连）。
 
 **打包信号当前结论**：T0 自愈后 **OVERALL: pass**；M8 放行前复跑仍 **pass**（2001 passed / 1 已登记沙箱专有失败，覆盖率 95.17%）。每次放行前须复跑 `scripts/release_gate.py`（注意 `--python` 需传 **Windows 路径**，POSIX `/c/...` 会判"python 不可用"）。
 

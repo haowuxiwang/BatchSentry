@@ -4,6 +4,15 @@
 
 BatchSentry 以**文件夹便携版**形式分发，用户无需安装，解压即用。
 
+> **当前分发形态：仅免安装目录，不产出安装包。**
+> `package.json` 里的 `nsis` 配置块是**保留的调参**，但 `build.win.target` 只有
+> `dir`，故 electron-builder **不会**生成 `Setup.exe`（不会下载 NSIS 工具链，也不需要
+> 代码签名证书）。请勿指导用户寻找安装包。若要改产安装包，把 `win.target` 改成
+> `[{"target":"nsis","arch":["x64"]}]` 即可启用那套现成配置 —— 但需一并准备
+> 代码签名（否则首次运行会被 SmartScreen 拦）并补做安装包的端到端验证。
+>
+> 该口径由 `tests/unit/test_distribution_parity.py` 机检守住（配置 ↔ 文档 ↔ 实物）。
+
 ### 构建便携版
 
 ```powershell
@@ -28,10 +37,41 @@ cd d:\learn\claudecode\pharma-batch-checker
 | Python 后端 | `dist/pbc-server/pbc-server.exe` | PyInstaller 打包的后端，嵌入 win-unpacked/resources/ |
 | Tailwind CSS | `static/app.css` | 压缩后的样式（~14KB） |
 
+> ⚠️ **产物目录名不一定是 `dist-electron/`。** 若安全软件（火绒等）持有上一轮
+> `win-unpacked` 内文件句柄，`build.ps1` 会自愈到备用目录
+> `dist-electron-locked/`，并在占用释放后尽力归位；归位失败会在日志里给出提示。
+> 打包后 `electron-builder` 报错时同样需要手工换目录。**分发前必须先确认你要发的是
+> 哪一个目录**，不要凭目录名假定 —— 例如安全软件占锁时曾手工输出到
+> `dist-electron-v112/`。判断依据是"最新且完整"：含 `BatchSentry.exe`、
+> `resources/app.asar`、`resources/pbc-server/pbc-server.exe`。
+
+### 分发前检查清单
+
+```powershell
+# 1. 门禁（覆盖率 + 单测 + 集成）
+python scripts/release_gate.py --python "<python.exe 的 Windows 路径>" --fail-under 95
+
+# 2. 分发一致性机检（配置↔文档↔实物：内嵌服务端逐字节一致 + 包内版本号）
+python -m pytest tests/unit/test_distribution_parity.py -o addopts="" -q
+
+# 3. 对**将要分发的那份**做端到端（把 PBC_E2E_EXE 指向 win-unpacked 内嵌副本）
+$env:PBC_E2E_EXE = "dist-electron-v112\win-unpacked\resources\pbc-server\pbc-server.exe"
+python tests/e2e_frozen.py
+
+# 4. 核对版本（服务端 /health 与包内 package.json 必须都等于 main.APP_VERSION）
+Remove-Item Env:\PBC_E2E_EXE
+```
+
+第 3 步的意义：默认 `tests/e2e_frozen.py` 测的是 `dist/pbc-server/`（PyInstaller 的
+直接产物），而**用户双击运行的是 Electron 包里内嵌的那一份**。不显式指过去，就等于
+"测了 A、发了 B"。第 2 步的逐字节比对是这条链路的兜底。
+
 ### 分发方式
 
-1. 将 `dist-electron/win-unpacked/` 整个文件夹压缩成 zip
+1. 将**最新且完整**的那个 `dist-electron*/win-unpacked/` 整个文件夹压缩成 zip
 2. 用户解压后双击 `BatchSentry.exe` 即可运行
+3. 首次运行可能被 Windows SmartScreen 或杀软拦下（**未做代码签名**，属预期）：
+   提示用户选"仍要运行"，或把解压目录加入杀软白名单
 
 ### 用户首次使用
 
@@ -155,8 +195,20 @@ curl -X POST http://127.0.0.1:58765/api/settings \
 1. 在 LLM 服务商平台生成新 API key
 2. 在设置页面更新对应的 API key 字段并保存（写入 `config.json`）
 3. 调用 `/api/health/downstream` 验证新 key 连通性
-4. 检查 git 历史确保旧 key 未提交：`git log -p -- config.json`（应无记录）
-5. 旧版 `.env` 已弃用，若仍有残留可直接删除
+4. **全仓库排查旧 key 是否落入版本控制**（不只 `config.json`）：
+   ```bash
+   git log -p -S "<key 前 8 位>" --oneline   # 任何历史命中都必须轮换，删文件无效
+   git grep -nE "sk-[A-Za-z0-9]{32,}"        # 工作树扫描（有测试固化此规则）
+   ```
+   注意 `config.json` 已被 `.gitignore`，但**测试脚本**一度把真实 key 写死并入库
+   （2026-09-15 发现于 `tests/e2e_frozen.py` / `e2e_manual.py` / `e2e_quick.py`，
+   自 `81964a3` 起在历史中）。**删除文件不能抹掉历史，只能轮换。**
+5. e2e 需要真实 key 时一律走环境变量，不要写进代码：
+   ```bash
+   PBC_E2E_DEEPSEEK_KEY=<key> python tests/e2e_frozen.py
+   ```
+   未设置时 e2e 会把 LLM 步骤如实降级并打印提示，不会伪造通过。
+6. 旧版 `.env` 已弃用，若仍有残留可直接删除
 
 ## 故障排查
 

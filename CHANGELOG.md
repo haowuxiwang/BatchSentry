@@ -46,6 +46,34 @@
   方差 12.0%、整页区域并集 F1 29.4% 全部不具鉴别力），故**刻意不写**"永远绿却无
   鉴别力"的伪测试。
 
+### 工程卫生与分发校验（本次补齐）
+
+- **清除已入库的真实 LLM 密钥**：`tests/e2e_frozen.py` / `e2e_manual.py` /
+  `e2e_quick.py` 三处硬编码了同一把真实 DeepSeek key（自 `81964a3` 起在 git 历史中
+  且已推送）。改为统一从 `PBC_E2E_DEEPSEEK_KEY` 读取（`tests/e2e_proc.llm_key()`）；
+  未设置时 e2e 如实降级并打印提示，不伪造通过。⚠️ **删除不能抹掉历史，该 key
+  必须到服务商处轮换**（流程见 DEPLOYMENT.md「Secret 轮换流程」）。
+- **e2e 可指向任意产物**：`tests/e2e_frozen.py` / `e2e_manual.py` 此前把
+  `pbc-server.exe` 路径写死成 `D:\...\dist\pbc-server`（含绝对盘符），导致 e2e
+  **测的是 PyInstaller 直接产物，而用户运行的是 Electron 包内嵌的那一份** ——
+  等于"测了 A、发了 B"。现由 `tests/e2e_proc.resolve_exe()` 解析，默认仍为
+  `dist/pbc-server`（行为不变），可用 `PBC_E2E_EXE` 指向 `win-unpacked` 内嵌副本。
+- **新增分发一致性机检 `tests/unit/test_distribution_parity.py`**：把
+  **配置 ↔ 文档 ↔ 实物**三者钉在一起 ——
+  `win.target` 声明的形态必须与 DEPLOYMENT.md 的分发指导一致（防"文档承诺安装包、
+  实物只有免安装目录"）；`extraResources` 必须恒为 `dist/pbc-server`（打包链的
+  唯一定义点，改错会静默装进空/旧服务端）；`npm run build` 必须串起 css→py→win；
+  产物在场时校验**最新产物**（构建失败后最新目录恰是残缺的，故"最新"即最高风险）
+  完整、内嵌服务端与 `dist/` 逐字节一致、`app.asar` 内版本 == `main.APP_VERSION`。
+- **新增回归护栏 `tests/unit/test_e2e_proc_helper.py`**：源码扫描禁止再出现
+  32+ 连串 `sk-` 字面量、禁止写死本仓库/家目录绝对路径（含阳性对照，防护栏因豁免
+  而空转）；并覆盖 `resolve_exe` / `llm_key` 的行为。
+- **文档同步**：DEPLOYMENT.md 显式声明"当前不产出安装包"（`nsis` 配置块是保留调参
+  但未被 target 启用，属死配置，已就地说明启用法）、补"分发前检查清单"与
+  SmartScreen/杀软首次运行指引、说明**产物目录名可能因安全软件占锁而变动**
+  （`dist-electron` / `-locked` / 手工指定的 `-v112`），分发前须按"最新且完整"
+  而非目录名判断。
+
 ### 已知限制
 
 - 上游去畸变（`use_doc_unwarping: true`）使块 bbox 与渲染图存在非刚性形变 —— 已
