@@ -39,9 +39,11 @@ _KEY_RE = re.compile(r"sk-[A-Za-z0-9]{32,}")
 # 源码扫描范围：产品与工程脚本（排除第三方、产物、本地日志目录）
 _SCAN_DIRS = ("api", "core", "db", "llm", "scripts", "tests", "tools", "models")
 _SCAN_SUFFIX = {".py", ".js", ".md", ".ps1", ".json", ".sql", ".html"}
-_SCAN_SKIP = {"node_modules", "dist", "build", "htmlcov", "devlogs",
-              "dist-electron", "dist-electron-locked", "dist-electron-m8",
-              "dist-electron-v112"}
+# 产物/缓存目录按**前缀**排除：dist、dist-electron、dist-electron-m8 …
+# 不罗列具体名 —— 安全软件占锁时 build.ps1 会自愈到备用输出目录，目录名会变；
+# 写死列表就得每次回来同步（历史上正是这么积出 4 个 dist-electron* 的）。
+_SCAN_SKIP = {"node_modules", "build", "htmlcov", "devlogs"}
+_SCAN_SKIP_PREFIX = ("dist",)
 
 
 def _source_files():
@@ -53,7 +55,7 @@ def _source_files():
             if not p.is_file() or p.suffix.lower() not in _SCAN_SUFFIX:
                 continue
             parts = set(p.relative_to(_ROOT).parts)
-            if parts & _SCAN_SKIP:
+            if parts & _SCAN_SKIP or any(pt.startswith(_SCAN_SKIP_PREFIX) for pt in parts):
                 continue
             yield p
 

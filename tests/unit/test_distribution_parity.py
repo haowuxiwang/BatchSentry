@@ -21,6 +21,7 @@
 """
 import hashlib
 import json
+import os
 import re
 import struct
 from pathlib import Path
@@ -87,17 +88,40 @@ def _artifact_dirs():
     return sorted(p for p in _ROOT.glob("dist-electron*/win-unpacked") if p.is_dir())
 
 
-def _newest_artifact():
-    """最新（按 mtime）的产物目录 —— **它就是本次要交付的那份**。
+def _build_time(d: Path) -> float:
+    """产物的"生成时间" = 目录内**文件**的最新 mtime。
 
-    这个选择规则本身就是护栏：`electron-builder` 会先清空再重建 `win-unpacked`，
-    所以**构建失败后，最新目录恰好是那个残缺的**。用"最新"而不是"名字最标准的"
-    去校验，失败构建才会当场变红，而不是被一个更早的完好目录掩盖过去。
+    ⚠️ **不要用目录自身的 mtime。** 目录 mtime 会被任何子项增删顶到"现在"：
+    2026-09-15 实测，一次逐文件"改名再改回"的占锁探测，把两个残缺目录的
+    `win-unpacked` mtime 刷成了同一分钟 —— 于是本文件跑到**残缺目录**上做校验，
+    误报"最新产物不完整 / 版本是 1.1.1"。改名与内容不变时 mtime 不变，
+    故取"目录内文件的最新 mtime"才是稳定的构建时间信号。
     """
-    dirs = _artifact_dirs()
-    if not dirs:
-        return None
-    return max(dirs, key=lambda d: d.stat().st_mtime)
+    newest = 0.0
+    for r, _dirs, fs in os.walk(d):
+        for f in fs:
+            try:
+                newest = max(newest, os.path.getmtime(os.path.join(r, f)))
+            except OSError:
+                pass
+    return newest
+
+
+def _artifacts_by_recency():
+    """所有产物目录，按生成时间**新→旧**排序。"""
+    return sorted(_artifact_dirs(), key=_build_time, reverse=True)
+
+
+def _newest_artifact():
+    """最新**完整**的产物目录 —— **它就是本次要交付的那份**。
+
+    只取完整的：残缺目录无法交付，且本文件另有 `test_latest_build_is_complete`
+    专门盯"最新那次构建是否失败"，职责不重叠。
+    """
+    for d in _artifacts_by_recency():
+        if not _completeness_problems(d):
+            return d
+    return None
 
 
 def _label(d: Path) -> str:
@@ -119,16 +143,52 @@ def _completeness_problems(d: Path):
 # ── 3. 实物校验（产物在场时才跑）─────────────────────────────────────
 
 
-def test_latest_artifact_is_a_complete_portable_package():
-    """最新产物必须完整 —— 缺任何一件都不是可交付的便携版。"""
-    d = _newest_artifact()
-    if d is None:
+def test_latest_build_is_complete():
+    """**最新的一次构建**必须完整 —— 缺任何一件都不是可交付的便携版。
+
+    判据刻意用"最新"而不是"名字最标准的"：`electron-builder` 先清空再重建
+    `win-unpacked`，所以**构建失败后，最新的目录恰好是那个残缺的**。这样失败构建
+    会当场变红，而不会被一个更早的完好目录掩盖过去。
+    """
+    arts = _artifacts_by_recency()
+    if not arts:
         pytest.skip("无 Electron 产物（未打包或已清理），跳过实物校验")
-    missing = _completeness_problems(d)
+    newest = arts[0]
+    missing = _completeness_problems(newest)
     assert not missing, (
-        f"最新产物 {_label(d)} 不完整，缺少：{missing}\n"
+        f"最新产物 {_label(newest)} 不完整，缺少：{missing}\n"
         f"→ 这是**构建失败后的残缺目录**。此时它比任何完好目录都新，最容易被误当作"
         f"交付物压成 zip。请重跑 electron-builder 而不是分发它。"
+    )
+
+
+def test_artifact_recency_ignores_directory_mtime(tmp_path):
+    """产物"谁最新"只认**文件** mtime，不认目录 mtime（回归护栏）。
+
+    实测事故（2026-09-15）：逐文件占锁探测（改名再改回）刷新了两个残缺目录的
+    `win-unpacked` mtime，本文件随即在残缺目录上做校验，误报"最新产物不完整 /
+    版本是 1.1.1"。改名不产生内容变化，不该影响"谁是本次交付物"的判定。
+    """
+    import os as _os
+
+    d = tmp_path / "win-unpacked"
+    (d / "resources").mkdir(parents=True)
+    exe = d / "BatchSentry.exe"
+    exe.write_bytes(b"MZ")
+    inner = d / "resources" / "app.asar"
+    inner.write_bytes(b"\x00" * 8)
+
+    file_t = 1_700_000_000
+    _os.utime(exe, (file_t, file_t))
+    _os.utime(inner, (file_t, file_t))
+    # 把目录 mtime 顶到很久以后 —— 模拟"子项被增删过"
+    dir_t = 1_900_000_000
+    _os.utime(d, (dir_t, dir_t))
+    _os.utime(d / "resources", (dir_t, dir_t))
+
+    assert _build_time(d) == file_t, (
+        "构建时间判定被目录 mtime 污染了 —— 任何子项增删都会顶高目录 mtime，"
+        "会让测试在错误（残缺）的产物上做校验。"
     )
 
 
