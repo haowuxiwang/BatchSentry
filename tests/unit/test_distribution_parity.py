@@ -38,6 +38,47 @@ def _deployment_md() -> str:
     return (_ROOT / "DEPLOYMENT.md").read_text(encoding="utf-8")
 
 
+# ── 文档一致性：版本戳与构建开关 ────────────────────────────────────
+
+
+def test_portable_readme_version_matches_app_version():
+    """随包交付的 `PORTABLE_README.txt` 版本戳必须等于 `main.APP_VERSION`。
+
+    它是**用户解压后第一份会读的文档**，却最容易漏改（实测停留在 v1.0.0 而
+    产品已到 v1.1.2）。版本号只应有 `main.APP_VERSION` 一个真值来源。
+    """
+    from main import APP_VERSION
+
+    txt = (_ROOT / "PORTABLE_README.txt").read_text(encoding="utf-8", errors="replace")
+    m = re.search(r"BatchSentry\s+v(\d+\.\d+\.\d+)", txt)
+    assert m is not None, "PORTABLE_README.txt 里找不到 `BatchSentry vX.Y.Z` 版本戳"
+    assert m.group(1) == APP_VERSION, (
+        f"PORTABLE_README.txt 版本戳 v{m.group(1)} != main.APP_VERSION {APP_VERSION}"
+    )
+
+
+def test_documented_build_switches_exist_in_build_ps1():
+    """README/DEPLOYMENT 里写到的 `-Xxx` 构建开关必须是 build.ps1 真的声明了的。
+
+    反例（2026-09-15）：README 写 `-SkipCss`、脚本声明的是 `-SkipCSS`。PowerShell
+    参数名大小写不敏感所以能跑，但文档与实现已经不一致 —— 一旦哪天换成大小写敏感的
+    解释器或改名，文档就会静默失效。
+    """
+    ps1 = (_ROOT / "build.ps1").read_text(encoding="utf-8", errors="replace")
+    declared = set(re.findall(r"\[switch\]\$(\w+)", ps1))
+    assert declared, "未从 build.ps1 解析到任何 [switch] 开关（解析方式可能已过时）"
+
+    mentioned = set()
+    for doc in ("README.md", "DEPLOYMENT.md"):
+        text = (_ROOT / doc).read_text(encoding="utf-8", errors="replace")
+        for tok in re.findall(r"\.\\build\.ps1\s+(-[A-Za-z]+)", text):
+            mentioned.add(tok[1:])
+    unknown = sorted(m for m in mentioned if m not in declared)
+    assert not unknown, (
+        f"文档里提到的构建开关在 build.ps1 中不存在：{unknown}（已声明：{sorted(declared)}）"
+    )
+
+
 # ── 产物定位助手 ────────────────────────────────────────────────────
 
 

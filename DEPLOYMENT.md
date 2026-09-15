@@ -69,8 +69,10 @@ Remove-Item Env:\PBC_E2E_EXE
 ### 分发方式
 
 1. 将**最新且完整**的那个 `dist-electron*/win-unpacked/` 整个文件夹压缩成 zip
-2. 用户解压后双击 `BatchSentry.exe` 即可运行
-3. 首次运行可能被 Windows SmartScreen 或杀软拦下（**未做代码签名**，属预期）：
+2. 把 `PORTABLE_README.txt` 放到 zip 根目录一并交付（它是用户解压后第一份会读的文档；
+   **它不在 Electron 包内**，`build.files` 只打包 `electron/main.js`，所以必须手工附带）
+3. 用户解压后双击 `BatchSentry.exe` 即可运行
+4. 首次运行可能被 Windows SmartScreen 或杀软拦下（**未做代码签名**，属预期）：
    提示用户选"仍要运行"，或把解压目录加入杀软白名单
 
 ### 用户首次使用

@@ -103,14 +103,20 @@ npm run dev
 ```powershell
 # 必须在真实 PowerShell 终端执行（非 IDE Sandbox）
 .\build.ps1              # 完整构建：CSS + PyInstaller + Electron portable
-.\build.ps1 -SkipCss    # 跳过 CSS 重建
-.\build.ps1 -Clean      # 清理后重建
+.\build.ps1 -SkipCSS     # 跳过 CSS 重建
+.\build.ps1 -Clean       # 清理后重建
 ```
 
 构建产物：
 - `static/app.css` — 压缩后的 Tailwind CSS（~14KB）
 - `dist/pbc-server/pbc-server.exe` — PyInstaller 打包的后端
 - `dist-electron/win-unpacked/` — Electron 文件夹便携版（双击 `BatchSentry.exe` 运行，无需安装）
+
+> 产物目录名不一定是 `dist-electron/`：安全软件占锁时 `build.ps1` 会自愈到
+> `dist-electron-locked/`，手工重打包时也可能指定别的名字。**分发前按"最新且完整"
+> （含 `BatchSentry.exe` / `resources/app.asar` / `resources/pbc-server/pbc-server.exe`）
+> 判断，不要凭目录名假定** —— 清单见 [DEPLOYMENT.md](./DEPLOYMENT.md)。
+> 本版**不产出安装包**（`win.target` 仅 `dir`），交付物就是该目录压成的 zip。
 
 详细部署与运维见 [DEPLOYMENT.md](./DEPLOYMENT.md)，开发规范见 [CONTRIBUTING.md](./CONTRIBUTING.md)。
 
