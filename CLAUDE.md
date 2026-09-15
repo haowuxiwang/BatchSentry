@@ -352,6 +352,18 @@ engine/stage1/dual_compare 的字面能力假设全部改由能力表驱动；`c
 真实 51 页 full-chain frozen e2e（`e2e_run.py --rounds real`）+ `ui_e2e.py`（Playwright 逐页三断言）；
 tag `v1.1.0`。
 
+**降噪落地 P0-2 / P0-3（v1.1.1）**：清单与依据见 `docs/NOISE_REDUCTION_TODO.md` /
+`docs/NOISE_REDUCTION_RESEARCH.md` / `docs/NOISE_REDUCTION_SPIKE.md`。
+- **抑制留痕（P0-2）**：抑制 ≠ 删除。`drop_unfounded_spec_findings()` 返回
+  `(保留, 明细列表)`（**第二项是列表不是计数**），每条带非空 `reason` + 结构化 `evidence`，
+  落 `finding_suppressions` 台账（schema v11；建表语句**只在 `db/schema.sql` 声明**）；
+  复核页"已抑制条目"面板可查可回退；`GET/POST /api/jobs/{id}/suppressions[...]`。
+- **区域级证据锚（P0-3）**：`core/pipeline/regions.py`（**纯函数、唯一定义点**）
+  把 finding 锚回 OCR 版面区域；`page_cache.regions_json` 存归一化 bbox（0..1）。
+  **只到区域级**（两后端都无单元格级 bbox）；**宽高比闸门**：`space_aspect` 与渲染图
+  不一致（如服务端旋转过的页）时明示无法定位，不画错位的框。锚定是**读时推导**，
+  SSR 与 AJAX 共用 `region_anchor`。
+
 **规格可判性（M8 看图比对后固化，唯一来源均在 `core/rules/parsing.py`）**：
 - `_parse_spec` 支持的写法：`A-B` / `A~B` / `A±B` / **空格 `A B`**（仅 `|B|<|A|` 才按 `A±B`，
   防 `10 20` 被误读为 `10±20`）/ **反向区间按 `A±B` 重建**（OCR 把 `±` 读成 `-`）。

@@ -5,6 +5,54 @@
 
 ---
 
+## [1.1.1]
+
+> 起点：`v1.1.0`（`ca355d6`）之后的补丁级发布。含 `_parse_spec` 修复与降噪专项
+> 调研文档（`e2417cd`、`4273c1f`，此前未随二进制发布），以及下面两项降噪落地。
+
+### 新增
+
+- **抑制留痕（P0-2，合规必需项）**：被降噪规则抑制的 LLM 误报从"只记一个计数"
+  改为**落台账 + 可查 + 可回退 + 可抽检**。
+  - `drop_unfounded_spec_findings()` 返回 `(保留, 明细列表)`（**第二项是列表不是
+    计数**）；每条带非空 `reason`（含命中的三元组及各自判定）与结构化 `evidence`。
+  - schema v11 新增 `finding_suppressions` 台账表：抑制 ≠ 删除（行只追加、不删除），
+    `reason` 由 `CHECK` 强制非空（显式空白字符集，堵住 Tab/换行绕过）。
+  - 新端点 `GET /api/jobs/{id}/suppressions`（含 page 过滤与全 job 计数）、
+    `POST /api/jobs/{id}/suppressions/{sid}/revert`（一键回退为正式 finding；
+    台账行只记 `reverted_at`/`reverted_finding_id`，重复回退 400，跨 job 404）。
+  - 复核页新增"已抑制条目"面板：逐条展示理由与命中证据，支持回退。
+  - 落库与正式 finding **同一把锁/同一事务**；重分析只清未回退行（已回退的是人工
+    审计证据）；写 `audit_log(action=spec_guard_dropped)`。
+- **区域级证据锚（P0-3）**：finding 可一键定位回原页并高亮其所在 OCR 版面区域。
+  - 新增纯函数模块 `core/pipeline/regions.py`（归一化 / 标签闭集 / 提取 / 锚定）。
+  - `page_cache.regions_json` 保存每页区域（Paddle 块级 bbox、MinerU 块 bbox +
+    `layout.json` 的 `page_size`），bbox **一律归一化到 0..1**。
+  - 复核页叠加高亮框 + finding 卡片"定位原图"按钮（SSR 首屏与 AJAX 翻页共用同一
+    推导与同一呈现逻辑）。
+  - **只到区域级**：两个后端都不回传单元格级 bbox；自称单元格级等于给复核员一个
+    错位的框。
+  - **宽高比闸门**：实测第 8 页 OCR 坐标系为横向（服务端旋转过），与页面宽高比不
+    一致时**明示无法定位**，而不是画一个横竖颠倒的框。
+  - 锚不上（无区域 / 无特征词命中）时不显示定位入口（宁缺勿错）。
+
+### 变更
+
+- 版本号 1.1.0 → **1.1.1**（`main.APP_VERSION`、`package.json`、
+  `package-lock.json`；`v1.1.0` tag 保持不动）。
+- `tests/e2e_frozen.py` 的 `/health` 版本断言改为从 `main.APP_VERSION` 派生，
+  不再硬编码（硬编码会在升版本时静默失配，把验证变成假通过）。
+
+### 测试
+
+- 新增 `tests/unit/test_suppression_ledger.py`（迁移 / CHECK / 单一声明处 /
+  源码扫描）、`tests/unit/test_regions_anchor.py`（60 项，含真实 51 页产物复算）、
+  `tests/unit/test_region_anchor_wiring.py`（16 项接线不变式 + 真实 MinerU 复算）、
+  `tests/integration/test_api_suppressions.py`（10 项真实 HTTP）、
+  `tests/integration/test_api_region_anchor.py`（6 项 API + SSR 一致性）。
+
+---
+
 ## [Unreleased]
 
 ### 修复

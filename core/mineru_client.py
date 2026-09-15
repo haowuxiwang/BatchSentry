@@ -334,8 +334,15 @@ def download_result(task_result: dict, pdf_path: str = "") -> list[dict]:
         full_md_name = next((n for n in names if n.endswith("full.md")), None)
 
         if content_list_name:
+            # P0-3：先取每页坐标系（layout.json），再解析 content_list —— 块 bbox
+            # 只有在知道自己所属页的 page_size 时才能归一化。
+            page_sizes = _layout_page_sizes(zf, names)
+            if not page_sizes:
+                logger.warning(
+                    "[MinerU] 未能取得 layout page_size — 本 job 不产出区域级证据锚"
+                )
             pages, n_tables, n_paragraphs = _split_pages_by_content_list(
-                zf, content_list_name
+                zf, content_list_name, page_sizes
             )
             # 完整性对照（OCR 鲁棒性，P1-4 重构）：content_list 结构化解析若
             # 丢失大部分内容（格式漂移/未知块类型/服务端降级），静默输出残缺
@@ -408,8 +415,78 @@ def _structural_completeness_violated(
     return False, ""
 
 
+def _layout_page_sizes(
+    zf: zipfile.ZipFile, names: list[str]
+) -> dict[int, tuple[float, float]]:
+    """从 zip 内 layout.json 取**每页自身的坐标系**（page_size）。
+
+    P0-3 区域级证据锚要用它把 content_list 的块 bbox 归一化。坐标系必须来自
+    源页自身：实测 595×842 输入 → page_size 595×842（同源），故按此归一化后
+    可与渲染页对齐。取不到就返回空表 —— 调用方据此不写区域（宁缺勿错：没有
+    坐标系的裸 bbox 无法归一化，也就无法与渲染页对齐）。
+    """
+    name = next((n for n in names if n.endswith("layout.json")), None)
+    if not name:
+        return {}
+    try:
+        data = json.loads(zf.read(name).decode("utf-8", errors="replace"))
+    except (json.JSONDecodeError, KeyError) as e:
+        logger.warning(f"[MinerU] layout.json 解析失败（区域锚将不可用）: {e}")
+        return {}
+    infos = data.get("pdf_info") if isinstance(data, dict) else None
+    if not isinstance(infos, list):
+        return {}
+    sizes: dict[int, tuple[float, float]] = {}
+    for i, info in enumerate(infos):
+        if not isinstance(info, dict):
+            continue
+        size = info.get("page_size")
+        if not isinstance(size, (list, tuple)) or len(size) != 2:
+            continue
+        try:
+            w, h = float(size[0]), float(size[1])
+        except (TypeError, ValueError):
+            continue
+        if w > 0 and h > 0:
+            # page_idx 优先（与 content_list 的页号对齐），缺失时退化为下标
+            idx = info.get("page_idx")
+            key = idx if isinstance(idx, int) else i
+            sizes[key] = (w, h)
+    return sizes
+
+
+def _page_regions(
+    blocks: list[dict], space: tuple[float, float] | None
+) -> dict:
+    """抽出该页的块级区域（P0-3）：``{"_space": (w,h), "_regions": [...]}``。
+
+    只有同时具备坐标系与块 bbox 才产出 —— 缺任一项都返回空 dict，避免写出
+    无法对齐的裸坐标。
+    """
+    if not space or not blocks:
+        return {}
+    regions = []
+    for b in blocks:
+        if not isinstance(b, dict):
+            continue
+        bbox = b.get("bbox")
+        if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+            continue
+        text = _block_to_markdown(b) or ""
+        regions.append({
+            "label": b.get("type") or "",
+            "bbox": [float(v) for v in bbox],
+            "text": text,
+        })
+    if not regions:
+        return {}
+    return {"_space": [float(space[0]), float(space[1])], "_regions": regions}
+
+
 def _split_pages_by_content_list(
-    zf: zipfile.ZipFile, name: str
+    zf: zipfile.ZipFile,
+    name: str,
+    page_sizes: dict[int, tuple[float, float]] | None = None,
 ) -> tuple[list[dict], int, int]:
     """用 content_list 按页分组，保留整页结构（表格 HTML + 正文）。
 
@@ -463,6 +540,10 @@ def _split_pages_by_content_list(
                     block_dicts, discarded_count, footer_dropped
                 ),
             }
+            # P0-3：区域级证据锚（块 bbox + 该页自身坐标系）
+            page_dict.update(
+                _page_regions(block_dicts, (page_sizes or {}).get(i))
+            )
             if discarded_count > 0:
                 # 暴露页级 OCR 完整性信息，pipeline 用于 UI 警告 + LLM 降级提示
                 page_dict["_discarded_count"] = discarded_count
@@ -507,6 +588,10 @@ def _split_pages_by_content_list(
                 blocks_for_page, discarded_count, footer_dropped
             ),
         }
+        # P0-3：区域级证据锚（v1 扁平结构同语义）
+        page_dict.update(
+            _page_regions(blocks_for_page, (page_sizes or {}).get(i))
+        )
         if discarded_count > 0:
             page_dict["_discarded_count"] = discarded_count
         pages.append(page_dict)

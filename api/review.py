@@ -397,10 +397,14 @@ async def list_findings(
     rows = await cursor.fetchall()
     findings = [dict(r) for r in rows]
 
-    # 页级完整性警告标记（置信度扣分信号）— 一次批量载入
+    # 页级完整性警告标记（置信度扣分信号）— 一次批量载入。
+    # P0-3 复用同一次查询带上 regions_json（区域级证据锚），避免为锚再多打
+    # 一次 page_cache 全表扫描。
     page_flags: dict[int, bool] = {}
+    regions_by_page: dict[int, dict] = {}
     flag_cursor = await db.execute(
-        "SELECT page, structured_json FROM page_cache WHERE job_id = ?",
+        "SELECT page, structured_json, regions_json FROM page_cache "
+        "WHERE job_id = ?",
         (job_id,),
     )
     for r in await flag_cursor.fetchall():
@@ -411,6 +415,13 @@ async def list_findings(
             except json.JSONDecodeError:
                 pass
         page_flags[r["page"]] = flagged
+        if r["regions_json"]:
+            try:
+                payload = json.loads(r["regions_json"])
+                if isinstance(payload, dict) and payload.get("regions"):
+                    regions_by_page[r["page"]] = payload
+            except json.JSONDecodeError:
+                pass
 
     for f in findings:
         # M2/T2.4：优先用写入期已落库的 confidence（v10）；旧 job 该列为 NULL
@@ -452,6 +463,20 @@ async def list_findings(
     # 前端只读 f.tier —— 避免"SSR 一套颜色、AJAX 又一套"的映射漂移。
     from core.finding_quality import attach_review_tier, tier_counts
     attach_review_tier(findings)
+
+    # P0-3 区域级证据锚：把每条 finding 锚回 OCR 版面区域（读时推导，不落库）。
+    # 读时推导而非写入期固化：区域来自 page_cache.regions_json（与 OCR 产物
+    # 同源），重分析后锚自动跟着更新，不存在"finding 的锚指向已消失的区域"
+    # 这类漂移；且免去又一处 schema 变更与其回填风险。
+    # 锚不上（文案无特征词 / 无命中 / 该页无区域）→ None，呈现层据此不显示
+    # 定位入口（宁缺勿错：锚错会把复核员注意力引到无关区域）。
+    from core.pipeline.regions import region_anchor
+    for f in findings:
+        payload = regions_by_page.get(f.get("page"))
+        f["region_ref"] = region_anchor(
+            f"{f.get('description') or ''} {f.get('ocr_text') or ''}", payload
+        )
+
     tier_count = tier_counts(findings)
 
     return {

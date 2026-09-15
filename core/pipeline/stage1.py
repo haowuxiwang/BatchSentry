@@ -14,6 +14,7 @@ from core.pipeline.ocr_support import (
     assess_ocr_page,
     supports_page_subset,
 )
+from core.pipeline.regions import extract_regions
 from core.pipeline.state import _audit_log, transition_status
 
 logger = logging.getLogger(__name__)
@@ -189,7 +190,24 @@ async def _run_stage1_full(
     new_pages = 0
     for i, page in enumerate(pages):
         page_num = i + 1
+        # P0-3：区域级证据锚 —— 从 OCR 原始版面抽块级 bbox（归一化）。
+        # 两后端都**不提供单元格级** bbox，故只到区域级；抽不到（无坐标系/无
+        # bbox/后端降级为纯文本拆分）就写 NULL，绝不写裸坐标。
+        region_payload = extract_regions(page)
         if page_num in existing_pages:
+            # 页已有原文（重试/续跑路径）：原文不覆盖（证据链不可改写），
+            # 但可**补写**此前缺失的区域锚 —— 否则历史 job 永远没有锚，
+            # 复核页会误以为"该页就是不支持定位"。
+            if region_payload is not None:
+                await db.execute(
+                    "UPDATE page_cache SET regions_json = ? "
+                    "WHERE job_id = ? AND page = ? "
+                    "AND (regions_json IS NULL OR regions_json = '')",
+                    (
+                        json.dumps(region_payload, ensure_ascii=False),
+                        job_id, page_num,
+                    ),
+                )
             continue
         raw_html = page.get("markdown", {}).get("text", "")
         diagnostics, integrity_reasons = assess_ocr_page(
@@ -205,8 +223,14 @@ async def _run_stage1_full(
         raw_html = _sanitize_ocr_text(raw_html)
         await db.execute(
             "INSERT OR IGNORE INTO page_cache "
-            "(job_id, page, raw_html, ocr_diagnostics) VALUES (?, ?, ?, ?)",
-            (job_id, page_num, raw_html, json.dumps(diagnostics, ensure_ascii=False)),
+            "(job_id, page, raw_html, ocr_diagnostics, regions_json) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (
+                job_id, page_num, raw_html,
+                json.dumps(diagnostics, ensure_ascii=False),
+                json.dumps(region_payload, ensure_ascii=False)
+                if region_payload is not None else None,
+            ),
         )
         # P0-1 修复：回写内存 dict — Stage 2 (_analyze_one) 从内存
         # page dict 读取文本，此前只写 DB 不回写 → 首次运行 LLM 收到

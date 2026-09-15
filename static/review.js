@@ -36,6 +36,8 @@
     if (img) img.style.width = Math.round(pdfZoom * 100) + "%";
     const label = document.getElementById("pdf-zoom-label");
     if (label) label.textContent = Math.round(pdfZoom * 100) + "%";
+    // P0-3：区域框以图片像素尺寸定位，缩放后必须重算（否则框跑偏）
+    positionRegionOverlay();
   }
 
   function zoomPdf(delta) {
@@ -102,7 +104,12 @@
       // onload/onerror 只注册一次 — 反复赋值会互相覆盖（翻页时第二次
       // updatePdfDisplay 命中缓存分支曾把 onload 置 null，图片加载完成后
       // 无回调 → "正在渲染第 N 页" 永久显示）。加载完成/失败统一隐藏遮挡。
-      pdfImg.onload = () => pdfLoading.classList.add("is-loaded");
+      pdfImg.onload = () => {
+        pdfLoading.classList.add("is-loaded");
+        // P0-3：区域框以图片实际像素尺寸定位，必须在图片加载完成后重算
+        // （加载前 offsetWidth/offsetHeight 还是旧页/占位尺寸 → 框偏移）
+        positionRegionOverlay();
+      };
       pdfImg.onerror = () => {
         pdfLoading.classList.add("is-loaded");
         log.err("PDF page render failed");
@@ -110,6 +117,8 @@
       updatePdfDisplay(currentPage);
       // 兜底：6s 后强制隐藏（渲染失败/极慢时不永久遮挡）
       setTimeout(() => pdfLoading.classList.add("is-loaded"), 6000);
+      // 窗口尺寸变化 → 图片 CT 尺寸变化 → 区域框需重算
+      window.addEventListener("resize", positionRegionOverlay);
     }
 
     // === SSE 实时进度订阅 ===
@@ -695,6 +704,8 @@
       if (img.src.endsWith(`/page/${targetPage}`)) {
         return;
       }
+      // P0-3：翻页后旧的高亮框属于上一页，必须清掉（否则框会落在新页上）
+      clearRegionAnchor();
       img.src = `/api/jobs/${jobId}/page/${targetPage}`;
       if (loading) {
         loading.classList.remove("is-loaded");
@@ -1312,6 +1323,16 @@
           : "";
         // f.id is INTEGER from DB; coerce to Number to prevent string injection
         const fid = Number(f.id);
+        // P0-3：区域级证据锚（后端读时推导；锚不上则无此入口）。
+        // 内联 onclick 传不了对象，先把锚存进 regionRefs 再按 id 取。
+        if (f.region_ref && Array.isArray(f.region_ref.bbox)) {
+          regionRefs[fid] = f.region_ref;
+        } else {
+          delete regionRefs[fid];
+        }
+        const locateBtn = f.region_ref && Array.isArray(f.region_ref.bbox)
+          ? `<button onclick="locateFinding(event, ${fid})" class="btn-press text-[11px] font-medium text-muted-foreground hover:text-foreground" title="在左侧页面上高亮该问题所在的 OCR 版面区域（区域级定位，非单元格级）">定位原图</button>`
+          : "";
         const actionBtns =
           f.status === "pending"
             ? `
@@ -1341,6 +1362,9 @@
                             ${kbRefsInfo}
                             ${correctedInfo}
                             ${noteInfo}
+                            ${locateBtn
+                              ? `<div class="mt-1.5 flex items-center gap-2">${locateBtn}</div>`
+                              : ""}
                             ${actionBtns}
                         </div>
                     </div>
@@ -1656,6 +1680,78 @@
       });
   }
 
+  // finding id → region_ref（渲染时收集；onclick 是内联的，无法携带对象）
+  const regionRefs = Object.create(null);
+  // SSR 首屏的锚点随 ctx 注入（首屏不经过 AJAX 渲染函数）
+  if (ctx.region_refs && typeof ctx.region_refs === "object") {
+    Object.assign(regionRefs, ctx.region_refs);
+  }
+  let activeRegionFid = null;
+  const REGION_ASPECT_TOL = 0.02;
+
+  function clearRegionAnchor() {
+    activeRegionFid = null;
+    const ov = document.getElementById("region-overlay");
+    if (ov) ov.classList.add("hidden");
+  }
+
+  function positionRegionOverlay() {
+    const ov = document.getElementById("region-overlay");
+    const img = document.getElementById("pdf-page-img");
+    if (!ov || !img || ov.classList.contains("hidden")) return;
+    const bbox = (ov.dataset.bbox || "").split(",").map(Number);
+    if (bbox.length !== 4 || bbox.some((v) => !Number.isFinite(v))) return;
+    // 以图片自身为基准计算：放大时 img.style.width 会超过包装层 100%，
+    // 用百分比定位会与实际渲染位置脱钩（缩放后框跑偏）。
+    const [x0, y0, x1, y1] = bbox;
+    ov.style.left = img.offsetLeft + x0 * img.offsetWidth + "px";
+    ov.style.top = img.offsetTop + y0 * img.offsetHeight + "px";
+    ov.style.width = (x1 - x0) * img.offsetWidth + "px";
+    ov.style.height = (y1 - y0) * img.offsetHeight + "px";
+  }
+
+  // P0-3 区域级证据锚：把 finding 锚回 OCR 原始版面区域并画到当前页图上。
+  // 只到区域级 —— Paddle/MinerU 都不回传单元格级 bbox（实测见
+  // docs/NOISE_REDUCTION_SPIKE.md），自称单元格级等于给复核员一个错位的框。
+  function locateFinding(e, findingId) {
+    if (e) e.stopPropagation();
+    const fid = Number(findingId);
+    const ref = regionRefs[fid];
+    const img = document.getElementById("pdf-page-img");
+    const ov = document.getElementById("region-overlay");
+    if (!ref || !img || !ov) return;
+    if (activeRegionFid === fid) {
+      clearRegionAnchor(); // 再点一次收起
+      return;
+    }
+    // 宽高比闸门：OCR 坐标系与渲染图宽高比不一致时，归一化坐标映射必然
+    // 失真（实测第 8 页 Paddle 返回横向空间 1920×1440 —— 服务端旋转过）。
+    // 此时明示"无法定位"远好过画一个错位的框：后者会把复核员的注意力引到
+    // 错误的区域，比不显示更危险。
+    const imgAspect = img.naturalWidth / img.naturalHeight;
+    const spAspect = Number(ref.space_aspect);
+    if (
+      spAspect > 0 &&
+      imgAspect > 0 &&
+      Math.abs(spAspect - imgAspect) / imgAspect > REGION_ASPECT_TOL
+    ) {
+      window.PBC.showToast(
+        "该页 OCR 坐标系方向与页面不一致（疑似旋转页），无法自动定位，请人工核对原图",
+        "err",
+      );
+      return;
+    }
+    ov.dataset.bbox = (ref.bbox || []).join(",");
+    ov.classList.remove("hidden");
+    activeRegionFid = fid;
+    positionRegionOverlay();
+    // 区域可能在容器可视区之外（页图高于容器），滚动到它附近
+    const scroll = document.getElementById("pdf-scroll");
+    if (scroll && ov.offsetTop > scroll.scrollTop + scroll.clientHeight - 40) {
+      scroll.scrollTop = Math.max(0, ov.offsetTop - scroll.clientHeight / 3);
+    }
+  }
+
   function updateFinding(e, findingId, status) {
     log("updateFinding() called", { findingId, status });
     const btn = e && e.currentTarget ? e.currentTarget : null;
@@ -1789,6 +1885,7 @@
   window.retryJob = retryJob;
   window.updateFinding = updateFinding;
   window.correctFinding = correctFinding;
+  window.locateFinding = locateFinding;
   window.revertSuppression = revertSuppression;
 
   // 初始化：OCR 文本 raw → htmlToText 可读化（data-raw 为服务端注入原文）

@@ -41,7 +41,14 @@ try:
         data = r.json()
         assert r.status_code == 200, f"status={r.status_code}"
         assert data["status"] == "ok", f"status={data['status']}"
-        assert data["version"] == "1.1.0", f"version={data['version']}"
+        # 版本必须与唯一真值 main.APP_VERSION 一致（禁止硬编码 —— 硬编码会在
+        # 升版本时静默失配，把"包内版本已更新"的验证变成假通过）。
+        # 冻结包从 exe 内取名，故用源码侧真值对齐（同一次发布流水线）。
+        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        from main import APP_VERSION as _EXPECT
+        assert data["version"] == _EXPECT, (
+            f"version={data['version']} 期望 {_EXPECT}"
+        )
         ok("health", f"v{data['version']}")
     except Exception as e:
         fail("health", str(e))

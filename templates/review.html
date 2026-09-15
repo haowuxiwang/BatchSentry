@@ -191,7 +191,15 @@
                    fit-width 自适应的原图预览。 #}
                 <div class="absolute inset-0 overflow-auto" id="pdf-scroll">
                     {# PNG 渲染页：w-full 按容器宽度等比缩放，不用 min-height 撑高（min-height 会在窄窗口下拉伸图片高度导致变形） #}
-                    <img id="pdf-page-img" class="w-full h-auto block" alt="PDF 第 {{ page }} 页">
+                    {# P0-3 区域级证据锚：包装层是 overlay 的定位基准。区域框用
+                       js 以**图片自身**的 offset/offsetWidth 计算（非百分比）——
+                       放大时 img 宽度会超过包装层的 100%，用百分比会失准。 #}
+                    <div id="pdf-page-wrap" class="relative w-full">
+                        <img id="pdf-page-img" class="w-full h-auto block" alt="PDF 第 {{ page }} 页">
+                        <div id="region-overlay"
+                             class="absolute hidden pointer-events-none border-2 border-destructive/80 bg-destructive/10 rounded-sm"
+                             title="该问题在 OCR 版面中的区域（区域级，非单元格级）"></div>
+                    </div>
                 </div>
                 {% else %}
                 <div class="flex items-center justify-center h-full text-muted-foreground text-sm p-12">PDF 不可预览</div>
@@ -496,6 +504,18 @@
                                     {% if f.reviewer_note %}
                                     <p class="text-[11px] text-muted-foreground mt-1">备注：{{ f.reviewer_note }}</p>
                                     {% endif %}
+                                    {# P0-3 区域级证据锚：把该问题高亮到左侧页面的版面区域。
+                                       锚不上（无区域/无特征词命中）则不显示入口 —— 宁缺勿错。
+                                       区域级而非单元格级：两后端都不回传单元格 bbox。 #}
+                                    {% if f.region_ref %}
+                                    <div class="mt-1.5 flex items-center gap-2">
+                                        <button onclick="locateFinding(event, {{ f.id }})"
+                                                class="btn-press focus-ring text-[11px] font-medium text-muted-foreground hover:text-foreground"
+                                                title="在左侧页面上高亮该问题所在的 OCR 版面区域（区域级定位，非单元格级）">
+                                            定位原图
+                                        </button>
+                                    </div>
+                                    {% endif %}
                                     {% if f.status == 'pending' %}
                                     <div class="action-btns mt-1.5 flex items-center gap-2">
                                         <button onclick="updateFinding(event, {{ f.id }}, 'confirmed')"
@@ -609,6 +629,9 @@
         pdf_url: {{ pdf_url | tojson }},
         page_parse_error: {{ page_parse_error | tojson if page_parse_error is boolean else 'false' }},
         page_confidence: {{ page_confidence | tojson }},
+        {# P0-3：首屏 findings 由 SSR 渲染、不经过 AJAX，锚点必须随 ctx 注入，
+           否则首屏的"定位原图"按钮点了没反应（翻页后才生效 = 假缺陷）。 #}
+        region_refs: {{ region_refs | tojson }},
         page_finding_counts: {
           {% for p, c in page_finding_counts.items() %}
           {{ p }}: { critical: {{ c.critical }}, warning: {{ c.warning }}, info: {{ c.info }}, total: {{ c.total }} },

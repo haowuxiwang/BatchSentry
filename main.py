@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 # Application version — single source of truth.
 # Avoids duplicate hardcoded "1.1.0" in FastAPI(app=...) and /health endpoint.
 # 与 package.json 的 version 必须一致（tests/unit/test_version_consistency.py 机检）。
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.1.1"
 
 
 # Phase 5B: resolve resource paths under both dev and PyInstaller frozen mode.
@@ -397,7 +397,8 @@ async def review_page(job_id: str, request: Request, page: int = 1):
 
     # Get OCR text + structured_json for requested page
     cursor = await db.execute(
-        "SELECT raw_html, ocr_diagnostics, structured_json FROM page_cache WHERE job_id = ? AND page = ?",
+        "SELECT raw_html, ocr_diagnostics, structured_json, regions_json "
+        "FROM page_cache WHERE job_id = ? AND page = ?",
         (job_id, page),
     )
     row = await cursor.fetchone()
@@ -409,6 +410,16 @@ async def review_page(job_id: str, request: Request, page: int = 1):
         except (TypeError, json.JSONDecodeError):
             pass
     structured_json = row["structured_json"] if row else None
+    # P0-3：本页区域级证据锚（与 AJAX 端点同源同函数 —— SSR 首屏与翻页后
+    # 刷新必须是同一套锚，否则会出现"翻页前能定位、翻页后不能"的假缺陷）
+    regions_payload = None
+    if row and row["regions_json"]:
+        try:
+            _rp = json.loads(row["regions_json"])
+            if isinstance(_rp, dict) and _rp.get("regions"):
+                regions_payload = _rp
+        except (TypeError, json.JSONDecodeError):
+            pass
     # Strip HTML tags for display — keep line breaks so tables stay readable.
     # Full raw_html goes to the template separately as ocr_raw_html and is
     # converted client-side by review.js htmlToText (same path as AJAX paging,
@@ -449,6 +460,12 @@ async def review_page(job_id: str, request: Request, page: int = 1):
                 pass
         f["kb_refs_list"] = refs
         f.pop("kb_refs", None)
+        # P0-3：区域级证据锚（与 api.review.list_findings 共用同一纯函数）
+        from core.pipeline.regions import region_anchor
+        f["region_ref"] = region_anchor(
+            f"{f.get('description') or ''} {f.get('ocr_text') or ''}",
+            regions_payload,
+        )
 
     # Phase 3: extract measurement matrix from structured_json so the template
     # can render the 9×8 cell grid with in_spec colors without an extra API call.
@@ -545,6 +562,13 @@ async def review_page(job_id: str, request: Request, page: int = 1):
     type_count_map = {r["type"]: r["cnt"] for r in await cursor.fetchall()}
     coverage = rule_coverage(type_count_map)
 
+    # P0-3：首屏锚点映射（finding id → region_ref）随 ctx 注入模板。
+    # 首屏 findings 由 SSR 渲染，不经过 AJAX 渲染函数，锚点必须显式传递，
+    # 否则首屏"定位原图"按钮点了没反应（翻页后才生效 —— 假缺陷）。
+    region_refs = {
+        f["id"]: f["region_ref"] for f in findings if f.get("region_ref")
+    }
+
     return templates.TemplateResponse(request, "review.html", {
         "job_id": job_id,
         "filename": job["filename"],
@@ -556,6 +580,7 @@ async def review_page(job_id: str, request: Request, page: int = 1):
         "ocr_raw_html": raw_html,
         "ocr_diagnostics": ocr_diagnostics,
         "findings": findings,
+        "region_refs": region_refs,
         "severity_counts": severity_counts,
         "page_finding_counts": page_finding_counts,
         "tier_counts": tier_count,

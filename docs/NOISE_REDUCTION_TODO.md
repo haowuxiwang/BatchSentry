@@ -9,9 +9,9 @@
 ## 依赖与建议顺序
 
 ```
-T-P0-4 ✅ 已完成
-T-P0-2（留痕，完全独立，可最先做）
-T-P0-3（证据锚，独立）
+T-P0-4 ✅ 已完成（4273c1f）
+T-P0-2 ✅ 已完成（a5661a6）
+T-P0-3 ✅ 代码就绪（目视核对待跑，见文末）
 T-P1-3（HTML 栅格化）─┬─→ T-P0-1（选择性双读仲裁）
                       └─→ T-P1-1 / T-P1-2（结构校验）
 T-P2-*（度量与治理，可与上并行）
@@ -34,7 +34,7 @@ T-P2-*（度量与治理，可与上并行）
 - **护栏（后续改动不得破坏）**：`_parse_spec` 保持"开头锚定 + 只允许非数字尾随"，
   以挡掉正文里的 `每1小时±5分钟记录一次`（见 T-P1-6）。
 
-### T-P0-2 抑制必须留痕（抑制 ≠ 删除）
+### ✅ T-P0-2 抑制必须留痕（抑制 ≠ 删除）—— 已完成（`a5661a6`）
 
 - **定位依据**：`core/rules/spec_guard.py::drop_unfounded_spec_findings` 返回
   `(kept, dropped:int)` —— **只有计数，没有明细**；`core/pipeline/stage2.py:209`
@@ -42,40 +42,65 @@ T-P2-*（度量与治理，可与上并行）
 - **法规依据**：EU GMP Annex 11 §16、中国附录《计算机化系统》第 15/16 条 ——
   关键数据的修改需经批准并记录理由；PIC/S PI 041-1 认可"经验证的异常报告"替代
   逐页复核，前提是留痕可追溯。
-- **改动面**：
-  1. `drop_unfounded_spec_findings` 改为返回**明细**（保留 `(kept, dropped_list)`，
-     每项含 `type/severity/description/命中的三元组/命中的规则`）—— 保持向后兼容
-     可另加 `return_details=False` 开关，或同步改调用方与其测试。
-  2. 落库：`audit_log` 增 `action=spec_guard_dropped`（含明细摘要）；
-     `findings` 增 `status='suppressed'`（或独立 `suppression_log` 表），
-     **必须含 `reason` 字段**。
-  3. 复核页：新增"已抑制"页签，支持查看原因 + 一键回退为正式 finding。
-- **机检不变式**（`tests/unit/test_spec_guard.py` 或新文件，源码扫描）：
-  - 禁止 `drop_*` 函数**只**返回 `int`；
-  - 任何 suppressed 记录必须带非空 `reason`；
-  - `stage2` 不得只保留计数（必须把明细交给落库层）。
-- **验收口径**：真实 51 页 e2e 中被抑制的条目 **100%** 可在复核页查到、带原因、可回退。
+- **实际改动**（与原方案的差异已标注）：
+  1. `drop_unfounded_spec_findings` → `(kept, 明细列表)`。**未加 `return_details`
+     开关**（两套返回契约本身就是漂移源），直接改调用方与其测试。
+  2. 落库用**独立台账表 `finding_suppressions`**（schema v11），**未**改
+     `findings.status='suppressed'` —— 抑制是"未进入问题清单"的候选条目，与人工
+     裁决（confirmed/rejected）不同态，混进 `findings` 会污染裁决口径与统计分母。
+     表含 `reason`（CHECK 非空）、`evidence`、`reverted_at`、`reverted_finding_id`。
+  3. `audit_log` 增 `action=spec_guard_dropped`（含明细摘要）。
+  4. 复核页：页面无"页签"结构，实现为**可折叠面板**（`#suppression-panel`），
+     逐条显示理由 + 命中证据，支持**一键回退为正式 finding**。
+- **机检不变式**（`tests/unit/test_suppression_ledger.py`）：禁止 `drop_*` **只**返回
+  `int`（返回注解扫描）；空理由在 **DB CHECK 与 Python 两侧**都必须被拒；台账建表
+  语句**只许在 schema.sql 声明**（迁移体复制 DDL = 漂移源）；`stage2` 不得回归为只留计数。
+- **实测发现并修复**：SQLite 单参 `trim()` **只去 ASCII 空格**，`reason="\t"` 可绕过
+  非空校验 → CHECK 显式给出空白字符集（Python 侧 `str.strip()` 覆盖全角空格）。
+- **验收**：`tests/integration/test_api_suppressions.py` 10 项真实 HTTP（查询/过滤/404/
+  计数；回退建 finding + 台账留痕 + audit_log；重复回退 400；跨 job 越权 404；
+  UNIQUE 去重幂等）。真实轮次的"100% 可查可回退"待打包后目视复核（见文末）。
 
-### T-P0-3 证据锚（区域级，不做单元格级）
+### ✅ T-P0-3 证据锚（区域级，不做单元格级）—— 代码就绪（目视核对待跑）
 
 - **定位依据**（spike §1/§2/§5）：Paddle 与 MinerU **都**返回表级/块级 bbox，
   但**都不返回单元格级 bbox**；而 `page_cache` 只有
   `job_id / page / raw_html / structured_json / analyzed_at / ocr_diagnostics` ——
   **坐标 100% 被丢弃**。所以区域级高亮是"白拿的能力"，单元格级不成立。
-- **改动面**：
-  1. `core/pipeline/stage1.py` 落库时保留每页区域：
-     `page_cache.regions_json` = `[{label, bbox, page_w, page_h}]`
-     （Paddle 取 `prunedResult.parsing_res_list[].block_bbox` +
-     `prunedResult.width/height`；MinerU 取 `content_list_v2[].bbox` +
-     `layout.json` 的 `page_size`）。
-  2. `findings` 增 `region_ref`（`{page, label, bbox}`，bbox 必须**带页宽高归一化**）。
-  3. 复核页：点击 finding → 渲染该页（用归一化 PDF）并框出所在区域。
-- **机检不变式**：禁止写入未归一化坐标（写入路径必须携带 `page_w/page_h`）；
-  区域类型必须来自已知 label 集合（避免服务端新增 label 时静默丢锚）。
-- **验收口径**：任意 finding 可一键回到原页并高亮所在**表格区域**；
-  高亮框与归一化 PDF 的坐标系一致（抽 5 页人工核对）。
-- **前置**：无（独立）。**注意**：需确认 MinerU 真实 51 页轮次的 `layout.json`
-  是否随 zip 保留（当前仅小样本验证过）。
+- **实际改动**（与原方案的差异已标注）：
+  1. 新增**纯函数** `core/pipeline/regions.py`（唯一定义点）：
+     `normalize_bbox` / `canonical_label` / `extract_regions` / `region_anchor`。
+     `page_cache.regions_json` 实际形态 =
+     `{backend, space:[w,h], space_aspect, regions:[{label, bbox(归一化 0..1), text}]}`
+     —— 与原方案的 `[{label,bbox,page_w,page_h}]` 不同：坐标系提到**载荷级**，
+     并额外记 `space_aspect`（呈现层宽高比闸门需要它）。
+  2. MinerU 侧需把 `layout.json` 的 `page_size` 从 `download_result` 一路带进
+     `_split_pages_by_content_list`（原方案未提及该改造）。**已确认 51 页轮次的
+     `layout.json` 随 zip 保留**（原方案列为待确认项，现已证实）。
+  3. **`findings.region_ref` 未加列** —— 改为**读时推导**：
+     `api/review.py::list_findings` 复用已有那次 `page_cache` 批量扫描带上
+     `regions_json`，用 `region_anchor()` 现算。理由：区域与 OCR 产物同源，
+     重分析后锚自动跟随，不存在"锚指向已消失区域"的漂移；且免去又一处 schema
+     变更与历史回填风险。SSR(`main.py::review_page`) 共用同一函数。
+  4. 复核页：`#region-overlay` 叠加框 + finding 卡片"定位原图"按钮；
+     首屏锚点随 `window.__PBC__.region_refs` 注入（首屏由 SSR 渲染、不经 AJAX）。
+- **实测新增的硬约束（原方案未预见）**：
+  - **坐标系逐页不同**：51 页中**第 8 页** Paddle 返回 `1920×1440`（服务端旋转过），
+    而页面是竖向 → 直接归一化叠加会横竖颠倒。故呈现层必须用 `space_aspect`
+    与渲染图宽高比比对（容差 2%），不一致时**明示无法定位**而不是画一个错位的框。
+  - **比例实测**：页面 3000×4000(0.75) / 归一化副本 720×960(0.75) / Paddle
+    1440×1920(0.75) —— **同向等比**（3000/1440 == 4000/1920 == 2.0833），
+    归一化坐标可直接映射，无畸变。
+  - **MinerU 的 `page_size` 取自源页自身**（595×842 输入 → 595×842 输出）。
+- **机检不变式**：`tests/unit/test_regions_anchor.py`（60 项）+ `test_region_anchor_wiring.py`
+  （16 项）：禁止写入未归一化坐标（`regions.py` 是唯一出口，stage1 不得触碰
+  `block_bbox` 等原始字段）；区域 label 必须落在**闭集** `CANONICAL_LABELS`
+  （未知 → `other`，白名单而非透传）；`regions.py` 保持**纯函数**；
+  SSR 与 AJAX 必须共用 `region_anchor`。
+- **真值复算**：真实 `paddle_original.jsonl`（51 页）与 `mineru_original.zip` 在场时
+  自动执行（全量 bbox 落单位方格、竖向 50 页 + 横向 1 页、真实批号块可被锚中）。
+- **待完成的验收项**：**抽 5 页人工核对高亮框与归一化 PDF 的坐标系一致** ——
+  需在打包后的真实轮次里目视完成（离线只能验算法与数据，验不了"人眼看着对不对"）。
 
 ### T-P0-1 选择性双读仲裁（表级粗筛 + 字段级判定）
 
@@ -213,3 +238,19 @@ T-P2-*（度量与治理，可与上并行）
 | 用 Paddle `layout_det_res.score` 当抽取置信度 | 实测是**版面检测分**（均值 0.579、p50 0.545），小文本块天然低分，与数值正确性无关 |
 | 单元格级坐标对齐 | 两个后端都不提供单元格 bbox（Paddle 整表 1 块、MinerU 整表 1 span），成本收益不成立 |
 | 单元格级高亮 | 同上；退化为区域级高亮（T-P0-3）已满足"点击回页核对"的需求 |
+
+---
+
+## 当前状态（v1.1.1）
+
+| 项 | 状态 | 提交 |
+|---|---|---|
+| T-P0-4 `_parse_spec` 书写变体归一化 | ✅ 完成 | `4273c1f` |
+| T-P0-2 抑制留痕（台账可查/可回退/可抽检） | ✅ 完成（含 10 项真实 HTTP 集成测试） | `a5661a6` + v1.1.1 |
+| T-P0-3 区域级证据锚（含宽高比闸门） | ✅ 代码就绪（60+16 项机检 + 真值复算） | v1.1.1 |
+| T-P0-1 选择性双读仲裁 | ⬜ 未开始（前置 T-P1-3） | — |
+
+**唯一未闭合的验收项**：T-P0-3 的"抽 5 页人工核对高亮框与页面坐标系一致"。
+离线测试能证明**算法与数据**正确（归一化落在单位方格、坐标系如实记录、真实产物可
+复算、SSR/AJAX 同源），但**证明不了"人眼看到的框位置对不对"** —— 那必须在真实轮次里
+目视完成，故不写成"已完成"来交差。
