@@ -195,6 +195,15 @@ async def _analyze_one(
                     "AND source = 'llm_page' AND status = 'pending'",
                     (job_id, page_num),
                 )
+                # P0-2：同页的抑制台账也要与本次分析结果对齐 —— 否则重分析后
+                # 新一套结论已变，旧台账行仍在，复核页会展示"已不存在的抑制"。
+                # 只清未回退行：已回退（reverted_at 非空）的是人工动作的审计
+                # 证据，改写它等于篡改审计追踪。
+                await db.execute(
+                    "DELETE FROM finding_suppressions WHERE job_id = ? AND page = ? "
+                    "AND reverted_at IS NULL",
+                    (job_id, page_num),
+                )
                 # 流式输出：立即把该页 LLM 产生的 findings 写入 findings 表。
                 # 对抗审查(cr-3): llm_page 路径同样依赖 idx_findings_dedup UNIQUE
                 # 索引（v5）做原子去重，防御"部分提交残留 + retry"组合路径下的重复行。
@@ -204,16 +213,25 @@ async def _analyze_one(
                 dict_findings = [f for f in page_findings if isinstance(f, dict)]
                 # M8/P0：LLM 自报的 param_out_of_spec 此前直接落库、不经可判性
                 # 校验，OCR 把 "40±3°C" 读成 "40 3°C" 时成片误报（真实 p14 实测
-                # 6 条中 5 条误报）。改用规则层同一解析器复核，判为合规则者剔除；
+                # 6 条中 5 条误报）。改用规则层同一解析器复核，判为合规则者抑制；
                 # 定位不到/不可判者保留（fail-closed）。
-                from core.rules.spec_guard import drop_unfounded_spec_findings
-                dict_findings, _dropped_spec = drop_unfounded_spec_findings(
+                # P0-2：抑制**必须留痕**（抑制 ≠ 删除）——第二返回值是明细列表
+                # 而非计数，落 finding_suppressions 台账（带非空 reason + 证据），
+                # 复核页可查、可一键回退。只记计数等于"不可查、不可回退、不可抽检"。
+                from core.rules.spec_guard import (
+                    SUPPRESSION_INSERT_SQL,
+                    drop_unfounded_spec_findings,
+                    suppression_rows,
+                )
+                dict_findings, _suppressed = drop_unfounded_spec_findings(
                     dict_findings, structured
                 )
-                if _dropped_spec:
+                _supp_rows = suppression_rows(job_id, page_num, _suppressed)
+                if _supp_rows:
                     logger.info(
-                        f"[{job_id}] Stage 2: page {page_num} 剔除 "
-                        f"{_dropped_spec} 条 LLM 规格误报（规则层复核为合规）"
+                        f"[{job_id}] Stage 2: page {page_num} 抑制 "
+                        f"{len(_supp_rows)} 条 LLM 规格误报（规则层复核为合规），"
+                        f"已写入抑制台账（可复核页回退）"
                     )
                 attach_gmp_basis(dict_findings)
                 # 知识库条文引用（v8）：后置富集（幂等，纯内存检索）
@@ -253,6 +271,25 @@ async def _analyze_one(
                         "(job_id, page, type, severity, description, ocr_text, operator, source, gmp_basis, kb_refs, confidence, raw_type, created_at) "
                         "VALUES (?, ?, ?, ?, ?, ?, ?, 'llm_page', ?, ?, ?, ?, datetime('now','localtime'))",
                         llm_page_rows,
+                    )
+                # P0-2 抑制台账落库：与 findings 同一事务/同一把 db_lock 内提交
+                # —— 抑制记录与正式 finding 必须同进同出，否则重试窗口内会
+                # 出现"finding 已回滚但抑制记录已提交"的台账漂移。
+                if _supp_rows:
+                    await db.executemany(
+                        SUPPRESSION_INSERT_SQL, _supp_rows
+                    )
+                    await db.execute(
+                        "INSERT INTO audit_log (job_id, action, detail, created_at) "
+                        "VALUES (?, 'spec_guard_dropped', ?, datetime('now','localtime'))",
+                        (
+                            job_id,
+                            f"page={page_num} suppressed={len(_supp_rows)}: "
+                            + "; ".join(
+                                # 行序：job_id, page, type, severity, description, ...
+                                f"{r[2]}: {str(r[4])[:60]}" for r in _supp_rows[:5]
+                            ),
+                        ),
                     )
                 await db.commit()
                 logger.info(

@@ -17,10 +17,19 @@ M8 真实 51 页实测（p14）：OCR 把印版 ``40±3°C`` 读成 ``40 3°C``�
 的，视为 LLM 误报予以剔除；定位不到、或解析/判定不出的，一律**保留**（fail-closed，
 交人工复核）——绝不因"复核不确定"而吞掉潜在真实偏差。
 
+抑制必须留痕（P0-2，法规必需）
+------------------------------
+**抑制 ≠ 删除**。EU GMP Annex 11 §16 与中国附录《计算机化系统》第 15/16 条要求
+关键数据的修改经批准并记录理由；PIC/S PI 041-1 认可"经验证的异常报告"替代逐页
+复核，前提是留痕可追溯。因此 :func:`drop_unfounded_spec_findings` **返回明细而非
+仅计数**：每一条被抑制的条目都带非空 ``reason`` 与结构化 ``evidence``（命中的三元组
+及各自的判定），由调用方落库（``finding_suppressions``）并在复核页可查、可回退。
+
 纯函数、无 DB、无网络，可在 core/api 两侧自由引用。
 """
 from __future__ import annotations
 
+import json
 import re
 
 from core.rules.parsing import (
@@ -114,21 +123,28 @@ def _triple_state(spec: str, actual: str) -> str:
 
 def drop_unfounded_spec_findings(
     findings: list, structured: dict
-) -> tuple[list, int]:
+) -> tuple[list, list[dict]]:
     """剔除 LLM 无法被规则层复核为"超差"的 ``param_out_of_spec`` 结论。
 
-    返回 ``(保留的 findings, 剔除条数)``。判定规则：
+    返回 ``(保留的 findings, 被抑制条目明细)``。**第二项是明细列表而非计数**
+    —— 抑制必须留痕（见模块 docstring）。每条明细形如::
+
+        {"finding": <原始 finding dict>,
+         "reason": "<非空理由，带命中的三元组>",
+         "evidence": {"rule": ..., "states": [...], "matched": [...]}}
+
+    判定规则：
 
     * 非 ``param_out_of_spec`` 类 finding：原样保留；
     * 文案（description + ocr_text）中能定位到结构化三元组，且所有命中的三元组
       状态均为 ``in``/``soft``（合规、或规则层已独立以 info 呈现的疑似 OCR 丢
-      小数点）：剔除（LLM 误报 / 重复条目）；
+      小数点）：抑制（LLM 误报 / 重复条目）；
     * 命中三元组中存在被判**超差**者：保留（真实偏差，规则层已独立佐证）；
     * 定位不到任何三元组，或命中三元组状态为 ``unknown``：保留（fail-closed）。
     """
     index = index_specs(structured)
     kept: list = []
-    dropped = 0
+    suppressed: list[dict] = []
     _DROP_SAFE = {"in", "soft"}
     for f in findings:
         if not isinstance(f, dict):
@@ -152,9 +168,77 @@ def drop_unfounded_spec_findings(
         precise = [t for t in matched if str(t[2]) and str(t[2]) in text]
         if precise:
             matched = precise
-        states = {_triple_state(spec, actual) for _, spec, actual in matched}
+        pairs = [(n, s, a, _triple_state(s, a)) for n, s, a in matched]
+        states = {st for *_, st in pairs}
         if states and states <= _DROP_SAFE:
-            dropped += 1
+            suppressed.append({
+                "finding": f,
+                "reason": _suppression_reason(pairs),
+                "evidence": {
+                    "rule": "core.rules.spec_guard._triple_state",
+                    "states": sorted(states),
+                    "matched": [
+                        {"name": n, "spec": s, "actual": a, "state": st}
+                        for n, s, a, st in pairs
+                    ],
+                },
+            })
             continue
         kept.append(f)
-    return kept, dropped
+    return kept, suppressed
+
+
+# ── 抑制留痕（P0-2）────────────────────────────────────────────────────────
+
+_STATE_REASON = {
+    "in": "规则层复核为合规",
+    "soft": "规则层已以 info 独立呈现同一三元组（疑似 OCR 丢失小数点）",
+}
+
+
+def _suppression_reason(pairs: list[tuple[str, str, str, str]]) -> str:
+    """由命中的三元组构造**非空**抑制理由（供法规留痕与人工抽检）。"""
+    detail = "；".join(
+        f"{name}：实测 {actual or '—'} 对规格 {spec or '—'} → {_STATE_REASON[st]}"
+        for name, spec, actual, st in pairs
+    )
+    return (
+        f"LLM 自报超限结论经规则层同一解析器复核后不成立（{detail}），"
+        f"按降噪规则抑制；原文保留备查，可回退为正式问题"
+    )
+
+
+# finding_suppressions 的列顺序（stage2 / api 共用同一构造点，避免两处漂移）
+SUPPRESSION_INSERT_SQL = (
+    "INSERT OR IGNORE INTO finding_suppressions "
+    "(job_id, page, type, severity, description, ocr_text, source, reason, evidence, "
+    "created_at) "
+    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','localtime'))"
+)
+
+
+def suppression_rows(
+    job_id: str, page: int, suppressed: list[dict]
+) -> list[tuple]:
+    """把抑制明细映射为 ``finding_suppressions`` 行（**唯一**构造点）。
+
+    ``reason`` 必须非空（法规留痕的硬要求）：为空即抛 ``ValueError`` —— 宁可
+    让写入路径显式失败，也不允许出现"无理由的抑制"这种不可抽检的记录。
+    """
+    rows: list[tuple] = []
+    for item in suppressed or []:
+        f = item.get("finding") if isinstance(item, dict) else None
+        if not isinstance(f, dict):
+            continue
+        reason = str(item.get("reason") or "").strip()
+        if not reason:
+            raise ValueError(
+                "抑制留痕缺失理由（finding_suppressions.reason 不得为空）"
+            )
+        rows.append((
+            str(job_id), int(page), str(f.get("type") or ""),
+            str(f.get("severity") or "info"), str(f.get("description") or ""),
+            str(f.get("ocr_text") or ""), str(f.get("source") or "llm_page"),
+            reason, json.dumps(item.get("evidence") or {}, ensure_ascii=False),
+        ))
+    return rows

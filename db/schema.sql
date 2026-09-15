@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS page_cache (
     page INTEGER NOT NULL,
     raw_html TEXT,
     ocr_diagnostics TEXT,          -- 页级 OCR 完整性证据（JSON）
+    regions_json TEXT,             -- v11: 区域级证据锚（P0-3）{"space":[w,h],"regions":[{label,bbox,text}]}
     structured_json TEXT,
     analyzed_at TIMESTAMP,
     PRIMARY KEY (job_id, page),
@@ -110,4 +111,34 @@ CREATE TABLE IF NOT EXISTS kb_entries (
     text TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_kb_entries_source ON kb_entries(source_id);
+
+-- v11: 抑制留痕（P0-2）— 被降噪规则抑制的候选条目的**不可变台账**。
+-- 抑制 ≠ 删除：EU GMP Annex 11 §16 / 中国附录《计算机化系统》第 15/16 条要求
+-- 关键数据的修改经批准并记录理由。因此 reason 由 CHECK 强制非空 ——
+-- 数据库层直接堵死"无理由的抑制"这种不可抽检的记录。
+-- reverted_* 记录"一键回退为正式 finding"的动作（原记录不改写，保持台账完整）。
+CREATE TABLE IF NOT EXISTS finding_suppressions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id TEXT NOT NULL,
+    page INTEGER NOT NULL,
+    type TEXT NOT NULL,
+    severity TEXT NOT NULL DEFAULT 'info',
+    description TEXT NOT NULL,
+    ocr_text TEXT,
+    source TEXT NOT NULL DEFAULT 'llm_page',
+    -- SQLite 的单参 trim() 默认只去 ASCII 空格，\t / \n / \r 会被留下 →
+    -- 一个"看起来有理由"的制表符就能绕过留痕要求。显式给出空白字符集。
+    reason TEXT NOT NULL
+        CHECK (length(trim(reason, char(32) || char(9) || char(10) || char(13))) > 0),
+    evidence TEXT,                 -- JSON：命中的 (名称, 规格, 实测, 判定) 明细
+    reverted_finding_id INTEGER,   -- 已回退为正式 finding 时记录其 id
+    reverted_at TIMESTAMP,
+    created_at TIMESTAMP DEFAULT (datetime('now','localtime')),
+    FOREIGN KEY (job_id) REFERENCES jobs(id)
+);
+CREATE INDEX IF NOT EXISTS idx_suppress_job ON finding_suppressions(job_id);
+CREATE INDEX IF NOT EXISTS idx_suppress_job_page ON finding_suppressions(job_id, page);
+-- 重分析/重试幂等：同一页同一指纹只留一条台账
+CREATE UNIQUE INDEX IF NOT EXISTS idx_suppress_dedup
+    ON finding_suppressions(job_id, page, type, description);
 

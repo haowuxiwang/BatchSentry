@@ -122,8 +122,196 @@ async def get_review_stats(job_id: str, request: Request = None):
         (job_id,),
     )
     stats = _review_stats_from_rows([dict(r) for r in await cursor.fetchall()])
+    # P0-2：抑制台账计数 — 与 findings 统计分列，避免把"被抑制"混入确认/驳回
+    # 分母（抑制不是人工裁决，口径必须分开）。
+    cursor = await db.execute(
+        "SELECT COUNT(*) AS n, "
+        "SUM(CASE WHEN reverted_at IS NOT NULL THEN 1 ELSE 0 END) AS r "
+        "FROM finding_suppressions WHERE job_id = ?",
+        (job_id,),
+    )
+    srow = await cursor.fetchone()
+    stats["suppressed"] = int(srow["n"] or 0)
+    stats["suppressed_reverted"] = int(srow["r"] or 0)
     stats["job_id"] = job_id
     return stats
+
+
+@router.get("/jobs/{job_id}/suppressions")
+async def list_suppressions(
+    job_id: str,
+    page: Optional[int] = None,
+    limit: int = 100,
+    request: Request = None,
+):
+    """列出本 job 的抑制台账（P0-2：抑制必须可查）。
+
+    抑制 ≠ 删除：被降噪规则抑制的候选条目全部落 `finding_suppressions`，
+    复核者可在此查看**为什么被抑制**（reason + 命中的三元组证据）并一键
+    回退为正式 finding。这是 EU GMP Annex 11 §16 / 中国附录《计算机化系统》
+    第 15/16 条对"关键数据修改需记录理由"的落地，也是 PIC/S PI 041-1
+    "经验证的异常报告"可抽检的前提。
+    """
+    from core.security import is_local_request
+    if request is not None and not is_local_request(request):
+        raise HTTPException(403, "Forbidden (non-local request)")
+    limit = max(1, min(limit, 500))
+    db = await get_db()
+    cursor = await db.execute("SELECT 1 FROM jobs WHERE id = ?", (job_id,))
+    if not (await cursor.fetchone()):
+        raise HTTPException(404, "Job 不存在")
+    if page:
+        cursor = await db.execute(
+            "SELECT * FROM finding_suppressions WHERE job_id = ? AND page = ? "
+            "ORDER BY id",
+            (job_id, page),
+        )
+    else:
+        cursor = await db.execute(
+            "SELECT * FROM finding_suppressions WHERE job_id = ? "
+            "ORDER BY page, id LIMIT ?",
+            (job_id, limit),
+        )
+    entries = []
+    for r in await cursor.fetchall():
+        e = dict(r)
+        e["type_zh"] = zh_finding_type(e.get("type"))
+        try:
+            parsed = json.loads(e.get("evidence") or "{}")
+            e["evidence"] = parsed if isinstance(parsed, dict) else {}
+        except ValueError:
+            e["evidence"] = {}
+        e["reverted"] = e.get("reverted_at") is not None
+        entries.append(e)
+    # 全 job 计数（供复核页摘要展示，不受 page 过滤影响）
+    cursor = await db.execute(
+        "SELECT COUNT(*) AS n, "
+        "SUM(CASE WHEN reverted_at IS NOT NULL THEN 1 ELSE 0 END) AS r "
+        "FROM finding_suppressions WHERE job_id = ?",
+        (job_id,),
+    )
+    row = await cursor.fetchone()
+    total = int(row["n"] or 0)
+    reverted = int(row["r"] or 0)
+    return {
+        "entries": entries,
+        "count": len(entries),
+        "total": total,
+        "reverted": reverted,
+        "active": total - reverted,
+    }
+
+
+@router.post("/jobs/{job_id}/suppressions/{suppression_id}/revert")
+async def revert_suppression(
+    job_id: str,
+    suppression_id: int,
+    request: Request = None,
+    reviewer_note: Optional[str] = Form(default=None),
+):
+    """把一条被抑制的候选条目**回退为正式 finding**（P0-2）。
+
+    人工复核怀疑抑制判定有误时的出口。落库语义：
+    * 在 `findings` 插入一条 `status='pending'` 的正式记录（带法规依据与
+      知识库引用，与原始 LLM 条目同等富集），复核者再走正常裁决流程；
+    * 抑制台账行**不删除**，只记 `reverted_at` + `reverted_finding_id` ——
+      台账不可变，回退本身也要可追溯；
+    * 写 `audit_log(action='suppression_reverted')`。
+    """
+    from core.security import is_local_request
+    if request is not None and not is_local_request(request):
+        raise HTTPException(403, "Forbidden (non-local request)")
+    _MAX_NOTE_LEN = 2000
+    if reviewer_note is not None and len(reviewer_note) > _MAX_NOTE_LEN:
+        raise HTTPException(
+            400,
+            f"reviewer_note 超过 {_MAX_NOTE_LEN} 字符上限（实际 {len(reviewer_note)}）",
+        )
+    db = await get_db()
+    cursor = await db.execute(
+        "SELECT * FROM finding_suppressions WHERE id = ? AND job_id = ?",
+        (suppression_id, job_id),
+    )
+    row = await cursor.fetchone()
+    if not row:
+        raise HTTPException(404, "抑制记录不存在")
+    if row["reverted_at"]:
+        raise HTTPException(400, "该抑制记录已回退，无需重复操作")
+    sup = dict(row)
+
+    from core.finding_quality import confidence_for as _conf, page_is_flagged
+    from core.rules.gmp_basis import attach_gmp_basis
+    cursor = await db.execute(
+        "SELECT structured_json FROM page_cache WHERE job_id = ? AND page = ?",
+        (job_id, sup["page"]),
+    )
+    prow = await cursor.fetchone()
+    structured = {}
+    if prow and prow["structured_json"]:
+        try:
+            structured = json.loads(prow["structured_json"])
+        except ValueError:
+            structured = {}
+    source = sup.get("source") or "llm_page"
+    conf = _conf({"source": source}, page_is_flagged(structured))
+    restored = [{
+        "type": sup["type"], "severity": sup["severity"],
+        "description": sup["description"], "ocr_text": sup.get("ocr_text") or "",
+        "source": source,
+    }]
+    attach_gmp_basis(restored)
+    try:
+        from core.kb.retriever import attach_kb_refs
+        attach_kb_refs(restored)
+    except Exception as e:  # 知识库不可用不阻断回退（依据可选）
+        logger.warning(f"[{job_id}] kb_refs attach skipped on revert: {e}")
+    g = restored[0]
+
+    async with db_lock:
+        cur = await db.execute(
+            "INSERT OR IGNORE INTO findings "
+            "(job_id, page, type, severity, description, ocr_text, source, "
+            "gmp_basis, kb_refs, confidence, reviewer_note, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','localtime'))",
+            (
+                job_id, sup["page"], sup["type"], sup["severity"],
+                sup["description"], sup.get("ocr_text") or "", source,
+                g.get("gmp_basis"),
+                json.dumps(g["kb_refs"], ensure_ascii=False) if g.get("kb_refs") else None,
+                conf, reviewer_note,
+            ),
+        )
+        new_id = getattr(cur, "lastrowid", None)
+        if not new_id:
+            # UNIQUE 去重命中（同 job/source/page/type/description 已存在）—
+            # 回退是幂等的：挂到既存行上，不制造重复 finding。
+            cur2 = await db.execute(
+                "SELECT id FROM findings WHERE job_id = ? AND source = ? "
+                "AND page = ? AND type = ? AND description = ?",
+                (job_id, source, sup["page"], sup["type"], sup["description"]),
+            )
+            ex = await cur2.fetchone()
+            new_id = ex["id"] if ex else None
+        await db.execute(
+            "UPDATE finding_suppressions SET reverted_at = datetime('now','localtime'), "
+            "reverted_finding_id = ? WHERE id = ? AND job_id = ?",
+            (new_id, suppression_id, job_id),
+        )
+        note = f" note={reviewer_note[:50]!r}" if reviewer_note else ""
+        await db.execute(
+            "INSERT INTO audit_log (job_id, finding_id, action, detail) "
+            "VALUES (?, ?, 'suppression_reverted', ?)",
+            (
+                job_id, new_id,
+                f"suppression_id={suppression_id} page={sup['page']} "
+                f"→ finding_id={new_id}{note}",
+            ),
+        )
+        await db.commit()
+    logger.info(
+        f"[{job_id}] Suppression {suppression_id} reverted → finding {new_id}"
+    )
+    return {"ok": True, "finding_id": new_id, "page": sup["page"]}
 
 
 @router.get("/jobs/{job_id}/findings")

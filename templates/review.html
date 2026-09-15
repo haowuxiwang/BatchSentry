@@ -524,6 +524,22 @@
                 </div>
             </div>
 
+            {# P0-2 抑制留痕：被降噪规则抑制的候选条目台账（抑制 ≠ 删除）。
+               EU GMP Annex 11 §16 / 中国附录《计算机化系统》第 15/16 条要求
+               关键数据修改需记录理由；本面板给出每条的**理由与命中证据**，
+               并提供"回退为正式问题"。内容由 review.js 渲染（与 AJAX 翻页
+               共用同一渲染函数，避免 SSR/AJAX 两套标记漂移）。 #}
+            <details id="suppression-panel" class="suppression-panel px-1 hidden">
+                <summary class="text-[11px] text-muted-foreground cursor-pointer select-none hover:text-foreground">
+                    已抑制条目<span id="suppression-brief" class="ml-1.5 tabular-nums"></span>
+                </summary>
+                <p class="text-[11px] text-muted-foreground mt-1 leading-relaxed">
+                    这些条目由降噪规则判定为不成立并已从问题清单中移除，原文与理由完整保留以备追溯与抽检；
+                    如认为判定有误，可回退为正式问题交人工裁决。
+                </p>
+                <div id="suppression-list" class="mt-1.5 border-t border-border"></div>
+            </details>
+
             <!-- OCR text — 对抗审查: 默认全部展开(移除折叠按钮, GMP复核需要对照原文) -->
             <div class="flex flex-col">
                 <div class="flex items-center justify-between px-1 py-1.5">

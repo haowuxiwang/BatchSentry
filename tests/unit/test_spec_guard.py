@@ -1,19 +1,26 @@
-"""LLM 自报 param_out_of_spec 的规则层复核（M8/P0）单测。
+"""LLM 自报 param_out_of_spec 的规则层复核（M8/P0）+ 抑制留痕契约（P0-2）单测。
 
 数据取自 M8 真实 51 页 e2e（job a5284ca3-47b）p14 的原始结构化载荷，用于锁定
 "OCR 丢 ± → LLM 成片误报"这一缺陷不再复发。
+
+P0-2：抑制 **≠** 删除 —— 被抑制的每一条都必须带非空理由与可抽检证据
+（EU GMP Annex 11 §16 / 中国附录《计算机化系统》第 15/16 条）。
 """
 from __future__ import annotations
 
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from core.rules.spec_guard import (  # noqa: E402
+    SUPPRESSION_INSERT_SQL,
     _triple_state,
     drop_unfounded_spec_findings,
     index_specs,
+    suppression_rows,
 )
 
 
@@ -114,8 +121,8 @@ class TestDropUnfoundedSpecFindings:
             {"type": "param_out_of_spec", "description": "浓缩前热水温度 72.5 °C 超出规格范围 70 5°C",
              "ocr_text": "浓缩前热水温度 72.5 °C"},
         ]
-        kept, dropped = drop_unfounded_spec_findings(findings, _p14_structured())
-        assert dropped == 4
+        kept, suppressed = drop_unfounded_spec_findings(findings, _p14_structured())
+        assert len(suppressed) == 4
         assert kept == []
 
     def test_keeps_genuine_out_of_spec(self):
@@ -127,14 +134,14 @@ class TestDropUnfoundedSpecFindings:
         }
         findings = [{"type": "param_out_of_spec", "description": "温度（0~5°C）在 12:10 时实测 45.6°C 超出规格",
                      "ocr_text": "12:10 45.6"}]
-        kept, dropped = drop_unfounded_spec_findings(findings, structured)
-        assert dropped == 0 and len(kept) == 1
+        kept, suppressed = drop_unfounded_spec_findings(findings, structured)
+        assert len(suppressed) == 0 and len(kept) == 1
 
     def test_keeps_when_no_structured_match(self):
         """定位不到结构化字段 → fail-closed，保留。"""
         findings = [{"type": "param_out_of_spec", "description": "某某参数超差", "ocr_text": "xx"}]
-        kept, dropped = drop_unfounded_spec_findings(findings, _p14_structured())
-        assert dropped == 0 and kept == findings
+        kept, suppressed = drop_unfounded_spec_findings(findings, _p14_structured())
+        assert len(suppressed) == 0 and kept == findings
 
     def test_keeps_when_spec_unparseable(self):
         structured = {"steps": [{"parameters": [
@@ -142,28 +149,28 @@ class TestDropUnfoundedSpecFindings:
         ]}]}
         findings = [{"type": "param_out_of_spec", "description": "效价 偏低 超出规格 见附件",
                      "ocr_text": "效价"}]
-        kept, dropped = drop_unfounded_spec_findings(findings, structured)
-        assert dropped == 0 and len(kept) == 1
+        kept, suppressed = drop_unfounded_spec_findings(findings, structured)
+        assert len(suppressed) == 0 and len(kept) == 1
 
     def test_non_spec_types_untouched(self):
         findings = [
             {"type": "completeness", "description": "缺项 温度 40 3°C", "ocr_text": ""},
             {"type": "handwritten", "description": "手写 温度", "ocr_text": ""},
         ]
-        kept, dropped = drop_unfounded_spec_findings(findings, _p14_structured())
-        assert dropped == 0 and kept == findings
+        kept, suppressed = drop_unfounded_spec_findings(findings, _p14_structured())
+        assert len(suppressed) == 0 and kept == findings
 
     def test_raw_type_alias_also_guarded(self):
         findings = [{"type": "param_out_of_range", "description": "浓缩结束温度 42.1 °C 超出规格 40 3°C",
                      "ocr_text": "浓缩结束温度 42.1 °C"}]
-        kept, dropped = drop_unfounded_spec_findings(findings, _p14_structured())
-        assert dropped == 1 and kept == []
+        kept, suppressed = drop_unfounded_spec_findings(findings, _p14_structured())
+        assert len(suppressed) == 1 and kept == []
 
     def test_non_dict_entries_passed_through(self):
         findings = ["junk", {"type": "param_out_of_spec", "description": "浓缩结束温度 42.1 °C 超出规格 40 3°C",
                              "ocr_text": "浓缩结束温度 42.1 °C"}]
-        kept, dropped = drop_unfounded_spec_findings(findings, _p14_structured())
-        assert dropped == 1 and kept == ["junk"]
+        kept, suppressed = drop_unfounded_spec_findings(findings, _p14_structured())
+        assert len(suppressed) == 1 and kept == ["junk"]
 
     def test_drops_llm_duplicate_of_decimal_loss_with_inconsistent_severity(self):
         """真实 p08：LLM 自报 critical「进料压力多次超出规格范围」与规则层
@@ -173,8 +180,8 @@ class TestDropUnfoundedSpecFindings:
         ]}]}
         findings = [{"type": "param_out_of_spec", "severity": "critical",
                      "description": "进料压力多次超出规格范围", "ocr_text": "进料压力 46"}]
-        kept, dropped = drop_unfounded_spec_findings(findings, structured)
-        assert dropped == 1 and kept == []
+        kept, suppressed = drop_unfounded_spec_findings(findings, structured)
+        assert len(suppressed) == 1 and kept == []
 
     def test_drops_llm_false_positives_across_name_separator_styles(self):
         """真实 p9：结构化列名 "T2101a_压力" vs 文案 "T2101a 压力"，
@@ -193,5 +200,57 @@ class TestDropUnfoundedSpecFindings:
              "description": "T2101b 压力 0.17 MPa 超出规格范围 <0.3 MPa",
              "ocr_text": "T2101b 压力 0.17 MPa"},
         ]
-        kept, dropped = drop_unfounded_spec_findings(findings, structured)
-        assert dropped == 2 and kept == []
+        kept, suppressed = drop_unfounded_spec_findings(findings, structured)
+        assert len(suppressed) == 2 and kept == []
+
+
+class TestSuppressionLedgerContract:
+    """P0-2：抑制必须留痕 —— 明细必须带非空理由与可抽检的证据。"""
+
+    def test_suppressed_details_carry_reason_and_evidence(self):
+        kept, suppressed = drop_unfounded_spec_findings(
+            [
+                {"type": "param_out_of_spec",
+                 "description": "浓缩结束温度 42.1 °C 超出规格范围 40 3°C",
+                 "ocr_text": "浓缩结束温度 42.1 °C"},
+            ],
+            _p14_structured(),
+        )
+        assert kept == [] and len(suppressed) == 1
+        item = suppressed[0]
+        assert item["reason"].strip(), "抑制理由不得为空（法规留痕硬要求）"
+        # 理由必须自证：含命中的参数名/实测/规格，可被人工抽检复核
+        assert "浓缩结束温度" in item["reason"]
+        assert "42.1" in item["reason"]
+        ev = item["evidence"]
+        assert ev["states"] == ["in"]
+        assert ev["matched"][0]["name"] == "浓缩结束温度"
+        assert ev["matched"][0]["state"] == "in"
+        # 原始 finding 必须随明细带走（台账要能还原"被抑制的是什么"）
+        assert item["finding"]["type"] == "param_out_of_spec"
+
+    def test_suppression_rows_shape_and_blank_reason_rejected(self):
+        _, suppressed = drop_unfounded_spec_findings(
+            [
+                {"type": "param_out_of_spec", "severity": "critical",
+                 "description": "缓冲液 pH 7.49/A 超出规格范围 7.5 0.2",
+                 "ocr_text": "缓冲液 pH 7.49/A"},
+            ],
+            _p14_structured(),
+        )
+        rows = suppression_rows("job-1", 14, suppressed)
+        assert len(rows) == 1
+        job_id, page, ftype, sev, desc, ocr, source, reason, evidence = rows[0]
+        assert (job_id, page, ftype, sev, source) == (
+            "job-1", 14, "param_out_of_spec", "critical", "llm_page")
+        assert desc and ocr and reason.strip()
+        assert '"states"' in evidence  # evidence 必须是 JSON 文本
+        # 不变式：理由为空 → 显式失败，绝不落库"无理由的抑制"
+        with pytest.raises(ValueError):
+            suppression_rows("job-1", 14, [{"finding": {"type": "x"}, "reason": "   "}])
+
+    def test_insert_sql_targets_ledger_table_with_reason(self):
+        """落库语句必须指向台账表且包含 reason/evidence 列（防止漂移回计数口径）。"""
+        assert "finding_suppressions" in SUPPRESSION_INSERT_SQL
+        for col in ("reason", "evidence", "job_id", "page", "type", "description"):
+            assert col in SUPPRESSION_INSERT_SQL, col

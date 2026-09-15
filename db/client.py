@@ -21,7 +21,7 @@ def _get_init_lock() -> asyncio.Lock:
     return _db_init_lock
 
 # Current schema migration level, persisted via PRAGMA user_version.
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 
 async def get_db() -> aiosqlite.Connection:
@@ -115,6 +115,9 @@ async def migrate(db: aiosqlite.Connection):
 
     if current_version < 10:
         await _migrate_v10(db)
+
+    if current_version < 11:
+        await _migrate_v11(db)
 
     # PRAGMA user_version cannot be parameterized; SCHEMA_VERSION is an int
     # constant defined in this module, so f-string is safe.
@@ -339,6 +342,30 @@ async def _migrate_v10(db: aiosqlite.Connection):
                 logger.info(f"Migration: added findings.{name}")
     except Exception as e:
         logger.warning(f"Migration skip findings v10 columns: {e}")
+    await db.commit()
+
+
+async def _migrate_v11(db: aiosqlite.Connection):
+    """v11: 抑制留痕 + 区域级证据锚（P0-2 / P0-3）。
+
+    - ``page_cache.regions_json``：OCR 原始区域 bbox（表/块级）。两个后端都
+      **不提供单元格级 bbox**（见 docs/NOISE_REDUCTION_SPIKE.md），故只存区域
+      级；坐标必须连同其所在坐标系 {"space":[w,h]} 一并保存 —— 裸坐标无法
+      归一化，也就无法与渲染页对齐，属禁止写入的形态。
+    - ``finding_suppressions`` 台账的建表语句**不在此处**：`init_db()` 每次启动
+      都先跑 ``schema.sql``（`CREATE TABLE IF NOT EXISTS`），旧库同样会被补建，
+      故 schema.sql 是它的**唯一**声明处。迁移体里复制一份 = 两处 DDL 各自演化
+      → 静默漂移（本项目明令禁止）。此处仅保留 schema.sql 无法表达的"给已存在
+      表加列"。
+    """
+    try:
+        cur = await db.execute("PRAGMA table_info(page_cache)")
+        cols = {row["name"] for row in await cur.fetchall()}
+        if "regions_json" not in cols:
+            await db.execute("ALTER TABLE page_cache ADD COLUMN regions_json TEXT")
+            logger.info("Migration: added page_cache.regions_json")
+    except Exception as e:
+        logger.warning(f"Migration skip page_cache.regions_json: {e}")
     await db.commit()
 
 
