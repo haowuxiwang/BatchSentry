@@ -1,24 +1,38 @@
-fastapi>=0.110.0
-# Floor for SSE safety: >=0.47 GZipMiddleware excludes text/event-stream from
-# compression — older versions buffer SSE frames until ~64KB (progress appears
-# frozen, then dumps all at once).
-starlette>=0.47.0
-uvicorn[standard]>=0.27.0
-python-multipart>=0.0.9
-jinja2>=3.1.3
-aiosqlite>=0.19.0
-pydantic>=2.6.0
-openai>=1.30.0
-python-dotenv>=1.0.0
-requests>=2.31.0
-PyMuPDF>=1.24.0
-Pillow>=10.0.0
+# 运行时依赖 —— **精确锁定**（`==`），不是下界。
+#
+# 为什么锁死：本产品以 PyInstaller 冻结产物分发，"本机能跑、打包失败 / CI 挂"
+# 这类漂移只会在发布时才暴露。锁定版本 = 让 CI、本地构建、发布包跑在同一组依赖上。
+# 当前锁定值 = **门禁实测通过**的那一组（Python 3.11.9 / Windows）。
+#
+# 升级流程：改这里的版本号 → 本地装一遍 → 跑 `python scripts/release_gate.py`
+# → 通过才提交。护栏 `tests/unit/test_declared_dependencies.py` 保证"源码里
+# import 的包一定在清单里"（曾漏声明 markupsafe —— 只靠 Jinja2 的传递依赖撑着，
+# Jinja2 一旦换实现就会炸）。
+#
+# 未覆盖：**传递依赖**仍由 pip 解析（本文件只管直接依赖）。要完全复现，需
+# pip-tools 之类的全量 lock；当前规模下先不做，但这一条是已知缺口，不是"已解决"。
+fastapi==0.139.0
+# starlette 必须 >=0.47：GZipMiddleware 自该版本起把 text/event-stream 排除在压缩
+# 之外 —— 更早的版本会把 SSE 帧缓冲到 ~64KB 才吐（进度看似冻结，然后一次性涌出）。
+starlette==1.3.1
+uvicorn[standard]==0.48.0
+python-multipart==0.0.21
+jinja2==3.1.6
+# 直接 import（main.py 的 `from markupsafe import Markup`）→ 必须显式声明，
+# 不能依赖"Jinja2 会顺带装上它"。
+markupsafe==3.0.2
+aiosqlite==0.21.0
+pydantic==2.11.5
+openai==2.35.1
+python-dotenv==1.2.1
+requests==2.32.4
+PyMuPDF==1.26.7
+Pillow==10.1.0
 
-# Optional: required ONLY when a provider is configured with protocol=anthropic
-# (e.g. Claude). All OpenAI-protocol providers (DeepSeek, GLM, Kimi, Qwen, MiMo)
-# use the `openai` package above and do NOT need this.
-anthropic>=0.39.0
+# 可选：仅当 provider 配置了 protocol=anthropic（如 Claude）时才需要。
+# 所有 OpenAI 协议 provider（DeepSeek / GLM / Kimi / Qwen / MiMo）走上面的
+# `openai` 包，**不需要**这个。
+anthropic==0.109.2
 
-# Build-time dependency for Windows installer bundling (Electron + PyInstaller).
-# Not required at runtime; install with: pip install pyinstaller
-pyinstaller>=6.10.0
+# 构建期依赖：Windows 安装包打包（Electron + PyInstaller）。运行时不需要。
+pyinstaller==6.18.0

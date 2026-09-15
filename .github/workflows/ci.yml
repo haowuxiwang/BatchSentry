@@ -1,0 +1,66 @@
+name: CI
+
+# 为什么跑在 Windows 上：
+#   本产品只发布 Windows 桌面版（Electron + PyInstaller），且 95% 覆盖率门禁是在
+#   Windows 上标定的 —— 代码里的平台分支（Windows 路径、Excel/COM 等）在 Linux 上
+#   根本不会执行，覆盖率会掉到门禁线以下（永久红灯）。跑在与产品同一平台，CI 的
+#   "绿"才与本地门禁同义。
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# 同一分支连推时取消上一个未完成的运行，避免排队浪费
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    name: 发布门禁
+    runs-on: windows-latest
+    timeout-minutes: 40
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      # 两个清单都是**精确锁定**（`==`），所以 CI 装到的就是本地门禁验证通过的那一组；
+      # 护栏 tests/unit/test_declared_dependencies.py 保证"源码 import 的包一定在清单里"。
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt -r requirements-dev.txt
+
+      # 单一入口：scripts/release_gate.py。CI 不重复实现任何一条检查 —— 门禁的每一项
+      # （工作区干净 / 打包前置文件 / 规则接线 / KB 语料与入包 / 单测 + 覆盖率）都在
+      # 那个脚本里，本地与 CI 跑的是同一份代码。
+      # 不传 --python：默认取 sys.executable，避免 PATH 上同名解释器的歧义。
+      - name: 运行发布门禁
+        run: python scripts/release_gate.py --fail-under 95
+
+      # 失败时把门禁报告与原始 pytest 输出带出来（门禁自己会落盘到 devlogs/，
+      # 该目录被 gitignore）。没有这个 artifact，CI 上只剩一行结论，无法回溯。
+      - name: 上传门禁报告
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate-report
+          path: |
+            devlogs/gate_report_*.json
+            devlogs/gate_pytest_*.log
+          if-no-files-found: ignore
+          retention-days: 14

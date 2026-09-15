@@ -31,6 +31,34 @@
   扫**全部可达历史 blob**（而非逐提交 diff，故"加进去又删掉"的串也跑不掉）并与当前
   `config.json` 比对；输出**只给指纹**（长度 / sha256 前 12 位 / 前 6 字符），
   **退出码 2 = 历史泄露值仍是当前生效值，必须立即轮换**。
+- **CI（`.github/workflows/ci.yml`）**：push / PR 到 `main` 时跑**同一个**
+  `scripts/release_gate.py`。runner 选 **Windows** —— 与本产品目标平台一致：平台分支
+  （`os.name`/`sys.platform`）只在 Windows 上执行，覆盖率数字才与本地门禁可比，跑在
+  Linux 上会永久低于阈值。CI **不重复实现任何检查**；失败时把门禁报告与原始 pytest
+  输出作为 artifact 带出（否则 CI 上只剩一行结论，无法回溯）。
+- **依赖声明护栏 `tests/unit/test_declared_dependencies.py`（5 项）**：源码里 import 的
+  第三方包必须在清单里声明。**它当场抓到一处真实隐患**：`main.py` 顶层写着
+  `from markupsafe import Markup`，而 `markupsafe` **不在任何清单里** —— 只靠
+  "Jinja2 恰好会装上它"运行，Jinja2 一换实现就是启动即 ImportError。分档判定：
+  本地模块（含 PEP 420 命名空间包）/ 标准库 / `_OPTIONAL`（有"缺失即降级"保护）/
+  `_TOOL_ONLY`（精确到位，如 `playwright` 只允许出现在 `ui_e2e.py`），其余必须声明。
+  另有两条自检：登记表不得变成摆设（每个豁免条目必须**真的**被 import）、清单必须
+  精确锁定。
+
+### 变更
+
+- **依赖精确锁定**：两个清单从"下界（`>=`）"改为**精确锁定（`==`）**，锁定值 =
+  门禁实测通过的那一组（Python 3.11.9 / Windows）。本产品以冻结产物分发，浮动版本
+  = CI / 本地 / 发布包各跑一套依赖。已用
+  `pip install --dry-run --ignore-installed -r requirements.txt -r requirements-dev.txt`
+  验证该组合可**从零解析**（无冲突）。**已知缺口，如实声明**：传递依赖仍由 pip 解析，
+  未做全量 hash 锁定。
+- **文档口径修正（三处真实缺陷）**：① `README.md` / `CLAUDE.md` 的测试命令写着
+  `--cov=.` —— 会叠加出一个**与门禁不同的、更低的**覆盖率数字（口径只在 `pytest.ini`
+  与 `scripts/release_gate.py` 各一份且刻意保持一致）；② 同处 `--timeout=30` 依赖一个
+  **未声明**的 `pytest-timeout`，照抄即报错；③ `README.md` 只装 `requirements.txt`，
+  **照它做根本跑不了测试**（缺 pytest）。另 `CLAUDE.md` 长期停留在一个**早已过期**的
+  覆盖率/用例数快照上 —— 已改为"具体数字一律以门禁报告为准"，不再写会腐烂的常量。
 
 ---
 

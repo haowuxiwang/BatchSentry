@@ -77,10 +77,10 @@ python server.py            # listens on 127.0.0.1:58765
 
 # Run tests
 pytest
-pytest --cov=. --cov-report=term --cov-report=html
 
-# Release gate (packaging signal) — offline; runs structure checks + tests/coverage
-python scripts/release_gate.py                 # full; writes devlogs/gate_report_<ts>.json
+# Release gate (packaging signal) — offline; THE authoritative check
+# structure checks + tests + coverage; writes devlogs/gate_report_<ts>.json
+python scripts/release_gate.py                 # full
 python scripts/release_gate.py --skip-tests    # structure checks only (seconds)
 
 # Runtime per-job data-quality gate (needs a running server + a finished job)
@@ -97,7 +97,19 @@ npx tailwindcss -i ./static/input.css -o ./static/app.css --minify
 # API docs (Swagger): http://127.0.0.1:8000/docs
 ```
 
-Test coverage target: **≥95%** (enforced by `pytest.ini --cov-fail-under=95`). Current: 95.12% (1550 passed, see `tests/` with unit + integration suites).
+Test coverage target: **≥95%**. The scope has exactly **two** copies — `pytest.ini`
+(`--cov-fail-under=95`) and `scripts/release_gate.py` (`--fail-under 95`) — kept identical on
+purpose. **Do not add `--cov=` on the command line**: it computes a *different, lower* number,
+and two conflicting coverage figures are worse than none.
+
+**Never hard-code the current coverage / test counts in docs** — they rot (this line once sat
+on a long-expired "95.12% (1550 passed)" snapshot). Read them from the gate report
+`devlogs/gate_report_*.json`, or just run the gate.
+
+**CI**: `.github/workflows/ci.yml` runs this same gate on push / PR to `main`, on a **Windows**
+runner — the same platform the product ships for. Platform branches (`os.name`/`sys.platform`)
+only execute there, so the coverage number is comparable; on Linux the gate would sit
+permanently under the threshold. CI implements no check of its own — it only invokes the script.
 
 > Sandbox note: to read coverage, prefer `python scripts/release_gate.py` (which uses
 > `coverage run` + `coverage report`). Avoid `pytest --cov` under the IDE sandbox — its
@@ -108,7 +120,11 @@ Test coverage target: **≥95%** (enforced by `pytest.ini --cov-fail-under=95`).
 
 ## Environment Setup
 
-Copy `.env.example` → `.env` and fill in:
+**Runtime config lives in `config.json`** (edited via the Settings page) — see the note at the
+end of this section. The table below is the **env-var reference**: these are the names backing
+each setting, the migration source for a legacy `.env`, and the override names tests/e2e use.
+A leftover `.env` is **not** required, and should be deleted once migrated
+(`DEPLOYMENT.md` → Secret rotation, step 6).
 
 | Variable | Purpose |
 |---|---|
@@ -290,6 +306,7 @@ The probe does NOT submit real OCR/LLM work — it just verifies auth + connecti
 - **OCR client**: blocking `requests` calls. Pipeline wraps with `asyncio.to_thread`. Don't call its functions directly from async context without threading.
 - **Dialogs**: never use native `alert()/confirm()/prompt()` — use `PBC.confirmDialog / promptDialog` (async Promise). Confirm dialogs for destructive actions focus the cancel button by default (Enter never misfires delete); Esc/overlay cancel; Enter follows focused button; Tab is trapped inside the dialog. All dialogs carry `role=dialog` + `aria-modal` + `aria-labelledby` (APG pattern).
 - **Frontend logging**: `[PBC]` prefix with color coding. Critical DOM elements probed on `DOMContentLoaded` for E2E test visibility.
+- **Dependencies**: both requirement files are **exactly pinned** (`==`) — this project ships a frozen artifact, so floating versions mean CI / local / release each run a different dependency set. `tests/unit/test_declared_dependencies.py` enforces that every third-party `import` anywhere in the tree is either declared, stdlib, or local, or sits on an explicit `_OPTIONAL` / `_TOOL_ONLY` list with a reason. **Add an import → declare it in the same commit** (the guard would have caught `markupsafe`, which was imported at `main.py` top level while only riding in as a Jinja2 transitive dep).
 
 ---
 
@@ -303,6 +320,7 @@ The probe does NOT submit real OCR/LLM work — it just verifies auth + connecti
 - `templates/` — Jinja2 HTML
 - `static/` — CSS, JS, design tokens (separated, no inline)
 - `tests/` — unit + integration suites (pytest)
+- `.github/workflows/` — CI: runs `scripts/release_gate.py` on push/PR to `main` (Windows runner)
 - `electron/` — Electron main process
 - `samples/` — sample PDFs (gitignored binaries)
 - `spike/` — experimental ad-hoc test inputs and reports (not part of app)

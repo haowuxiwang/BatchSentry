@@ -81,8 +81,8 @@ BatchSentry 是面向制药企业的批生产记录（BPR）审核工具，通�
 ### 开发模式
 
 ```bash
-# 1. 安装 Python 依赖
-pip install -r requirements.txt
+# 1. 安装 Python 依赖（运行时 + 开发/测试；两个清单都是**精确锁定**版本）
+pip install -r requirements.txt -r requirements-dev.txt
 
 # 2. 构建前端 CSS（首次必须）
 npx tailwindcss -i ./static/input.css -o ./static/app.css --minify
@@ -158,15 +158,27 @@ npm run dev
 ```bash
 # 全量测试（需设置环境变量避免日志文件冲突）
 $env:PBC_NO_FILE_LOG='1'
-python -m pytest tests/ --cov=. --cov-report=term --timeout=30
+python -m pytest tests/
 
-# 打包信号门禁（junitxml 事实源 + 覆盖率门禁，--python 必须传 Windows 路径）
-python scripts/release_gate.py --python "C:/path/to/python.exe" --fail-under 95
+# 打包信号门禁 —— **权威口径**：junitxml 事实源 + 覆盖率门禁
+# （--python 仅在解释器不在 PATH 时才需要，且必须传 Windows 路径）
+python scripts/release_gate.py --fail-under 95
 ```
 
-> 覆盖率门禁 **95%**（仅统计 `api/ core/ llm/ db/ config/ main`）；沙箱环境下
-> `test_main_routes.TestServePdf::test_pdf_non_local_host_returns_403` 因删除探针被拦截
-> 而失败，属环境产物（已登记 allowlist，非回归）。
+> **为什么这里不再写 `--cov=.`**：覆盖率口径只在 `pytest.ini` 与
+> `scripts/release_gate.py` 里各有一份，且**两者一致**（只统计
+> `api/ core/ llm/ db/ config/ main`，门禁 95%）。命令行再叠一个 `--cov=.` 会算出
+> 一个**更低的、与门禁不同的数字** —— 两套口径比没有口径更糟。
+>
+> 沙箱环境下 `test_main_routes.TestServePdf::test_pdf_non_local_host_returns_403`
+> 因删除探针被拦截而失败，属环境产物（已登记 allowlist，非回归）。
+
+### CI
+
+`.github/workflows/ci.yml` 在 push / PR 到 `main` 时跑**同一个** `scripts/release_gate.py`。
+runner 选 **Windows** —— 与本产品的目标平台一致（平台分支只在 Windows 上执行，
+覆盖率数字才有可比性）；CI 不重复实现任何一条检查。门禁失败时会把
+`devlogs/gate_report_*.json` 与原始 pytest 输出作为 artifact 带出来。
 
 ## 安全设计
 

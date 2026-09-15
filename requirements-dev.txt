@@ -1,7 +1,9 @@
-# 开发依赖 — 测试 + 覆盖率 + 代码质量
-pytest>=8.0.0
-pytest-asyncio>=0.23.0
-pytest-cov>=4.1.0
-httpx>=0.27.0  # FastAPI 测试客户端
-pytest-mock>=3.12.0
-coverage>=7.4.0
+# 开发依赖 —— 测试 + 覆盖率。**精确锁定**（理由与锁定值来历见 requirements.txt 头部）。
+pytest==8.3.5
+# pytest-asyncio >=0.25 起弃用隐式 fixture 循环作用域：pytest.ini 已显式声明
+# asyncio_default_fixture_loop_scope，避免未来版本改变默认值后异步用例静默失效。
+pytest-asyncio==0.25.3
+pytest-cov==7.0.0
+httpx==0.28.1  # FastAPI 测试客户端（TestClient 依赖）
+pytest-mock==3.15.1
+coverage==7.13.3
