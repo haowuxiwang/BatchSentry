@@ -104,6 +104,26 @@
   "真实文档轮次要确认实际 OCR 引擎"的告警，检查清单新增产物体检步骤并改用规范名
   `dist-electron\`；README.md 同步。
 
+### 验证（2026-09-15 真实 Paddle 轮次）
+
+- **51 页真实批记录在 Paddle 后端上跑通，且旋转分支被真实数据覆盖**：
+  job `95a27d88-52b`，`review`，1894s，`ocr_backend_used = paddle`（新增断言
+  `expect_backend=paddle` 通过，`backend_mismatch=null`）；51 页均无稀疏页
+  （<40 字符），findings 总量 347。
+  - 逐页 `space_rotation`：50 页 `0` + **第 8 页 `270`**（`space=[1920,1440]`、
+    `space_aspect=1.3333`，而页面 `page_aspect=0.75`）—— P0-3 的旋转场景在真实
+    数据上复现。
+  - **逆映射逐边核对**（`270` 规则 `x'=v, y'=1-u`）：OCR 空间
+    `[0.02865, 0.22153, 1.0, 0.86736]` → 页面空间
+    `[0.22153, 0.0, 0.86736, 0.97135]`，四边与期望值精确吻合。
+  - **方向独立核验**（`scripts/verify_anchor_orientation.py`，读本次真实
+    `paddle_original.jsonl`）：第 8 页上报 270° / 实测 270°（轴优势 3.148），
+    第 3/7/19 页 0° 对照成立 —— 全部 PASS。
+  - 详见 `docs/REGION_ANCHOR_VISUAL_CHECK.md` §7。
+- **纠正上一轮的结论**：此前那次 51 页"Paddle"轮次（`4b098630-1cb`）直查库为
+  `ocr_backend_used = 'mineru'`（上游 10010 队列满 → 自动 failover）。当时的报告
+  与屏幕输出都看不出这一点 —— 这正是本轮加后端断言的直接动因。
+
 ### 已知限制
 
 - 上游去畸变（`use_doc_unwarping: true`）使块 bbox 与渲染图存在非刚性形变 —— 已

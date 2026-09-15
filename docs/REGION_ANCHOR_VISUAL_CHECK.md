@@ -176,3 +176,53 @@ PY="C:/Users/WuSiTan/AppData/Local/Programs/Python/Python311/python.exe"
   其"框不套字"的观感来自上游去畸变残差，而非映射错误。
 * 本批记录上**不存在**廉价的像素代理判据（§3），故不写伪测试 —— 这一条负面结论
   本身就是本次调研的产出，避免后人重复踩坑。
+
+---
+
+## 7. 补充：真实 Paddle 轮次上的端到端复现（2026-09-15 13:15）
+
+§1–§6 的核验是**离线**做的。之后那轮 51 页真实轮次（`4b098630-1cb`）**实际跑的是
+MinerU** —— 上游 Paddle 返回 `10010 任务提交队列已满`，管线自动 failover，而终态/
+findings/SSE 全都正常（直查库确认 `jobs.ocr_backend_used = 'mineru'`）。所以旋转路径
+当时只有离线产物 + 单测背书。
+
+本次在 Paddle 队列放行后重跑，**后端确为 Paddle**（`e2e_run.py` 新增的
+`expect_backend=paddle` 断言：`backend_mismatch=null`），旋转路径在真实数据上复现：
+
+| 证据 | 值 |
+|---|---|
+| 任务 | `95a27d88-52b`，51 页，`review`，1894s |
+| `jobs.ocr_backend_used` | **`paddle`**（`ocr_backend_display=PaddleOCR`）|
+| 逐页 `space_rotation` | 50 页 `0`、**第 8 页 `270`** |
+| 第 8 页 `space` / `space_aspect` | `[1920,1440]` / `1.3333`（横向 OCR 空间）|
+| 第 8 页锚点 `page_aspect` / `rotated` | `0.75`（竖向页面）/ `True` |
+| 稀疏页（<40 字符，driver 逐页统计） | **0**（51 页全部有正文）|
+| findings 总量 | **347**（直查 `findings` 表；接口 `limit` 封顶 200，**别把接口条数当总量**）|
+
+**逆映射逐边核对**（第 8 页；`270` 规则 `x'=v, y'=1-u`）：
+
+| | x0 | y0 | x1 | y1 |
+|---|---|---|---|---|
+| OCR 空间 `bbox` | 0.02865 | 0.22153 | 1.0 | 0.86736 |
+| 页面空间 `page_bbox` | 0.22153 | 0.0 | 0.86736 | 0.97135 |
+| 期望 | `y0`=0.22153 | `1-x1`=0.0 | `y1`=0.86736 | `1-x0`=0.97135 |
+
+四边精确吻合，结果落在 `[0,1]²` 内；该页 7 条锚点全部 `rotated=True`。
+
+**方向独立核验**（`scripts/verify_anchor_orientation.py`，读本次真实
+`paddle_original.jsonl`，非离线样本）：
+
+```
+   页    上报角   ρ轴   θ轴    θ实测    轴优势     方向  判定
+   3      0    0    0      0 18.934      是  PASS
+   7      0    0    0      0   2.65      是  PASS
+   8    270    0   90    270  3.148      是  PASS
+  19      0    0    0      0  3.169      是  PASS
+```
+
+→ 旋转分支**已在真实 Paddle 数据上闭环**：确定性不变量 + 独立地面真值方向 +
+逐边人工核对，三者一致。
+
+> ⚠️ 复现依赖 `%TEMP%/pbc_e2e_appdata/PBC/output/<job>/paddle_original.jsonl`，
+> 而那是 e2e 的**临时隔离区，会被系统清理**。要留证先把该目录拷出来
+> （e2e 用隔离 APPDATA 是为了不污染常驻库，代价是产物非持久）。
