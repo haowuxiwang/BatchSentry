@@ -9,7 +9,9 @@
 本文件：
 1. 行为验证 helper（落盘 / 读尾 / 幂等停止）；
 2. **源码扫描护栏**：tests/ 下不得再用未排空的 PIPE 启动服务，必须走
-   ``tests.e2e_proc.spawn_server``。
+   ``tests.e2e_proc.spawn_server``；
+3. **源码扫描护栏**：tests/ 下不得写死本仓库 / 家目录的绝对路径（换台机器即失效，
+   改用 ``tests.e2e_proc.REPO_ROOT`` 派生）。
 """
 import re
 import sys
@@ -25,68 +27,11 @@ from tests.e2e_proc import spawn_server, stop_server, tail_log  # noqa: E402
 
 _PIPE_RE = re.compile(r"stdout\s*=\s*subprocess\.PIPE")
 
-# 曾经被硬编码进 3 个 e2e 脚本、随提交进入 git 历史的真实 LLM 密钥
-# （2026-09-15 发现）。这里**故意用拼接**构造，使本文件自身不含 32 连串的
-# `sk-` 字面量 —— 否则下面那条通用扫描规则会命中它自己，只能靠白名单放行，
-# 而白名单会让"往这个文件里加密钥"也逃过检查。
-_LEAKED_KEY = "sk-vprnpmjfzbcinduybbsboaw" + "tjxtrnrhfldbargfwzkieuczu"
-
-# 通用规则：`sk-` 后跟 32+ 个不含分隔符的字符 = 形似真实密钥。
-# 仓库里的占位符均显著短于该阈值（如 sk-test-key-for-unit-test-only 含短横、
-# sk-realkey1234567890abcdef 仅 24 字符），故不会被误报。
-_KEY_RE = re.compile(r"sk-[A-Za-z0-9]{32,}")
-
-# 源码扫描范围：产品与工程脚本（排除第三方、产物、本地日志目录）
-_SCAN_DIRS = ("api", "core", "db", "llm", "scripts", "tests", "tools", "models")
-_SCAN_SUFFIX = {".py", ".js", ".md", ".ps1", ".json", ".sql", ".html"}
-# 产物/缓存目录按**前缀**排除：dist、dist-electron、dist-electron-m8 …
-# 不罗列具体名 —— 安全软件占锁时 build.ps1 会自愈到备用输出目录，目录名会变；
-# 写死列表就得每次回来同步（历史上正是这么积出 4 个 dist-electron* 的）。
-_SCAN_SKIP = {"node_modules", "build", "htmlcov", "devlogs"}
-_SCAN_SKIP_PREFIX = ("dist",)
-
-
-def _source_files():
-    for d in _SCAN_DIRS:
-        base = _ROOT / d
-        if not base.is_dir():
-            continue
-        for p in sorted(base.rglob("*")):
-            if not p.is_file() or p.suffix.lower() not in _SCAN_SUFFIX:
-                continue
-            parts = set(p.relative_to(_ROOT).parts)
-            if parts & _SCAN_SKIP or any(pt.startswith(_SCAN_SKIP_PREFIX) for pt in parts):
-                continue
-            yield p
-
-
-def test_no_true_llm_key_in_repo_sources():
-    """工作树任何源文件都不得出现那把已泄漏的真实密钥。
-
-    注意：删除**不能**抹掉 git 历史 —— 该密钥自 2026-08-24（``81964a3``）起
-    就在历史中且已推送，唯一补救是到服务商处**轮换**。本用例只保证不再扩散。
-    """
-    offenders = []
-    for p in _source_files():
-        if _LEAKED_KEY in p.read_text(encoding="utf-8", errors="replace"):
-            offenders.append(p.relative_to(_ROOT).as_posix())
-    assert not offenders, (
-        "以下文件仍硬编码着已泄漏的 LLM 密钥（应改为从环境变量读取）：\n"
-        + "\n".join(f"  - {o}" for o in offenders)
-    )
-
-
-def test_no_hardcoded_long_api_keys():
-    """通用护栏：源码里不得出现形似真实密钥的 32+ 连串 ``sk-`` 字面量。"""
-    offenders = []
-    for p in _source_files():
-        for i, line in enumerate(p.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
-            if _KEY_RE.search(line):
-                offenders.append(f"{p.relative_to(_ROOT).as_posix()}:{i}")
-    assert not offenders, (
-        "以下位置疑似硬编码了真实 API key（请改为环境变量注入）：\n"
-        + "\n".join(f"  - {o}" for o in offenders)
-    )
+# 密钥扫描护栏已收拢到 tests/unit/test_no_committed_secrets.py：
+#   - 范围更广（含**仓库根目录脚本** —— 本事故正发生在根目录脚本上）；
+#   - 与 DEPLOYMENT.md 的自查命令同源（有测试做绑定，防两边各自漂移）；
+#   - 带阳性对照 + "config.json 被 gitignore"的前提检查。
+# 本文件只保留"绝对路径"与"未排空 PIPE"两条源码扫描护栏。
 
 
 _ABS_PATH_RE = re.compile(r"""["'](?:[A-Za-z]:[\\/]|/Users/|/home/)""")

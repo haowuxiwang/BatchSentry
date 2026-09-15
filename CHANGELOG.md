@@ -5,6 +5,35 @@
 
 ---
 
+## [Unreleased]
+
+### 修复
+
+- **密钥护栏"分家"收拢为一处**：密钥扫描此前同时存在于
+  `tests/unit/test_e2e_proc_helper.py`（两条）与 `tests/unit/test_no_committed_secrets.py`，
+  两套口径并存 —— 正是本项目明令禁止的"重复真值"。现收拢到后者，并顺带修掉三个真实缺口：
+  - **范围扩到仓库根目录脚本**：原范围只有 `api/core/db/llm/scripts/tests/tools/models`，
+    漏掉 `main.py` / `config.py` / `e2e_run.py` 等根目录文件 —— 而本事故（真实 key 被写死
+    进 e2e 脚本）正发生在那里，`server.py` / `ui_e2e.py` 当年就因此躲过扫描。
+  - **产物目录按前缀排除**：原实现罗列 `dist-electron-m8` 等具体名（历史上正是这么积出
+    4 个 `dist-electron*` 的）；改为 `dist*` 前缀，构建自愈到备用目录时不会再漏。
+  - **与文档同源**：`DEPLOYMENT.md` 的自查命令与护栏口径此后由
+    `test_documented_scan_command_matches_this_guard` 双向绑定 —— 改一边必须改另一边。
+- **防空转与前提检查**：新增 `test_secret_scan_positive_control`（防"全绿只是空转"）、
+  `test_scan_scope_covers_repo_root_scripts`（防范围被无意收窄）、
+  `test_config_json_is_gitignored`（"扫描排除 config.json"这一口径的**前提**）。
+  顺带**消除全部豁免**：正反样本一律用**拼接**构造，故文件自身不会命中，无需白名单
+  （白名单会让"往该文件里加密钥"也逃过检查）。
+
+### 新增
+
+- **`scripts/check_leaked_keys.py`**：把 `DEPLOYMENT.md`「Secret 轮换流程」第 4 步工具化 ——
+  扫**全部可达历史 blob**（而非逐提交 diff，故"加进去又删掉"的串也跑不掉）并与当前
+  `config.json` 比对；输出**只给指纹**（长度 / sha256 前 12 位 / 前 6 字符），
+  **退出码 2 = 历史泄露值仍是当前生效值，必须立即轮换**。
+
+---
+
 ## [1.1.2]
 
 > 起点：`v1.1.1`。把 P0-3 遗留的唯一验收项（"抽 5 页人工核对高亮框与页面坐标系
@@ -249,11 +278,7 @@ token。两条不变式保住"修过头"防线：① 匹配只在**单个 token 
   `tests/integration/test_api_suppressions.py`（10 项真实 HTTP）、
   `tests/integration/test_api_region_anchor.py`（6 项 API + SSR 一致性）。
 
----
-
-## [Unreleased]
-
-### 修复
+### 随本版发布的前序修复（`e2417cd`、`4273c1f`）
 
 - **`_parse_spec` 书写变体缺口（M9-spike 真实落库定位）**：真实 3526 个
   `(spec, value)` 对中存在 7 种**语义等价但此前解析失败**的写法，全部静默降级为
@@ -276,7 +301,7 @@ token。两条不变式保住"修过头"防线：① 匹配只在**单个 token 
   仍不可解析的 31 种形态全部是**正确的 fail-closed**（`是/否`、`符合规定`、
   `蓝紫色结晶性粉末`、裸数字 `1.4`/`14 L/min`）。单测 +9 项。
 
-### 变更
+### 变更（调研文档入档）
 
 - **调研与执行清单入档**：新增 `docs/NOISE_REDUCTION_SPIKE.md`（表格对齐粒度与
   PaddleOCR-VL bbox 资格的实测结论）与 `docs/NOISE_REDUCTION_TODO.md`（P0–P2 分项清单）。

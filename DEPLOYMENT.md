@@ -249,13 +249,22 @@ failover 到 MinerU 时**流程中途失败**（护栏
 2. 在设置页面更新对应的 API key 字段并保存（写入 `config.json`）
 3. 调用 `/api/health/downstream` 验证新 key 连通性
 4. **全仓库排查旧 key 是否落入版本控制**（不只 `config.json`）：
+
    ```bash
-   git log -p -S "<key 前 8 位>" --oneline   # 任何历史命中都必须轮换，删文件无效
-   git grep -nE "sk-[A-Za-z0-9]{32,}"        # 工作树扫描（有测试固化此规则）
+   python scripts/check_leaked_keys.py    # ① 历史曾入库的疑似密钥 ② 当前生效的密钥
+                                         # ③ 两者交集 = 必须立即轮换（退出码 2）
+   git grep -nE "sk-[A-Za-z0-9]{32,}"      # 工作树扫描
    ```
-   注意 `config.json` 已被 `.gitignore`，但**测试脚本**一度把真实 key 写死并入库
+
+   两条命令的**判定模式是同一个**（`sk-[A-Za-z0-9]{32,}`），且由
+   `tests/unit/test_no_committed_secrets.py` 固化："工作树出现即测试失败"、
+   该模式与本节命令**双向绑定**（`test_documented_scan_command_matches_this_guard`，
+   防文档与护栏各自漂移）、以及阳性对照防"护栏空转"。覆盖范围含**仓库根目录脚本**
+   —— 那正是本事故的发生地。
+
+   `config.json` 已被 `.gitignore`，但**测试脚本**一度把真实 key 写死并入库
    （2026-09-15 发现于 `tests/e2e_frozen.py` / `e2e_manual.py` / `e2e_quick.py`，
-   自 `81964a3` 起在历史中）。**删除文件不能抹掉历史，只能轮换。**
+   自 `81964a3` 起在历史中）。**删除文件不能抹掉历史，只能到服务商处作废重发。**
 5. e2e 需要真实 key 时一律走环境变量，不要写进代码：
    ```bash
    PBC_E2E_DEEPSEEK_KEY=<key> python tests/e2e_frozen.py
