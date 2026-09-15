@@ -38,12 +38,26 @@ cd d:\learn\claudecode\pharma-batch-checker
 | Tailwind CSS | `static/app.css` | 压缩后的样式（~14KB） |
 
 > ⚠️ **产物目录名不一定是 `dist-electron/`。** 若安全软件（火绒等）持有上一轮
-> `win-unpacked` 内文件句柄，`build.ps1` 会自愈到备用目录
-> `dist-electron-locked/`，并在占用释放后尽力归位；归位失败会在日志里给出提示。
-> 打包后 `electron-builder` 报错时同样需要手工换目录。**分发前必须先确认你要发的是
-> 哪一个目录**，不要凭目录名假定 —— 例如安全软件占锁时曾手工输出到
-> `dist-electron-v112/`。判断依据是"最新且完整"：含 `BatchSentry.exe`、
-> `resources/app.asar`、`resources/pbc-server/pbc-server.exe`。
+> `win-unpacked/resources/app.asar` 的文件句柄，`build.ps1` 会自愈到备用目录
+> `dist-electron-locked/`；手工重打包也可能显式指定别的名字（曾输出到
+> `dist-electron-v112/`）。
+>
+> 这是仓库里积出**多个 `dist*` 目录**的根因，不是构建逻辑的缺陷：只要那个句柄
+> 还在，`app.asar` 就既不能改名也不能删除，**连它所在的整个目录都无法重命名/
+> 删除**（NTFS 拒绝重命名含被占用子项的目录）。2026-09-15 实测：某目录 1880 个
+> 文件中恰好 4 个被占 —— 全部是 `app.asar`。
+>
+> 因此**不要凭目录名假定要怎么发**，用体检脚本：
+>
+> ```powershell
+> python scripts/clean_dist.py            # dry-run：体检 + 出方案，不动手
+> python scripts/clean_dist.py --apply    # 按方案清理（走回收站，可恢复）
+> ```
+>
+> 它按"最新且完整"判定该保留哪一个（完整 = 含 `BatchSentry.exe`、
+> `resources/app.asar`、`resources/pbc-server/pbc-server.exe`），并把**被外部
+> 句柄占用**的文件点名报出来。若报出占用：把本仓库目录加入安全软件的信任区/
+> 白名单（或临时退出安全软件），再重跑 `--apply`。清理**只走回收站**，可恢复。
 
 ### 分发前检查清单
 
@@ -55,27 +69,38 @@ cd d:\learn\claudecode\pharma-batch-checker
 npm run build:css
 git diff --exit-code -- static/app.css
 
-# 1. 门禁（覆盖率 + 单测 + 集成）
+# 1. 产物体检：确认只剩一个待发目录，且它是"最新且完整"的那个
+python scripts/clean_dist.py
+
+# 2. 门禁（覆盖率 + 单测 + 集成）
 python scripts/release_gate.py --python "<python.exe 的 Windows 路径>" --fail-under 95
 
-# 2. 分发一致性机检（配置↔文档↔实物：内嵌服务端逐字节一致 + 包内版本号）
+# 3. 分发一致性机检（配置↔文档↔实物：内嵌服务端逐字节一致 + 包内版本号）
 python -m pytest tests/unit/test_distribution_parity.py -o addopts="" -q
 
-# 3. 对**将要分发的那份**做端到端（把 PBC_E2E_EXE 指向 win-unpacked 内嵌副本）
-$env:PBC_E2E_EXE = "dist-electron-v112\win-unpacked\resources\pbc-server\pbc-server.exe"
+# 4. 对**将要分发的那份**做端到端（把 PBC_E2E_EXE 指向 win-unpacked 内嵌副本）
+$env:PBC_E2E_EXE = "dist-electron\win-unpacked\resources\pbc-server\pbc-server.exe"
 python tests/e2e_frozen.py
 
-# 4. 核对版本（服务端 /health 与包内 package.json 必须都等于 main.APP_VERSION）
+# 5. 核对版本（服务端 /health 与包内 package.json 必须都等于 main.APP_VERSION）
 Remove-Item Env:\PBC_E2E_EXE
 ```
 
-第 3 步的意义：默认 `tests/e2e_frozen.py` 测的是 `dist/pbc-server/`（PyInstaller 的
+第 4 步的意义：默认 `tests/e2e_frozen.py` 测的是 `dist/pbc-server/`（PyInstaller 的
 直接产物），而**用户双击运行的是 Electron 包里内嵌的那一份**。不显式指过去，就等于
-"测了 A、发了 B"。第 2 步的逐字节比对是这条链路的兜底。
+"测了 A、发了 B"。第 3 步的逐字节比对是这条链路的兜底。
+
+> ⚠️ **真实文档轮次要确认"实际用的是哪个 OCR 引擎"。** 主后端提交失败会自动
+> failover 到备选后端，而终态、findings、SSE 全都照常 —— 只有
+> `jobs.ocr_backend_used` 能揭穿。`e2e_run.py` 的每轮都已声明期望后端，不一致直接
+> 判 FAIL 并打印 `BACKEND MISMATCH`；报告里的 `ocr_backend_used` 才是真值。
+> 2026-09-15 实测：Paddle 上游返回 `10010 任务提交队列已满`，51 页真实文档整轮跑的
+> 其实是 MinerU，而报告里写着 paddle —— 这类结论**不得**作为 Paddle 路径的证据。
 
 ### 分发方式
 
-1. 将**最新且完整**的那个 `dist-electron*/win-unpacked/` 整个文件夹压缩成 zip
+1. 先跑 `python scripts/clean_dist.py` 确认只剩一个完整产物（`dist-electron/`），
+   再把它的 `win-unpacked/` 整个文件夹压缩成 zip
 2. 把 `PORTABLE_README.txt` 放到 zip 根目录一并交付（它是用户解压后第一份会读的文档；
    **它不在 Electron 包内**，`build.files` 只打包 `electron/main.js`，所以必须手工附带）
 3. 用户解压后双击 `BatchSentry.exe` 即可运行

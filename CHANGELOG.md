@@ -74,6 +74,36 @@
   （`dist-electron` / `-locked` / 手工指定的 `-v112`），分发前须按"最新且完整"
   而非目录名判断。
 
+### 工程卫生续补（产物目录治理 + OCR 后端可验证）
+
+- **新增 `scripts/clean_dist.py`（dist 产物体检与安全清理）**：electron-builder 的
+  输出目录名会漂移 —— 安全软件（本机为火绒）占锁 `resources/app.asar` 时
+  `build.ps1` 自愈到 `dist-electron-locked`，手工重打包又可能指定
+  `dist-electron-v112` —— 仓库一度积压 5 个 `dist*` 目录（约 1.0GB）。脚本把
+  "该发哪一个"变成可判定：按**最新且完整**选出保留项；`dist/`（PyInstaller 产物，
+  是 electron-builder `extraResources` 的输入）永不清；逐文件**认锁**并点名报出
+  被外部句柄占用、从而让**整个目录**都无法重命名/删除的文件；默认 **dry-run**，
+  `--apply` 才动手且**走回收站**（可恢复）；认不出类型的目录只通报不动手；
+  **一个完整产物都没有时什么都不删**。
+- **e2e driver 现在校验"实际用的是哪个 OCR 引擎"**：主后端提交失败会自动 failover
+  到备选后端，而终态/findings/SSE 全都照常 —— 只有 `jobs.ocr_backend_used` 能揭穿。
+  `e2e_run.py` 的 `run_upload(..., expect_backend=...)` 把实际后端写进结果，不一致即
+  判 FAIL 并打印 `BACKEND MISMATCH`。2026-09-15 实测：Paddle 上游返回
+  `10010 任务提交队列已满`，一轮"用 Paddle 跑"的报告看着全绿（`review` + 32 findings
+  + SSE 正常），实际后端却是 MinerU。**这类结论不得作为 Paddle 路径的证据。**
+- **e2e 密钥不再走命令行**：`--sf-key` / `--paddle-token` / `--mineru-token` 均可由
+  `PBC_E2E_SILICONFLOW_KEY` / `PBC_E2E_PADDLE_TOKEN` / `PBC_E2E_MINERU_TOKEN` 注入。
+  命令行参数会进 shell history、进程表（`tasklist`）与 CI 日志，等同于泄漏 ——
+  本仓库已经吃过一次硬编码密钥的亏。
+- **新增护栏**：`tests/unit/test_clean_dist.py`（方案判定 / 安全默认 / 认锁跳过）、
+  `tests/unit/test_e2e_backend_assert.py`（判定语义 + **AST 联检**所有
+  `run_upload(...)` 调用必须声明 `expect_backend`，防新轮次漏校验）。
+  `tests/unit/test_e2e_proc_helper.py` 的产物目录排除表由"罗列具体名"改为
+  **前缀匹配**，目录名再漂移也不必回来同步。
+- **文档同步**：DEPLOYMENT.md 补产物目录治理（根因 + 体检脚本 + 认锁处置）与
+  "真实文档轮次要确认实际 OCR 引擎"的告警，检查清单新增产物体检步骤并改用规范名
+  `dist-electron\`；README.md 同步。
+
 ### 已知限制
 
 - 上游去畸变（`use_doc_unwarping: true`）使块 bbox 与渲染图存在非刚性形变 —— 已

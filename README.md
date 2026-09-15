@@ -112,10 +112,17 @@ npm run dev
 - `dist/pbc-server/pbc-server.exe` — PyInstaller 打包的后端
 - `dist-electron/win-unpacked/` — Electron 文件夹便携版（双击 `BatchSentry.exe` 运行，无需安装）
 
-> 产物目录名不一定是 `dist-electron/`：安全软件占锁时 `build.ps1` 会自愈到
-> `dist-electron-locked/`，手工重打包时也可能指定别的名字。**分发前按"最新且完整"
-> （含 `BatchSentry.exe` / `resources/app.asar` / `resources/pbc-server/pbc-server.exe`）
-> 判断，不要凭目录名假定** —— 清单见 [DEPLOYMENT.md](./DEPLOYMENT.md)。
+> 产物目录名不一定是 `dist-electron/`：安全软件（火绒等）占锁 `resources/app.asar`
+> 时 `build.ps1` 会自愈到 `dist-electron-locked/`，手工重打包时也可能指定别的名字。
+> **不要凭目录名假定要发哪一个** —— 跑体检脚本，它按"最新且完整"给出方案，并点名
+> 报出被外部句柄占用、导致整个目录删不掉的文件：
+>
+> ```powershell
+> python scripts/clean_dist.py            # dry-run，不动手
+> python scripts/clean_dist.py --apply    # 按方案清理（走回收站，可恢复）
+> ```
+>
+> 清单见 [DEPLOYMENT.md](./DEPLOYMENT.md)。
 > 本版**不产出安装包**（`win.target` 仅 `dir`），交付物就是该目录压成的 zip。
 
 详细部署与运维见 [DEPLOYMENT.md](./DEPLOYMENT.md)，开发规范见 [CONTRIBUTING.md](./CONTRIBUTING.md)。
