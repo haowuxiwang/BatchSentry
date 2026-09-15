@@ -48,6 +48,13 @@ cd d:\learn\claudecode\pharma-batch-checker
 ### 分发前检查清单
 
 ```powershell
+# 0. CSS 是否为最新（改动过 templates/ 或 static/*.js 就必须查）
+#    判法：重跑编译，git diff 必须为空 —— 若输出有差异，说明 app.css 曾过期，
+#    必须提交新 CSS 并**重新打包**（app.css 会随 pbc-server.exe 一起冻结进包，
+#    只改源码不重打包 = 用户看到的仍是旧样式。历史上曾因此少 2 个 Tailwind 类。）
+npm run build:css
+git diff --exit-code -- static/app.css
+
 # 1. 门禁（覆盖率 + 单测 + 集成）
 python scripts/release_gate.py --python "<python.exe 的 Windows 路径>" --fail-under 95
 
