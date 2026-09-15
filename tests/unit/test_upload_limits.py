@@ -24,7 +24,9 @@
 * 单一真值的派生关系（后端常量、页面注入）；
 * **源码扫描护栏**：限额数值与提示文案不得再散落各处 —— 只能出现在
   ``config.py``（策略本体）与 ``core/mineru_client.py``（厂商上限）；
-* 策略上限 ≤ 厂商上限的关系护栏。
+* 策略上限 ≤ 厂商上限的关系护栏；
+* **引用纪律护栏**：禁止把"每页耗时"归给第三方厂商（该数字无人公布），
+  并要求外部成本数字留在带出处的文档里 —— 见本文件第 7 节由来。
 """
 import re
 import sys
@@ -44,9 +46,10 @@ def test_shipped_defaults_are_the_documented_ones():
     """默认值即契约：改动必须同步更新本测试 + docs/UPLOAD_LIMITS.md 的推导。
 
     页数上限的定标依据（实测，非照抄云厂商）：云厂商的 1,000~3,000 页不可
-    移植 —— 它们单页成本约 1–2s，比本链路（实测 9.0 s/页 OCR、22.8 s/页
-    LLM）快 10~30 倍。**可移植的量是墙钟时间，不是页数。** 200 页对应 OCR
-    预估 1800s，对既有 3600s 轮询上限留 2× 余量。
+    移植 —— 那是"单页成本"的函数（三大云纯文本抽取约 $1.50/1,000 页；本链路
+    每页跑手写 OCR + 逐页 LLM，按调用性质属 $10~50/1,000 页的生成式档，实测
+    9.0 s/页 OCR、22.8 s/页 LLM）。**可移植的量是"墙钟时间预算"，不是页数。**
+    200 页对应 OCR 预估 1800s，对既有 3600s 轮询上限留 2× 余量。
     """
     assert UPLOAD_LIMITS["max_bytes"] == 200 * 1024 * 1024
     assert UPLOAD_LIMITS["max_pages"] == 200
@@ -315,4 +318,100 @@ def test_policy_limit_does_not_exceed_mineru_vendor_limit():
     assert UPLOAD_LIMITS["max_bytes"] <= MINERU_MAX_UPLOAD_BYTES, (
         f"准入上限 {UPLOAD_LIMITS['max_bytes']} 超过 MinerU 厂商上限 "
         f"{MINERU_MAX_UPLOAD_BYTES} —— failover 到 MinerU 时会在流程中途失败"
+    )
+
+
+# ── 7. 引用外部数字必须带出处、且不得张冠李戴量纲 ─────────────────────
+#
+# 由来（2026-09-15 自查）：初版把这个限额的"不可移植"论证写成了
+# 「云厂商 1–2 s/页，比本链路快 10~30 倍」—— 这个数字纯属编造。核实后的
+# 事实是：三大云纯文本抽取**价格**统一约 $1.50/1,000 页，结构化/生成式档
+# $10~50/1,000 页，**相差 10~30 倍的是"价格"而不是"速度"**，而且各厂商
+# 公布的是价格、根本不公布平均延迟。我把一个成本比值错记成了耗时比值，
+# 并写进了 8 处文档/代码/测试。
+#
+# 教训可复用：**别把从别处借来的数字当自己的实测值**。因此这里钉两条：
+#   ① 外部成本数字必须落在带出处的文档里（出处块不可被静默删除）；
+#   ② 禁止把"每页耗时"归给第三方厂商 —— 那是我们**不可能有**的数据。
+_VENDOR_TOKENS = (
+    "云厂商",
+    "Azure",
+    "AWS",
+    "Textract",
+    "Document AI",
+    "Mistral",
+    "Veryfi",
+    "amaise",
+    "Autodesk",
+)
+
+# 形如 "9.0 s/页" / "1–2 s/页" / "37 秒/页" —— 每页耗时的中文工程写法
+_PER_PAGE_TIME = re.compile(r"\d+(?:\.\d+)?\s*(?:[–~—\-]\s*\d+(?:\.\d+)?\s*)?(?:s|秒)\s*/\s*页")
+
+_SOURCED_DOC = "docs/UPLOAD_LIMITS.md"
+_CITATION_MARKERS = ("本节出处", "$1.50", "1,000 页")
+
+
+def _iter_text_files():
+    """扫描范围：单一真值 + 全部文档（第三方数字只可能出现在这些地方）。"""
+    yield Path("config.py")
+    for p in sorted((_ROOT / "docs").rglob("*.md")):
+        yield p.relative_to(_ROOT)
+    for name in ("CLAUDE.md", "CHANGELOG.md", "README.md", "DEPLOYMENT.md"):
+        p = _ROOT / name
+        if p.is_file():
+            yield Path(name)
+
+
+def test_vendor_latency_claims_are_forbidden():
+    """禁止把"每页耗时"归给第三方厂商 —— 据我们所知无人公布该数字。
+
+    触发条件收紧到**同一行内**同时出现厂商名与每页耗时：本项目的自测耗时
+    （9.0 s/页 等）从不与厂商名同行，故正常内容零假阳性。
+    若确有出处的厂商延迟，应写进 UPLOAD_LIMITS.md 的出处块并在此登记例外。
+    """
+    offenders = []
+    for rel in _iter_text_files():
+        try:
+            lines = (_ROOT / rel).read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeDecodeError):
+            continue
+        for i, line in enumerate(lines, 1):
+            if any(v in line for v in _VENDOR_TOKENS) and _PER_PAGE_TIME.search(line):
+                offenders.append(f"{rel}:{i}: {line.strip()[:90]}")
+    assert not offenders, (
+        "以下位置把「每页耗时」归给了第三方厂商 —— 该数字我们无从得知，"
+        "请改用有出处的价格（如 $1.50/1,000 页）或本项目自测值：\n  "
+        + "\n  ".join(offenders)
+    )
+
+
+def test_guard_against_vendor_latency_has_controls():
+    """正/负对照：护栏必须真的能报警，且不误伤自测值与价格。"""
+    # 正对照①：正是当初写错的那句 → 必须命中
+    assert _PER_PAGE_TIME.search("云厂商的 1,000~3,000 页建立在其 1–2 s/页的成本上")
+    # 正对照②：换一种写法也要命中
+    assert _PER_PAGE_TIME.search("Azure Read 很快，约 0.4 秒/页")
+    # 负对照①：本项目自测耗时（无厂商名）→ 不命中
+    assert not (
+        any(v in "本链路实测 9.0 s/页（OCR）" for v in _VENDOR_TOKENS)
+        and _PER_PAGE_TIME.search("本链路实测 9.0 s/页（OCR）")
+    )
+    # 负对照②：厂商的价格数字（无"每页耗时"形态）→ 不命中
+    vendor_pricing = "云厂商纯文本抽取统一约 $1.50 / 1,000 页"
+    assert any(v in vendor_pricing for v in _VENDOR_TOKENS)
+    assert not _PER_PAGE_TIME.search(vendor_pricing)
+
+
+def test_external_figures_keep_a_citation():
+    """外部数字必须可追溯：出处块与其关键锚点不得被静默删除。
+
+    数字会过期，但"有这个数字、它从哪来"这条线索不能在编辑中丢失 ——
+    丢失后下一个人就只能像我一样凭印象编一个。
+    """
+    text = (_ROOT / _SOURCED_DOC).read_text(encoding="utf-8")
+    missing = [m for m in _CITATION_MARKERS if m not in text]
+    assert not missing, (
+        f"{_SOURCED_DOC} 缺少出处锚点 {missing} —— 外部数字必须带来源，"
+        "否则后人无法分辨哪些是实测、哪些是引用"
     )

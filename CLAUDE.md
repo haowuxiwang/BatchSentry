@@ -378,11 +378,14 @@ tag `v1.1.0`。
 - **定标依据是实测而非照抄**：真实 51 页 Stage1 OCR 460.5s（**9.0 s/页**）、
   Stage2 逐页 LLM 1163.7s（**22.8 s/页**）。200 页 → OCR 预估 1800s，对既有
   `ocr_client.POLL_TIMEOUT_MAX=3600s`（**100 页即封顶**）留 2× 余量。
-  ⚠️ 云厂商的 1,000~3,000 页**不可移植** —— 其单页成本 1–2s，**可移植的量是墙钟时间，不是页数**。
+  ⚠️ 云厂商的 1,000~3,000 页**不可移植** —— 上限是"单页成本"的函数：三大云纯文本
+  抽取约 **$1.50/1,000 页**，结构化/生成式档 $10~50/1,000 页（差 10~30 倍），本链路
+  每页跑手写 OCR + 逐页 LLM、按调用性质属后者。**可移植的量是"墙钟时间预算"，不是
+  页数**（出处见 `docs/UPLOAD_LIMITS.md` §2）。
 - **与厂商上限的关系**：`core/mineru_client.MINERU_MAX_UPLOAD_BYTES` 是 MinerU
   **厂商**上限（与本产品策略同值纯属巧合）；MinerU 是 failover 备选，准入上限超过它
   会导致"放行后流程中途失败"。护栏机检 `UPLOAD_LIMITS["max_bytes"] <= 厂商上限`。
-- 护栏：`tests/unit/test_upload_limits.py`（21）+ `tests/integration/test_api_upload_page_limit.py`（5）。
+- 护栏：`tests/unit/test_upload_limits.py`（24）+ `tests/integration/test_api_upload_page_limit.py`（5）。
   ⚠️ 200 页是**基于 51 页实测的线性外推**，未以 200 页文件实跑。
 
 **规格可判性（M8 看图比对后固化，唯一来源均在 `core/rules/parsing.py`）**：
