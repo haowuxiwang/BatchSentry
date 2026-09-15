@@ -24,6 +24,17 @@
   `test_config_json_is_gitignored`（"扫描排除 config.json"这一口径的**前提**）。
   顺带**消除全部豁免**：正反样本一律用**拼接**构造，故文件自身不会命中，无需白名单
   （白名单会让"往该文件里加密钥"也逃过检查）。
+- **`scripts/release_gate.py` 在非 UTF-8 控制台下崩溃（CI 首次运行的实测收获）**：
+  六项检查**全部通过**、报告文件也已写出，却在随后打印报告时抛
+  `UnicodeEncodeError: 'charmap' codec can't encode characters in position 2-9` ——
+  本地开发机代码页是 936/65001（中文正常），而 GitHub Actions 的 `windows-latest`
+  控制台是 **cp1252**。即"门禁结论正确但 CI 红"：这是只有真跑 CI 才会暴露的缺陷，
+  也正说明此前"没有触发门禁的人"。修法两层：`main()` 开头把 stdout/stderr
+  `reconfigure(encoding="utf-8")`（对重定向到文件同样生效），并在跑子进程时注入
+  `PYTHONIOENCODING=utf-8`（pytest 自己打印中文用例名时同样会踩）。
+  新增 `TestNonUtf8Console::test_report_prints_under_cp1252_console`：**在 cp1252 下**
+  启动门禁子进程，断言无 `UnicodeEncodeError` 且报告头 `OVERALL` 出现在输出里。
+  已做正对照 —— 绕过修复即复现同一条报错。
 
 ### 新增
 

@@ -25,6 +25,12 @@
 
 退出码：0 = 无 FAIL；1 = 存在 FAIL。WARN/SKIP 不影响退出码。
 
+⚠️ 输出编码：本脚本打印**中文**报告，`main()` 一开始就把 stdout/stderr 切成 UTF-8
+   （`errors="replace"`）。Windows 控制台的默认编码取决于代码页 —— 本地开发机
+   （936/65001）能显示中文，而 **GitHub Actions 的 Windows runner 是 cp1252**，
+   不切就会死在第一个 `print` 上，把"门禁全过"变成"CI 失败"（2026-09-15 CI run #1
+   实测：检查跑满 3.5 分钟、报告已落盘，只死在打印那一步）。
+
 ⚠️ 沙箱注意：取覆盖率必须走 `coverage run` + `coverage report`，**不要**用
    `pytest --cov` —— 后者收尾 `pytest_cov.finish()` 会调 `cov.combine()` 删除
    自身并行数据文件，在 WorkBuddy 沙箱下触发 safe-delete 批量守卫 →
@@ -94,6 +100,25 @@ def _ms() -> int:
     return int(time.time() * 1000)
 
 
+def _force_utf8_stdio() -> None:
+    """把 stdout/stderr 的编码强制为 UTF-8（`errors="replace"`）。
+
+    为什么必须有：本脚本打印**中文**报告，而 Windows 文本流的默认编码来自代码页 ——
+    本地开发机（936/65001）能显示中文，**GitHub Actions 的 Windows runner 是 cp1252**
+    → `_print_report` 第一行 `print` 就 `UnicodeEncodeError` → 退出码 1，把"门禁 6 项
+    全过"变成"CI 红"（2026-09-15 CI run #1 实测：检查跑满 3.5 分钟、报告已落盘，
+    只死在打印那一步）。
+
+    修在脚本自身、而不是 workflow 的环境变量里 —— 它是唯一入口，谁调用都该拿到
+    正确行为（本地、CI、将来别的调度器都一样）。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError, OSError):
+            pass  # 已被重定向/替换成非 TextIOWrapper 时静默跳过
+
+
 # ── 子进程封装 ──────────────────────────────────────────────────────────────
 
 
@@ -102,6 +127,10 @@ def run_cmd(cmd: list[str], *, timeout: int | None = None,
     """在仓库根目录执行命令，返回 (returncode, 合并输出)。"""
     merged = os.environ.copy()
     merged["PBC_NO_FILE_LOG"] = "1"
+    # 子进程（pytest）也要按 UTF-8 输出：它的中文日志经管道回传，若按控制台代码页
+    # 编码（Windows runner = cp1252）会撞上与 `_force_utf8_stdio` 同一个坑。
+    # 显式统一，让本地与 CI 行为一致，而不是靠各自的区域设置碰运气。
+    merged["PYTHONIOENCODING"] = "utf-8"
     if env:
         merged.update(env)
     proc = subprocess.run(
@@ -510,6 +539,7 @@ def _print_report(report: dict, path: Path) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    _force_utf8_stdio()
     ap = argparse.ArgumentParser(description="v1.1 发布门禁（打包信号）")
     ap.add_argument("--fail-under", type=int, default=95, help="覆盖率门禁（默认 95）")
     ap.add_argument("--skip-tests", action="store_true", help="跳过单测/覆盖率（秒级结构检查）")

@@ -8,6 +8,9 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -408,3 +411,36 @@ class TestMainExitCode:
                             lambda results, **k: {"overall": "pass", "counts": {"pass": 1, "fail": 0, "warn": 0, "skip": 0}, "checks": []})
         monkeypatch.setattr(rg, "write_report", lambda rep, out: tmp_path / "r.json")
         assert rg.main(["--skip-tests"]) == 0
+
+
+# ── 非 UTF-8 控制台（CI 实测回归）───────────────────────────────────────────
+
+
+class TestNonUtf8Console:
+    """`release_gate.py` 打印中文报告，必须在非 UTF-8 控制台下也能跑完。
+
+    2026-09-15 CI run #1（GitHub Actions `windows-latest`，控制台编码 **cp1252**）：
+    门禁 6 项检查全过、报告已落盘，却死在 `_print_report` 的**第一个** `print` ——
+    中文 + 制表符 `UnicodeEncodeError` → 退出码 1 → CI 直接红。
+    本机**永远复现不了**（本地代码页能显示中文），所以只能靠"子进程 + 显式非 UTF-8
+    编码"把它固化成机检。
+    """
+
+    def _run(self, tmp_path, io_encoding: str):
+        env = {**os.environ, "PYTHONIOENCODING": io_encoding}
+        # --skip-tests：只跑秒级结构检查，不启动 5 分钟的 pytest 子进程
+        return subprocess.run(
+            [sys.executable, str(_RG_PATH), "--skip-tests",
+             "--out", str(tmp_path / "r.json")],
+            cwd=str(_RG_PATH.parents[1]),
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            env=env, timeout=300,
+        )
+
+    def test_report_prints_under_cp1252_console(self, tmp_path):
+        proc = self._run(tmp_path, "cp1252")
+        combined = proc.stdout + proc.stderr
+        assert "UnicodeEncodeError" not in combined, combined[-900:]
+        assert "Traceback" not in combined, combined[-900:]
+        # 报告本身必须真的打出来 —— "没崩但什么都没输出"同样是失败（空转不算过）
+        assert "OVERALL" in proc.stdout, combined[-900:]
