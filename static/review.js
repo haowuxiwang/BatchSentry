@@ -1325,12 +1325,14 @@
         const fid = Number(f.id);
         // P0-3：区域级证据锚（后端读时推导；锚不上则无此入口）。
         // 内联 onclick 传不了对象，先把锚存进 regionRefs 再按 id 取。
-        if (f.region_ref && Array.isArray(f.region_ref.bbox)) {
+        // 画的是 page_bbox（后端已按服务端上报的 angle 做旋转逆映射的
+        // **页面空间**坐标）；bbox 是 OCR 空间原始框，仅留痕不回显。
+        if (f.region_ref && Array.isArray(f.region_ref.page_bbox)) {
           regionRefs[fid] = f.region_ref;
         } else {
           delete regionRefs[fid];
         }
-        const locateBtn = f.region_ref && Array.isArray(f.region_ref.bbox)
+        const locateBtn = f.region_ref && Array.isArray(f.region_ref.page_bbox)
           ? `<button onclick="locateFinding(event, ${fid})" class="btn-press text-[11px] font-medium text-muted-foreground hover:text-foreground" title="在左侧页面上高亮该问题所在的 OCR 版面区域（区域级定位，非单元格级）">定位原图</button>`
           : "";
         const actionBtns =
@@ -1724,24 +1726,25 @@
       clearRegionAnchor(); // 再点一次收起
       return;
     }
-    // 宽高比闸门：OCR 坐标系与渲染图宽高比不一致时，归一化坐标映射必然
-    // 失真（实测第 8 页 Paddle 返回横向空间 1920×1440 —— 服务端旋转过）。
-    // 此时明示"无法定位"远好过画一个错位的框：后者会把复核员的注意力引到
-    // 错误的区域，比不显示更危险。
+    // 宽高比闸门（兜底）：page_bbox 已是页面空间坐标，正常情况下必与渲染图
+    // 同向。仍比对一次 —— 后端上报的坐标空间与页面**不同源**时（服务端转了
+    // 页但没上报 angle、或上游改了行为），归一化映射必然失真。此时明示"无法
+    // 定位"远好过画一个错位的框：后者会把复核员的注意力引到错误的区域，
+    // 比不显示更危险。page_aspect 是后端按 rotation 推出的"页面应有宽高比"。
     const imgAspect = img.naturalWidth / img.naturalHeight;
-    const spAspect = Number(ref.space_aspect);
+    const pgAspect = Number(ref.page_aspect);
     if (
-      spAspect > 0 &&
+      pgAspect > 0 &&
       imgAspect > 0 &&
-      Math.abs(spAspect - imgAspect) / imgAspect > REGION_ASPECT_TOL
+      Math.abs(pgAspect - imgAspect) / imgAspect > REGION_ASPECT_TOL
     ) {
       window.PBC.showToast(
-        "该页 OCR 坐标系方向与页面不一致（疑似旋转页），无法自动定位，请人工核对原图",
+        "该页坐标系与页面方向不一致（上游未上报旋转角），无法自动定位，请人工核对原图",
         "err",
       );
       return;
     }
-    ov.dataset.bbox = (ref.bbox || []).join(",");
+    ov.dataset.bbox = (ref.page_bbox || []).join(",");
     ov.classList.remove("hidden");
     activeRegionFid = fid;
     positionRegionOverlay();

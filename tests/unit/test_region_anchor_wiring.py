@@ -106,11 +106,19 @@ class TestSurface:
         assert "img.offsetWidth" in js and "img.offsetHeight" in js
 
     def test_js_has_aspect_gate(self):
-        """宽高比闸门：坐标系与渲染图不一致时必须明示无法定位，而不是画错框。"""
+        """宽高比闸门：坐标系与渲染图不一致时必须明示无法定位，而不是画错框。
+
+        闸门比的是后端给出的 ``page_aspect``（页面**应当**具有的宽高比，
+        已按服务端上报的 rotation 折算），不是 OCR 空间的 ``space_aspect``
+        —— 后者在旋转页上必然与页面不符，拿它比对会把本来能正确映射的页
+        也一并拒掉。
+        """
         js = REVIEW_JS.read_text(encoding="utf-8")
         assert "REGION_ASPECT_TOL" in js
-        assert "space_aspect" in js
+        assert "ref.page_aspect" in js
         assert "无法自动定位" in js
+        # 画的是页面空间坐标，不是 OCR 空间原始框
+        assert "ref.page_bbox" in js
 
     def test_js_recomputes_on_zoom_load_and_resize(self):
         js = REVIEW_JS.read_text(encoding="utf-8")
