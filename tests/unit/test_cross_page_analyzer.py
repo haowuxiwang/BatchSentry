@@ -1958,6 +1958,53 @@ class TestBatchConsistency:
         assert _normalize_batch_no("") == ""
         assert _normalize_batch_no(None) == ""
 
+    def test_batch_no_normalizer_strips_symbol_noise(self):
+        """真实轮次实测的符号噪声（`^*`、`/`）必须被剥离 —— 它们是 OCR 把
+        上标/标点混进批号，不是批号的有效内容（"-" 例外，留给工序后缀切分）。"""
+        from core.rules.parsing import _normalize_batch_no
+
+        assert _normalize_batch_no("1127011N^*250101") == "1127011N250101"
+        assert _normalize_batch_no("11270111/250101") == "11270111250101"
+        assert _normalize_batch_no("1127011N(250101)") == "1127011N250101"
+        assert _normalize_batch_no("1127011N·250101-04") == "1127011N250101-04"
+
+    def test_symbol_and_single_char_variants_voted_away(self):
+        """R2 投票归一：归一后仍会剩"多组批号"，但逐组看是**同一批号**的 OCR
+        写法 —— `^*` 符号噪声、`/` 分隔符、`N`↔`1` 单字符误读。多数读法覆盖
+        ≥60% 时，编辑距离 ≤1 的组被吸收为变体 → 不再报 critical。"""
+        variants = (
+            ["1127011N250101"] * 8
+            + ["1127011N^*250101"] * 5
+            + ["11270111/250101"] * 3
+        )
+        pages = [{"page": i + 1, "page_info": {"batch_no": v}}
+                 for i, v in enumerate(variants)]
+        assert _check_batch_consistency(pages) == []
+
+    def test_vote_not_decisive_reports_all_groups(self):
+        """多数批号覆盖不足 `_BATCH_VOTE_MIN_SHARE` → 投票不决定性 →
+        近邻变体也照原样全报（保守：宁可多报，不可把真实混批吃掉）。"""
+        variants = ["1127011N250101"] * 2 + ["11270111250101"] * 2
+        pages = [{"page": i + 1, "page_info": {"batch_no": v}}
+                 for i, v in enumerate(variants)]
+        findings = _check_batch_consistency(pages)
+        assert len(findings) == 1
+        assert "检测到 2 组不同批号" in findings[0]["description"]
+
+    def test_vote_absorption_is_disclosed(self):
+        """被投票吸收的变体数量必须**明示**在描述里（不静默归一）。"""
+        variants = (
+            ["1127011N250101"] * 10
+            + ["11270111250101"] * 2      # 单字符近邻 → 被投票吸收
+            + ["2245DP20260115"] * 2      # 真实不同批号 → 存活
+        )
+        pages = [{"page": i + 1, "page_info": {"batch_no": v}}
+                 for i, v in enumerate(variants)]
+        findings = _check_batch_consistency(pages)
+        assert len(findings) == 1
+        assert "另按多数读法归并 1 个单字符/符号近邻变体" in findings[0]["description"]
+        assert "2245DP20260115" in findings[0]["ocr_text"]
+
 
 # ===========================================================================
 # QA 签名检查（R6 扩展）

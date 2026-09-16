@@ -75,15 +75,28 @@ async def _run_stage3_cross_analysis(
     findings = await _run_analyze_cross(
         page_structures, job_id=job_id, progress_cb=_cross_progress_cb
     )
+    # R1 降噪：自指元噪声（"本页含手写内容"/"整体识别置信度较低"）是**工具可读性**
+    # 提示而非记录缺陷，整份文档聚合为一条。先于 completeness 降噪执行 —— 两者
+    # 治理对象不重叠（前者按文档属性聚合，后者按结构缺失 kind 细分）。
+    from core.finding_noise import (
+        reduce_completeness_noise,
+        reduce_self_referential_noise,
+    )
+    findings, _self_ref_report = reduce_self_referential_noise(findings)
     # M2 降噪：completeness 结构性缺失的"抽取不确定降级 + 文档级聚合"。
     # 在 gmp_basis/kb_refs 富集**之前**执行 —— 只对精简后的集合做检索/映射，
     # 省掉数百条同质条目的无谓开销。审计可追溯（report 落 audit）。
-    from core.finding_noise import reduce_completeness_noise
     findings, _noise_report = reduce_completeness_noise(
         findings,
         flagged_pages=flagged_pages,
         total_pages=len(page_structures),
     )
+    if _self_ref_report["aggregated_total"]:
+        logger.info(
+            f"[{job_id}] self-referential noise reduced: "
+            f"aggregated={_self_ref_report['aggregated_total']} "
+            f"({list(_self_ref_report['aggregated'])})"
+        )
     if _noise_report["aggregated_total"] or \
             _noise_report["downgraded_extraction_uncertain"]:
         logger.info(

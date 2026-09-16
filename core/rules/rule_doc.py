@@ -3,11 +3,16 @@ from __future__ import annotations
 import logging
 
 from core.rules.parsing import (
+    _edit_distance_le1,
     _interval_after,
     _normalize_batch_no,
     _parse_time,
     _parse_time_interval,
 )
+
+# R2 投票阈值：多数批号核心串须覆盖的有批号页比例。低于此值视为"投票不决定性"
+# → 不做近邻吸收，按原样全报（保守；绝不把真实混批吃掉）。
+_BATCH_VOTE_MIN_SHARE = 0.6
 
 logger = logging.getLogger(__name__)
 
@@ -164,11 +169,15 @@ def _check_batch_consistency(pages: list[dict]) -> list[dict]:
     Pages without batch_no (cover, toc, appendix) are skipped.
 
     OCR variants of the SAME batch number are grouped before comparison:
-    separators ("·"/spaces/"°"), full-width glyphs, digit confusions
-    ("25010i" → "250101") and sheet-suffix numbers ("1127011N250101-04")
-    all collapse onto one core. Prefix-truncated extractions (LLM cut the
-    batch no short) merge into the longer group. Only groups that survive
-    normalization are reported as a real inconsistency."""
+    separators ("·"/spaces/"°"), symbol noise ("^*"/"/"), full-width glyphs,
+    digit confusions ("25010i" → "250101") and sheet-suffix numbers
+    ("1127011N250101-04") all collapse onto one core. Prefix-truncated
+    extractions (LLM cut the batch no short) merge into the longer group.
+    Finally a **vote** (R2): when the majority core covers ≥
+    `_BATCH_VOTE_MIN_SHARE` of the pages carrying a batch no, other cores
+    within edit distance ≤1 of it are absorbed as variants. Only groups that
+    survive normalization **and** the vote are reported as a real
+    inconsistency — the absorbed count is disclosed in the description."""
     findings = []
     # normalized core (before "-suffix") -> {raw batch_no: [page numbers]}
     cores: dict[str, dict[str, list[int]]] = {}
@@ -202,24 +211,57 @@ def _check_batch_consistency(pages: list[dict]) -> list[dict]:
     if len(merged) <= 1:
         return findings  # all same (or none) — consistent
 
-    # Report: main group + surviving suspicious groups, noting merged variants
-    items = sorted(merged.items(), key=lambda kv: -sum(len(v) for v in kv[1].values()))
+    # ── R2（投票归一）：多数读法 + 单字符近邻吸收 ──────────────────────────
+    # 定位依据（真实轮次实测）：归一后仍报"5 组不同批号"，但逐组看是
+    # `1127011N250101` / `1127011N^*250101` / `11270111/250101` 等**同一批号的
+    # OCR 写法**。差异要么是纯符号（`^*`、`/`），要么是单字符（`N`↔`1`）。
+    #
+    # 判据：多数核心串须覆盖 ≥ `_BATCH_VOTE_MIN_SHARE` 的有批号页（投票**决定性**），
+    # 此时把与之**编辑距离 ≤1** 的其他核心串吸收为变体；不决定性时按原样全报
+    # （保守：宁可多报，不可把真实的混批吃掉）。吸收数量在描述里**明示**。
+    page_counts = {c: sum(len(v) for v in m.values()) for c, m in merged.items()}
+    total_pages = sum(page_counts.values())
+    items = sorted(merged.items(), key=lambda kv: (-page_counts[kv[0]], kv[0]))
     main_core, main_map = items[0]
+    decisive = total_pages > 0 and page_counts[main_core] >= (
+        _BATCH_VOTE_MIN_SHARE * total_pages
+    )
+    survivors: list[tuple[str, dict[str, list[int]]]] = [(main_core, main_map)]
+    absorbed: list[str] = []
+    for core, raw_map in items[1:]:
+        if decisive and _edit_distance_le1(core, main_core):
+            absorbed.append(core)
+        else:
+            survivors.append((core, raw_map))
+    if len(survivors) <= 1:
+        logger.info(
+            f"R7 batch vote: 单一批号（多数核心 {main_core} 覆盖 "
+            f"{page_counts[main_core]}/{total_pages} 页；吸收 {len(absorbed)} 个"
+            f"单字符/符号变体 {absorbed}）"
+        )
+        return findings
+
+    # Report: main group + surviving suspicious groups, noting merged variants
     summary_parts = []
-    for core, raw_map in items:
+    for core, raw_map in survivors:
         pns = sorted(p for pages_ in raw_map.values() for p in pages_)
         summary_parts.append(f"{core}(第{','.join(str(p) for p in pns)}页)")
     n_variants = sum(len(m) for m in merged.values()) - len(merged)
     all_raw = [raw for m in merged.values() for raw in m]
+    vote_note = (
+        f"，另按多数读法归并 {len(absorbed)} 个单字符/符号近邻变体"
+        if absorbed else ""
+    )
     findings.append({
         "page": min(min(v) for v in main_map.values()),
         "type": "batch_inconsistency",
         "severity": "critical",
         "description": (
-            f"跨页批号不一致：检测到 {len(merged)} 组不同批号 — "
+            f"跨页批号不一致：检测到 {len(survivors)} 组不同批号 — "
             f"{'；'.join(summary_parts[:3])}"
             f"{'…' if len(summary_parts) > 3 else ''}"
-            f"（已归并 {n_variants} 个空格/分隔符/工序后缀等 OCR 变体），"
+            f"（已归并 {n_variants} 个空格/分隔符/工序后缀等 OCR 变体"
+            f"{vote_note}），"
             f"请核对是否装订错误或混批"
         ),
         "ocr_text": f"batch_nos={all_raw}",
@@ -227,8 +269,8 @@ def _check_batch_consistency(pages: list[dict]) -> list[dict]:
         "source": "rule",
     })
     logger.warning(
-        f"R7 batch inconsistency: {len(merged)} distinct batch groups "
-        f"({len(all_raw)} raw variants, {n_variants} merged)"
+        f"R7 batch inconsistency: {len(survivors)} distinct batch groups "
+        f"({len(all_raw)} raw variants, {n_variants} merged, {len(absorbed)} voted)"
     )
     return findings
 

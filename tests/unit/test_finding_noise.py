@@ -1,7 +1,8 @@
-"""core/finding_noise.py 单测（M2 降噪）。
+"""core/finding_noise.py 单测（M2 + R1 降噪）。
 
 覆盖：结构性 kind 识别、抽取不确定降级、文档级聚合阈值、非目标类型零改动、
-报告字段与确定性；并锁定 rule_doc 的标记契约（防止降噪静默失效）。
+报告字段与确定性；R1 自指元噪声的分组/聚合/幂等/不丢信息；并锁定 rule_doc 的
+标记与文案契约（防止降噪静默失效）。
 """
 from __future__ import annotations
 
@@ -11,7 +12,11 @@ import pytest
 
 from core.finding_noise import (
     STRUCTURAL_MARKERS,
+    SELF_REFERENTIAL_TYPES,
+    _SELF_REF_MARKERS,
     reduce_completeness_noise,
+    reduce_self_referential_noise,
+    self_referential_kind,
     structural_kind,
 )
 
@@ -161,3 +166,125 @@ class TestMarkerContract:
         src = (_REPO / "core" / "rules" / "rule_doc.py").read_text(encoding="utf-8")
         for marker in STRUCTURAL_MARKERS:
             assert marker in src, f"rule_doc 已不再产出标记 {marker!r}"
+
+
+# ---------------------------------------------------------------------------
+# R1 自指元噪声（handwritten / 整体识别置信度较低）
+# ---------------------------------------------------------------------------
+
+
+def _hw(page: int, severity: str = "info") -> dict:
+    return {"page": page, "type": "handwritten", "severity": severity,
+            "description": f"第{page}页 工序 含 3 条手写内容，手写体 OCR 易误读",
+            "ocr_text": "张三", "source": "rule"}
+
+
+def _lowconf(page: int) -> dict:
+    return {"page": page, "type": "completeness", "severity": "info",
+            "description": (f"第{page}页 整体识别置信度较低，"
+                            "建议人工核对 OCR 结果（可能存在手写体或印章干扰）"),
+            "ocr_text": "overall_confidence=low", "source": "rule"}
+
+
+class TestSelfReferentialKind:
+    @pytest.mark.parametrize("finding,kind", [
+        (_hw(1), "handwritten"),
+        (_lowconf(2), "ocr_confidence"),
+        (_c(3, "step_no=1 time=空"), None),            # 结构缺失不是自指噪声
+        (_c(3, "step_no=1 time=空", "info"), None),
+        ({"page": 4, "type": "param_out_of_spec", "severity": "critical",
+          "description": "越界", "ocr_text": "", "source": "rule"}, None),
+    ])
+    def test_kind(self, finding, kind):
+        assert self_referential_kind(finding) is kind
+
+    def test_structural_completeness_not_taken_even_with_similar_words(self):
+        """结构缺失的 completeness 不得被自指规则误捕（两者聚合粒度不同）。"""
+        f = {"page": 1, "type": "completeness", "severity": "warning",
+             "description": "第1页 识别置信度较低 x", "ocr_text": "step_no=1 time=空",
+             "source": "rule"}
+        assert self_referential_kind(f) is None
+
+
+class TestReduceSelfReferential:
+    def test_aggregates_each_kind_into_one(self):
+        items = [_hw(p) for p in range(1, 11)] + [_lowconf(p) for p in range(1, 4)]
+        kept, rep = reduce_self_referential_noise(items)
+        assert set(rep["aggregated"]) == {"handwritten", "ocr_confidence"}
+        assert rep["aggregated"]["handwritten"]["count"] == 10
+        assert rep["aggregated"]["ocr_confidence"]["count"] == 3
+        assert len(kept) == 2                      # 两条摘要
+        assert all(f["aggregated"] is True for f in kept)
+
+    def test_page_list_is_complete_evidence(self):
+        """不丢信息：摘要必须携带完整页清单（逐页可追溯）。"""
+        items = [_hw(p) for p in (3, 7, 11, 42)]
+        kept, rep = reduce_self_referential_noise(items)
+        assert rep["aggregated"]["handwritten"]["pages"] == [3, 7, 11, 42]
+        assert kept[0]["page_list"] == [3, 7, 11, 42]
+        assert "4 处" in kept[0]["description"]
+
+    def test_single_item_not_aggregated(self):
+        """1 条不构成噪声 → 原样保留（逐字不变）。"""
+        item = _hw(5)
+        kept, rep = reduce_self_referential_noise([item])
+        assert kept == [item] and rep["aggregated"] == {}
+
+    def test_non_target_types_untouched(self):
+        other = {"page": 1, "type": "time_reversal", "severity": "critical",
+                 "description": "z", "ocr_text": "", "source": "rule"}
+        items = [_hw(p) for p in range(1, 5)] + [other]
+        kept, _ = reduce_self_referential_noise(items)
+        assert other in kept
+
+    def test_no_information_loss_on_pages(self):
+        """页级证据闭合：原始出现过的页，降噪后要么仍有条目，要么在摘要页清单里。"""
+        items = ([_hw(p) for p in range(1, 21)] + [_lowconf(p) for p in range(1, 6)]
+                 + [{"page": 99, "type": "time_reversal", "severity": "critical",
+                     "description": "z", "ocr_text": "", "source": "rule"}])
+        kept, _ = reduce_self_referential_noise(items)
+        before = {f["page"] for f in items}
+        after = {f["page"] for f in kept}
+        summarized = set()
+        for f in kept:
+            summarized |= set(f.get("page_list") or [])
+        assert before <= after | summarized
+
+    def test_empty_input(self):
+        kept, rep = reduce_self_referential_noise([])
+        assert kept == [] and rep["aggregated_total"] == 0
+
+    def test_deterministic(self):
+        items = [_hw(p) for p in range(1, 8)]
+        a, _ = reduce_self_referential_noise(items)
+        b, _ = reduce_self_referential_noise(items)
+        assert a == b
+
+    def test_idempotent_second_pass(self):
+        """再跑一次不得继续聚合（摘要本身是 1 条，低于阈值）。"""
+        items = [_hw(p) for p in range(1, 8)]
+        once, _ = reduce_self_referential_noise(items)
+        twice, rep2 = reduce_self_referential_noise(once)
+        assert twice == once and rep2["aggregated"] == {}
+
+    def test_input_not_mutated(self):
+        items = [_hw(p) for p in range(1, 8)]
+        snapshot = [dict(f) for f in items]
+        reduce_self_referential_noise(items)
+        assert items == snapshot
+
+
+class TestSelfReferentialMarkerContract:
+    def test_rule_doc_still_emits_low_confidence_wording(self):
+        """自指契约：`_SELF_REF_MARKERS` 必须仍是 rule_doc 实际产出的文案，
+        否则 R8 的低置信度条目会静默漏收（降噪看着有效、实际没生效）。"""
+        src = (_REPO / "core" / "rules" / "rule_doc.py").read_text(encoding="utf-8")
+        for marker in _SELF_REF_MARKERS:
+            assert marker in src, f"rule_doc 已不再产出文案 {marker!r}"
+
+    def test_handwritten_type_is_canonical(self):
+        """`handwritten` 必须是规范类型（聚合后仍用它，六面同步才不会漂）。"""
+        from core.finding_quality import CANONICAL_TYPES
+
+        assert "handwritten" in CANONICAL_TYPES
+        assert SELF_REFERENTIAL_TYPES <= set(CANONICAL_TYPES)

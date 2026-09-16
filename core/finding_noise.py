@@ -1,7 +1,15 @@
-"""completeness 噪声治理（M2 降噪，可度量）。
+"""finding 降噪（M2 + R1）—— 可度量、可审计、不丢信息。
 
-问题（实测）
-------------
+本模块治理**两类**不同的噪声，各有独立的聚合粒度：
+
+R1 自指元噪声（`reduce_self_referential_noise`）
+------------------------------------------------
+讲的是"工具看不清"，不是"记录有问题"：`handwritten`（"本页含 N 条手写内容"）
+与 `整体识别置信度较低`。真实 51 页轮次实测 72/442 = **16%**。它们是**文档属性**，
+故整份文档聚合为 1 条（携带条数与完整页清单）。
+
+completeness 结构性缺失（`reduce_completeness_noise`）
+------------------------------------------------------
 真实 51 页 job 的 784 条 findings 中 **completeness 占 678 条（86.5%）**，其中
 525 条为 warning。最小复现：一个"干净页"（编号连续/时间有序/操作复核齐全）
 仍产出 `completeness[info] 缺少 QA 签名`。复核界面被同质条目淹没，真正的异常
@@ -19,7 +27,7 @@
 
 不做的事
 --------
-- 不改非 completeness 类型的 finding（高价值信号原样保留）。
+- 不改非目标类型的 finding（高价值信号原样保留）。
 - 不删除信息：摘要条携带 `page_list` 与条数，逐页可追溯。
 - 阈值是**显式参数**（可测、可调），不写死在逻辑里。
 
@@ -48,6 +56,110 @@ AGGREGATABLE_TYPES: frozenset[str] = frozenset({"spec_unverifiable"})
 
 # 摘要条目展示的页清单上限（描述文案里的样例）。
 _PAGE_SAMPLE = 12
+
+
+# ---------------------------------------------------------------------------
+# R1 自指元噪声：讲的是"工具看不清"，不是"记录有问题"
+# ---------------------------------------------------------------------------
+# 定位依据（真实 51 页轮次实测）：`handwritten` 65 条 + `整体识别置信度较低`
+# 7 条 = 72 条（占 442 条的 16%），文案分别是"本页含 N 条手写内容…请人工核对"
+# 与"整体识别置信度较低…建议人工核对 OCR 结果"。对 QA 复核员这是纯噪声
+# （"这里有手写"人眼一秒可见），却**计入 finding 计数**，把真正的异常淹没。
+#
+# 治理：整份文档聚合成 1 条（携带完整页清单与条数），信息不丢失。
+# 这些类型是**工具能力陈述**，不是记录缺陷 —— 与结构缺失（time/operator/…）
+# 分开治理，因为聚合粒度不同（前者是文档属性，后者有 kind 细分）。
+SELF_REFERENTIAL_TYPES: frozenset[str] = frozenset({"handwritten"})
+# `completeness` 里的自指子类：由 R8 产出，文案固定（`rule_doc.py:370`）。
+# 一旦该文案改动，`test_finding_noise.py` 的自指契约用例立即失败。
+_SELF_REF_MARKERS: tuple[str, ...] = ("整体识别置信度较低",)
+# 少于此条数不聚合（1 条不构成噪声，原样保留）。
+_SELF_REF_MIN = 2
+
+_SELF_REF_LABEL = {
+    "handwritten": "含手写内容（手写体 OCR 易误读）",
+    "ocr_confidence": "整体识别置信度较低",
+}
+
+
+def self_referential_kind(finding: dict) -> str | None:
+    """识别"自指元噪声"条目的分组键；None = 不是自指噪声。"""
+    ftype = finding.get("type") or ""
+    if ftype in SELF_REFERENTIAL_TYPES:
+        return ftype
+    if ftype == "completeness":
+        desc = finding.get("description") or ""
+        if any(m in desc for m in _SELF_REF_MARKERS):
+            return "ocr_confidence"
+    return None
+
+
+def _self_ref_summary(kind: str, items: list[dict]) -> dict:
+    """构造文档级自指噪声摘要（保留条数与页清单 —— 信息不丢失）。"""
+    pages = sorted({f.get("page") for f in items if f.get("page") is not None})
+    label = _SELF_REF_LABEL.get(kind, kind)
+    sample = "、".join(str(p) for p in pages[:_PAGE_SAMPLE])
+    more = f" 等 {len(pages)} 页" if len(pages) > _PAGE_SAMPLE else ""
+    return {
+        "page": pages[0] if pages else 1,
+        "type": kind if kind in SELF_REFERENTIAL_TYPES else "completeness",
+        "severity": "info",
+        "description": (
+            f"全份记录共 {len(items)} 处「{label}」提示（涉及 {len(pages)} 页："
+            f"第 {sample} 页{more}）。这是**工具可读性**提示而非记录缺陷，"
+            f"已聚合为一条供整体参考；逐页明细见附加信息。"
+        ),
+        "ocr_text": f"aggregated kind={kind} count={len(items)} pages={pages}",
+        "operator": "",
+        "source": "rule",
+        "aggregated": True,
+        "page_list": pages,
+    }
+
+
+def reduce_self_referential_noise(
+    findings: list[dict],
+    *,
+    min_group: int = _SELF_REF_MIN,
+) -> tuple[list[dict], dict]:
+    """把自指元噪声聚合为文档级摘要（R1）。
+
+    Args:
+        findings: 规则/LLM 产出的 finding 列表（原地不修改）。
+        min_group: 触发聚合的最小条数（低于此值原样保留 —— 1 条不是噪声）。
+
+    Returns:
+        (kept, report)。report 的 `aggregated` 给出每类的条数与页清单，
+        供审计回答"为什么这几百条变成了几条"。
+    """
+    kept: list[dict] = []
+    groups: dict[str, list[dict]] = {}
+    for f in findings:
+        kind = self_referential_kind(f)
+        if kind is None:
+            kept.append(f)
+        else:
+            groups.setdefault(kind, []).append(f)
+
+    aggregated: dict[str, dict] = {}
+    for kind in sorted(groups):
+        items = groups[kind]
+        if len(items) < max(2, min_group):
+            kept.extend(items)
+            continue
+        summary = _self_ref_summary(kind, items)
+        kept.append(summary)
+        aggregated[kind] = {
+            "count": len(items),
+            "pages": summary["page_list"],
+        }
+
+    report = {
+        "aggregated": aggregated,
+        "aggregated_total": sum(v["count"] for v in aggregated.values()),
+        "kept": len(kept),
+    }
+    return kept, report
 
 
 def structural_kind(finding: dict) -> str | None:

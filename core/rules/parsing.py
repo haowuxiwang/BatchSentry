@@ -184,6 +184,10 @@ _FULLWIDTH_MAP = str.maketrans(
 # cross-batch difference must not be silently merged.
 _OCR_DIGIT_MAP = str.maketrans({"i": "1", "I": "1", "l": "1", "o": "0", "O": "0"})
 _BATCH_SEP_RE = re.compile(r"[\s\u3000·°.,;]+")
+# 符号噪声：OCR 常把上标/标点混进批号（实测 `1127011N^*250101`、`11270111/250101`）。
+# 批号的有效内容只可能是字母数字 —— 故剥离**除 `-` 之外**的全部非字母数字，
+# `-` 保留给工序后缀（`-02`…`-06`）切分用（调用方 split("-")[0]）。
+_BATCH_SYMBOL_RE = re.compile(r"[^0-9A-Za-z\-]+")
 
 
 def _normalize_batch_no(raw: str) -> str:
@@ -195,7 +199,36 @@ def _normalize_batch_no(raw: str) -> str:
     s = _BATCH_SEP_RE.sub("", s)
     s = s.translate(_FULLWIDTH_MAP)
     s = s.translate(_OCR_DIGIT_MAP)
+    s = _BATCH_SYMBOL_RE.sub("", s)
     return s.upper()
+
+
+def _edit_distance_le1(a: str, b: str) -> bool:
+    """两个串的编辑距离是否 ≤1（纯函数，无依赖）。
+
+    R2 投票归一用它判定"单字符近邻变体"：真实混批的批号差异通常 ≥2 位，
+    而 OCR 误读（`N`↔`1`、丢一位）只差 1 位。**长度差 >1 直接否决**。
+    """
+    if a == b:
+        return True
+    la, lb = len(a), len(b)
+    if abs(la - lb) > 1:
+        return False
+    if la == lb:
+        return sum(1 for x, y in zip(a, b) if x != y) == 1
+    short, long_ = (a, b) if la < lb else (b, a)
+    i = j = 0
+    diffs = 0
+    while i < len(short) and j < len(long_):
+        if short[i] != long_[j]:
+            diffs += 1
+            if diffs > 1:
+                return False
+            j += 1
+        else:
+            i += 1
+            j += 1
+    return True
 
 
 def _parse_time_interval(

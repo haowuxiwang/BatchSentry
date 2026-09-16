@@ -11,8 +11,23 @@ from core.rules.parsing import (
     _parse_time,
     _parse_time_interval,
 )
+from core.rules.year_vote import YearVote, build_year_vote
 
 logger = logging.getLogger(__name__)
+
+
+def _year_resolved(vote: YearVote, *years: int | None) -> str | None:
+    """若任一输入年份被投票归一，返回归一理由（否则 None）。
+
+    R3 降噪的公共闸门：`year_delta > 2` 的"异常"往往源于**同一次单字符年份
+    误读**（如 2015/2025 混淆），而非记录本身矛盾。此时按投票归一并**不发射**
+    该 finding —— 理由回传供调用方记录（不静默丢弃）。
+    """
+    for y in years:
+        _, reason = vote.resolve(y)
+        if reason:
+            return reason
+    return None
 
 
 
@@ -68,6 +83,8 @@ def _check_time_reversal_cross_page(pages: list[dict]) -> list[dict]:
     """
     findings = []
     ordered = []
+    vote = build_year_vote(pages)
+    year_resolutions: list[str] = []
     unparseable_times: list[tuple[int, str, str, str]] = []  # (page, step_no, operation, raw_time)
     for page in pages:
         pno = page["page"]
@@ -120,6 +137,12 @@ def _check_time_reversal_cross_page(pages: list[dict]) -> list[dict]:
         else:
             continue
         if year_delta > 2:
+            # R3：先做年份投票归一 —— 若该差异由"同一次单字符年份误读"造成
+            # （如 2015/2025），它就不是提取错误提示而是纯噪声：归一 + 不发射。
+            reason = _year_resolved(vote, curr["t_start"].year, prev["t_end"].year)
+            if reason:
+                year_resolutions.append(reason)
+                continue
             findings.append({
                 "page": curr["page"],
                 "type": "time_reversal",
@@ -160,6 +183,11 @@ def _check_time_reversal_cross_page(pages: list[dict]) -> list[dict]:
             "operator": "",
             "source": "rule",
         })
+    if year_resolutions:
+        logger.info(
+            f"R1-b 年份投票归一：抑制 {len(year_resolutions)} 条误读派生的 time_reversal "
+            f"（{year_resolutions[0]}）"
+        )
     return findings
 
 
@@ -183,7 +211,15 @@ def _step_sort_key(step_no) -> float:
 
 
 def _check_year_contradiction(pages: list[dict]) -> list[dict]:
+    """R2：同一事件类型内出现多个年份。
+
+    R3 降噪（交叉约束）：先用**全文档年份投票**把"单字符误读的少数读法"归一
+    （如 `[2015, 2025]` → `[2025]`），只有在归一后**仍剩 ≥2 个年份**时才发射
+    —— 即"禁止单选一个候选就生成 contradiction"（评审文档 §5 R3）。
+    """
     findings = []
+    vote = build_year_vote(pages)
+    normalized: list[str] = []
     for page in pages:
         eyg = page["event_year_groups"]
         if not eyg:
@@ -193,6 +229,17 @@ def _check_year_contradiction(pages: list[dict]) -> list[dict]:
             years = eyg.get(event_type) or []
             # de-dup but preserve multi-year signal
             uniq = sorted({int(y) for y in years if y is not None})
+            if len(uniq) <= 1:
+                continue
+            # R3：投票归一 —— 逐个年份过闸，被归一的记录理由、不进 `kept`。
+            kept: list[int] = []
+            for y in uniq:
+                _resolved, reason = vote.resolve(y)
+                if reason:
+                    normalized.append(f"第{pno}页 {event_type}: {reason}")
+                else:
+                    kept.append(y)
+            uniq = sorted(set(kept))
             if len(uniq) <= 1:
                 continue
             findings.append({
@@ -206,6 +253,11 @@ def _check_year_contradiction(pages: list[dict]) -> list[dict]:
                 "operator": "",
                 "source": "rule",
             })
+    if normalized:
+        logger.info(
+            f"R2 年份投票归一：{len(normalized)} 处单字符误读归入多数读法"
+            f"（{normalized[0]}）"
+        )
     return findings
 
 
@@ -266,6 +318,8 @@ def _collect_all_date_strings(page: dict) -> list[str]:
 
 def _check_signature_time_anomaly(pages: list[dict]) -> list[dict]:
     findings = []
+    vote = build_year_vote(pages)
+    year_resolutions: list[str] = []
     for page in pages:
         pno = page["page"]
         fb_date = page["page_info"].get("production_date")
@@ -291,6 +345,12 @@ def _check_signature_time_anomaly(pages: list[dict]) -> list[dict]:
                     # (e.g. 2015/2025), so the "earlier than" conclusion is
                     # too strong — flag it as an extraction hint instead.
                     year_delta = abs(iv_sig[0].year - iv_op[0].year)
+                    if year_delta > 2:
+                        # R3：同一次年份误读不得派生第二条 finding（归一 + 不发射）。
+                        reason = _year_resolved(vote, iv_sig[0].year, iv_op[0].year)
+                        if reason:
+                            year_resolutions.append(reason)
+                            continue
                     desc = (
                         f"第{pno}页 {sig.get('role','')} {sig.get('name','')} "
                         f"签名时间 {st} 早于操作时间 "
@@ -310,6 +370,11 @@ def _check_signature_time_anomaly(pages: list[dict]) -> list[dict]:
                         "operator": sig.get("name") or "",
                         "source": "rule",
                     })
+    if year_resolutions:
+        logger.info(
+            f"R5 年份投票归一：抑制 {len(year_resolutions)} 条误读派生的 "
+            f"signature_time_anomaly（{year_resolutions[0]}）"
+        )
     return findings
 
 
@@ -331,6 +396,8 @@ _ROLE_RANK = {
 
 def _check_signature_order(pages: list[dict]) -> list[dict]:
     findings = []
+    vote = build_year_vote(pages)
+    year_resolutions: list[str] = []
     for page in pages:
         pno = page["page"]
         fb_date = page["page_info"].get("production_date")
@@ -358,6 +425,12 @@ def _check_signature_order(pages: list[dict]) -> list[dict]:
                     continue
                 if _interval_before(curr[2], prev[2]):
                     year_delta = abs(curr[2][0].year - prev[2][0].year)
+                    if year_delta > 2:
+                        # R3：同一次年份误读不得派生第二条 finding（归一 + 不发射）。
+                        reason = _year_resolved(vote, curr[2][0].year, prev[2][0].year)
+                        if reason:
+                            year_resolutions.append(reason)
+                            continue
                     desc = (
                         f"第{pno}页 {curr[1].get('role','')} {curr[1].get('name','')} "
                         f"签名时间({curr[1].get('sign_time')}) 早于 "
@@ -383,6 +456,11 @@ def _check_signature_order(pages: list[dict]) -> list[dict]:
                         "operator": curr[1].get("name") or "",
                         "source": "rule",
                     })
+    if year_resolutions:
+        logger.info(
+            f"R9a 年份投票归一：抑制 {len(year_resolutions)} 条误读派生的 "
+            f"signature_time_anomaly（{year_resolutions[0]}）"
+        )
     return findings
 
 
