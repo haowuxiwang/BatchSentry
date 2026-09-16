@@ -316,6 +316,19 @@ The probe does NOT submit real OCR/LLM work — it just verifies auth + connecti
 
 ---
 
+## Repo hygiene & release discipline (agent 硬规矩, round-27)
+
+> 背景：dist-electron 六个变体目录 + 半成品版本号（APP_VERSION=1.1.5 vs package.json=1.1.4）迫使一次审查动用哈希比对/健康探测/时间线推理才能回答"哪个包可分发"。以下规则按"约定优先于流程"原则写定，每条都有既有机检或工具兜底，不新增重流程。
+
+1. **产物唯一入口**：可分发包只有 `dist-electron/win-unpacked/`。任何 `dist-electron-*` 变体都是过程产物或历史留存，**不是分发候选**；宣称"可分发"必须指向标准路径（或带 PROVENANCE.txt 的变体）。
+2. **变体必须带出身**：build.ps1 自愈到备用目录且归位失败时自动写 `PROVENANCE.txt`（HEAD/时间/版本/验证命令/清理命令）。人为留存历史版本 → 打包 zip 到 `release-archive/`（命名含版本+日期），不散放目录。
+3. **dist 收敛**：会话中产生/发现多余 dist* 目录时，收尾跑 `python scripts/clean_dist.py`（先 dry-run；`--apply` 走回收站）。它保留"最新且完整"的一个 + `dist/`（PyInstaller 输出是 electron-builder 的输入，不可删）。
+4. **版本提升原子性**：`main.APP_VERSION` / `package.json` / `package-lock.json` / CHANGELOG 必须同一提交改齐（`test_version_consistency.py` 机检）。**禁止在 WIP 里提前 bump 版本** —— 版本号只属于发布提交；门禁红了只允许"修完再发"，不允许跳过。
+5. **WIP 隔日必收敛**：未提交改动过夜 → 下次会话开工先 `git status`，读懂 WIP 再决定"续作收尾 / 拆分提交"，**不在 WIP 上叠加无关新需求**；提交前跑 `python scripts/release_gate.py --skip-tests`（秒级结构检查，含 worktree_clean）。
+6. **结论挂证据**：宣称"产物已验证"必须引用 devlogs 里对应日志文件名（e2e 驱动日志首行含 target exe 路径）；不引用日志的"全绿"口头结论视为未验证。
+
+---
+
 ## Subdirectories
 
 - `api/` — FastAPI routers (jobs/ package, review, report, settings/ package)

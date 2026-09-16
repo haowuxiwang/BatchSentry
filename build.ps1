@@ -363,6 +363,30 @@ if (-not $SkipElectron) {
     }
 
     # dir target produces win-unpacked/ folder (not a single exe)
+    # 3.2 变体目录留痕（round-27 卫生规则 R2）：凡最终产物不在标准路径
+    # dist-electron/win-unpacked（安全软件锁 app.asar 时自愈到带时间戳的
+    # 备用目录且归位失败），就地写 PROVENANCE.txt —— 出处（HEAD/时间/版本）
+    # + 收敛指引。没有出身的变体目录会被下一个会话当成"身份不明垃圾"，
+    # 判定成本（哈希比对/健康探测/时间线推理）远高于写这个文件的成本。
+    if ($finalUnpacked -ne $stdUnpacked) {
+        $gitHead = ""
+        try { $gitHead = (& git rev-parse --short HEAD) 2>$null } catch {}
+        $appVer = ""
+        try {
+            $appVer = (Select-String -Path "main.py" -Pattern 'APP_VERSION = "(.+)"').Matches[0].Groups[1].Value
+        } catch {}
+        $prov = Join-Path $finalUnpacked "PROVENANCE.txt"
+        @(
+            "fallback output: standard dist-electron was locked at build time"
+            "built_at: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+            "git_head: $gitHead"
+            "version:  $appVer"
+            "verify:   `$env:PBC_E2E_EXE = '<this dir>\resources\pbc-server\pbc-server.exe'; python tests/e2e_frozen.py"
+            "cleanup:  python scripts/clean_dist.py  (dry-run first; --apply sends to recycle bin)"
+        ) -join "`r`n" | Set-Content -Path $prov -Encoding UTF8
+        Write-Host "  [INFO] PROVENANCE.txt written to $prov" -ForegroundColor DarkGray
+    }
+
     $exePath = Join-Path $finalUnpacked "BatchSentry.exe"
     if (Test-Path $exePath) {
         $size = (Get-Item $exePath).Length / 1MB

@@ -61,6 +61,12 @@ cd d:\learn\claudecode\pharma-batch-checker
 
 ### 分发前检查清单
 
+> **分发入口唯一**：只分发 `dist-electron/win-unpacked/`。带 `PROVENANCE.txt` 的
+> `dist-electron-out-<时间戳>` 变体是构建自愈的产物（标准目录被安全软件占用时
+> 的落点），验证通过后用 `scripts/clean_dist.py` 归位或清理；历史版本一律打包
+> zip 存 `release-archive/`，不散放目录。详见 CLAUDE.md「仓库卫生与发布纪律」。
+
+
 ```powershell
 # 0. CSS 是否为最新（改动过 templates/ 或 static/*.js 就必须查）
 #    判法：重跑编译，git diff 必须为空 —— 若输出有差异，说明 app.css 曾过期，
