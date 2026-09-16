@@ -52,10 +52,16 @@ jobs:
       - name: 运行发布门禁
         run: python scripts/release_gate.py --fail-under 95
 
-      # 失败时把门禁报告与原始 pytest 输出带出来（门禁自己会落盘到 devlogs/，
-      # 该目录被 gitignore）。没有这个 artifact，CI 上只剩一行结论，无法回溯。
+      # 上传门禁报告与**全量** pytest 日志（`always()` 而非 `failure()`）。
+      #
+      # 为什么必须 always：CI 与本地跑到的用例数不同（本机有未入库的构建产物，
+      # `test_frozen_smoke` / `test_distribution_parity` / 真实 OCR 产物用例在干净检出上
+      # 只能 skip）。要回答"到底哪些没跑、为什么"，**唯一**的依据就是这份逐条日志。
+      # 只在失败时上传，就导致"CI 绿了 → 差异无法审计" —— 这个盲区是实际踩过的：
+      # 一次调查中拿到的 artifact 日志是**残缺**的（只解析出 1416/2237 条结果），
+      # 于是"44 个用例没跑"只能定位到 17 条 skip，剩下的无法归因。
       - name: 上传门禁报告
-        if: failure()
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: gate-report

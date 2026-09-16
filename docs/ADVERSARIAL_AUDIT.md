@@ -376,3 +376,60 @@ PY="C:/Users/WuSiTan/AppData/Local/Programs/Python/Python311/python.exe"
 
 > 真实轮次的库在 `%APPDATA%/PBC/data.db`（运行库，含 WAL）；`data/pharma.db` 是开发库。
 > **量测前先复制到临时目录**，避免对运行库做写操作。
+
+---
+
+## 13. CI 与干净检出的用例差异（精确清单，含一处未能钉死的残差）
+
+### 13.1 已钉死的部分：CI 上被 **skip 的 17 个**（两个独立提取结果一致）
+
+| 组 | 文件 | 条数 | 依赖 | 能否在 CI 上跑 |
+|---|---|---|---|---|
+| **A** | `tests/integration/test_frozen_smoke.py` | **8** | `dist/pbc-server.exe`（冻结产物） | ✅ **能** —— 前提是 CI 里先跑一次 PyInstaller 构建 |
+| **B** | `tests/unit/test_distribution_parity.py` | 3 | `dist-electron*` + 已构建输出 | ⚠️ 需要 Electron 打包（node_modules + electron-builder），CI 代价高 |
+| **C** | `test_regions_anchor.py`(4) + `test_region_anchor_wiring.py`(2) | 6 | 真实 Paddle/MinerU 产物 | ❌ **设计上不跑**（体积 + 数据敏感性，不入库）；上一轮已用**等形态合成数据**补了等价契约 |
+
+逐条（A/B/C）：
+
+```
+tests/integration/test_frozen_smoke.py
+  test_api_docs_served / test_db_created_in_appdata / test_health_ok
+  test_jobs_api_returns_paginated / test_review_page_route
+  test_settings_page_served / test_static_css_served / test_upload_page_served
+tests/unit/test_distribution_parity.py
+  test_latest_artifact_embeds_the_build_output_byte_for_byte
+  test_latest_build_is_complete / test_packaged_app_version_matches_app_version
+tests/unit/test_regions_anchor.py
+  test_real_artifact_reports_orientation_for_every_page
+  test_real_artifact_rotation_parity_matches_space_orientation
+  test_real_paddle_artifact_replays
+  test_real_rotated_page_landmarks_land_where_they_should
+tests/unit/test_region_anchor_wiring.py
+  test_real_mineru_artifact_replays / test_real_mineru_regions_anchor_a_real_finding
+```
+
+### 13.2 **未能钉死的残差（诚实声明）**
+
+CI run #3 报 `2250 passed`，同期本地 `2362 collected` → 差 **112**（含 17 skip）。
+要把差额逐条归因，唯一依据是**逐条 pytest 日志**。但手上那份 artifact
+（`gate_pytest_20260915_094323.log`，来自 run #2，当时 CI 为 2237 通过）**是残缺的**：
+只解析出 **1416** 条结果行（2237 应有多少条就有多少条），所以 per-file 对比不可信。
+
+→ **我不知道那 26（run #2 口径）具体是哪些用例。** 此前把它写成"属预期、不是缺陷"
+是**未经证实的**，本节据此更正。
+
+**已做的补救（本轮，2 行改动）**：`.github/workflows/ci.yml` 的上传步骤由
+`if: failure()` 改为 **`if: always()`** —— 绿了也上传。这样下一次 CI 的 artifact
+就是**全量逐条日志**，"哪些没跑、为什么"从此可审计。这是本次审查里少见的
+"改一行就永久消除一类盲区"的改动。
+
+### 13.3 让 A 组（8 条）真正在 CI 上跑的路径
+
+需要给 CI 加一个 job：装 PyInstaller → 跑 `build.ps1`（或直接 `pyinstaller pbc-server.spec`）
+→ 再跑 `tests/integration/test_frozen_smoke.py`。
+
+**本轮没有做，理由**：新增一个 CI job 属于"新增验证路径"，按本项目纪律必须由**一次真实
+CI 运行**证明它可用；而它的代价（PyInstaller 构建 + 依赖）与失败模式（构建锁、路径）
+都需要单独一轮调试。**先把它挂成待办，而不是提交一个未经运行验证的 workflow。**
+（这也正是本轮 CI 的教训：`ci.yml` 第一次跑就抓到了 cp1252 与干净检出覆盖率两个缺陷
+—— 未跑过的 CI 配置不能当作"已完成"。）
