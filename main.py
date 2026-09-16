@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 # Application version — single source of truth.
 # Avoids duplicate hardcoded "1.1.0" in FastAPI(app=...) and /health endpoint.
 # 与 package.json 的 version 必须一致（tests/unit/test_version_consistency.py 机检）。
-APP_VERSION = "1.1.3"
+APP_VERSION = "1.1.4"
 
 
 # Phase 5B: resolve resource paths under both dev and PyInstaller frozen mode.
@@ -374,6 +374,25 @@ async def settings_page(request: Request):
 @app.get("/health")
 async def health():
     return {"status": "ok", "version": APP_VERSION}
+
+
+@app.get("/api/health/watchdog")
+async def health_watchdog(request: Request):
+    """运行时看门狗的自述：存活 + 判定口径 + 最近一轮结论。
+
+    为什么必须单独暴露（`docs/RUNTIME_WATCHDOG.md` §8）：看门狗**自己挂掉**
+    比 job 卡死更糟 —— 用户会以为"有兜底"而不再手动重试。`last_scan_at`
+    停滞、或 `last_scan_error` 持续非空，就是巡检失效的证据。
+
+    与 `/health` 分开而不合并：`/health` 的返回体是探针（Electron 启动、
+    e2e harness）依赖的稳定契约，不为其增删字段。守卫口径与
+    `/api/health/downstream` 对齐（同属 `/api/health/*` 家族）。
+    """
+    from core.security import is_local_request
+    if not is_local_request(request):
+        raise HTTPException(403, "Forbidden (non-local request)")
+    from core.watchdog import status_snapshot
+    return status_snapshot()
 
 
 @app.post("/api/shutdown")
