@@ -9,6 +9,22 @@
 
 _（暂无 —— 下一版待记）_
 
+### 修复（仅 e2e 驱动 + 文档；**不影响已发布的 1.1.4 产物**）
+
+- **【中】e2e 护栏只取 findings 首页 ⇒ 判据下界失真**：`/api/jobs/{id}/findings` 默认
+  `limit=50`（钳制 200），driver 原先只取首页。实测 51 页真实 **314 条 / 14 类** 被打印成
+  "50 findings / 7 类"，`missing` 判定基于被截断分布；更糟的是 findings 从 314 掉到 60
+  依然 `ok` —— **护栏形同虚设**。改为按 offset 翻页取全量（按**实际返回条数**推进，兼容
+  服务端把 limit 钳小），并新增 `findings_declared_total` 完整性自检：取回数 ≠ 端点声明
+  total 即判本轮失败。护栏 20 条（`tests/unit/test_e2e_findings_paging.py`）。
+- **【中】`run_rot` 前置失败吞掉旋转测量**：原 `if not res.get("ok"): return res` 使
+  paddle→mineru failover 在判失败的同时把整段旋转测量一起吞掉，摘要里连 `rot_lost` 都没有，
+  读者会以为"旋转没问题"。改为**观测与断言分离**（仍测量并落 `rot_measured`/`rot_paths`/
+  `rot_lost`，只是不计入 `ok`）；`ok` 断言未放宽。
+- **文档**：`docs/PROJECT_PITFALLS.md` 新增 §十一（旋转自愈 forensic 定案：**非代码回归**，
+  是 Paddle 上游拥塞窗口的产物 —— 附同日健康/拥塞期天然对照实验，并记录一条被推翻的
+  假设"字段缺失 ≠ 闸门未触发，可能是设计语义"）与 §十二（上述两条护栏教训）。
+
 ---
 
 ## [1.1.4] — 2026-09-16
