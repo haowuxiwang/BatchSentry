@@ -123,6 +123,19 @@ def _is_picklable(fn) -> bool:
 _DEFAULT_TIMEOUT_S = float(os.getenv("PBC_CPU_TASK_TIMEOUT_S", "1800"))
 
 
+def cpu_task_timeout_seconds() -> float:
+    """单任务超时封顶的**只读**对外访问口（单一真值仍是 `_DEFAULT_TIMEOUT_S`）。
+
+    存在的理由：`core/watchdog.py` 的阈值必须压在"本地 CPU 重活"的封顶之上
+    —— 取消检查点只在 `run_cpu` **前后**（`stage1.py:49/54`），所以一个正在
+    规范化的大文档会合法地停在 `cancelling` 上长达这个封顶。看门狗若把阈值
+    设在它之下，就会把"用户已请求取消、正在等 Stage 0 收尾"的 job 判成停滞
+    并改成 `error` —— 破坏取消审计链（`engine.py` 的注释明确记录过这条：
+    "cancelled 被改成 error 会破坏取消审计链，通知也会重发"）。
+    """
+    return _DEFAULT_TIMEOUT_S
+
+
 def _recycle_pool(reason: str) -> None:
     """丢弃当前进程池并尽力终止其 worker（超时路径专用）。
 
