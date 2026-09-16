@@ -219,6 +219,18 @@
 - ⚠️ **`wait_health` 只看 HTTP 200、不校验响应者身份** → 端口被占时可能静默连上**旧实例**
   （与"测了 A 发了 B"同类）。已加 `_assert_port_free()` 启动门禁（端口被占直接失败，
   而不是连错服务）；`e2e_run.py` 的 `PORT`/`API` 统一由 `PBC_E2E_PORT` 派生。
+- ⚠️ **e2e 用固定端口 ⇒ 同一时刻只能跑一轮**：第二轮会撞上 `_assert_port_free()` 直接拒绝
+  （这是**特性**：防两轮互相污染）。实测 2026-09-16 抢跑被拦。**处置**：等端口释放后
+  **串行接力**（写个 watcher 轮询 `netstat` + 宿主 PID，释放即自动起下一轮），而不是抢跑或干等。
+- ⚠️ **判读进度别只看 `status`**（同类已踩多次，2026-09-16 再次踩到）：Stage 2 逐页 LLM
+  期间 `status` 一直停在 `analyzing`、且 **`ocr_progress.done` 是「OCR 回调计数」会落后于
+  实际落库数**（实测 `pages_ocr_done=51` 而 `ocr_progress.done=50`，差的 1 页是经**自愈**路径
+  恢复的，走 `self_heal_progress` 不递增 `ocr_progress`）。可靠判据：
+  - **页数维度** → `pages_ocr_done`（`COUNT(*) FROM page_cache`，精确单调）/ `pages_analyzed`；
+  - **实时维度** → 隔离 appdata 的 `PBC/logs/pipeline.log` 里
+    `Stage 2: Page N/51 analyzed (M done)` 与每页 `LLM done in Xms`（实测拥堵期 **53–132s/页**，
+    正常约 20–40s）→ 据此估算剩余时间，而不是怀疑卡死。
+  - **不要**用 `ocr_progress.done` 或 `status` 单独判"是否卡死"（会误判为永久停滞）。
 
 ## 六、产物目录 / 删除通道 / OCR 后端
 
