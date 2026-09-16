@@ -11,6 +11,95 @@ _（暂无 —— 下一版待记）_
 
 ---
 
+## [1.1.4] — 2026-09-16
+
+> 本版是 **看门狗实施后回审（第二轮回审）** 的修复版：v1.1.3 落地的 P1 看门狗
+> 自身还有 5 项缺陷（三项严重）。判定依据、量化证据与护栏见
+> `docs/RUNTIME_WATCHDOG.md` §8 —— 其中第 5 项是被第 2 项提炼出的**阈值不变式**
+> 顺带揪出来的。
+
+### 修复
+
+- **【严重】看门狗收敛只改状态、不终止孤儿 pipeline task** —— 会**由它自己**
+  造出一个永久无声的 `pending`：`run_pipeline` 用 per-job 锁串行同一 job，
+  而 `retry` 端点 `error → pending` 后就 `launch_pipeline`；孤儿仍持锁 →
+  retry 永远停在 `async with lock`（该等待点无任何上限），而 `pending` 按设计
+  不被监视 → 用户照着看门狗提示点"重试"，得到的是永远不动、也没有提示的 pending。
+  附带损害：孤儿继续写 `ocr_progress`/`last_activity_at`（UPDATE 不带状态条件）→
+  会刷新**重试轮**的心跳，可能掩盖重试轮真正的停滞。
+  修法：收敛后 `task.cancel()` + `asyncio.wait(10s)`，处置结论写进审计
+  （`orphan_task=cancelled|no-task|not-exited`）；终止与审计都在 `db_lock`
+  **之外**（pipeline 的 `CancelledError` 分支自己要 `transition_status` → 取同一把锁）。
+- **【严重】OCR 停滞阈值（1800s）低于上游自己的封顶（`POLL_TIMEOUT_MAX = 3600s`）**
+  → 会抢在上游超时之前把"上游还在正常等待"判成停滞。量化：空页自愈**逐页**写心跳，
+  心跳缺口上界 = 单页补救 = 3 个候选角 × 单页探测封顶 630s ≈ 1890s + 重分析 ≈ 2100s；
+  旧阈值对 1 页文档只有 1920s（**低于合法上界**）、对 4 页 2280s（余量 8.6%）。
+  修法：基准改为 `POLL_TIMEOUT_MAX + 600 = 4200s`，并把"基准 ≥ 上游封顶"写成
+  **不变式** —— 护栏 `TestThresholdsAboveUpstreamCaps` 从真值源推导（ocr_client /
+  procpool / LLM 适配器 / 旋转候选角数），不重复字面数字。
+- **【严重】`cancelling` 阈值（900s）低于它要等的封顶（CPU 重活超时 1800s）**
+  —— 取消检查点只在 `run_cpu` **前后**（`stage1.py:49/54`），所以正在 Stage 0
+  规范化的大文档被取消后会合法地停在 `cancelling` 直到收尾；阈值低于该封顶时
+  看门狗会把"**已请求取消、正在正常收尾**"的 job 改成 `error`，而 `engine.py`
+  明确禁止覆盖取消语义（"cancelled 被改成 error 会破坏取消审计链，通知也会重发"）。
+  修法：基准 = `procpool.cpu_task_timeout_seconds()` + 600 = **2400s**。
+  同时记录一条**固有上限**（非缺陷）：取消的响应性受限于本地 CPU 重活的封顶
+  —— 进程池隔离决定了 `run_cpu` 跑到一半无法被打断。
+- **【中】"被接管的 pending"不可见** —— 补一条收窄规则：`pending` 只在
+  `_pipeline_tasks` 里有未完成 task 时才纳入判定（上传/重试都是"先写 `pending`、
+  紧接着 `launch_pipeline`"，中间只有毫秒级窗口，把过渡态当停滞会误杀刚上传的任务），
+  阈值 900s。⚠️ 同时更正判据文案：`MAX_CONCURRENT_JOBS` 达上限时是**直接 409 拒绝**
+  而**不是排队**，所以运行期**根本不存在**"排队等槽位"的 pending ——
+  原判据把它写成"合法排队态"与代码不符（结论不变：仍不默认监视）。
+- **【中】e2e 轮次预算写死单值，两次把真实长跑判成失败**（2026-09-04 rot 620s>600s
+  误杀；2026-09-16 pdf 835s>600s 判超时，该 job 随后正常进 `review`）。修法：
+  预算 = 「基线 + 每页 × 页数」，斜率按各轮实测每页成本取 —— pdf 1980s@6 页、
+  rot 2400s@4 页、real 7920s@51 页；页数读不出时按 51 页保守回退；
+  `E2E_*_TIMEOUT` 仍可覆盖。
+
+### 新增
+
+- **`GET /api/health/watchdog`** —— 看门狗自身的可观测性（存活 `running` /
+  `last_scan_at` / `last_scan_error`、判定口径 `stall_limits_s` / `per_page_s` /
+  `ocr_upstream_cap_s`、最近一轮 `last_stalled_found` / `last_recovered`）。
+  看门狗自己挂掉比 job 卡死更糟（用户会以为有兜底），故存活必须可查。
+  **不并入 `/health`**：后者是 Electron 启动与 e2e harness 依赖的稳定探针契约。
+- **护栏**：`tests/unit/test_watchdog.py` 39 → 55 条
+  （`TestThresholdsAboveUpstreamCaps` / `TestOrphanTaskTermination` /
+  `TestPendingTakeover` / `TestStatusSnapshot`）；
+  `tests/unit/test_e2e_round_budget.py`（18 条，含"不得再写死默认预算"的静态检查）；
+  `/api/health/watchdog` 路由用例 3 条。
+
+### 变更
+
+- 版本号 1.1.3 → **1.1.4**（5 处：`main.APP_VERSION` / `package.json` /
+  `package-lock.json` 顶层 + `packages[""]` / `PORTABLE_README.txt`）。
+
+### 验证（本版实测）
+
+- **全量回归**：`2464 passed / 0 failed`（`tests/unit` + `tests/integration`，202.78s，
+  0 skipped）—— 新增 55 条看门狗护栏 + 18 条预算护栏 + 3 条健康端点用例全部生效。
+- **构建**：PyInstaller `dist/pbc-server/pbc-server.exe` = 20,314,177 B；
+  Electron `dist-electron-out-20260916-115142/win-unpacked/BatchSentry.exe` = 188,784,128 B。
+- **产物冒烟**（只有产物才暴露的断言）：
+  - `/health` 的 `version` == 源码 `main.APP_VERSION`（**从源码读，不硬编码**）；
+  - `/api/health/watchdog` 可达 ⇒ 证明 **lifespan 里延迟导入的 `core.watchdog`
+    真的被打进包**（PyInstaller 静态分析抓不到延迟导入）；
+  - **阈值不变式在产物上再复核一次**（不硬编码任何常量，直接比对端点自述的两个数）：
+    `invariant ok: ocr_running=4200.0 >= ocr_upstream_cap_s=3600.0`、
+    `invariant ok: cancelling=2400.0 >= cpu_task_cap_s=1800.0`。
+  - ⚠️ 该冒烟脚本首版用**字符串匹配**序列化 JSON（`'"enabled": true'` vs 实际
+    `"enabled":true`）→ **产物完全正确却报失败**、把构建挡在 Step 2.5。已改为
+    `json.loads` 后断言结构（教训见 `docs/PROJECT_PITFALLS.md`）。
+- **分发一致性** `tests/unit/test_distribution_parity.py` **13/13 通过**：
+  最新构建目录完整、内嵌产物与 `dist/` **逐字节一致**、asar 版本 == 1.1.4、
+  `PORTABLE_README.txt` 版本同步、`extraResources` 确实内嵌 PyInstaller 输出。
+- **真实 51 页端到端**（`e2e_run.py --rounds pdf,real`，直接指向
+  `win-unpacked/resources/pbc-server/pbc-server.exe`，即**要分发的那份**）
+  —— 结果见本文件同日的运行记录 / `devlogs/`。
+
+---
+
 ## [1.1.3] — 2026-09-16
 
 > 本版是 **R1–R3 降噪 + 运行时看门狗 + 构建物重出** 的合并版：产物此前停留在
@@ -29,11 +118,17 @@ _（暂无 —— 下一版待记）_
     而 `CURRENT_TIMESTAMP` 是 UTC，与全库 localtime 口径冲突 → 由代码统一写入。
   - `last_activity_at IS NULL` / 时间戳不可解析 → **一律跳过**（不可判定就不判，
     绝不用 `created_at` 兜底 —— 那会误杀正常跑很久的大文档）。
-  - **`pending` 不在监视范围**：运行期间它是合法排队态（`MAX_CONCURRENT_JOBS`），
-    当停滞会误杀用户排队的上传；崩掉的 pending 由启动恢复兜底。
+  - **`pending` 不在监视范围**：运行期间它是"已建单、pipeline 尚未推进"的过渡态
+    （上传/重试先写 `pending` 再立刻 `launch_pipeline`），当停滞会误杀刚上传的任务；
+    崩掉的 pending 由启动恢复兜底。
+    ⚠️ 本行原文写作"合法排队态（`MAX_CONCURRENT_JOBS`）"，**与代码不符** ——
+    达上限时是直接 409 拒绝而非排队，运行期不存在排队态；已在 [1.1.4] 更正
+    （本行保留原值以记录当时的决策）。
   - 阈值按状态分级且刻意宽松（OCR 1800s + 120s/页 封顶 3h；逐页 LLM 1800s +
     180s/页 封顶 3h；`ocr_done` 1800s；`cancelling` 900s），`PBC_WATCHDOG_SCALE`
     可整体缩放。依据是实测基准（51 页 OCR 644s、逐页 LLM 825–1209s）。
+    ⚠️ 其中 OCR 基准 1800s **低于上游封顶**，已在 [1.1.4] 修正为 4200s ——
+    参见该版"修复"第 2 条（本行保留原值以记录当时的决策）。
   - 开关 `PBC_WATCHDOG_ENABLED` / 周期 `PBC_WATCHDOG_INTERVAL_S`。
   - 收敛动作与启动恢复一致：条件 `UPDATE ... WHERE status = ?`（防并发改写）+ 审计
     `watchdog_stall_recovery` + 锁外飞书通知。扫描异常**绝不退出循环**（看门狗自己

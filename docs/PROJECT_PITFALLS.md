@@ -133,6 +133,56 @@
      迁移但 `PRAGMA user_version` 仍置 12 → **静默 schema 漂移**（看门狗永久失明）。
      护栏 `test_every_migration_version_has_its_own_guard`（正则校验每个版本都有配对守卫 + 调用）。
 
+### 四之二、看门狗**实施后回审**（v1.1.4，2 项严重缺陷；完整版见 `docs/RUNTIME_WATCHDOG.md` §8）
+
+- 🔴 **收敛必须同时终止孤儿 task**：只改状态不够。`run_pipeline` 用 **per-job 锁**串行同一
+  job，`retry` 端点 `error → pending` 后 `launch_pipeline` → 孤儿仍持锁则 retry **永远**
+  卡在 `async with lock`（无上限），而 `pending` **不被监视** → **看门狗自己的恢复动作
+  造出了它本要消灭的状态**（用户照提示点重试，得到永久无声的 pending）。
+  启动恢复无此问题（那时没有活 task）→ 只在运行期暴露。
+  - 附带：孤儿还会写 `ocr_progress`/`last_activity_at`/`page_cache`（**不带状态条件**）
+    → 刷新**重试轮**心跳、可能掩盖其真实停滞。
+  - 顺序两条：终止/审计在 `db_lock` **外**（pipeline 的 `CancelledError` 分支自己要
+    `transition_status` → 取同一把锁）；状态 UPDATE **先于**终止（否则 pipeline 先落
+    通用 error，带 `status=?` 的 UPDATE 影响 0 行 → 判定与审计丢失）。
+- 🔴 **阈值不变式：基准必须 ≥ 它覆盖的上游调用自己的封顶**，否则会抢在上游超时前
+  把"上游还在正常等待"判成停滞。OCR 基准 1800 < `POLL_TIMEOUT_MAX` **3600** 就是实例。
+  量化：自愈**逐页**写心跳 → 缺口上界 = 单页补救 = 3 候选角 × 630s ≈ 1890 + 重分析 ≈ **2100s**；
+  旧值 1 页文档仅 1920s（低于上界）。现为 `3600 + 600 = 4200s`。
+  护栏从真值源**推导**（ocr_client / procpool / `LLMAdapter.chat` timeout / 候选角数），不重复字面数字。
+- 🔴 **同一条不变式揪出的第三个**：`cancelling` 基准 900 < CPU 重活封顶 **1800**
+  （取消检查点只在 `run_cpu` **前后**，`stage1.py:49/:54`）→ 会把"已请求取消、正在收尾"
+  的 job 从 `cancelled` 改成 `error`，破坏取消审计链（`engine.py` 明确禁止）。
+  现为 `cpu_task_timeout_seconds() + 600 = 2400s`。
+  **固有上限（非缺陷）**：取消响应性 ≤ CPU 重活封顶 —— 进程池隔离下 `run_cpu` 无法被打断。
+- ⚠️ **`pending` 的唯一例外**：仅在 `_pipeline_tasks` 里**有未完成 task** 时纳入判定
+  （上传/重试都是"先写 pending 再立刻 launch"；既不是排队也不是注册表为空）。
+  阈值 900s。⚠️ `MAX_CONCURRENT_JOBS` 是**拒绝**（409）不是排队 —— 别再把 pending 说成"排队态"。
+- **可观测性**：`GET /api/health/watchdog`（**不并入 `/health`** —— 那是探针契约）。
+  看门狗自己挂掉比 job 卡死更糟（用户以为有兜底）→ `last_scan_at` 停滞即失效证据。
+- ⚠️ **e2e 轮次预算不许写死单值**（同类缺陷已犯两次：09-04 rot 620s>600s 误杀；
+  09-16 pdf 835s>600s 判超时而该 job 随后正常进 `review`）。用「基线 + 每页 × 页数」。
+- ⚠️ **同一文件的多处 Edit 不能并行发**：三条 Edit 同批发出时后写入覆盖前写入，
+  却**都报成功**（实测只生效 1 条）。改同文件必须**逐条**发、改完复查。
+- ⚠️ **改 Round 段落别把标题当 `old_string`**：会整体吃掉标题（Round 15 已被吃两次，
+  第二次是 2026-09-16）。改完立刻 `grep -c` 校验标题数。
+- 🔴 **护栏禁止断言"序列化后的字符"，必须 `json.loads` 后断言结构**（2026-09-16 实测）：
+  构建冒烟脚本写 `'"enabled": true' in body.replace(" ", " ")`，而真实响应是紧凑
+  JSON `"enabled":true` → **产物完全正确却报 "watchdog 未启用"**，把构建挡在 Step 2.5。
+  （`.replace(" ", " ")` 这种"归一化"还等于没归一化。）同类：字符串里找 `": true"` /
+  `"ok"` 之类。**判据**：断言里出现引号包字段名 + 冒号，基本就是错的。
+- ✅ **阈值不变式要在"发出去的那份"上再复核一次**：`/api/health/watchdog` 同时回传
+  `stall_limits_s` 与上游封顶 `ocr_upstream_cap_s`/`cpu_task_cap_s`，冒烟即可
+  **不硬编码任何常量**地断言 `阈值 ≥ 上游封顶`（见 `docs/RUNTIME_WATCHDOG.md` §8.8）。
+- ⚠️ **看门狗里有界但无显式超时的等待**（回审时刻意保留，2026-09-16）：
+  ① `await notify_job` —— 全仓 **5 处调用点全部 await 且无超时**（`engine.py`/`stage3.py`/
+  `state.py`/`watchdog.py`），是**项目级取舍**；其自身上限可算（`_MAX_RETRIES=3` ×
+  (5s HTTP + 30s 速率钳制) × 3 阶段 ≈ **330s**），**不会永久堵住巡检** → 不在看门狗
+  单点加 `wait_for`（会造出不一致的特例 + 一个 ~930s 的无意义魔数）。
+  ② `async with db_lock` —— **刻意不加上限**：加超时 = 超时即静默跳过恢复（看门狗
+  退化成 no-op），而保留则可借 `last_scan_at` 停推**看见**它 → "可观测的等待"
+  优于"不可见的静默"。若将来调大 `_MAX_RETRIES` 或去掉 30s 钳制，回来复核 ①。
+
 ## 五、构建 / 冻结 e2e（实测坑）
 
 - 入口 `.\build.ps1`（真实 PS）；PS 5.1 **stdout 不捕获** → `*> <日志>` 后 Read。
