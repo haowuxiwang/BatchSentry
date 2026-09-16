@@ -8,7 +8,7 @@ Rounds:
   img         — upload test1.jpg (image->pdf conversion path)
   mineru      — re-upload e2e_test.pdf with mineru backend (dual-engine)
   real        — 丝裂霉素提取批记录.pdf (real handwriting, paddle primary; per-page
-                sparse detection <40 chars + REAL_TIMEOUT_S budget)
+                sparse detection <40 chars + baseline+per-page budget)
   real-mineru — same real pdf with mineru backend (dual-engine completeness)
   cancel      — upload then cancel immediately (OCRCancelled abort semantics;
                 asserts terminal=cancelled within 180s)
@@ -44,9 +44,9 @@ API = f"http://127.0.0.1:{PORT}"
 
 # 大文档轮次预算：51 页 Stage 2 在上游 LLM 拥堵日（硅基流动单页排队
 # 500-1000s 实测）需要 45-60min，旧固定 2400s 曾在 40/51 页处误杀整轮
-# （driver finally 终止 exe）— 默认 90min，可用 E2E_REAL_TIMEOUT 覆盖。
-REAL_TIMEOUT_S = int(os.environ.get("E2E_REAL_TIMEOUT", "5400"))
-
+# （driver finally 终止 exe）。**现在不再写死单值** —— 由
+# `_round_budget_s(path, "real")` 按"基线 + 每页"算（见该函数说明），
+# `E2E_REAL_TIMEOUT` 仍可显式覆盖。
 _TERMINAL = ("review", "partial_review", "error", "cancelled")
 
 
@@ -302,7 +302,7 @@ def main():
                     results["real"] = run_upload(
                         c, os.environ.get("E2E_PDF", "丝裂霉素提取批记录.pdf"),
                         "application/pdf", expect_types=[], force=True,
-                        timeout_s=REAL_TIMEOUT_S, page_chars=True,
+                        page_chars=True, budget_kind="real",
                         expect_backend="paddle")
                 elif rnd == "real-mineru":
                     # same real pdf with mineru backend (dual-engine completeness)
@@ -311,7 +311,7 @@ def main():
                     results["real-mineru"] = run_upload(
                         c, os.environ.get("E2E_PDF", "丝裂霉素提取批记录.pdf"),
                         "application/pdf", expect_types=[], force=True,
-                        timeout_s=REAL_TIMEOUT_S, page_chars=True,
+                        page_chars=True, budget_kind="real",
                         expect_backend="mineru")
                 elif rnd == "cancel":
                     # cancel-during-OCR: OCRCancelled abort semantics (frozen exe)
@@ -333,7 +333,6 @@ def main():
                     r = c.post(f"{API}/api/settings", json={"ocr_backend": "paddle"})
                     print(f"[e2e] switch to paddle -> {r.status_code}")
                     results["rot"] = run_rot(c, "e2e_rot.pdf",
-                                             timeout_s=_ROT_TIMEOUT_S,
                                              expect_backend="paddle")
                 elif rnd == "robust":
                     # M3 尺寸鲁棒性：合成样本 + "不得静默标记成功"断言
@@ -356,21 +355,64 @@ def main():
         print("[e2e] exe stopped")
 
 
-# 常规轮预算：默认 600s；上游 LLM 拥堵日单页排队可达数分钟
-# （2026-09-02 实测 img 轮 1 页 482s），可用 E2E_PDF_TIMEOUT 覆盖。
-_PDF_TIMEOUT_S = int(os.environ.get("E2E_PDF_TIMEOUT", "600"))
+def _pdf_page_count(path: str) -> int:
+    """PDF 页数（用于把轮次预算表达成"基线 + 每页"）。判不出来返回 0。"""
+    try:
+        import fitz
 
-# rot 轮专用预算：旋转自愈链固有成本远超常规轮 —— 初始 OCR + 空页切片
-# 自愈（两轮上游重提交）+ 逐页逐角度旋转探测（每页最多 2 角 × 2 重试，
-# 每次探测都是完整上游 OCR 任务 submit+poll，实测单轮总耗时 620s+
-# （2026-09-04 冻结版 e2e：job 620s 超默认 600s 预算 20s 被误杀，
-# 旋转证据本身完整 — 两页 90° 恢复、标记可见、审计落库）。默认 1200s，
-# 可用 E2E_ROT_TIMEOUT 覆盖。
-_ROT_TIMEOUT_S = int(os.environ.get("E2E_ROT_TIMEOUT", "1200"))
+        with fitz.open(path) as doc:
+            return int(doc.page_count)
+    except Exception as e:      # 文件缺失/损坏 → 由调用方走保守回退
+        print(f"[e2e] WARN 读取页数失败 {path}: {e}")
+        return 0
+
+
+# 轮次预算 = 基线 + 每页 × 页数。斜率按**该轮实测每页成本**取，全部大于观测值。
+#
+# 为什么不再写死单值（同类缺陷已犯两次）：
+#   - 2026-09-04 rot 轮 620s > 默认 600s，被误杀 20s；
+#   - 2026-09-16 pdf 轮 835s > 默认 600s，被判超时（该 job 之后正常进了 review）。
+# 固定值对小文档太紧、对大文档太松，必须随页数走。这套"基线 + 每页"的
+# 表达与 `core/watchdog.py` 的阈值同一思路（那边是产品侧，这边是测试侧）。
+#
+# 实测参照（冻结产物，见 docs/ADVERSARIAL_AUDIT.md §5）：
+#   pdf  835s / 6 页  ≈ 139s/页（含空页自愈）
+#   rot 1031s / 4 页  ≈ 258s/页（每页最多 3 次完整上游 OCR 旋转探测）
+#   real ~1975s / 51 页 ≈ 39s/页
+_ROUND_BUDGETS = {
+    "pdf": (900, 180),
+    "rot": (1200, 300),
+    "real": (1800, 120),
+}
+_ROUND_ENV = {
+    "pdf": "E2E_PDF_TIMEOUT",
+    "rot": "E2E_ROT_TIMEOUT",
+    "real": "E2E_REAL_TIMEOUT",
+}
+# 页数读不出来时的保守回退：按本项目实测最大真实件（51 页）算 ——
+# 宁可多等，也不要把一次真实长跑误判成失败（误判比慢更贵）。
+_UNKNOWN_PAGE_FALLBACK = 51
+
+
+def _round_budget_s(path: str, kind: str) -> int:
+    """该轮的终态等待预算（秒）。`E2E_*_TIMEOUT` 显式设置时优先。"""
+    override = os.environ.get(_ROUND_ENV[kind])
+    if override:
+        try:
+            return int(override)
+        except ValueError:
+            print(f"[e2e] WARN {_ROUND_ENV[kind]}={override!r} 非整数，改用公式预算")
+    base, per_page = _ROUND_BUDGETS[kind]
+    pages = _pdf_page_count(path) or _UNKNOWN_PAGE_FALLBACK
+    return base + per_page * pages
+
+
+# 轮次预算一律由 `_round_budget_s(path, kind)` 按"基线 + 每页"计算；
+# 显式 `timeout_s` 传参仍然优先（个别轮次需要特殊预算时用）。
 
 
 def run_upload(c, path, mime, expect_types, force, timeout_s=None, page_chars=False,
-               expect_backend=None):
+               expect_backend=None, budget_kind="pdf"):
     """上传 → 跑到终态 → 汇总证据。
 
     ``expect_backend``：断言 ``jobs.ocr_backend_used`` 等于该值。
@@ -379,9 +421,12 @@ def run_upload(c, path, mime, expect_types, force, timeout_s=None, page_chars=Fa
     ``_get_ocr_chain``）：Paddle 上游返回 10010「任务提交队列已满」时，
     整轮会静默改用 MinerU，而终态仍是 ``review`` —— 不校验后端就会把
     一次"用 Paddle 跑"的结论记成通过（2026-09-15 实测踩到）。
+
+    ``budget_kind``：``timeout_s`` 未显式给出时，用它选 `_ROUND_BUDGETS`
+    里的斜率（``pdf`` / ``rot`` / ``real``）。
     """
     if timeout_s is None:
-        timeout_s = _PDF_TIMEOUT_S
+        timeout_s = _round_budget_s(path, budget_kind)
     t0 = time.time()
     with open(path, "rb") as f:
         files = {"file": (path, f, mime)}
@@ -559,6 +604,8 @@ def run_rot(c, path, mime="application/pdf", timeout_s=None, expect_backend=None
     可见；自愈路径额外断言 rotation_deg 落库与审计可追溯。p1 批号基准
     （B2025001）同页可见性一并校验（对照页未受旋转污染）。
     """
+    if timeout_s is None:
+        timeout_s = _round_budget_s(path, "rot")
     res = run_upload(c, path, mime, expect_types=[], force=True,
                      timeout_s=timeout_s, expect_backend=expect_backend)
     job_id = res.get("job_id")
