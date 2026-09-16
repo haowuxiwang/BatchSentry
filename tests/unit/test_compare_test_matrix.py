@@ -64,6 +64,23 @@ class TestParseCollect:
         text = "tests\\unit\\test_a.py::test_x\r\n"
         assert ctm.parse_collect(text) == {"tests/unit/test_a.py::test_x"}
 
+    def test_keeps_unicode_escapes_in_param_ids(self):
+        """参数化 id 里的 `\\uXXXX` 是**转义**，不是路径分隔符 —— 不许被改写。
+
+        这两个坑都是**自验时抓到的**：拿"本地 junit vs 本地 collect 应当完全一致"
+        当自检，结果发现同一批用例同时出现在"只在本地"与"只在 CI"两个差集里。
+        根因是此处曾把反斜杠一律换成 `/`，`[exc1-\\u8bbf\\u95ee]` 被改成
+        `[exc1-/u8bbf/u95ee]`，而 junit 侧（`_junit_nodeid`）不做替换。
+        """
+        line = r"tests/unit/test_a.py::T::test_m[exc1-\u8bbf\u95ee\u88ab\u62d2\u7edd]"
+        assert ctm.parse_collect(line + "\n") == {line}
+
+    def test_keeps_param_ids_containing_spaces(self):
+        """参数化 id **可以含空格**（`[step_no=1 operator=空-operator]`）——
+        尾部用 `[^\\s]+` 会把这些用例整条丢弃，并假造成"只被 CI 收集"。"""
+        line = "tests/unit/test_a.py::T::test_m[step_no=1 operator=\u7a7a-operator]"
+        assert ctm.parse_collect(line + "\n") == {line}
+
     def test_empty_input(self):
         assert ctm.parse_collect("") == set()
 

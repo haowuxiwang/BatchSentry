@@ -33,9 +33,18 @@ from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
-# `pytest --collect-only -q` 的用例行：`path/to/test_x.py` 或 `...py::Cls::test_m`。
-# 汇总行（`2362 tests collected in 12.34s`）与百分比行都不以 `.py` 结尾 → 天然被排除。
-_COLLECT_LINE = re.compile(r"^[A-Za-z0-9_./\\-]+\.py(?:::[^\s]+)?$")
+# `pytest --collect-only -q` 的用例行：`path/to/test_x.py` 或 `...py::Cls::test_m[参数]`。
+# 汇总行（`2382 tests collected in 3.81s`）不以 `.py` 结尾 → 天然被排除。
+#
+# ⚠️ 两处**实测踩过的坑**（靠"本地 junit vs 本地 collect 应完全一致"这条自检抓到）：
+#  ① 参数化 id **可以含空格**（`[step_no=1 operator=空-operator]`）→ 尾部不能用
+#     `[^\s]+`，否则这些用例被丢弃、并被假造成"只被 CI 收集"。
+#  ② 非 ASCII 参数在 nodeid 里是 **`\uXXXX` 转义**
+#     （`[exc1-\u8bbf\u95ee\u88ab\u62d2\u7edd]`）—— 这**不是**路径分隔符！曾在此处把
+#     反斜杠一律替换成 `/`，于是 id 变成 `[exc1-/u8bbf/u95ee...]`，与 junit 侧
+#     （`_junit_nodeid` 不做替换）对不上 → **同一批用例同时出现在两个差集里**。
+#     正解：只归一化 `::` **之前**的路径段。
+_COLLECT_LINE = re.compile(r"^[A-Za-z0-9_./\\-]+\.py(?:::.*)?$")
 
 
 def _load_release_gate():
@@ -55,7 +64,10 @@ def parse_collect(text: str) -> set[str]:
     for line in text.splitlines():
         s = line.strip().rstrip("\r")
         if s and _COLLECT_LINE.match(s):
-            ids.add(s.replace("\\", "/"))
+            # 只归一化**路径段**（`::` 之前）的分隔符；参数段原样保留 ——
+            # 参数里可能出现 `\uXXXX`，那不是路径分隔符（见上方注释 ②）。
+            head, sep, tail = s.partition("::")
+            ids.add(head.replace("\\", "/") + sep + tail)
     return ids
 
 
