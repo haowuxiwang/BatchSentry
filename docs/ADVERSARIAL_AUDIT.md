@@ -418,10 +418,46 @@ CI run #3 报 `2250 passed`，同期本地 `2362 collected` → 差 **112**（�
 → **我不知道那 26（run #2 口径）具体是哪些用例。** 此前把它写成"属预期、不是缺陷"
 是**未经证实的**，本节据此更正。
 
-**已做的补救（本轮，2 行改动）**：`.github/workflows/ci.yml` 的上传步骤由
-`if: failure()` 改为 **`if: always()`** —— 绿了也上传。这样下一次 CI 的 artifact
-就是**全量逐条日志**，"哪些没跑、为什么"从此可审计。这是本次审查里少见的
-"改一行就永久消除一类盲区"的改动。
+**补救（两步；第 2 步才是真正止血的那一步）**：
+
+1. `.github/workflows/ci.yml` 上传步骤由 `if: failure()` 改为 **`if: always()`**
+   —— 绿了也上传。不这么做，**成功时连 artifact 都没有**（run #3 实测：该步骤
+   结论是 `skipped`，"上传门禁报告"这一栏根本不存在）。
+2. **但只改 ① 不够** —— 传出来的仍是**残缺的 stdout 文本日志**（不含逐条 nodeid）。
+   真正的根因是：门禁跑 pytest 带 `-o addopts=-q`，stdout 上**只有点和汇总**；逐条
+   事实源是 junit XML，而它落在 `tempfile.gettempdir()`（CI 上是 `D:\a\_temp\`）
+   —— 随 runner 一起消失，也不在 artifact 上传列表里。
+   → 修法：门禁把 junit XML **另存一份到 `devlogs/gate_junit_<stamp>.xml`**
+   （字节级复制，路径写进报告 `detail`），CI 的 artifact 列表补上该 glob。
+   护栏 `tests/unit/test_release_gate.py::TestJunitAuditTrail`（4 例），其中一条是
+   **跨文件契约**：`ci.yml` 必须同时含 `devlogs/gate_junit_*.xml` 与 `if: always()`
+   —— 少了任一半，门禁写出来的副本都传不出 CI，盲区原样保留。
+
+**于是"44 个用例"从此可核对**：下一次 CI 的 artifact 里就有逐条用例清单，把 CI 的
+junit 与本地 `--collect-only` 做**集合差**即可逐条归因，不再依赖残缺日志的行数猜测。
+
+```bash
+# ① CI 侧：从 artifact（gate-report）里取 gate_junit_<stamp>.xml
+# ② 本地侧：现场 collect，交给工具做集合差
+PY="C:/Users/WuSiTan/AppData/Local/Programs/Python/Python311/python.exe"
+"$PY" -m pytest tests --collect-only -q -o addopts="" -p no:cacheprovider \
+    > /tmp/local_ids.txt
+"$PY" scripts/compare_test_matrix.py \
+    --ci-junit <下载的 gate_junit_xxx.xml> --local-collect /tmp/local_ids.txt
+```
+
+`scripts/compare_test_matrix.py` 把这个对比固化下来，**复用** `release_gate._junit_nodeid`
+做 nodeid 还原（不复制第二套口径 —— 同一事实只能有一处真值）：
+
+- 输出"只被本地收集"与"只被 CI 收集"两组，按文件聚合（"整文件缺失"一眼可见）；
+- 单独给出 CI 侧 `skipped` 计数并说明**为什么它不等于"没跑"**：junit 里 skip 的用例
+  **仍在**（`<testcase><skipped/></testcase>`），所以"只被本地收集"才是真正的
+  "CI 上不存在"，skip 数只用于对账；
+- 退出码 1 = 两侧有差异，便于把"差异必须被解释"接进流程。
+
+护栏 `tests/unit/test_compare_test_matrix.py`（16 例），其中三条锁"口径唯一"
+（必须加载 release_gate、不得在本脚本里重现 `_junit_nodeid`），并专门测了
+**CRLF 输入**（Windows 的 `--collect-only` 输出是 CRLF，裸 `grep`/`comm` 会失真）。
 
 ### 13.3 让 A 组（8 条）真正在 CI 上跑的路径
 

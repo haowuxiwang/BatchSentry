@@ -56,6 +56,25 @@
     14 行** —— 全是真实产物用例永远走不到的畸形输入分支。
   - **这类缺陷的护栏就是 CI 本身**：此前门禁只在本机跑，所以"95% 只在本机成立"
     一直没被发现。workflow 落地后第一次跑就抓到了，这正是「提交即验证」的价值。
+- **CI 上"到底跑了哪些用例"不可查证（T0.5，根因在门禁的落盘位置）**：要回答"CI 与本地
+  差哪些用例、为什么"，唯一依据是**逐条**用例清单。实测发现两层障碍：
+  - **第一层**：`.github/workflows/ci.yml` 的上传步骤写作 `if: failure()` —— CI 成功时该
+    步骤直接 `skipped`，**连 artifact 都没有**（run #3 实测：步骤结论 = `skipped`）。
+  - **第二层（真正的根因）**：即便改成 `always()`，传出来的也只有**残缺的 stdout 文本
+    日志**。因为门禁跑 pytest 带 `-o addopts=-q`，stdout 上**只有点和汇总、没有逐条
+    nodeid**；逐条事实源是 junit XML，而它写在 `tempfile.gettempdir()`（CI 上是
+    `D:\a\_temp\`）—— 随 runner 一起消失，也不在 artifact 上传列表里。
+  - **后果**：一次"44 个用例没跑"的调查只能钉死 17 条 skip（三个文件），其余无法归因。
+    此前文档把它写成"属预期、不是缺陷"是**未经证实**的，已更正（见
+    `docs/ADVERSARIAL_AUDIT.md` §13.2）。
+  - **修法**：门禁把 junit XML **另存一份到 `devlogs/gate_junit_<stamp>.xml`**（字节级
+    复制，路径写进报告 `detail`），CI 的 artifact 列表补上该 glob，并保留 `always()`。
+    新增 `_audit_dir()` 作为**独立注入点** —— 测试不能直接 monkeypatch `REPO_ROOT`，
+    因为 `_junit_nodeid` 依赖它定位真实 `.py` 文件（替换后 nodeid 会退化成点分转斜杠）。
+  - **护栏**：`tests/unit/test_release_gate.py::TestJunitAuditTrail`（4 例）—— 副本逐字节
+    一致、副本仍可被门禁自己的解析器读出逐条 nodeid、junit 缺失时不造假副本，以及一条
+    **跨文件契约**（`ci.yml` 必须同时含 `devlogs/gate_junit_*.xml` 与 `if: always()`；
+    少了任一半，门禁写出来的副本都传不出 CI，盲区原样保留）。
 
 ### 新增
 
@@ -66,8 +85,9 @@
 - **CI（`.github/workflows/ci.yml`）**：push / PR 到 `main` 时跑**同一个**
   `scripts/release_gate.py`。runner 选 **Windows** —— 与本产品目标平台一致：平台分支
   （`os.name`/`sys.platform`）只在 Windows 上执行，覆盖率数字才与本地门禁可比，跑在
-  Linux 上会永久低于阈值。CI **不重复实现任何检查**；失败时把门禁报告与原始 pytest
-  输出作为 artifact 带出（否则 CI 上只剩一行结论，无法回溯）。
+  Linux 上会永久低于阈值。CI **不重复实现任何检查**；artifact 用 **`if: always()`**
+  带上门禁报告 JSON、**junit XML** 与 pytest 日志（详见「修复」节 T0.5 —— 只在失败时
+  上传会导致"CI 一绿就无据可查"）。
 - **依赖声明护栏 `tests/unit/test_declared_dependencies.py`（5 项）**：源码里 import 的
   第三方包必须在清单里声明。**它当场抓到一处真实隐患**：`main.py` 顶层写着
   `from markupsafe import Markup`，而 `markupsafe` **不在任何清单里** —— 只靠
