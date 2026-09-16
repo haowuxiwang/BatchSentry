@@ -113,21 +113,86 @@ def _is_picklable(fn) -> bool:
     return True
 
 
-async def run_cpu(fn, *args, label: str = ""):
+# 单任务超时（秒）。默认 30 分钟 —— 这不是"性能限制"而是"永久等待兜底"：
+# 本机实测 138MB/51 页的 Stage 0 规范化在百秒量级，30 分钟留足一个数量级
+# 余量；一旦超过，几乎必然是 worker 挂死（fitz 处理畸形页面盒/severe OOM
+# 后无响应/worker 进程僵死），而非"任务真慢"。可用环境变量覆盖。
+# 为什么必须有它：run_in_executor / to_thread 的等待**没有内建上限**——
+# 唯一的真实性"永久非终态"入口（外部 HTTP 调用均有 timeout：LLM 180s、
+# MinerU 60/300s、Paddle 轮询封顶 3600s，唯有此处原本无上限）。
+_DEFAULT_TIMEOUT_S = float(os.getenv("PBC_CPU_TASK_TIMEOUT_S", "1800"))
+
+
+def _recycle_pool(reason: str) -> None:
+    """丢弃当前进程池并尽力终止其 worker（超时路径专用）。
+
+    为什么必须回收而不能只超时返回：``max_workers=1`` 的池里，一个挂死的
+    worker 会**永久占住唯一槽位** —— 后续所有 job 的 Stage 0 提交都会排队，
+    表现从"某个 job 卡住"扩散成"整个应用不再处理新任务"。仅让调用方不再
+    等待（future.cancel）**不会**释放槽位，故必须重建池。
+
+    ``shutdown(wait=False)`` 默认不杀在跑的 worker（且被 cancel 的 future
+    所对应的 worker 仍在消耗 CPU），因此额外尽力 kill —— 失败只记日志，
+    不影响"新池可建"这一核心目标。
+    """
+    global _pool
+    pool, _pool = _pool, None
+    if pool is None:  # pragma: no cover - 调用点保证非空
+        return
+    for proc in list(getattr(pool, "_processes", {}).values()):
+        try:
+            if proc.is_alive():
+                proc.kill()
+        except Exception:  # pragma: no cover - 句柄失效/已退出
+            pass  # 已退出/句柄失效 — 回收目的已达成
+    try:
+        pool.shutdown(wait=False, cancel_futures=True)
+    except Exception as e:  # pragma: no cover - 退出路径防御
+        logger.warning(f"Process pool shutdown raised during recycle: {e}")
+    logger.warning(f"CPU process pool recycled ({reason}) — a fresh pool will be created")
+
+
+async def run_cpu(fn, *args, label: str = "", timeout: float | None = None):
     """在子进程中执行 CPU 密集函数，返回其结果。
 
     优先级：进程池（GIL 隔离）→ asyncio.to_thread（回退）。
     子进程内异常原样冒泡（与 to_thread 语义一致，调用方已有
     try/except 规范化失败处理）。
+
+    ``timeout``：单任务等待上限（秒），默认 :data:`_DEFAULT_TIMEOUT_S`。
+    超时后**回收进程池**并抛 :class:`TimeoutError` —— 让 pipeline 走正常
+    error 路径（job 进入终态、用户可重试），而不是让 job 永久停在
+    非终态、SSE 无限等待。传 ``0`` 或负数表示不设限（仅测试用）。
     """
+    limit = _DEFAULT_TIMEOUT_S if timeout is None else timeout
     pool = _get_pool() if _is_picklable(fn) else None
     if pool is None:
         if label and _in_pytest():
             logger.debug(f"CPU task {label}: running in thread (pytest mode)")
-        return await asyncio.to_thread(fn, *args)
+        coro = asyncio.to_thread(fn, *args)
+        if limit and limit > 0:
+            try:
+                return await asyncio.wait_for(coro, limit)
+            except asyncio.TimeoutError:
+                # 线程无法强杀（Python 限制）— 只能止损：不再等待，抛错让
+                # 上层走 error 路径。线程泄漏一个，但 job 不再永久非终态。
+                raise TimeoutError(
+                    f"CPU task {label or fn.__name__} timed out after {limit:g}s "
+                    f"(thread fallback; thread is leaked — cannot be killed)"
+                ) from None
+        return await coro
     loop = asyncio.get_running_loop()
     try:
-        return await loop.run_in_executor(pool, partial(fn, *args))
+        fut = loop.run_in_executor(pool, partial(fn, *args))
+        if limit and limit > 0:
+            return await asyncio.wait_for(fut, limit)
+        return await fut
+    except asyncio.TimeoutError:
+        _recycle_pool(f"{label or fn.__name__} timed out after {limit:g}s")
+        raise TimeoutError(
+            f"CPU task {label or fn.__name__} timed out after {limit:g}s "
+            f"(process pool recycled)"
+        ) from None
     except (pickle.PicklingError, AttributeError, TypeError) as e:
         # 提交期 pickling 失败（如 partial 包装后仍不可序列化）—
         # 回退线程执行，不丢失任务。

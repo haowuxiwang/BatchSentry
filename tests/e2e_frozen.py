@@ -122,6 +122,35 @@ try:
     except Exception as e:
         fail("settings_configure_llm", str(e))
 
+    # 5b. Configure OCR backend —— 只配 LLM 不配 OCR 是**假的绿**：
+    # 实测（2026-09-16）Paddle 的 api_url 为空时提交即失败
+    # （`Invalid URL '': No scheme supplied`），pipeline 一路走到 error，
+    # 而冒烟此前把 error 也判 PASS。凭据来自环境（PBC_E2E_*），绝不入库。
+    section("Configure OCR")
+    _paddle = os.environ.get("PBC_E2E_PADDLE_TOKEN", "")
+    _mineru = os.environ.get("PBC_E2E_MINERU_TOKEN", "")
+    OCR_CONFIGURED = bool(_paddle or _mineru)
+    if OCR_CONFIGURED:
+        payload = {"ocr_backend": "paddle" if _paddle else "mineru"}
+        if _paddle:
+            payload["paddle_ocr_api_url"] = os.environ.get(
+                "PBC_E2E_PADDLE_URL",
+                "https://paddleocr.aistudio-app.com/api/v2/ocr/jobs")
+            payload["paddle_ocr_token"] = _paddle
+            payload["paddle_ocr_model"] = os.environ.get(
+                "PBC_E2E_PADDLE_MODEL", "PaddleOCR-VL-1.6")
+        if _mineru:
+            payload["mineru_token"] = _mineru
+        try:
+            r = requests.post(f"{BASE}/api/settings", json=payload, timeout=5)
+            assert r.status_code == 200, r.text[:200]
+            ok("settings_configure_ocr", f"backend={payload['ocr_backend']}")
+        except Exception as e:
+            fail("settings_configure_ocr", str(e))
+    else:
+        print("    [WARN] 未提供 PBC_E2E_PADDLE_TOKEN / PBC_E2E_MINERU_TOKEN —— "
+              "OCR 未配置，pipeline 无法跑通（下游将如实标注为降级，不冒充 PASS）")
+
     # 6. PDF upload with small test PDF
     section("Upload")
     test_pdf = os.path.join(os.environ["TEMP"], "e2e-test.pdf")
@@ -152,22 +181,42 @@ try:
             fail("job_status", str(e))
 
         # 8. Wait for pipeline and check review page
+        # 断言强度取决于**环境是否具备跑通条件**（这是本用例的核心纪律）：
+        #   - 已配 OCR 凭据 → 必须走成功路径（review/partial_review）；
+        #     出现 error 即真实缺陷 → FAIL 并带出 error_message。
+        #   - 未配凭据 → 如实标注"降级"，**绝不冒充 PASS**。
+        #     历史缺陷：此前 `status in (..., "error", ...)` 直接 ok() ——
+        #     "pipeline 完全跑不起来"在冒烟里也是绿的（与 importorskip 同源的
+        #     "静默成功"）。
         section("Pipeline -> Review")
+        terminal, err_msg = "", ""
         for i in range(30):
             time.sleep(2)
             try:
                 r = requests.get(f"{BASE}/api/jobs/{job_id}", timeout=5)
                 data = r.json()
-                status = data.get("status", "")
-                if status in ("review", "partial_review", "error", "cancelled"):
+                terminal = data.get("status", "")
+                err_msg = data.get("error_message") or ""
+                if terminal in ("review", "partial_review", "error", "cancelled"):
                     break
-            except:
+            except Exception:
                 pass
         try:
             r = requests.get(f"{BASE}/api/jobs/{job_id}", timeout=5)
             data = r.json()
-            status = data.get("status", "")
-            ok("pipeline_terminal", f"status={status}")
+            terminal = data.get("status", terminal)
+            err_msg = data.get("error_message") or err_msg
+            if terminal in ("review", "partial_review"):
+                ok("pipeline_terminal", f"status={terminal}")
+            elif terminal == "error" and OCR_CONFIGURED:
+                fail("pipeline_terminal",
+                     f"status=error（已配 OCR 仍失败 — 真实缺陷）"
+                     f"error_message={err_msg[:200]}")
+            elif terminal in ("error", "cancelled"):
+                print(f"    [SKIP] pipeline_terminal status={terminal} —— 环境未配 OCR "
+                      f"凭据，属预期的降级路径（error_message={err_msg[:160]}）")
+            else:
+                fail("pipeline_terminal", f"未在 60s 内到达终态: status={terminal!r}")
         except Exception as e:
             fail("pipeline_terminal", str(e))
 

@@ -25,6 +25,15 @@ def _child_pid() -> int:
     return os.getpid()
 
 
+def _hang_forever() -> None:
+    """模块级（**必须**——局部函数不可 pickle，会静默走线程回退而不是池路径）。
+
+    worker 内长时间阻塞，用于制造"超时 → 回收池"场景。
+    """
+    import time
+    time.sleep(300)
+
+
 class TestPytestThreadFallback:
     """pytest 环境：run_cpu 走 to_thread（同进程执行）。"""
 
@@ -102,6 +111,90 @@ class TestRealPoolInProcess:
         assert procpool._pool is None
         procpool.shutdown_pool()  # 二次关闭无操作
         # 关闭后再次 _get_pool → 重建新池（不因关闭而 broken）
+        assert procpool._get_pool() is not None
+
+
+class TestCpuTaskTimeout:
+    """超时兜底：run_cpu 不得让"worker 挂死"退化成"永久等待"。
+
+    为什么必须有：``run_in_executor`` / ``to_thread`` 的等待**没有内建上限**。
+    外部 HTTP 调用均有 timeout（LLM 180s / MinerU 60-300s / Paddle 轮询封顶
+    3600s），唯独此处原本无上限 —— 它是"job 永久停在非终态、SSE 无限等待"
+    的唯一真实入口。
+
+    超时后**必须回收进程池**：``max_workers=1`` 的池里，一个挂死的 worker
+    永久占住唯一槽位，会把"某个 job 卡住"扩散成"整个应用不再处理新任务"。
+    """
+
+    def test_default_timeout_is_generous(self):
+        """默认值必须远大于正常 Stage 0 耗时（138MB/51 页实测百秒量级），
+        否则会误杀正常任务 —— 这个常量是"永久等待兜底"而非"性能限制"。"""
+        from core import procpool
+        assert procpool._DEFAULT_TIMEOUT_S >= 300
+
+    @pytest.mark.asyncio
+    async def test_thread_path_timeout_raises(self):
+        """线程回退路径超时 → TimeoutError（线程无法强杀，但 job 不再永久非终态）。"""
+        import time
+
+        from core import procpool
+
+        def _sleep_long():
+            time.sleep(5)
+
+        with pytest.raises(TimeoutError, match="timed out"):
+            await procpool.run_cpu(_sleep_long, label="sleepy", timeout=0.2)
+
+    @pytest.mark.asyncio
+    async def test_timeout_zero_means_unlimited(self):
+        """``timeout=0`` = 不设限（测试/特殊场景逃生口）。"""
+        from core import procpool
+        got = await procpool.run_cpu(_child_pid, timeout=0)
+        assert got == os.getpid()
+
+    @pytest.mark.asyncio
+    async def test_normal_path_unaffected_by_timeout(self):
+        """正常任务在超时包装下结果不变（不得引入行为漂移）。"""
+        from core import procpool
+        got = await procpool.run_cpu(_child_pid, label="ok", timeout=60)
+        assert got == os.getpid()
+
+    def test_recycle_pool_with_no_pool_is_noop(self):
+        from core import procpool
+        procpool._pool = None
+        procpool._recycle_pool("no pool")  # 不得抛异常
+        assert procpool._pool is None
+
+
+class TestProcessPoolTimeoutRecycle:
+    """真实 spawn 池下的超时 → 回收（父进程侧分支）。"""
+
+    @pytest.fixture(autouse=True)
+    def _real_pool(self, monkeypatch):
+        from core import procpool
+        monkeypatch.setattr(procpool, "_in_pytest", lambda: False)
+        procpool._pool = None
+        procpool._pool_broken = False
+        yield
+        procpool.shutdown_pool()
+        procpool._pool = None
+        procpool._pool_broken = False
+
+    @pytest.mark.asyncio
+    async def test_timeout_recycles_pool_and_raises(self):
+        """池路径超时：抛 TimeoutError 且单例被丢弃（后续任务可重新建池）。
+
+        用**模块级** ``_hang_forever`` —— 局部函数不可 pickle，会走线程回退
+        而非池路径，测不到回收逻辑（这个坑本用例第一次写时就踩到了）。
+        """
+        from core import procpool
+
+        assert procpool._is_picklable(_hang_forever) is True
+        assert procpool._get_pool() is not None
+        with pytest.raises(TimeoutError, match="process pool recycled"):
+            await procpool.run_cpu(_hang_forever, label="hang", timeout=0.5)
+        assert procpool._pool is None, "超时后必须丢弃池 —— 否则唯一槽位被挂死 worker 占住"
+        # 回收后仍可重建（不因此进入 broken 状态）
         assert procpool._get_pool() is not None
 
 

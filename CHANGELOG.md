@@ -9,6 +9,32 @@
 
 ### 修复
 
+- **`run_cpu` 没有超时 —— 全链路唯一的"永久非终态"入口（对抗审查定位）**：
+  实测超时覆盖面发现，外部调用**都有**上限（LLM 180s、MinerU 60/300s、Paddle
+  轮询封顶 3600s），唯独本地 CPU 重活（Stage 0 规范化）的
+  `run_in_executor` / `to_thread` 等待**没有任何上限**。后果不是"慢"，而是
+  job 永久停在非终态、SSE 死等（`api/jobs/status.py` 是 `while True` 且只认终态）、
+  `recover_stuck_jobs` 又只在启动时跑一次 —— 用户只能重启应用。
+  更严重的是**放大效应**：进程池是 `max_workers=1`，一个挂死的 worker 会永久
+  占住唯一槽位，把"某个 job 卡住"扩散成"整个应用不再处理新任务"（项目注释
+  `core/pipeline/stage1.py:45-48` 已预见该风险，但此前无对应措施）。
+  修法：`run_cpu` 加单任务超时（默认 1800s，`PBC_CPU_TASK_TIMEOUT_S` 可覆盖；
+  定位是"永久等待兜底"而非性能限制，故留足一个数量级余量），超时后
+  **回收进程池**（仅让调用方不再等待不会释放槽位）并抛 `TimeoutError` 让 job
+  走正常 error 路径。线程回退路径无法强杀线程，只能止损（抛错 + 记明"线程已泄漏"）。
+  护栏：`tests/unit/test_procpool.py::TestCpuTaskTimeout` /
+  `::TestProcessPoolTimeoutRecycle`（含"回收后可重建"）。调研与分层方案见
+  `docs/RUNTIME_WATCHDOG.md`。
+- **`e2e_frozen.py` 的"假绿"（本轮端到端实测暴露）**：两处叠加导致
+  "pipeline 完全跑不起来"在冒烟里也是绿的：
+  - **不配置 OCR**：只 POST 了 LLM 凭据。实测 Paddle 的 `api_url` 为空时提交
+    立即失败（`Invalid URL '': No scheme supplied`），pipeline 一路走到 `error`。
+  - **断言过弱**：`pipeline_terminal` 用 `status in (..., "error", ...)` 收集结果后
+    无条件 `ok()` —— `error` 也判 PASS（与 `pytest.importorskip` 同源的"静默成功"）。
+  修法：新增 `Configure OCR` 步骤（凭据从环境 `PBC_E2E_*` 取，绝不入库）；
+  `pipeline_terminal` 按**环境是否具备跑通条件**分级断言 —— 已配 OCR 却出现
+  `error` 即 FAIL 并带出 `error_message`；未配凭据时如实标注为降级（`[SKIP]`），
+  **不再冒充 PASS**。
 - **密钥护栏"分家"收拢为一处**：密钥扫描此前同时存在于
   `tests/unit/test_e2e_proc_helper.py`（两条）与 `tests/unit/test_no_committed_secrets.py`，
   两套口径并存 —— 正是本项目明令禁止的"重复真值"。现收拢到后者，并顺带修掉三个真实缺口：
@@ -95,6 +121,13 @@
 
 ### 新增
 
+- **`docs/RUNTIME_WATCHDOG.md`**：运行时看门狗的**调研与分层决策**文档。给出
+  "是否需要"的三问判据（有无无超时的等待点 / 卡死时用户看到什么 / 兜底能否自动执行）、
+  完整的超时覆盖面矩阵、业界范式对标（心跳必须绑定"前进"而非计时器、看门狗不应与
+  被观察对象同进程、阈值须按任务类型分级），并据此给出 **P0 已实施 / P1 待确认
+  （需 schema 变更 + 状态机写入点）/ P2 可选（SSE 停滞可见性）** 的分层方案，
+  以及明确**不推荐**的弱信号方案（用 `audit_log` 最后时间推断卡死 —— 粒度不足，
+  省下的 schema 代价会以"误杀正常长任务"还回来）。
 - **`scripts/check_leaked_keys.py`**：把 `DEPLOYMENT.md`「Secret 轮换流程」第 4 步工具化 ——
   扫**全部可达历史 blob**（而非逐提交 diff，故"加进去又删掉"的串也跑不掉）并与当前
   `config.json` 比对；输出**只给指纹**（长度 / sha256 前 12 位 / 前 6 字符），
