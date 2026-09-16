@@ -374,10 +374,20 @@ def _parse_coverage_total(output: str) -> float | None:
     return None
 
 
+def _audit_dir() -> Path:
+    """门禁产物的落盘目录（`devlogs/`）：报告、junit 审计副本、pytest 落盘日志。
+
+    刻意做成函数而非常量：测试需要替换它，但**不能**直接 monkeypatch `REPO_ROOT`
+    —— `_junit_nodeid` 依赖 `REPO_ROOT` 定位真实 `.py` 文件，一旦被替换，nodeid 会
+    退化成"点分转斜杠"，env-only 前缀匹配随之失效。审计目录必须是独立的注入点。
+    """
+    return REPO_ROOT / "devlogs"
+
+
 def _dump_pytest_log(raw: str, stamp: str | None = None) -> Path:
     """失败时把原始 pytest 输出落盘（T0.2），供事后回溯，避免"未解析出用例"。"""
     stamp = stamp or datetime.now().strftime("%Y%m%d_%H%M%S")
-    out = REPO_ROOT / "devlogs" / f"gate_pytest_{stamp}.log"
+    out = _audit_dir() / f"gate_pytest_{stamp}.log"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(raw, encoding="utf-8", errors="replace")
     return out
@@ -416,6 +426,21 @@ def check_tests_and_coverage(fail_under: int = 95, python: str | None = None,
         source = "stdout"
     passed, failed, nodeids = parsed
 
+    # ③ junit 的**可审计副本**（T0.5）：原件落在系统临时目录，CI 上随 runner 一起消失，
+    #    也不在 artifact 上传列表里 → "CI 到底跑了哪些用例"将无从查证。这个盲区是实测
+    #    踩到的：只拿得到 stdout 落盘日志（`-o addopts=-q` 下只有点和汇总），44 条差异
+    #    里只能钉死 17 条 skip，其余无法归因。故在 devlogs/ 另存一份，由 CI 的 artifact
+    #    带上 —— 于是任何一次 CI 运行都能逐条核对"跑了什么、跳了什么"。
+    audit_junit: Path | None = None
+    if junit.exists():
+        try:
+            audit_dir = _audit_dir()
+            audit_dir.mkdir(parents=True, exist_ok=True)
+            audit_junit = audit_dir / f"gate_junit_{stamp}.xml"
+            audit_junit.write_bytes(junit.read_bytes())
+        except OSError:
+            audit_junit = None
+
     env_only = [n for n in nodeids if n.startswith(ENV_ONLY_FAILURE_PREFIXES)]
     real_failures = [n for n in nodeids if n not in env_only]
 
@@ -448,6 +473,11 @@ def check_tests_and_coverage(fail_under: int = 95, python: str | None = None,
     parts = [f"{passed} passed", f"{failed} failed",
              f"coverage={total if total is not None else '?'}% (门禁 {fail_under}%)",
              f"fact={source}"]
+    if audit_junit is not None:
+        try:
+            parts.append(f"junit={audit_junit.relative_to(REPO_ROOT).as_posix()}")
+        except ValueError:  # REPO_ROOT 被重定向（测试）时仍给出可用路径
+            parts.append(f"junit={audit_junit}")
     detail = ", ".join(parts)
 
     if real_failures:

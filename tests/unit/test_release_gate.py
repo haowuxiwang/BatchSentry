@@ -358,6 +358,9 @@ class TestTestsCoverageCheck:
         # 不落真实 devlogs/
         monkeypatch.setattr(rg, "_dump_pytest_log",
                             lambda raw, stamp=None: tmp_path / "raw.log")
+        # junit 审计副本同样不落真实 devlogs/（与上一条分开注入：`_audit_dir`
+        # 不能被 REPO_ROOT 的替换覆盖 —— `_junit_nodeid` 还要用真 REPO_ROOT 定位 .py）
+        monkeypatch.setattr(rg, "_audit_dir", lambda: tmp_path / "devlogs")
 
     def test_mixed_failures_real_one_wins(self, monkeypatch, tmp_path):
         # 同时含真实失败与 env-only → 真实失败优先，判 FAIL，且 raw_log 已落盘
@@ -393,6 +396,57 @@ class TestTestsCoverageCheck:
         self._patch(monkeypatch, tmp_path, junit_xml=None, pytest_out="", rc=3)
         r = rg.check_tests_and_coverage(python="py")
         assert r.status == rg.FAIL and "未能完成" in r.detail
+
+
+class TestJunitAuditTrail:
+    """junit 的**可审计副本**（T0.5）。
+
+    背景：门禁跑 pytest 带 `-o addopts=-q` → stdout 只有点和汇总，**没有逐条 nodeid**；
+    junit XML 才是逐条事实源，但它原先落在系统临时目录（CI 上随 runner 消失，也不在
+    artifact 列表里）。于是"CI 上到底跑了哪些用例"无从查证 —— 实测踩过：44 条差异只
+    能钉死 17 条 skip。这个类锁住"副本必须落进 devlogs/ 且 CI 必须上传它"。
+    """
+
+    def _patch(self, monkeypatch, tmp_path, **kw):
+        monkeypatch.setattr(rg.tempfile, "gettempdir", lambda: str(tmp_path))
+        monkeypatch.setattr(rg, "run_cmd", _fake_gate_run_cmd(**kw))
+        monkeypatch.setattr(rg, "_audit_dir", lambda: tmp_path / "devlogs")
+
+    def test_junit_audit_copy_is_written_verbatim(self, monkeypatch, tmp_path):
+        self._patch(monkeypatch, tmp_path, junit_xml=_XML_ALL_PASS)
+        r = rg.check_tests_and_coverage(python="py")
+        audit = sorted((tmp_path / "devlogs").glob("gate_junit_*.xml"))
+        assert len(audit) == 1, "junit 审计副本未落盘 → CI 上无法逐条核对用例"
+        assert audit[0].read_text(encoding="utf-8") == _XML_ALL_PASS
+        assert "junit=" in r.detail, "报告里应带上副本路径，便于从 CI 摘要直达"
+
+    def test_audit_copy_carries_testcase_level_detail(self, monkeypatch, tmp_path):
+        """副本必须保留 testcase 级信息 —— 那正是 stdout 日志缺的东西。"""
+        self._patch(monkeypatch, tmp_path, junit_xml=_XML_WITH_FAILURES)
+        rg.check_tests_and_coverage(python="py")
+        audit = next((tmp_path / "devlogs").glob("gate_junit_*.xml"))
+        parsed = rg._parse_junit(audit)
+        assert parsed is not None, "副本必须仍可被门禁自己的解析器读取"
+        _, _, nodeids = parsed
+        assert nodeids, "副本里应能解析出逐条 nodeid"
+
+    def test_no_audit_copy_when_xml_never_written(self, monkeypatch, tmp_path):
+        """junit 缺失（回落 stdout 解析）时不应凭空造目录或假副本。"""
+        self._patch(monkeypatch, tmp_path, junit_xml=None, pytest_out="1 passed\n")
+        r = rg.check_tests_and_coverage(python="py")
+        assert not (tmp_path / "devlogs").exists()
+        assert "junit=" not in r.detail
+
+    def test_ci_uploads_the_junit_audit_file(self):
+        """**跨文件契约**：门禁落盘的 junit 必须在 CI artifact 的上传列表里。
+
+        少了任一半，门禁写出来的副本都传不出 CI —— 盲区原样保留。
+        同时锁 `always()`：一绿就不上传，等价于没有。
+        """
+        ci = (rg.REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8")
+        assert "devlogs/gate_junit_*.xml" in ci, "CI 未上传 junit 审计副本"
+        assert "if: always()" in ci, "上传步骤必须无条件执行，否则绿了就丢日志"
 
 
 class TestMainExitCode:

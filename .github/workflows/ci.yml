@@ -52,14 +52,17 @@ jobs:
       - name: 运行发布门禁
         run: python scripts/release_gate.py --fail-under 95
 
-      # 上传门禁报告与**全量** pytest 日志（`always()` 而非 `failure()`）。
+      # 上传门禁报告、junit XML 与 pytest 日志（`always()` 而非 `failure()`）。
       #
       # 为什么必须 always：CI 与本地跑到的用例数不同（本机有未入库的构建产物，
       # `test_frozen_smoke` / `test_distribution_parity` / 真实 OCR 产物用例在干净检出上
-      # 只能 skip）。要回答"到底哪些没跑、为什么"，**唯一**的依据就是这份逐条日志。
+      # 只能 skip）。要回答"到底哪些没跑、为什么"，**唯一**的依据就是逐条用例清单。
       # 只在失败时上传，就导致"CI 绿了 → 差异无法审计" —— 这个盲区是实际踩过的：
       # 一次调查中拿到的 artifact 日志是**残缺**的（只解析出 1416/2237 条结果），
       # 于是"44 个用例没跑"只能定位到 17 条 skip，剩下的无法归因。
+      #
+      # gate_junit_*.xml 是**权威**依据：门禁跑 pytest 时带 `-o addopts=-q`，stdout 上
+      # 只有点和汇总、没有逐条 nodeid；junit XML 才是逐条可解析的事实源。
       - name: 上传门禁报告
         if: always()
         uses: actions/upload-artifact@v4
@@ -67,6 +70,7 @@ jobs:
           name: gate-report
           path: |
             devlogs/gate_report_*.json
+            devlogs/gate_junit_*.xml
             devlogs/gate_pytest_*.log
           if-no-files-found: ignore
           retention-days: 14
