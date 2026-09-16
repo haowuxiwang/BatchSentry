@@ -506,6 +506,20 @@ CI run #6（`4416de8`）之后，artifact 里首次有了 `gate_junit_*.xml`，�
    + `test_container_skip_makes_the_check_fail` / `test_case_level_skip_still_passes`
    （正反对照，防"用例级 skip 被误判"）。
 
+**最终验证（CI run #7，`98448bc`）**：
+
+```
+本地 collect : 2395
+CI junit     : 2395  (passed=2378 skipped=17 failed=0)
+── 只被本地收集（CI 上不存在）：0 条
+── 只被 CI 收集（本地没有）：0 条
+```
+
+→ 两侧用例矩阵**完全一致**。27 条已回归 CI；剩余 **17 条全部是用例级 skip**
+（artifact-gated，设计使然）。**"CI 上 44 个用例"到此终结**：
+`44 = 27（真实缺陷，已修）+ 17（设计使然）`，且此后**每一次 CI 都可用一条命令核对**
+（`compare_test_matrix.py`），不再需要任何猜测。
+
 ### 13.3 让 A 组（8 条）真正在 CI 上跑的路径
 
 需要给 CI 加一个 job：装 PyInstaller → 跑 `build.ps1`（或直接 `pyinstaller pbc-server.spec`）
