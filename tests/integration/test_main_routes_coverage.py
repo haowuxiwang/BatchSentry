@@ -260,6 +260,45 @@ class TestLifespanLogging:
         assert r.status_code == 200
 
 
+class TestWatchdogHealthEndpoint:
+    """GET /api/health/watchdog —— 看门狗自述。
+
+    不并入 `/health`：后者是 Electron 启动 / e2e harness 依赖的稳定契约。
+    """
+
+    @pytest.mark.asyncio
+    async def test_returns_calibration_and_liveness(self, client_with_full_job):
+        c, _ = client_with_full_job
+        r = await c.get("/api/health/watchdog")
+        assert r.status_code == 200
+        d = r.json()
+        assert d["enabled"] is True
+        assert d["interval_s"] > 0
+        # 口径必须可见：现场排障第一件事就是看"阈值是什么、为什么判"
+        assert d["ocr_upstream_cap_s"] > 0
+        assert "ocr_running" in d["stall_limits_s"]
+        assert "pending" not in d["watch_statuses"]
+        assert d["pending_watch_requires_live_task"] is True
+        for k in ("running", "last_scan_at", "total_scans"):
+            assert k in d
+
+    @pytest.mark.asyncio
+    async def test_does_not_leak_version_contract(self, client_with_full_job):
+        """/health 的返回体不得被本端点改动（探针契约稳定）。"""
+        c, _ = client_with_full_job
+        r = await c.get("/health")
+        assert r.json() == {"status": "ok", "version": r.json()["version"]}
+
+    @pytest.mark.asyncio
+    async def test_forbidden_for_non_local(self, client_with_full_job, monkeypatch):
+        import core.security as sec
+
+        monkeypatch.setattr(sec, "is_local_request", lambda req: False)
+        c, _ = client_with_full_job
+        r = await c.get("/api/health/watchdog")
+        assert r.status_code == 403
+
+
 class TestResourceDirFrozenMode:
     """_resource_dir() 在 frozen 模式下的行为。"""
 
