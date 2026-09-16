@@ -40,6 +40,25 @@ class TestProbePaddleBranches:
         finally:
             cfg["paddle_ocr"].api_url, cfg["paddle_ocr"].token = orig_url, orig_token
 
+    def test_probe_connection_error(self):
+        """连接失败（DNS 解析不了 / 连接被拒）走**专属**分支，reason 不得为空。
+
+        为什么单列一条：这条分支此前只在"打包产物在场"的 frozen 冒烟里被真实
+        网络失败顺带走到（干净检出上 frozen 用例被 skip → 无人覆盖）。
+        这里是环境无关的直接覆盖。
+        """
+        from config import config as cfg
+        orig_url, orig_token = cfg["paddle_ocr"].api_url, cfg["paddle_ocr"].token
+        self._configured(cfg)
+        try:
+            with patch("core.health.requests.request",
+                       side_effect=requests.exceptions.ConnectionError("boom")):
+                r = probe_paddle_ocr()
+            assert r["ok"] is False
+            assert "连接失败" in r["reason"]
+        finally:
+            cfg["paddle_ocr"].api_url, cfg["paddle_ocr"].token = orig_url, orig_token
+
     def test_probe_unexpected_exception(self):
         from config import config as cfg
         orig_url, orig_token = cfg["paddle_ocr"].api_url, cfg["paddle_ocr"].token

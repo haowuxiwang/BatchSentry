@@ -865,6 +865,20 @@ class TestMinerUDownload:
         """content 为 str 时直接返回（叶子节点）。"""
         assert mineru_client._content_text({"content": "直接文本"}) == "直接文本"
 
+    def test_content_text_string_value_inside_dict(self):
+        """content 为 dict 且其值是**纯字符串** → 直接取用（v2 行内块变体）。
+
+        与上面的 list 分支不同的一条独立路径：`{"content": {"键": "值"}}`。
+        缺这条用例时该分支只在"真实产物在场"的可选用例里被顺带走到，
+        干净检出上无人覆盖。
+        """
+        assert mineru_client._content_text(
+            {"content": {"text": "段落一"}}
+        ) == "段落一"
+        assert mineru_client._content_text(
+            {"content": {"a": "甲", "b": ["乙", {"content": "丙"}]}}
+        ) == "甲 乙 丙"
+
     def test_content_text_empty(self):
         """无 content 或 content 非 dict/str 时返回空。"""
         assert mineru_client._content_text({"type": "text"}) == ""

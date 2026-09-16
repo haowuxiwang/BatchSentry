@@ -263,12 +263,22 @@ class TestResourceDirFrozenMode:
     """_resource_dir() 在 frozen 模式下的行为。"""
 
     def test_dev_mode_returns_project_root(self):
-        """开发模式应返回 main.py 所在目录。"""
+        """开发模式应返回 main.py 所在目录（而非 CWD、更不是 _MEIPASS）。
+
+        ⚠️ 这里**不得**断言目录名：检出目录叫什么由克隆者决定（CI 上是
+        ``BatchSentry``，本地是 ``pharma-batch-checker``）。原实现写的是
+        ``path.name in ("pharma-batch-checker", "")`` —— 等于把本地环境写进
+        测试，2026-09-15 CI run #2 因此失败：``assert 'BatchSentry' in (...)``。
+        契约用 ``__file__`` 表达才是环境无关的。
+        """
+        import main as main_mod
         from main import _resource_dir
+
         path = _resource_dir()
-        assert path.name in ("pharma-batch-checker", "")
-        # templates/ 和 static/ 应在该目录下
-        assert (path / "templates").exists()
+        assert path.resolve() == Path(main_mod.__file__).resolve().parent
+        # 真正的行为要求：模板/静态资源确实就在那个目录下
+        assert (path / "templates").is_dir()
+        assert (path / "static").is_dir()
 
     def test_frozen_mode_returns_meipass(self, monkeypatch):
         """frozen 模式应返回 sys._MEIPASS。"""

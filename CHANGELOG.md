@@ -35,6 +35,27 @@
   新增 `TestNonUtf8Console::test_report_prints_under_cp1252_console`：**在 cp1252 下**
   启动门禁子进程，断言无 `UnicodeEncodeError` 且报告头 `OVERALL` 出现在输出里。
   已做正对照 —— 绕过修复即复现同一条报错。
+- **覆盖率门禁在干净检出上不达标（CI run #2 实测暴露的真实缺口）**：修掉上面的控制台
+  问题后，CI 又报到 **94.89% < 95%**。根因不是代码缺陷，而是**测试的环境耦合**：
+  - **一处断言写死了检出目录名**：`test_dev_mode_returns_project_root` 断言
+    `path.name in ("pharma-batch-checker", "")` —— CI 检出到 `BatchSentry` 即失败
+    （`assert 'BatchSentry' in (...)`）。契约本是"开发模式返回 `main.py` 所在目录"，
+    改用 `__file__` 表达，与克隆目录名解耦。
+  - **一批 artifact-gated 用例在干净检出上必然 skip/ephemeral**：需要 `dist/pbc-server.exe`
+    （打包产物）、真实 Paddle/MinerU 产物（体积 + 数据敏感性，不入库）、`dist-electron*`。
+    本地因这些产物在场而"顺手覆盖"了 **30 行**，干净检出上无人覆盖 →
+    95% 门禁**只在本机能过**。行级差分（`coverage` 数据对比）精确定位到：
+    `core/mineru_client.py` 29 行（P0-3 的 `_layout_page_sizes` / `_page_regions`）+
+    `core/health.py` 1 行（`probe_paddle_ocr` 的连接失败分支）。
+  - **修法**：按本项目既定约定（"真实产物不入库，故用等形态合成数据锁契约"）补
+    **环境无关**的直接用例 —— 内存合成 MinerU zip 覆盖 `page_size` 解析的
+    全部畸形分支、块级区域抽取的 bbox 校验分支、`_content_text` 的 dict-值-字符串
+    分支、以及 `probe_paddle_ocr` 的 `ConnectionError` 分支。
+  - **实测**：干净检出等效覆盖率 **94.97% → 95.42%**（缺失行 460 → 419）；
+    与"产物在场"全量跑的行级差分 **A−B = 0 行**（缺口闭合），且新增用例**反向多覆盖
+    14 行** —— 全是真实产物用例永远走不到的畸形输入分支。
+  - **这类缺陷的护栏就是 CI 本身**：此前门禁只在本机跑，所以"95% 只在本机成立"
+    一直没被发现。workflow 落地后第一次跑就抓到了，这正是「提交即验证」的价值。
 
 ### 新增
 

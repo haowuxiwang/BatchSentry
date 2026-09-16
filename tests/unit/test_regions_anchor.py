@@ -8,9 +8,11 @@ Paddle 空间 1440×1920、块字段 block_label/block_bbox/block_content；Mine
 """
 from __future__ import annotations
 
+import io
 import json
 import os
 import sys
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -18,6 +20,10 @@ import pytest
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
 
+from core.mineru_client import (  # noqa: E402
+    _layout_page_sizes,
+    _page_regions,
+)
 from core.pipeline.regions import (  # noqa: E402
     CANONICAL_LABELS,
     _LABEL_MAP,
@@ -353,6 +359,127 @@ class TestExtractMinerU:
         })
         assert out is not None and len(out["regions"]) == 1
         assert out["regions"][0]["label"] == "table"
+
+
+def _mineru_zip(layout=None, extra: dict[str, str] | None = None) -> zipfile.ZipFile:
+    """等形态的 MinerU 产物 zip（内存构造，不落盘、无需真实产物）。
+
+    ``layout=None`` → 不带 layout.json；``extra`` 可塞入任意名字的原始字节，
+    用于构造"存在但不可解析"的畸形件。
+    """
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        if layout is not None:
+            zf.writestr("out/layout.json", json.dumps(layout))
+        for name, body in (extra or {}).items():
+            zf.writestr(name, body)
+    buf.seek(0)
+    return zipfile.ZipFile(buf)
+
+
+class TestMineruLayoutPageSizes:
+    """`_layout_page_sizes`：从 layout.json 取**每页自身的坐标系**（P0-3 的归一化分母）。
+
+    为什么必须单独测：它是 ``_page_regions`` 的入参来源，取错就是"框画到别处"。
+    但它此前**没有任何直接单测** —— 唯一覆盖来自"真实 MinerU 产物在场"的可选用例
+    （资产不入库：体积 + 数据敏感性）。干净检出上那批用例被 skip → 这些行无人覆盖
+    → 2026-09-15 CI run #2 实测覆盖率 94.89% < 门禁 95%。现按本文件既定约定
+    （等形态合成数据锁契约）补上，使其**环境无关**。
+    """
+
+    def test_reads_page_size_keyed_by_page_idx(self):
+        zf = _mineru_zip({"pdf_info": [
+            {"page_idx": 0, "page_size": [595, 842]},
+            {"page_idx": 1, "page_size": [842, 595]},
+        ]})
+        assert _layout_page_sizes(zf, zf.namelist()) == {
+            0: (595.0, 842.0), 1: (842.0, 595.0),
+        }
+
+    def test_falls_back_to_index_when_page_idx_is_missing(self):
+        """page_idx 缺失时退化为下标 —— 与 content_list 的页号对齐靠它兜底。"""
+        zf = _mineru_zip({"pdf_info": [{"page_size": [595, 842]}]})
+        assert _layout_page_sizes(zf, zf.namelist()) == {0: (595.0, 842.0)}
+
+    def test_skips_every_malformed_entry(self):
+        """非 dict 条目 / 无 page_size / 长度非 2 / 非数值 / 非正数 一律跳过。
+
+        "跳过"而非"猜一个"是刻意的：坐标系猜错会让框整体错位，宁可该页没有区域
+        （宁缺勿错 —— 与 ``extract_regions`` 的取向一致）。
+        """
+        zf = _mineru_zip({"pdf_info": [
+            "not a dict",
+            {"page_idx": 1},
+            {"page_idx": 2, "page_size": [595]},
+            {"page_idx": 3, "page_size": "595x842"},
+            {"page_idx": 4, "page_size": [None, 842]},
+            {"page_idx": 5, "page_size": [0, 842]},
+            {"page_idx": 6, "page_size": [-1, 842]},
+            {"page_idx": 7, "page_size": [595, 842]},
+        ]})
+        assert _layout_page_sizes(zf, zf.namelist()) == {7: (595.0, 842.0)}
+
+    def test_missing_layout_json_yields_empty(self):
+        zf = _mineru_zip(None)
+        assert _layout_page_sizes(zf, zf.namelist()) == {}
+
+    def test_unparsable_layout_json_yields_empty(self):
+        zf = _mineru_zip(None, {"out/layout.json": "{ not json"})
+        assert _layout_page_sizes(zf, zf.namelist()) == {}
+
+    def test_pdf_info_not_a_list_yields_empty(self):
+        """layout.json 顶层是 dict 但 pdf_info 形态不对 → 空表。"""
+        zf = _mineru_zip({"pdf_info": {"0": {"page_size": [595, 842]}}})
+        assert _layout_page_sizes(zf, zf.namelist()) == {}
+
+    def test_json_root_is_not_a_dict_yields_empty(self):
+        zf = _mineru_zip([{"page_size": [595, 842]}])
+        assert _layout_page_sizes(zf, zf.namelist()) == {}
+
+
+class TestMineruPageRegions:
+    """`_page_regions`：块级区域抽取 —— 坐标系与 bbox 缺任一项都不产出。
+
+    与 ``_layout_page_sizes`` 同理，此前只被真实产物用例间接覆盖。
+    """
+
+    def test_requires_both_space_and_blocks(self):
+        blocks = [{"type": "text", "bbox": [0, 0, 10, 10], "text": "x"}]
+        assert _page_regions(blocks, None) == {}
+        assert _page_regions([], (595, 842)) == {}
+        assert _page_regions(None, (595, 842)) == {}
+
+    def test_builds_regions_from_blocks(self):
+        out = _page_regions(
+            [
+                {"type": "text", "bbox": [77, 54, 277, 74], "text": "批号 112701"},
+                {"type": "table", "bbox": [50, 100, 545, 400],
+                 "table_body": "<table><tr><td>含量</td></tr></table>"},
+            ],
+            (595, 842),
+        )
+        assert out["_space"] == [595.0, 842.0]
+        assert [r["label"] for r in out["_regions"]] == ["text", "table"]
+        assert out["_regions"][0]["bbox"] == [77.0, 54.0, 277.0, 74.0]
+        assert "批号 112701" in out["_regions"][0]["text"]
+
+    def test_skips_malformed_blocks(self):
+        """非 dict 块 / 无 bbox / bbox 长度非 4 / bbox 非序列 —— 全部跳过。"""
+        out = _page_regions(
+            [
+                "not a dict",
+                {"type": "text"},
+                {"type": "text", "bbox": [0, 0, 1]},
+                {"type": "text", "bbox": "0,0,1,1"},
+                {"type": "table", "bbox": [0, 0, 50, 50], "text": "t"},
+            ],
+            (595, 842),
+        )
+        assert len(out["_regions"]) == 1
+        assert out["_regions"][0]["label"] == "table"
+
+    def test_all_blocks_malformed_yields_empty(self):
+        assert _page_regions(["nope", {"type": "text"}], (595, 842)) == {}
 
 
 class TestAnchorTokens:
