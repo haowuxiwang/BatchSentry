@@ -266,6 +266,62 @@ _XML_ENV_ONLY = """<?xml version="1.0" encoding="utf-8"?>
 </testsuite></testsuites>"""
 
 
+_XML_CONTAINER_SKIP = """<?xml version="1.0" encoding="utf-8"?>
+<testsuites>
+  <testsuite name="pytest" tests="2" failures="0" errors="0" skipped="2">
+    <testcase classname="" name="tests.unit.test_anchor_orientation_tool" time="0.000">
+      <skipped message="collection skipped">("path", 22, "could not import 'numpy'")</skipped>
+    </testcase>
+    <testcase classname="tests.unit.test_release_gate" name="test_a" time="0.1" />
+  </testsuite>
+</testsuites>
+"""
+
+_XML_CASE_SKIP = """<?xml version="1.0" encoding="utf-8"?>
+<testsuites>
+  <testsuite name="pytest" tests="2" failures="0" errors="0" skipped="1">
+    <testcase classname="tests.unit.test_release_gate" name="test_a" time="0.1" />
+    <testcase classname="tests.unit.test_release_gate" name="test_b" time="0.1">
+      <skipped message="no artifact" />
+    </testcase>
+  </testsuite>
+</testsuites>
+"""
+
+
+class TestContainerSkips:
+    """收集阶段的整文件 skip（junit 里 `classname=""`）——"用例静默消失"的签名。
+
+    实测（2026-09-16）：CI 缺 numpy → `test_anchor_orientation_tool.py` 整段被
+    `pytest.importorskip` 跳掉，**27 条用例消失而门禁六项全绿**。这类失败不进
+    failed、不进覆盖率，唯一能看见它的地方就是这条检查。
+    """
+
+    def _write(self, tmp_path, xml):
+        p = tmp_path / "j.xml"
+        p.write_text(xml, encoding="utf-8")
+        return p
+
+    def test_detects_empty_classname_skip(self, tmp_path):
+        assert rg._container_skips(self._write(tmp_path, _XML_CONTAINER_SKIP)) == [
+            "tests.unit.test_anchor_orientation_tool — collection skipped"]
+
+    def test_ignores_case_level_skips(self, tmp_path):
+        """用例级 skip（有 classname）是设计使然（artifact-gated 用例）→ 不得误判。"""
+        assert rg._container_skips(self._write(tmp_path, _XML_CASE_SKIP)) == []
+
+    def test_missing_file_returns_empty(self, tmp_path):
+        assert rg._container_skips(tmp_path / "nope.xml") == []
+
+    def test_error_entry_is_not_a_container_skip(self, tmp_path):
+        """收集阶段的 `<error>` 已被 `_parse_junit` 计入 failed（本就 FAIL）→ 不重复报。"""
+        xml = _XML_CONTAINER_SKIP.replace(
+            '<skipped message="collection skipped">("path", 22, '
+            '"could not import \'numpy\'")</skipped>',
+            '<error message="collection failed">boom</error>')
+        assert rg._container_skips(self._write(tmp_path, xml)) == []
+
+
 class TestJunitParsing:
     def test_nodeid_module_level(self):
         assert rg._junit_nodeid("tests.integration.test_main_routes", "test_a") == \
@@ -396,6 +452,18 @@ class TestTestsCoverageCheck:
         self._patch(monkeypatch, tmp_path, junit_xml=None, pytest_out="", rc=3)
         r = rg.check_tests_and_coverage(python="py")
         assert r.status == rg.FAIL and "未能完成" in r.detail
+
+    def test_container_skip_makes_the_check_fail(self, monkeypatch, tmp_path):
+        """整文件被收集阶段跳过 → FAIL（否则"用例消失"永远查不出来）。"""
+        self._patch(monkeypatch, tmp_path, junit_xml=_XML_CONTAINER_SKIP)
+        r = rg.check_tests_and_coverage(python="py")
+        assert r.status == rg.FAIL and "整文件被跳过" in r.detail
+
+    def test_case_level_skip_still_passes(self, monkeypatch, tmp_path):
+        """对照组：用例级 skip 不得触发上面那条 FAIL（artifact-gated 用例靠它）。"""
+        self._patch(monkeypatch, tmp_path, junit_xml=_XML_CASE_SKIP)
+        r = rg.check_tests_and_coverage(python="py")
+        assert r.status == rg.PASS
 
 
 class TestJunitAuditTrail:

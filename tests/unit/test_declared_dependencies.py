@@ -47,8 +47,11 @@ _OPTIONAL = {
     "docling": "可选第三方 OCR 后端（core/docling_client.py：is_available() 保护，缺失不进链）",
 }
 
-# 工具专用：这些脚本不被 pytest 收集、不随包分发，故**不进 CI / 运行时环境**。
-# 值 = 允许出现的位置前缀 —— 精确到位，避免登记表退化成"全局放行"。
+# 工具专用：这些脚本不随包分发。值 = 允许出现的位置前缀 —— 精确到位，避免登记表
+# 退化成"全局放行"。
+# ⚠️ 登记在这里**不等于"可以缺"**：若某个工具**被测**，其依赖必须显式声明 ——
+#    否则 `pytest.importorskip` 会让整个测试文件静默消失（见
+#    `TestImportOrSkipIsDeclared` 与 numpy 的实测事故）。
 _TOOL_ONLY: dict[str, tuple[str, ...]] = {
     "numpy": ("scripts/",),
     "win32com": ("scripts/",),
@@ -143,6 +146,45 @@ def _imported_map() -> dict[str, list[str]]:
     for rel, p in _iter_source_files():
         src = p.read_text(encoding="utf-8-sig", errors="replace")
         for name in collect_imports(rel, src):
+            found.setdefault(name, [])
+            if rel.as_posix() not in found[name]:
+                found[name].append(rel.as_posix())
+    return found
+
+
+# `pytest.importorskip("X")` 里的 X 是**隐式依赖**：import 扫描看不见它（那是字符串
+# 参数，不是 import 语句），而缺包时的后果比"少跑几条"严重得多 —— **整个模块被静默
+# 跳过**（junit 里只剩一条 `classname=""` 的 collection-skip 条目），门禁的
+# passed / failed / 覆盖率**全都看不见**。
+def collect_importorskip(rel: Path, src: str) -> set[str]:
+    """纯函数：AST 提取 `pytest.importorskip("X")` 的 X（已归一化）。
+
+    刻意用 AST 而非正则：正则会把**注释与文档里的示例**也算进来 —— 本文件的
+    docstring 里就写着示例，实测被正则版本误报成"未声明依赖 x"。
+    """
+    try:
+        tree = ast.parse(src)
+    except SyntaxError:
+        return set()
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if not (isinstance(func, ast.Attribute) and func.attr == "importorskip"):
+            continue
+        if node.args and isinstance(node.args[0], ast.Constant) \
+                and isinstance(node.args[0].value, str):
+            names.add(_norm(node.args[0].value))
+    return names
+
+
+def _importorskip_map() -> dict[str, list[str]]:
+    """{importorskip 的模块名（已归一化）: [出现位置, ...]}。"""
+    found: dict[str, list[str]] = {}
+    for rel, p in _iter_source_files():
+        src = p.read_text(encoding="utf-8-sig", errors="replace")
+        for name in collect_importorskip(rel, src):
             found.setdefault(name, [])
             if rel.as_posix() not in found[name]:
                 found[name].append(rel.as_posix())
@@ -257,3 +299,58 @@ def test_requirements_files_exist():
     """两个清单都必须在场（否则上面的检查会静默通过）。"""
     for fname in _REQ_FILES:
         assert (_ROOT / fname).is_file(), f"{fname} 缺失 —— 依赖清单是构建的前提"
+
+
+class TestImportOrSkipIsDeclared:
+    """`pytest.importorskip("X")` 的 X 必须在清单里声明（或已登记豁免）。
+
+    实测事故（2026-09-16）：`test_anchor_orientation_tool.py` 用
+    `pytest.importorskip("numpy")` 测 `scripts/verify_anchor_orientation.py`，
+    而 numpy 只被登记为 `_TOOL_ONLY`（"不进 CI 环境"）→ CI 上该文件**整段**跳过，
+    **27 条用例静默消失，门禁六项全绿**（junit 里该文件只剩一条 `classname=""`
+    的 collection-skip 条目）。这是"覆盖率绿 ≠ 用例都跑了"的最强反例，也是
+    "CI 与本地差 40+ 个用例"的真身。
+    """
+
+    def test_importorskip_dependencies_are_declared(self):
+        skips = _importorskip_map()
+        undeclared = {
+            name: locs for name, locs in skips.items()
+            if name not in _declared_dists()
+            and name not in _OPTIONAL
+            and not _is_local(name)
+        }
+        assert not undeclared, (
+            "importorskip 的依赖未声明 —— 缺包时**整个文件**会被静默跳过，"
+            "门禁的 passed/failed/覆盖率全都看不见。请把依赖加进 "
+            f"requirements-dev.txt：{undeclared}"
+        )
+
+    def test_importorskip_guard_is_not_vacuous(self):
+        """正对照：扫描器必须真能扫到已知的 importorskip（防"空转即全绿"）。"""
+        skips = _importorskip_map()
+        assert "numpy" in skips, "应扫到 test_anchor_orientation_tool.py 的 numpy"
+        assert any("test_anchor_orientation_tool" in loc for loc in skips["numpy"])
+
+    def test_importorskip_scan_covers_tests_dir(self):
+        """范围护栏：`tests/` 必须在扫描范围内，否则本类会默默失效。"""
+        scanned = {rel.as_posix() for rel, _ in _iter_source_files()}
+        assert any(p.startswith("tests/") for p in scanned), \
+            "扫描范围不含 tests/ —— importorskip 护栏形同虚设"
+
+    def test_docstring_examples_are_not_counted(self):
+        """必须用 AST 而非正则：文档里的示例不算真实依赖。
+
+        正则版本实测把自己 docstring 里的示例当成了 `importorskip("x")`，
+        于是这条护栏报出"未声明依赖 x"的**假警报**（假阳性会让人把护栏关掉）。
+        """
+        doc_only = ('def f():\n'
+                    '    """示例：pytest.importorskip("ghostpkg") 用于可选依赖"""\n'
+                    '    pass\n')
+        assert collect_importorskip(Path("fake.py"), doc_only) == set()
+        real = 'import pytest\nnp = pytest.importorskip("numpy")\n'
+        assert collect_importorskip(Path("fake.py"), real) == {"numpy"}
+
+    def test_syntax_error_source_yields_nothing(self):
+        """坏源码不得让护栏崩溃（与 collect_imports 同口径）。"""
+        assert collect_importorskip(Path("bad.py"), "def ( <<<") == set()

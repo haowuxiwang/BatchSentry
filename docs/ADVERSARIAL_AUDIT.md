@@ -381,7 +381,11 @@ PY="C:/Users/WuSiTan/AppData/Local/Programs/Python/Python311/python.exe"
 
 ## 13. CI 与干净检出的用例差异（精确清单，含一处未能钉死的残差）
 
-### 13.1 已钉死的部分：CI 上被 **skip 的 17 个**（两个独立提取结果一致）
+### 13.1 设计使然的 skip：artifact-gated 用例（run #2 实测 17 条；run #6 = **18 条**）
+
+> 这些是**预期**行为：本机有未入库的构建产物所以能跑，CI 干净检出无产物所以被 skip。
+> **数目随用例增删浮动**（不是固定 17），且它们**不是**"44 个用例"的主因 ——
+> 真正的问题在 §13.2b。
 
 | 组 | 文件 | 条数 | 依赖 | 能否在 CI 上跑 |
 |---|---|---|---|---|
@@ -408,7 +412,7 @@ tests/unit/test_region_anchor_wiring.py
   test_real_mineru_artifact_replays / test_real_mineru_regions_anchor_a_real_finding
 ```
 
-### 13.2 **未能钉死的残差（诚实声明）**
+### 13.2 **未能钉死的残差（诚实声明）**（→ 已于 §13.2b 钉死）
 
 CI run #3 报 `2250 passed`，同期本地 `2362 collected` → 差 **112**（含 17 skip）。
 要把差额逐条归因，唯一依据是**逐条 pytest 日志**。但手上那份 artifact
@@ -455,9 +459,52 @@ PY="C:/Users/WuSiTan/AppData/Local/Programs/Python/Python311/python.exe"
   "CI 上不存在"，skip 数只用于对账；
 - 退出码 1 = 两侧有差异，便于把"差异必须被解释"接进流程。
 
-护栏 `tests/unit/test_compare_test_matrix.py`（16 例），其中三条锁"口径唯一"
+护栏 `tests/unit/test_compare_test_matrix.py`（18 例），其中三条锁"口径唯一"
 （必须加载 release_gate、不得在本脚本里重现 `_junit_nodeid`），并专门测了
 **CRLF 输入**（Windows 的 `--collect-only` 输出是 CRLF，裸 `grep`/`comm` 会失真）。
+
+### 13.2b **残差已钉死（2026-09-16，用 CI 的 junit 审计副本实测）**
+
+CI run #6（`4416de8`）之后，artifact 里首次有了 `gate_junit_*.xml`，残差可以**逐条**算了：
+
+| | 本地 | CI |
+|---|---|---|
+| collect / junit testcase | **2384** | **2358**（passed=2340, skipped=**18**, failed=0） |
+| 差 | — | **26** |
+
+逐条归因（`scripts/compare_test_matrix.py`）：
+
+- **27 条** —— `tests/unit/test_anchor_orientation_tool.py` 的**全部**用例在 CI 上
+  **不存在**；CI 的 junit 里该文件只剩一条 `classname=""` 的条目：
+
+  ```
+  <skipped message="collection skipped">
+    ("D:\a\BatchSentry\BatchSentry\tests\unit\test_anchor_orientation_tool.py", 22,
+     "Skipped: could not import 'numpy': No module named 'numpy'")
+  ```
+
+- **18 条用例级 skip**（artifact-gated：`test_frozen_smoke` 8 / `test_distribution_parity` 3 /
+  `regions_anchor` + `region_anchor_wiring` 6 / 其他 1）—— 这些才是**设计使然**：
+  本机有产物所以跑，CI 干净检出无产物所以跳。
+
+**26 = 27（整文件消失）− 1（那条畸形条目占位）**，与 18 条 skip **无关**。
+
+→ **此前"属预期、不是缺陷"的判断错了一半**：18 条确实预期，但那 **27 条是真实缺陷** ——
+一整文件在 CI 上**从未运行过**，而门禁六项全绿、覆盖率也没反映（该文件的覆盖被本机
+"顺手"补上了）。这是"只被可选用例覆盖"隐患的**升级版：整个文件消失**。
+
+**修法（三层，缺一不可）**：
+
+1. **声明依赖**：`requirements-dev.txt` 加 `numpy==2.4.5`（本机实测通过的那一版）→
+   CI 装上后 27 条回归。
+2. **护栏（预防）**：`test_declared_dependencies.py::TestImportOrSkipIsDeclared` ——
+   `pytest.importorskip("X")` 的 X 必须在清单里声明。**用 AST 而非正则**：正则版把本文件
+   docstring 里的示例误判成"未声明依赖 x"（假阳性会让人干脆把护栏关掉），实测踩到。
+3. **检测（兜底）**：门禁新增 `_container_skips()` —— junit 里 `classname=""` 的 skip 条目
+   （= 整文件在**收集阶段**被跳）**直接判 FAIL**。这是唯一能看见这类失败的检查：
+   它既不进 `failed`、也不进覆盖率。护栏 `test_release_gate.py::TestContainerSkips`（4 例）
+   + `test_container_skip_makes_the_check_fail` / `test_case_level_skip_still_passes`
+   （正反对照，防"用例级 skip 被误判"）。
 
 ### 13.3 让 A 组（8 条）真正在 CI 上跑的路径
 

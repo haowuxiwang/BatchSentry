@@ -75,6 +75,23 @@
     一致、副本仍可被门禁自己的解析器读出逐条 nodeid、junit 缺失时不造假副本，以及一条
     **跨文件契约**（`ci.yml` 必须同时含 `devlogs/gate_junit_*.xml` 与 `if: always()`；
     少了任一半，门禁写出来的副本都传不出 CI，盲区原样保留）。
+- **整个测试文件在 CI 上静默消失（numpy 未声明 —— "44 个用例"的真身）**：靠上面那个
+  junit 审计副本，CI 的用例矩阵首次能**逐条**算，结果发现
+  `tests/unit/test_anchor_orientation_tool.py` 的**全部 27 条用例在 CI 上根本不存在**，
+  而门禁六项**全绿**、覆盖率也没反映。CI 的 junit 里该文件只剩一条 `classname=""` 的条目：
+  `Skipped: could not import 'numpy': No module named 'numpy'`。
+  - **根因**：该文件用 `pytest.importorskip("numpy")` 测 `scripts/verify_anchor_orientation.py`，
+    而 numpy 只被登记为 `_TOOL_ONLY`（"不进 CI 环境"），**从未在任何 requirements 清单里声明**
+    → CI 不装 → 整个文件在**收集阶段**被跳掉。
+  - **判定更正**：此前把"CI 与本地差 40+ 个用例"写成"属预期、不是缺陷"是**错了一半** ——
+    18 条 artifact-gated skip 确实预期，但这 27 条是真实缺陷（`26 = 27 − 1` 条畸形条目占位）。
+  - **修法三层**：① `requirements-dev.txt` 声明 `numpy==2.4.5`（本机实测通过的那一版）；
+    ② 新护栏 `TestImportOrSkipIsDeclared` —— `importorskip` 的依赖必须声明，**用 AST 而非
+    正则**（正则版把本文件 docstring 里的示例误报成"未声明依赖 x"，实测踩到）；③ 门禁新增
+    `_container_skips()`：`classname=""` 的 skip 条目（整文件在收集阶段被跳）**直接判 FAIL**
+    —— 这是唯一能看见这类失败的检查，它既不进 `failed` 也不进覆盖率。
+  - **一般化教训**：`importorskip` 把"依赖缺失"伪装成"跳过"。**凡是"静默跳过"都必须配一条
+    "不许静默"的检查**，否则覆盖率绿只证明"跑了的都对"，不证明"该跑的都跑了"。
 
 ### 新增
 
@@ -102,6 +119,18 @@
   前后对比、噪声占比、**页级证据闭合核对**（原始页必须仍"有据可查"：要么仍有条目、
   要么落在摘要页清单里）与**硬约束自检**（高价值类型与 `critical` 不得被削弱，削弱即
   退出码 1）。这是"漏检对照"的落地形式：降噪不许靠丢真命中换。
+- **用例矩阵差分工具 `scripts/compare_test_matrix.py`**：把"CI 与本地到底差哪些用例"从
+  猜测变成一条命令 —— 输入 CI artifact 里的 `gate_junit_*.xml` 与本地
+  `pytest --collect-only -q` 的输出，输出"只被本地收集"/"只被 CI 收集"两组（按文件聚合，
+  "整文件缺失"一眼可见），并单列 CI 侧 `skipped` 计数。**复用**
+  `release_gate._junit_nodeid` 做 nodeid 还原（不复制第二套口径）。退出码 1 = 两侧有差异，
+  便于把"差异必须被解释"接进流程。
+  护栏 `tests/unit/test_compare_test_matrix.py`（18 例）。**这个工具是被自己的自检修出来的**：
+  拿"本地 junit vs 本地 collect 应当完全一致"当不变量，一跑就炸出两个真实缺陷 ——
+  ① 参数化 id 里的 `\uXXXX` 是**转义**不是路径分隔符，被 `replace("\\","/")` 改写成
+  `/u8bbf` → 与 junit 侧对不上 → 同一批用例**同时出现在两个差集**；② 参数化 id **可以含
+  空格**（`[step_no=1 operator=空-operator]`），被尾部 `[^\s]+` 整条丢弃。修后"只被 CI
+  收集"= 0，本地 collect 从 2375（被吃掉 7 条）回到 2382。
 - **对抗性审查报告 `docs/ADVERSARIAL_AUDIT.md`**：对"构建物可分发 / 日志与状态机 /
   流式输出 / 设置 / pipeline / 鲁棒性与泛化与抗挫折 / 知识库 / 是否引入进化机制 /
   视觉交叉对比"逐项给出**带证据**的结论，并单列一节记下本轮发现的**度量与证据问题**。

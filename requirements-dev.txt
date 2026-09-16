@@ -7,3 +7,13 @@ pytest-cov==7.0.0
 httpx==0.28.1  # FastAPI 测试客户端（TestClient 依赖）
 pytest-mock==3.15.1
 coverage==7.13.3
+
+# scripts/ 工具链的测试依赖：`tests/unit/test_anchor_orientation_tool.py` 用
+# `pytest.importorskip("numpy")` 测 `scripts/verify_anchor_orientation.py`。
+#
+# **为什么必须显式声明**（实测踩过）：CI 上缺 numpy → 该文件**整段**被 importorskip
+# 吞掉 → 27 条用例静默消失，而门禁六项**全绿**（junit 里该文件只剩一条
+# `classname=""` 的 collection-skip 条目；本地有 numpy 所以差 26 条）。
+# 这正是"CI 与本地差 40+ 个用例"的真身，也是"覆盖率绿 ≠ 用例都跑了"的最强反例。
+# 护栏：`tests/unit/test_declared_dependencies.py::TestImportOrSkipIsDeclared`。
+numpy==2.4.5

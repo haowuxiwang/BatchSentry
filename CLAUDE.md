@@ -320,7 +320,12 @@ The probe does NOT submit real OCR/LLM work — it just verifies auth + connecti
 - `templates/` — Jinja2 HTML
 - `static/` — CSS, JS, design tokens (separated, no inline)
 - `tests/` — unit + integration suites (pytest)
-- `.github/workflows/` — CI: runs `scripts/release_gate.py` on push/PR to `main` (Windows runner)
+- `.github/workflows/` — CI: runs `scripts/release_gate.py` on push/PR to `main` (Windows runner).
+  Artifact upload uses **`if: always()`** and carries the gate report JSON, the **junit XML**
+  (`devlogs/gate_junit_*.xml`) and the pytest log. The junit XML is the **only** testcase-level
+  record (the gate runs pytest with `-o addopts=-q`, whose stdout has no per-case nodeids), so
+  it is what makes "which cases ran on CI vs locally" auditable —
+  `scripts/compare_test_matrix.py --ci-junit <xml> --local-collect <collect.txt>`.
 - `electron/` — Electron main process
 - `samples/` — sample PDFs (gitignored binaries)
 - `spike/` — experimental ad-hoc test inputs and reports (not part of app)

@@ -359,6 +359,36 @@ def _parse_junit(xml_path: Path) -> tuple[int, int, list[str]] | None:
     return passed, failed, nodeids
 
 
+def _container_skips(xml_path: Path) -> list[str]:
+    """junit 里 `classname` 为空的 skip 条目 = **整个文件**在收集阶段被跳过。
+
+    这是"用例静默消失"的签名，也是最危险的失败形态：门禁只看 passed / failed /
+    覆盖率时**完全看不见它**。实测（2026-09-16）：CI 未声明 numpy →
+    `test_anchor_orientation_tool.py` 被 `pytest.importorskip` 整段跳掉，
+    **27 条用例消失而门禁六项全绿**，junit 里该文件只剩一条
+    `classname=""` + `<skipped message="collection skipped">` 的条目。
+
+    正常情况这里应为空：依赖声明齐了 CI 就会装上，不会 collection-skip。
+    （收集阶段的 `<error>` 不走这里 —— 它已被 `_parse_junit` 计入 failed → FAIL。）
+    """
+    try:
+        root = ET.parse(str(xml_path)).getroot()
+    except (ET.ParseError, OSError):
+        return []
+    out: list[str] = []
+    for case in root.iter("testcase"):
+        if (case.get("classname") or "").strip():
+            continue
+        if case.find("failure") is not None or case.find("error") is not None:
+            continue
+        skip = case.find("skipped")
+        if skip is None:
+            continue
+        msg = (skip.get("message") or "").strip()
+        out.append(f"{case.get('name') or '?'}" + (f" — {msg}" if msg else ""))
+    return out
+
+
 def _parse_coverage_total(output: str) -> float | None:
     """从 coverage report 输出解析总覆盖率（百分比）。"""
     import re
@@ -483,6 +513,14 @@ def check_tests_and_coverage(fail_under: int = 95, python: str | None = None,
     if real_failures:
         return CheckResult("tests_coverage", FAIL,
                            f"{detail}；真实失败：{real_failures[:5]}", _ms() - t0, raw_log)
+    # 整文件被收集阶段跳过 → 那些用例根本没参与门禁，却既不计 failed 也不计覆盖率
+    # → 必须显式失败，否则"用例静默消失"永远查不出来。
+    container_skips = _container_skips(junit)
+    if container_skips:
+        return CheckResult(
+            "tests_coverage", FAIL,
+            f"{detail}；**整文件被跳过**（收集阶段，这些用例并未参与门禁）："
+            f"{container_skips}", _ms() - t0, raw_log)
     if failed and not nodeids:
         # 失败计数与用例解析不一致 → 事实源不可信，fail-closed
         return CheckResult("tests_coverage", FAIL,
