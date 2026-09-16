@@ -49,6 +49,11 @@ API = f"http://127.0.0.1:{PORT}"
 # `E2E_REAL_TIMEOUT` 仍可显式覆盖。
 _TERMINAL = ("review", "partial_review", "error", "cancelled")
 
+# /jobs/{id}/findings 的分页真值（api/review.py: limit=max(1,min(limit,200))）。
+# 只取首页会把 types / gmp_basis / 条数一起截断（见 findings_of 说明）。
+_FINDINGS_PAGE_LIMIT = 200
+_FINDINGS_MAX_PAGES = 25  # 安全上限：200×25=5000 条；超出即视为异常而非无限翻页
+
 
 def backend_mismatch(expect_backend, used_backend):
     """返回后端不一致的说明；一致（或未指定期望）时返回 ``None``。
@@ -183,13 +188,61 @@ def wait_terminal(client, job_id, timeout_s=600):
 
 
 def findings_of(client, job_id):
-    r = client.get(f"{API}/api/jobs/{job_id}/findings", timeout=15)
-    if r.status_code == 200:
+    """取回该 job 的**全部** findings（按 offset 翻页）。
+
+    为什么必须翻页：端点默认 ``limit=50``（``api/review.py``），只取首页会把
+    条数、``types`` 分布、``gmp_basis`` 覆盖率一起截断 —— 2026-09-16 实测
+    51 页真实 **314** 条 / **14** 类，首页只回 50 条 / 7 类，于是护栏打印
+    "50 findings" 并把"缺类型"判成产品缺陷。更糟的是**下界失真**：findings
+    从 314 掉到 60 依然 ``ok``，护栏形同虚设。
+
+    终态 job 的 findings 是静态的，翻页期间不会变动；若翻页中出现状态变化
+    （理论上不可能），最坏是多/漏一条 —— 对分类统计无实质影响。
+    """
+    out = []
+    offset = 0
+    for _ in range(_FINDINGS_MAX_PAGES):
+        try:
+            r = client.get(
+                f"{API}/api/jobs/{job_id}/findings",
+                params={"limit": _FINDINGS_PAGE_LIMIT, "offset": offset},
+                timeout=30,
+            )
+        except Exception:
+            break
+        if r.status_code != 200:
+            break
         d = r.json()
-        if isinstance(d, list):
-            return d
-        return d.get("findings", [])
-    return []
+        if isinstance(d, list):  # 兼容无分页形态
+            out.extend(d)
+            break
+        batch = d.get("findings") or []
+        out.extend(batch)
+        total = d.get("total")
+        offset += len(batch)
+        if not batch or (isinstance(total, int) and offset >= total):
+            break
+    return out
+
+
+def findings_total_of(client, job_id):
+    """读取端点声明的 findings 总数（``limit=1`` 只取元信息）。
+
+    返回 ``None`` 表示端点没给 ``total``（旧形态）——此时不做完整性判定，
+    而不是假定"50 条就是全部"。
+    """
+    try:
+        r = client.get(f"{API}/api/jobs/{job_id}/findings",
+                       params={"limit": 1, "offset": 0}, timeout=15)
+    except Exception:
+        return None
+    if r.status_code != 200:
+        return None
+    d = r.json()
+    if isinstance(d, list):
+        return None
+    total = d.get("total")
+    return total if isinstance(total, int) else None
 
 
 def _require(value, flag: str, env_name: str):
@@ -477,7 +530,14 @@ def run_upload(c, path, mime, expect_types, force, timeout_s=None, page_chars=Fa
                 pass
         print(f"[e2e] {path}: sparse OCR pages(<40 chars)={len(sparse_pages)} {sparse_pages[:10]}")
     missing = [t for t in expect_types if t not in types]
-    ok = st in ("review", "partial_review") and not missing
+    # 取回完整性自检（"护栏的护栏"）：翻页结果必须等于端点声明的 total。
+    # 少了 → 统计被截断（会伪装成"缺类型"产品缺陷）；多了 → 端点语义变了。
+    # 有它才能在**端点再次改封顶**时立刻发现，而不是等人工比对。
+    declared_total = findings_total_of(c, job_id)
+    truncated = declared_total is not None and len(fs) != declared_total
+    ok = st in ("review", "partial_review") and not missing and not truncated
+    if truncated:
+        print(f"[e2e] {path}: FINDINGS 取回不完整 got={len(fs)} declared={declared_total}")
     if missing:
         print(f"[e2e] {path}: MISSING expected types: {missing}")
     # 后端校验：failover 发生后终态依然正常，只有 ocr_backend_used 能揭穿
@@ -493,6 +553,7 @@ def run_upload(c, path, mime, expect_types, force, timeout_s=None, page_chars=Fa
           f" final={((sse_stats.get('last') or {}).get('status'))} -> {'OK' if sse_ok else 'CHECK'}")
     return {"ok": ok, "status": st, "duration_s": dur,
             "pages": d.get("total_pages"), "findings": len(fs),
+            "findings_declared_total": declared_total,
             "job_id": job_id,
             "ocr_backend_used": used_backend,
             "backend_mismatch": backend_err,
@@ -609,8 +670,20 @@ def run_rot(c, path, mime="application/pdf", timeout_s=None, expect_backend=None
     res = run_upload(c, path, mime, expect_types=[], force=True,
                      timeout_s=timeout_s, expect_backend=expect_backend)
     job_id = res.get("job_id")
-    if not job_id or not res.get("ok"):
+    if not job_id:
         return res
+    if res.get("status") not in ("review", "partial_review"):
+        # 终态不可评判时旋转内容本就无从测量：明确记录"未测"，
+        # 不制造 lost=[] 这种"看起来没问题"的假象。
+        print(f"[e2e] rot: 终态 {res.get('status')!r} → 旋转契约**未测**")
+        res["rot_measured"] = False
+        return res
+    # 观测与断言分离（2026-09-16 实测）：原先此处是 `if not res.get("ok"): return res`
+    # —— 后端 failover 让 run_upload 判失败的同时，把整段旋转测量一起吞掉，
+    # 摘要里连 rot_lost 都没有，读者会以为"旋转没问题"。现在仍**测量**并落进
+    # 结果，只是不计入 ok（failover 后跑的旋转结果不能记在 paddle 名下）。
+    if not res.get("ok"):
+        print("[e2e] rot: ⚠ 前置已失败（见上）—— 以下旋转测量仅供归因，不计入判定")
     markers = {2: "横置九十度工序表", 3: "横置二百七十度参数表"}
     paths, lost = [], []
     rot_pages = {}
@@ -655,6 +728,7 @@ def run_rot(c, path, mime="application/pdf", timeout_s=None, expect_backend=None
     res["p1_batch_visible"] = p1_ok
     res["rotation_deg"] = rot_pages
     res["audit_rotation_events"] = len(audit_rot)
+    res["rot_measured"] = True
     res["ok"] = (bool(res.get("ok")) and not lost and p1_ok
                  and (not rot_pages or bool(audit_rot)))
     if not res["ok"]:
