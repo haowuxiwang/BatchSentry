@@ -21,7 +21,7 @@ def _get_init_lock() -> asyncio.Lock:
     return _db_init_lock
 
 # Current schema migration level, persisted via PRAGMA user_version.
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 
 async def get_db() -> aiosqlite.Connection:
@@ -118,6 +118,9 @@ async def migrate(db: aiosqlite.Connection):
 
     if current_version < 11:
         await _migrate_v11(db)
+
+    if current_version < 12:
+        await _migrate_v12(db)
 
     # PRAGMA user_version cannot be parameterized; SCHEMA_VERSION is an int
     # constant defined in this module, so f-string is safe.
@@ -366,6 +369,35 @@ async def _migrate_v11(db: aiosqlite.Connection):
             logger.info("Migration: added page_cache.regions_json")
     except Exception as e:
         logger.warning(f"Migration skip page_cache.regions_json: {e}")
+    await db.commit()
+
+
+async def _migrate_v12(db: aiosqlite.Connection):
+    """v12: ``jobs.last_activity_at`` —— 运行时看门狗所需的"最后推进时刻"。
+
+    为什么需要它：看门狗要回答"这个 job 还在动吗"，而此前**没有任何一列**
+    能表达这件事 —— ``created_at`` 只有起点、``finished_at`` 非终态为空、
+    ``ocr_progress`` 只有值没有时间戳、``audit_log`` 在 51 页分析期间可能
+    数十分钟无写入（粒度不足，任何基于它的阈值都会误杀长任务）。
+
+    为什么**不给默认值**：``ALTER TABLE ... ADD COLUMN`` 的默认值必须是常量，
+    唯二允许的表达式默认 ``CURRENT_TIMESTAMP`` 是 **UTC** —— 与本项目全库
+    ``datetime('now','localtime')`` 的口径冲突，混用会让"停滞多久"算错时区
+    偏移。故列本身无默认，由代码在写入点显式赋值；``NULL`` 一律视为
+    **不可判定 → 看门狗跳过**（宁缺勿错）。
+
+    为什么能确定代码会写：写入点集中在 ``core/pipeline/state.py`` 的
+    ``touch_activity``（状态迁移 / OCR 进度 / 自愈进度 / 跨页进度）+ Stage 2
+    逐页分析完成 + ``api/jobs/upload.py`` 创建 job，均有回归用例覆盖。
+    """
+    try:
+        cur = await db.execute("PRAGMA table_info(jobs)")
+        cols = {row["name"] for row in await cur.fetchall()}
+        if "last_activity_at" not in cols:
+            await db.execute("ALTER TABLE jobs ADD COLUMN last_activity_at TIMESTAMP")
+            logger.info("Migration: added jobs.last_activity_at")
+    except Exception as e:
+        logger.warning(f"Migration skip jobs.last_activity_at: {e}")
     await db.commit()
 
 

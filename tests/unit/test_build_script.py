@@ -74,18 +74,35 @@ def test_build_ps1_electron_lock_self_heals(ps1_bytes):
     重启应用亦不释放。旧行为只打印 WARN，随后 electron-builder 仍写标准
     目录 → 以 app-builder 的 Go 内部栈失败，整次构建报废。
 
-    不变式：检测到占用 → 自动改用备用输出目录继续构建 → 构建后
-    best-effort 归位到标准路径。
+    **契约在 2026-09-16 被实测修正**：原实现"切到固定名备用目录 +
+    构建后 best-effort 归位"有两个缺陷，都来自同一份实测：
+    - 固定名备用目录是**一次性的** —— `dist-electron-locked` 自己的 app.asar
+      同样会被锁住（实测 `dist-electron` / `dist-electron-locked` /
+      `dist-electron-v112` / `dist-electron-m8` **四个目录全部 PermissionError 32**），
+      所以第二次自愈必然失败；
+    - 直接 `Remove-Item` 仍被占用的旧标准目录会在删到被持有的文件时**中途失败**
+      —— 失败前已经删掉一部分文件，把一个完好的旧产物变成**残缺目录**
+      （比不归位更糟，还会让"最新产物"判定指向残缺目录）。
+
+    修正后的不变式：
+    1. 备用输出目录**每次唯一**（时间戳），不再使用固定名；
+    2. 归位前必须**再探一次**占用，只有确认标准目录可写才 Remove-Item/Move-Item。
     """
     src = ps1_bytes.decode("utf-8-sig")
-    assert "dist-electron-locked" in src, (
-        "占用时应自动切到备用输出目录，而不是仅告警后继续写被锁目录"
+    assert "dist-electron-out-$(Get-Date -Format" in src, (
+        "备用输出目录必须每次唯一（时间戳）—— 固定名备用目录用过一次，自己就被锁"
+    )
+    assert '$outDir = "dist-electron-locked"' not in src, (
+        "不得再使用固定名备用目录（实测已失效）"
     )
     assert '"-c.directories.output=$outDir"' in src, (
         "备用输出目录必须经 electron-builder 的 -c.directories.output 传入"
     )
+    assert "$canMoveBack" in src, (
+        "归位前必须重探占用：直接 Remove-Item 被占用的旧目录会留下残缺产物"
+    )
     assert "Move-Item" in src and "Remove-Item -Recurse -Force $stdUnpacked" in src, (
-        "构建成功后应 best-effort 归位（删旧标准目录 + 移入新产物）"
+        "确认可写后应 best-effort 归位（删旧标准目录 + 移入新产物）"
     )
 
 

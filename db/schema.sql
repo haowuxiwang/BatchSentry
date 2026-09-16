@@ -15,7 +15,13 @@ CREATE TABLE IF NOT EXISTS jobs (
     error_message TEXT,
     pdf_path TEXT,
     ocr_progress TEXT,              -- OCR 轮询进度 JSON {"done":N,"total":M}（Stage 1 实时）
-    ocr_backend_used TEXT           -- 实际执行 OCR 的后端（双 OCR 主备切换后的审计记录）
+    ocr_backend_used TEXT,          -- 实际执行 OCR 的后端（双 OCR 主备切换后的审计记录）
+    last_activity_at TIMESTAMP      -- v12: 最后"真实推进"时刻（状态迁移 / 进度更新 / 单页分析完成）
+                                    -- 运行时看门狗据此判定停滞。**故意不设 DEFAULT**：
+                                    -- ALTER 加列不允许用 datetime('now','localtime') 作默认，
+                                    -- 而 CURRENT_TIMESTAMP 是 UTC，与全库 localtime 口径冲突；
+                                    -- 故由代码在写入点显式赋值，新库与迁移库行为一致。
+                                    -- NULL = 不可判定 → 看门狗跳过（宁缺勿错，绝不误杀）
 );
 
 CREATE TABLE IF NOT EXISTS page_cache (

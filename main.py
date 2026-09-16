@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 # Application version — single source of truth.
 # Avoids duplicate hardcoded "1.1.0" in FastAPI(app=...) and /health endpoint.
 # 与 package.json 的 version 必须一致（tests/unit/test_version_consistency.py 机检）。
-APP_VERSION = "1.1.2"
+APP_VERSION = "1.1.3"
 
 
 # Phase 5B: resolve resource paths under both dev and PyInstaller frozen mode.
@@ -84,7 +84,38 @@ async def lifespan(app: FastAPI):
             logger.error(f"  stuck job recovery failed: {e}", exc_info=True)
 
     import asyncio as _asyncio
-    _asyncio.create_task(_recover_bg())
+
+    # 后台任务统一登记，关停时**先取消并 join 全部**再关库。
+    # 踩过的坑：这些任务原先都是 fire-and-forget（`create_task` 不留引用），
+    # 于是存在"close_db() 之后任务才被调度 → get_db() 重新打开连接 → 该连接
+    # 再没人关"的竞态。测试里的表现是 tmp_path 上的 test.db 删不掉
+    # （WinError 32 另一个程序正在使用此文件），生产里的表现是关停后残留
+    # 一个 DB 句柄。日志线索是关停后的 "kb seed skipped: Cannot operate on
+    # a closed database." —— 那句话本身就是"任务跑晚了一步"的证据。
+    bg_tasks: list = []
+
+    def _spawn(coro) -> "_asyncio.Task":
+        task = _asyncio.create_task(coro)
+        bg_tasks.append(task)
+        return task
+
+    _spawn(_recover_bg())
+
+    # 运行时看门狗（v12）：补齐"运行期间"的兜底。上面那个 recover 只在启动时
+    # 跑一次 —— 不重启应用，卡死的 job 就永远停在非终态、SSE 无限等待
+    # （见 docs/RUNTIME_WATCHDOG.md）。看门狗按 jobs.last_activity_at 判定停滞，
+    # 收敛动作与启动恢复一致（error + 审计 + 通知）。
+    async def _watchdog_bg():
+        try:
+            from core.watchdog import enabled, watchdog_loop
+            if not enabled():
+                logger.info("  watchdog disabled via PBC_WATCHDOG_ENABLED")
+                return
+            await watchdog_loop()
+        except Exception as e:
+            logger.error(f"  watchdog crashed: {e}", exc_info=True)
+
+    _spawn(_watchdog_bg())
 
     # v8: 知识库条目镜像装载（幂等；JSON 缺失/异常不致命——检索走内存）
     async def _kb_seed_bg():
@@ -98,8 +129,19 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning(f"  kb seed skipped: {e}")
 
-    _asyncio.create_task(_kb_seed_bg())
+    _spawn(_kb_seed_bg())
     yield
+    # 关停顺序：先把后台任务全部取消并 join（等它们真正结束），再关库。
+    # 反过来做就会让"晚一步被调度"的任务重新 open 一个没人关的连接。
+    for t in bg_tasks:
+        t.cancel()
+    for t in bg_tasks:
+        try:
+            await t
+        except _asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.warning(f"  background task shutdown error: {e}")
     await close_db()
     logger.info("Shutdown complete.")
 

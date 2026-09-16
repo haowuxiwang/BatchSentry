@@ -7,6 +7,7 @@
 - request_id 中间件：异常路径 + 静态文件跳过日志
 - _resource_dir()：frozen 模式分支
 """
+import asyncio
 import pytest
 import pytest_asyncio
 import shutil
@@ -310,7 +311,11 @@ class TestLifespanStartup:
         monkeypatch.setattr("main.recover_stuck_jobs", mock_recover)
 
         async with lifespan(app):
-            pass
+            # lifespan 关停时会取消并 join 所有后台任务（v12 起）。
+            # 生产里 lifespan 长驻，后台任务必然被调度过；测试里 body 是瞬时的，
+            # 必须主动让出一拍，否则任务会在启动前就被取消掉 —— 那测的就不是
+            # "启动时是否触发了恢复"，而是"关停够不够快"。
+            await asyncio.sleep(0.05)
 
         mock_recover.assert_awaited_once()
 
@@ -324,7 +329,11 @@ class TestLifespanStartup:
         monkeypatch.setattr("main.recover_stuck_jobs", mock_recover)
 
         async with lifespan(app):
-            pass
+            # lifespan 关停时会取消并 join 所有后台任务（v12 起）。
+            # 生产里 lifespan 长驻，后台任务必然被调度过；测试里 body 是瞬时的，
+            # 必须主动让出一拍，否则任务会在启动前就被取消掉 —— 那测的就不是
+            # "启动时是否触发了恢复"，而是"关停够不够快"。
+            await asyncio.sleep(0.05)
 
         mock_recover.assert_awaited_once()
 
@@ -339,7 +348,11 @@ class TestLifespanStartup:
 
         # lifespan 不应抛异常（recover 失败被捕获）
         async with lifespan(app):
-            pass
+            # lifespan 关停时会取消并 join 所有后台任务（v12 起）。
+            # 生产里 lifespan 长驻，后台任务必然被调度过；测试里 body 是瞬时的，
+            # 必须主动让出一拍，否则任务会在启动前就被取消掉 —— 那测的就不是
+            # "启动时是否触发了恢复"，而是"关停够不够快"。
+            await asyncio.sleep(0.05)
 
         mock_recover.assert_awaited_once()
 

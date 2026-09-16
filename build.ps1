@@ -286,10 +286,16 @@ if (-not $SkipElectron) {
         }
     }
     if ($locked) {
-        $outDir = "dist-electron-locked"
+        # 备用目录名必须**每次都是新的**。历史实现用固定名 `dist-electron-locked`，
+        # 但备用目录自己写过之后，其 app.asar 同样会被安全软件持有 ——
+        # 2026-09-16 实测：dist-electron / dist-electron-locked / dist-electron-v112 /
+        # dist-electron-m8 四个目录的 app.asar **全部被锁**（PermissionError 32，
+        # 重启不释放）。也就是说固定名备用目录 = **第二次自愈必然失败**。
+        # 按时间戳生成即可保证唯一，不需要事先探测。
+        $outDir = "dist-electron-out-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
         Write-Host "  [WARN] $stdUnpacked 被占用（resources\app.asar 无法重命名）。" -ForegroundColor Yellow
         Write-Host "         原因：BatchSentry.exe 未退出，或安全软件正持有上次产物句柄。" -ForegroundColor Yellow
-        Write-Host "         自愈：本次改用备用输出目录 $outDir，构建后自动尝试归位。" -ForegroundColor Yellow
+        Write-Host "         自愈：本次改用全新输出目录 $outDir（固定名备用目录是一次性的）。" -ForegroundColor Yellow
     }
 
     # electron-builder 的进度/警告输出走 stderr — 落盘日志，失败可诊断。
@@ -312,24 +318,45 @@ if (-not $SkipElectron) {
     }
 
     # ── 3.1 best-effort 归位到标准路径 ────────────────────────────
+    # 归位前**必须再探一次**占用：直接 Remove-Item 一个仍被占用的目录，会在删到
+    # 被持有的 app.asar 时失败 —— 而失败前它已经删掉了目录里的一部分文件，把
+    # 一个完好的旧产物变成残缺目录（比不归位更糟，且会让"最新产物"判定指向
+    # 一个残缺目录）。故只有确认标准目录已可写才动手。
     $finalUnpacked = $stdUnpacked
     if ($locked) {
         $finalUnpacked = Join-Path $outDir "win-unpacked"
-        $moved = $false
-        try {
-            Remove-Item -Recurse -Force $stdUnpacked -ErrorAction Stop
-            Move-Item -Path $finalUnpacked -Destination $stdUnpacked -ErrorAction Stop
-            $moved = $true
-        } catch {
-            $moved = $false
-        }
-        if ($moved) {
-            Remove-Item -Recurse -Force $outDir -ErrorAction SilentlyContinue
-            $finalUnpacked = $stdUnpacked
-            Write-OK "占用已释放，产物已归位 $stdUnpacked"
+        $canMoveBack = $false
+        $probeFile = Join-Path $stdUnpacked "resources\app.asar"
+        if (-not (Test-Path $probeFile)) {
+            $canMoveBack = $true
         } else {
-            Write-Host "  [WARN] 归位失败（占用仍未释放），产物保留在 $finalUnpacked" -ForegroundColor Yellow
-            Write-Host "         释放后手动归位：" -ForegroundColor Yellow
+            try {
+                Rename-Item -Path $probeFile -NewName "app.asar.lockprobe" -ErrorAction Stop
+                Rename-Item -Path (Join-Path $stdUnpacked "resources\app.asar.lockprobe") -NewName "app.asar" -ErrorAction Stop
+                $canMoveBack = $true
+            } catch {
+                $canMoveBack = $false
+            }
+        }
+        if ($canMoveBack) {
+            $moved = $false
+            try {
+                Remove-Item -Recurse -Force $stdUnpacked -ErrorAction Stop
+                Move-Item -Path $finalUnpacked -Destination $stdUnpacked -ErrorAction Stop
+                $moved = $true
+            } catch {
+                $moved = $false
+            }
+            if ($moved) {
+                Remove-Item -Recurse -Force $outDir -ErrorAction SilentlyContinue
+                $finalUnpacked = $stdUnpacked
+                Write-OK "占用已释放，产物已归位 $stdUnpacked"
+            } else {
+                Write-Host "  [WARN] 归位失败，产物保留在 $finalUnpacked" -ForegroundColor Yellow
+            }
+        } else {
+            Write-Host "  [WARN] 未尝试归位（$stdUnpacked 仍被占用）。产物保留在 $finalUnpacked" -ForegroundColor Yellow
+            Write-Host "         释放占用后手动归位：" -ForegroundColor Yellow
             Write-Host "           Remove-Item -Recurse -Force $stdUnpacked" -ForegroundColor Yellow
             Write-Host "           Move-Item $finalUnpacked $stdUnpacked" -ForegroundColor Yellow
         }

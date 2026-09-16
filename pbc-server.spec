@@ -116,6 +116,7 @@ hiddenimports = [
     "db.client",
     "core.pipeline",
     "core.procpool",  # 2026-08-24: CPU 重活子进程池（300dpi 规范化 GIL 隔离）
+    "core.watchdog",  # v12: 运行时看门狗（lifespan 内延迟导入 → 静态分析漏检）
     "core.pipeline.locks",
     "core.pipeline.state",
     "core.pipeline.ocr_support",

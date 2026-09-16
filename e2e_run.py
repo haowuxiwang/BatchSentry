@@ -24,7 +24,7 @@ Rounds:
                 极端长宽比）必须显式携带非完整信号；已规范化页不得稀疏。
 
 Every round also subscribes /api/jobs/{id}/stream and records SSE frames to
-devlogs/e2e_sse_<stem>.jsonl (streaming-output evidence: event count / phase chain).
+devlogs/e2e_sse_<stem>_<job_id>.jsonl (streaming-output evidence: event count / phase chain).
 """
 import argparse
 import importlib.util
@@ -38,7 +38,9 @@ from pathlib import Path
 
 import httpx
 
-API = "http://127.0.0.1:58799"
+# 端口单一真值：driver、被测进程、健康检查必须一致（曾各自写死 58799）
+PORT = int(os.environ.get("PBC_E2E_PORT", "58799"))
+API = f"http://127.0.0.1:{PORT}"
 
 # 大文档轮次预算：51 页 Stage 2 在上游 LLM 拥堵日（硅基流动单页排队
 # 500-1000s 实测）需要 45-60min，旧固定 2400s 曾在 40/51 页处误杀整轮
@@ -109,6 +111,27 @@ def _sse_recorder(job_id, out_path, stats):
     t = threading.Thread(target=_run, daemon=True, name=f"sse-{job_id[:8]}")
     t.start()
     return t
+
+
+def _assert_port_free() -> None:
+    """启动前确认端口没被别的实例占着 —— 否则本轮结论不可信。
+
+    历史隐患：``wait_health`` 只看 HTTP 200，**不校验响应者是不是本进程刚拉起的那个**。
+    若上一次运行残留的 ``pbc-server.exe`` 仍占着端口，新实例绑定失败，而健康检查会
+    顺利连到**旧实例** → driver 把任务提交给了另一个 server（appdata/DB 都不是本次的），
+    全程却"绿灯"。这与已修的"测了 A、发了 B"是同一类错，只是错在实例身份而非文件路径。
+    """
+    import socket
+
+    with socket.socket() as s:
+        s.settimeout(2.0)
+        busy = s.connect_ex(("127.0.0.1", PORT)) == 0
+    if busy:
+        raise SystemExit(
+            f"[e2e] FAIL: 端口 {PORT} 已被占用 —— 疑似残留 pbc-server.exe。\n"
+            f"        继续跑会连到那个实例（appdata/DB 均非本次），结果不可信。\n"
+            f"        请先结束残留进程，或用 PBC_E2E_PORT 换一个端口。"
+        )
 
 
 def wait_health(client, timeout=40):
@@ -202,7 +225,7 @@ def main():
 
     appdata = os.path.join(tempfile.gettempdir(), "pbc_e2e_appdata")
     os.makedirs(appdata, exist_ok=True)
-    env = dict(os.environ, APPDATA=appdata, PORT="58799", NO_WINDOW="1")
+    env = dict(os.environ, APPDATA=appdata, PORT=str(PORT), NO_WINDOW="1")
 
     # 别写死产物路径：默认测 PyInstaller 直接产物，但用户双击运行的是 Electron
     # 包里内嵌的那一份 —— 只测前者等于"测了 A、发了 B"（见 DEPLOYMENT.md 检查清单）。
@@ -212,6 +235,7 @@ def main():
         sys.exit(2)
     exe = os.path.abspath(exe)
     print(f"[e2e] target exe = {exe}")
+    _assert_port_free()
     proc = subprocess.Popen([exe], env=env,
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     print(f"[e2e] exe started pid={proc.pid} appdata={appdata}")
@@ -368,7 +392,11 @@ def run_upload(c, path, mime, expect_types, force, timeout_s=None, page_chars=Fa
     print(f"[e2e] upload {path} -> job {job_id}")
     # SSE 流式输出证据采集：全程订阅进度流，记录事件数/phase 覆盖
     sse_stats = {"events": 0, "transitions": [], "last_phase": None, "last": None}
-    sse_log = os.path.join("devlogs", f"e2e_sse_{Path(path).stem}.jsonl")
+    # 证据文件按 **job_id** 分文件：同一轮复跑会产生新 job，若按 stem 命名且 append，
+    # 多次运行的帧会混进同一个文件、事后无法分辨哪一帧属于哪一轮（2026-09-16 实测：
+    # 一个 e2e_sse_e2e_rot.jsonl 里累积了 7 个 job 的帧）。采集器**断线重连需要在
+    # while 内重新 open**，所以不能改成 "w"（会擦掉已采到的帧），只能换文件名。
+    sse_log = os.path.join("devlogs", f"e2e_sse_{Path(path).stem}_{job_id}.jsonl")
     sse_thread = _sse_recorder(job_id, sse_log, sse_stats)
     st, d = wait_terminal(c, job_id, timeout_s=timeout_s)
     sse_thread.join(timeout=15)
@@ -448,7 +476,7 @@ def run_cancel(c, path, mime="application/pdf"):
     job_id = r.json().get("job_id") or r.json().get("id")
     print(f"[e2e] upload {path} -> job {job_id}")
     sse_stats = {"events": 0, "transitions": [], "last_phase": None, "last": None}
-    sse_log = os.path.join("devlogs", "e2e_sse_cancel.jsonl")
+    sse_log = os.path.join("devlogs", f"e2e_sse_cancel_{job_id}.jsonl")
     sse_thread = _sse_recorder(job_id, sse_log, sse_stats)
     # 等 OCR 真正开跑（避免对 pending 取消的无关路径），最长 20s
     entered = ""

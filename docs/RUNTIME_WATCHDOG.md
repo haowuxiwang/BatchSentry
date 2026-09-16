@@ -1,8 +1,10 @@
 # 运行时看门狗：是否需要，以及做到什么程度
 
 > 结论先行：**需要，但要分层**。当前最痛的缺陷不是"没有看门狗"，而是
-> **一个无上限的等待点**（已修）；真正的运行时看门狗需要一次 schema 变更，
-> 属于应当由需求方确认的改动，本文给出依据与分阶段方案。
+> **一个无上限的等待点**（P0，已修）；运行期间的自动巡检（P1）经需求方确认后
+> 也已实施（`core/watchdog.py`，schema v12）。P2（SSE 停滞可见性）仍未做。
+> 本文保留完整的判定依据、实测数据与分层过程 —— 包括**实施中踩到并被用例
+> 当场抓出的两个坑**，它们的价值不低于结论本身。
 
 ## 1. 问题定义
 
@@ -75,6 +77,10 @@
 **没有任何一列记录"最后活动时间"** → 看门狗无法判定，除非改 schema。
 这是本文最重要的实现约束。
 
+> **已解决（v12）**：`jobs.last_activity_at` 就是为回答这个问题而加的列。
+> 注意 `audit_log` 那条仍然成立 —— 它是**弱信号**，不能拿来当判据（见 §5
+> "不推荐的做法"），现在的判据只认 `last_activity_at`。
+
 ## 4. 业界范式（对标）
 
 主流任务系统的做法高度一致，四条可直接借鉴：
@@ -117,20 +123,48 @@ SQS/Celery 用 visibility timeout 让"超时未 ACK"的任务重新可见。
 - 护栏：`tests/unit/test_procpool.py::TestCpuTaskTimeout`
   + `::TestProcessPoolTimeoutRecycle`（含"回收后可重建"）
 
-### P1 —— 建议实施，需确认（触及 schema 与状态机）
+### P1 —— **已实施（2026-09-16，用户确认后开工）**
 
-真正的运行时看门狗：
+模块 `core/watchdog.py` + schema v12：
 
-1. `jobs` 加 `last_activity_at`（schema v11 → v12；迁移体只加列）
-2. 在**进度推进点**写心跳：`transition_status` 各转换 + `_update_ocr_progress`
-   + 每页分析完成（**绑定前进，不是定时器**）
-3. 后台周期任务（如 60s）扫描非终态 job，按状态分级阈值判定
-4. 判定超时 → 复用 `recover_stuck_jobs` 同款动作（`error` + 审计 + 通知）
-5. 阈值全部可配置，默认保守（宁可晚判，不可误杀长任务）
+1. `jobs` 加 `last_activity_at`（v11 → v12；迁移体只加列，schema.sql 是 DDL 唯一声明处）
+2. 在**进度推进点**写心跳：`state.touch_activity`（状态迁移 + OCR / 自愈 / 跨页
+   三类进度更新）+ Stage 2 单页分析完成（含解析失败页）+ `upload.py` 建 job。
+   **绑定前进，不是定时器**
+3. 后台周期任务（默认 60s，`PBC_WATCHDOG_INTERVAL_S`）扫描非终态 job，按状态分级阈值判定
+4. 判定超时 → 复用 `recover_stuck_jobs` 同款动作（条件 `UPDATE` + 审计
+   `watchdog_stall_recovery` + 锁外通知）
+5. 阈值全部可配置（`PBC_WATCHDOG_SCALE` 整体缩放），默认保守
 
-**为什么需要确认**：它改 schema、改状态机写入点，且阈值一旦设错会误杀
-正常的长任务（51 页真实批记录的 OCR + 分析本身就要几十分钟）。
-不宜在没有需求方确认的情况下擅自引入。
+**实施中定下的两条硬约束**（比原方案更严格）：
+
+- **`pending` 移出监视范围**。运行期间 `pending` 是**合法排队态**（等
+  `MAX_CONCURRENT_JOBS` 槽位），把"排队久"当停滞会**误杀用户排队的上传**；
+  而崩溃残留的 pending 由启动恢复兜底。原方案把 `_STUCK_STATUSES` 整体当监视集，
+  是错的。
+- **`last_activity_at IS NULL` / 不可解析 → 跳过**。不用 `created_at` 兜底：
+  那会让"正常跑了很久的大文档"被判成停滞。宁缺勿错。
+
+**实施中踩到并修掉的两个坑**（都被本轮新增用例当场抓出，不是事后发现的）：
+
+| 坑 | 后果 | 修法 / 护栏 |
+|---|---|---|
+| `recover_stalled_jobs` 首版在 `db_lock` **内**调 `_audit_log`，而后者也取同一把锁（`asyncio.Lock` 不可重入） | **永久死锁**（测试跑成 5 分钟无输出） | 审计移到锁外；`test_marks_error_audits_and_notifies` |
+| `_migrate_v12` 首版被贴在 `_migrate_v11` 的 `if current_version < 11:` 块内 | v11 库**跳过迁移**，但 `PRAGMA user_version` 仍无条件写 12 → **库标成 v12 却缺列**（静默 schema 漂移，看门狗永久失明且不报错） | 补同号守卫；通用护栏 `test_every_migration_version_has_its_own_guard`（每个版本号必须有同号守卫 + 同号调用） |
+
+阈值分级（默认值，`PBC_WATCHDOG_SCALE` 可整体缩放）：
+
+| 状态 | 基准 | 页数增量 | 封顶 | 实测参照 |
+|---|---|---|---|---|
+| `ocr_running` | 1800s | +120s/页 | 10800s | 51 页真实件 644s（10× 余量）；4 页旋转自愈轮 1031s |
+| `analyzing` | 1800s | +180s/页 | 10800s | 51 页真实件 825–1209s（9× 余量）|
+| `ocr_done` | 1800s | — | — | 纯过渡态，正常 <1s |
+| `cancelling` | 900s | — | — | 需等一次在途 OCR 轮询收尾 |
+| `pending` | **不监视** | — | — | 合法排队态 |
+
+**仍然不做的**：不动"事件循环整停"那一类（GIL 饿死）—— 同循环内的定时器
+也停摆，捕获不了。那类问题由 `core/procpool.py` 的进程隔离解决（Round 15），
+两者是不同手段，不能互相替代（对照本文件 §4 第 2 条）。
 
 ### P2 —— 可选（不依赖 schema）
 

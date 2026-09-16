@@ -38,7 +38,8 @@ async def test_db_for_state_machine(tmp_path):
             stage2_ms INTEGER,
             stage3_ms INTEGER,
             failed_pages TEXT,
-            error_message TEXT
+            error_message TEXT,
+            last_activity_at TIMESTAMP  -- v12 心跳：transition_status 会写它
         );
         CREATE TABLE audit_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,

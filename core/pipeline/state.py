@@ -96,7 +96,11 @@ async def _transition_status_unlocked(db, job_id: str, new_status: str, detail: 
             f"允许的转换：{', '.join(sorted(zh_job_status(s) for s in allowed))}"
         )
 
-    await db.execute("UPDATE jobs SET status = ? WHERE id = ?", (new_status, job_id))
+    await db.execute(
+        "UPDATE jobs SET status = ?, last_activity_at = datetime('now','localtime') "
+        "WHERE id = ?",
+        (new_status, job_id),
+    )
     await db.execute(
         "INSERT INTO audit_log (job_id, action, detail, created_at) "
                 "VALUES (?, ?, ?, datetime('now','localtime'))",
@@ -300,6 +304,31 @@ def is_job_stopping_sync(job_id: str) -> bool:
         return False
 
 
+async def touch_activity(db, job_id: str, *, commit: bool = False) -> None:
+    """心跳：把 job 的"最后推进时刻"推到当前时间（运行时看门狗的唯一信号源）。
+
+    **必须绑定真实前进**，不能挂独立定时器 —— 定时器在 stall 期间照样跳，
+    看门狗永远不会触发（业界共识，见 `docs/RUNTIME_WATCHDOG.md` §4）。
+    故只在三种"确实往前走了一步"的时刻调用：状态迁移、进度更新、
+    单页分析完成。
+
+    设计取舍：
+    - 失败**绝不抛异常**：心跳只是可观测性，不能因为它把正常管线打断
+      （与 `_update_ocr_progress` 同款兜底）。
+    - ``commit=False`` 是默认：进度写入点通常紧接着自己 commit，
+      此处额外 commit 只会多一次 fsync（也避免与调用方事务边界打架）。
+    """
+    try:
+        await db.execute(
+            "UPDATE jobs SET last_activity_at = datetime('now','localtime') WHERE id = ?",
+            (job_id,),
+        )
+        if commit:
+            await db.commit()
+    except Exception as e:
+        logger.warning(f"[{job_id}] Activity heartbeat failed: {e}")
+
+
 async def _update_ocr_progress(job_id: str, done: int, total: int) -> None:
     """更新 job.ocr_progress（JSON）供 SSE 实时推送。
 
@@ -313,7 +342,9 @@ async def _update_ocr_progress(job_id: str, done: int, total: int) -> None:
     try:
         async with db_lock:
             await db.execute(
-                "UPDATE jobs SET ocr_progress = ? WHERE id = ?", (payload, job_id)
+                "UPDATE jobs SET ocr_progress = ?, "
+                "last_activity_at = datetime('now','localtime') WHERE id = ?",
+                (payload, job_id),
             )
             await db.commit()
     except Exception as e:
@@ -343,7 +374,9 @@ async def _update_self_heal_progress(
     try:
         async with db_lock:
             await db.execute(
-                "UPDATE jobs SET ocr_progress = ? WHERE id = ?", (payload, job_id)
+                "UPDATE jobs SET ocr_progress = ?, "
+                "last_activity_at = datetime('now','localtime') WHERE id = ?",
+                (payload, job_id),
             )
             await db.commit()
     except Exception as e:
@@ -379,7 +412,9 @@ async def _update_cross_progress(job_id: str, done: int, total: int, label: str)
                 data["cross"] = {"done": done, "total": total, "label": label}
             payload = json.dumps(data, ensure_ascii=False)
             await db.execute(
-                "UPDATE jobs SET ocr_progress = ? WHERE id = ?", (payload, job_id)
+                "UPDATE jobs SET ocr_progress = ?, "
+                "last_activity_at = datetime('now','localtime') WHERE id = ?",
+                (payload, job_id),
             )
             await db.commit()
     except Exception as e:

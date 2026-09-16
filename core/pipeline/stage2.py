@@ -8,7 +8,7 @@ import time
 
 from config import config
 from core.page_analyzer import AnalysisCancelled
-from core.pipeline.state import _audit_log, transition_status
+from core.pipeline.state import _audit_log, touch_activity, transition_status
 
 logger = logging.getLogger(__name__)
 async def _run_stage2_analysis(
@@ -163,6 +163,9 @@ async def _analyze_one(
                         "WHERE job_id = ? AND page = ?",
                         (json.dumps(error_data, ensure_ascii=False), job_id, page_num),
                     )
+                    # 心跳绑定"前进"：该页已处理完（哪怕解析失败也算推进），
+                    # 看门狗据此知道 analyzing 阶段的 job 仍在动。
+                    await touch_activity(db, job_id)
                     await db.commit()
                 logger.warning(
                     f"[{job_id}] Stage 2: Page {page_num} JSON parse failure "
@@ -185,6 +188,7 @@ async def _analyze_one(
                     "WHERE job_id = ? AND page = ?",
                     (payload, job_id, page_num),
                 )
+                await touch_activity(db, job_id)  # 单页分析完成 = 前进
                 # 对抗审查 P2：重分析页先清该页待审（pending）llm_page 旧行 —
                 # 自愈/重试后 raw_html 变化 → 新 findings 指纹不同，
                 # idx_findings_dedup UNIQUE 挡不住，新旧两套结论并存误导复核。
@@ -324,6 +328,7 @@ async def _analyze_one(
                     "WHERE job_id = ? AND page = ?",
                     (json.dumps(error_data, ensure_ascii=False), job_id, page_num),
                 )
+                await touch_activity(db, job_id)  # 前进（即使该页最终失败）
                 await db.commit()
                 logger.warning(f"[{job_id}] DB: page_cache updated with _parse_error (page={page_num})")
             return

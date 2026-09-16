@@ -367,8 +367,10 @@ async def create_job(
                     f"确需重新分析请先删除旧任务或重新上传（将创建新任务）。",
                 )
             await db.execute(
-                "INSERT INTO jobs (id, filename, status, pdf_path, total_pages, md5, created_at) "
-                "VALUES (?, ?, 'pending', ?, ?, ?, datetime('now','localtime'))",
+                "INSERT INTO jobs (id, filename, status, pdf_path, total_pages, md5, "
+                "created_at, last_activity_at) "
+                "VALUES (?, ?, 'pending', ?, ?, ?, datetime('now','localtime'), "
+                "datetime('now','localtime'))",
                 (job_id, safe_name, str(pdf_path), pdf_page_count or None, content_md5),
             )
             audit_detail = (

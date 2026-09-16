@@ -7,8 +7,52 @@
 
 ## [Unreleased]
 
+_（暂无 —— 下一版待记）_
+
+---
+
+## [1.1.3] — 2026-09-16
+
+> 本版是 **R1–R3 降噪 + 运行时看门狗 + 构建物重出** 的合并版：产物此前停留在
+> `8cd0dc1`（v1.1.2 设定那次），落后源码 20 个提交，**分发它等于发旧行为**。
+
+### 新增
+
+- **运行时看门狗（`core/watchdog.py`，schema v12）**：补齐"运行期间"的兜底 ——
+  此前 `recover_stuck_jobs` **只在启动时**跑一次，不重启就没有任何自动收敛，
+  卡死的 job 会让 SSE 永久等待（`while True` 只认终态）。
+  判据与取舍（详见 `docs/RUNTIME_WATCHDOG.md`）：
+  - 新增 `jobs.last_activity_at`，由 `state.touch_activity` 写在**真实推进点**
+    （状态迁移 / OCR 进度 / 自愈进度 / 跨页进度 / Stage 2 单页分析完成）。
+    **心跳绑定前进，不挂定时器** —— 定时器在 stall 期间照样跳，看门狗永不触发。
+  - 列**故意不给 DB 默认值**：`ALTER` 不允许用 `datetime('now','localtime')` 作默认，
+    而 `CURRENT_TIMESTAMP` 是 UTC，与全库 localtime 口径冲突 → 由代码统一写入。
+  - `last_activity_at IS NULL` / 时间戳不可解析 → **一律跳过**（不可判定就不判，
+    绝不用 `created_at` 兜底 —— 那会误杀正常跑很久的大文档）。
+  - **`pending` 不在监视范围**：运行期间它是合法排队态（`MAX_CONCURRENT_JOBS`），
+    当停滞会误杀用户排队的上传；崩掉的 pending 由启动恢复兜底。
+  - 阈值按状态分级且刻意宽松（OCR 1800s + 120s/页 封顶 3h；逐页 LLM 1800s +
+    180s/页 封顶 3h；`ocr_done` 1800s；`cancelling` 900s），`PBC_WATCHDOG_SCALE`
+    可整体缩放。依据是实测基准（51 页 OCR 644s、逐页 LLM 825–1209s）。
+  - 开关 `PBC_WATCHDOG_ENABLED` / 周期 `PBC_WATCHDOG_INTERVAL_S`。
+  - 收敛动作与启动恢复一致：条件 `UPDATE ... WHERE status = ?`（防并发改写）+ 审计
+    `watchdog_stall_recovery` + 锁外飞书通知。扫描异常**绝不退出循环**（看门狗自己
+    挂掉比 job 卡死更糟）。
+- **`docs/RUNTIME_WATCHDOG.md`**：看门狗必要性调研（三问判据 / 超时覆盖面矩阵 /
+  业界对标 / 分层方案 / 不推荐做法）。
+- **`docs/VISUAL_CROSSCHECK.md`**：视觉交叉对比实测（前置条件 + 独立互证结论）。
+- **`docs/ADVERSARIAL_AUDIT.md`**：9 问对抗性审查报告（逐条带 `file:line` 证据）。
+
 ### 修复
 
+- **周期巡检引入时踩到的两个坑（均被自己新增的用例当场抓出）**：
+  - `recover_stalled_jobs` 首版在 `db_lock` 内调用 `_audit_log`，而后者也取同一把
+    `asyncio.Lock`（不可重入）→ **永久死锁**。修法：审计移到锁外写。
+    护栏 `test_marks_error_audits_and_notifies`。
+  - `_migrate_v12` 首版被贴在 `_migrate_v11` 的 `if current_version < 11:` 块内 →
+    **v11 库整段跳过迁移，而 `PRAGMA user_version` 仍无条件写成 12** = 库被标成 v12
+    却缺列（静默 schema 漂移，看门狗永久失明）。修法：补自己的守卫；并新增通用护栏
+    `test_every_migration_version_has_its_own_guard`（每个版本号必须有同号守卫 + 同号调用）。
 - **`run_cpu` 没有超时 —— 全链路唯一的"永久非终态"入口（对抗审查定位）**：
   实测超时覆盖面发现，外部调用**都有**上限（LLM 180s、MinerU 60/300s、Paddle
   轮询封顶 3600s），唯独本地 CPU 重活（Stage 0 规范化）的
