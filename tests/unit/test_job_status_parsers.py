@@ -10,6 +10,7 @@ import pytest
 from api.jobs.status import (
     _derive_phase,
     _parse_cross_progress,
+    _parse_failed_pages,
     _parse_ocr_progress,
     _parse_self_heal_progress,
 )
@@ -79,6 +80,39 @@ class TestParseCrossProgress:
 
     def test_invalid_json_returns_none(self):
         assert _parse_cross_progress("oops") is None
+
+
+class TestParseFailedPages:
+    """#132 — `jobs.failed_pages` 是 TEXT 列，但**字段语义是列表**。
+
+    回归守卫：接口曾原样透传该 TEXT，响应里出现 `"failed_pages": "[2, 1]"`
+    （装着 JSON 的字符串）。前端 `Array.isArray()` 拿到字符串即静默退化为
+    `[]` ⇒ 失败页在任务列表里永不显示，而复核页（自行 json.loads）却正常。
+    所以这里断言的是**返回类型**，不只是取值。
+    """
+
+    def test_returns_list_not_string(self):
+        got = _parse_failed_pages("[2, 1]")
+        assert got == [2, 1]
+        assert isinstance(got, list), "必须是 list —— 字符串会被前端静默丢弃"
+
+    def test_none_and_empty_are_unknown_not_zero(self):
+        """无失败页 → None；**不得**伪造 `[]`（那是在断言"确认零失败页"）。"""
+        assert _parse_failed_pages(None) is None
+        assert _parse_failed_pages("") is None
+
+    def test_single_page(self):
+        assert _parse_failed_pages("[3]") == [3]
+
+    def test_non_list_payload_is_unknown(self):
+        assert _parse_failed_pages('{"page": 2}') is None
+
+    def test_invalid_json_is_unknown(self):
+        assert _parse_failed_pages("not-valid-json{") is None
+
+    def test_non_numeric_element_is_unknown(self):
+        """页码不可解析 → 整体按未知处理（与 _parse_self_heal_progress 同款）。"""
+        assert _parse_failed_pages('["x"]') is None
 
 
 class TestDerivePhase:

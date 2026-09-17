@@ -185,9 +185,21 @@ class TestFrontendVisibilityContract:
                 )
 
     def test_failed_pages_are_rendered(self):
-        """接口一直返回 failed_pages，界面此前零处渲染 → 用户看不到哪几页。"""
+        """接口一直返回 failed_pages，界面此前零处渲染 → 用户看不到哪几页。
+
+        #132：本用例只能证明"前端消费了该字段"，**证明不了类型对得上** ——
+        原先只查标识符出现，而接口当时返回的其实是字符串 `"[2, 1]"`，
+        于是这条"护栏"全程为绿。行为级护栏见
+        `tests/integration/test_api_jobs_coverage.py::TestGetJobStatus::`
+        `test_get_status_failed_pages_is_a_json_array`；此处同时锁住前端的
+        类型预期，两端一起改才可能漂移。
+        """
         js = UPLOAD_JS.read_text(encoding="utf-8")
         assert "job.failed_pages" in js, "failed_pages 未被前端消费"
+        assert re.search(r"Array\.isArray\(\s*job\.failed_pages\s*\)", js), (
+            "前端须按数组取用 failed_pages（接口契约是 list）；"
+            "接口若回归成字符串，Array.isArray 会静默丢弃 → 失败页不可见"
+        )
 
     def test_partial_review_shows_the_reason(self):
         """partial_review 下也必须显示 error_message（SSE + 历史行两处）。"""

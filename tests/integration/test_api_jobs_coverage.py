@@ -10,6 +10,8 @@
 - POST /api/jobs 上传 - 文件名路径穿越    (Path 安全检查)
 - GET /api/jobs/stats/overview - PDF 输出目录计数
 """
+import json
+
 import pytest
 import pytest_asyncio
 from pathlib import Path
@@ -109,6 +111,34 @@ class TestGetJobStatus:
             "phase",
         ):
             assert field in data, f"missing field: {field}"
+
+    @pytest.mark.asyncio
+    async def test_get_status_failed_pages_is_a_json_array(self, client, test_db):
+        """#132 — `GET /api/jobs/{id}` 的 failed_pages 必须是 JSON **数组**。
+
+        上面那条用例只断言字段**存在**（`field in data`），而字符串 `"[2, 1]"`
+        同样"存在" —— 所以缺陷能在它眼皮底下长期存活。这里断言**类型**：
+        该列是 SQLite TEXT，接口曾原样透传，于是响应里是 `"[2, 1]"`；
+        前端按 `Array.isArray()` 取用 ⇒ 静默退化为 `[]` ⇒ 任务列表**永远
+        不显示**失败页与页码，而复核页（SSR 自行 json.loads）却显示正常。
+        同一字段两张页面行为不一致，用户只会读成"这次没有失败页"。
+
+        修复前此断言必红（`isinstance(got, str)` 为真）。
+        """
+        await test_db.execute(
+            "INSERT INTO jobs (id, filename, pdf_path, status, total_pages, failed_pages) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            ("fp-type-job", "t.pdf", "/tmp/t.pdf", "partial_review", 3, "[2, 1]"),
+        )
+        await test_db.commit()
+
+        r = await client.get("/api/jobs/fp-type-job")
+        assert r.status_code == 200
+        got = r.json()["failed_pages"]
+        assert got == [2, 1], f"failed_pages 应为 list，实得 {got!r}"
+        assert not isinstance(got, str), (
+            "failed_pages 被原样透传为字符串 —— 前端 Array.isArray 会静默丢弃（#132）"
+        )
 
     @pytest.mark.asyncio
     async def test_get_status_ocr_backend_display(self, client_with_job, test_db):
@@ -900,7 +930,21 @@ class TestStreamJobProgress:
                 body += chunk
                 if "event: done" in body:
                     break
-        assert '"failed_pages": "[2]"' in body
+        # #132：断言**解析后的结构**，而不是序列化后的字符。原断言写死
+        # `'"failed_pages": "[2]"'`，把"TEXT 列原样透传"这个缺陷本身固化成了
+        # 契约 —— 而前端 `Array.isArray()` 收到字符串会静默退化成 `[]`，
+        # 失败页在任务列表里永不显示。这正是"断言序列化字符"的典型代价。
+        payloads = [
+            json.loads(ln[len("data: "):])
+            for ln in body.splitlines()
+            if ln.startswith("data: ")
+        ]
+        fps = [p["failed_pages"] for p in payloads if "failed_pages" in p]
+        assert fps, f"SSE 快照未携带 failed_pages：{body[:400]!r}"
+        assert [2] in fps, f"failed_pages 应为 list [2]，实得 {fps!r}"
+        assert not any(isinstance(v, str) for v in fps), (
+            "failed_pages 仍是字符串 —— 前端 Array.isArray 会静默丢弃（#132）"
+        )
 
     @pytest.mark.asyncio
     async def test_live_snapshot_only_includes_active_jobs(self, test_db):

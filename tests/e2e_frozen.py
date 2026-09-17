@@ -326,6 +326,27 @@ try:
         except Exception as e:
             fail("pipeline_terminal", str(e))
 
+        # 8b. #132 —— failed_pages 的**运行时类型**必须与前端预期一致。
+        #     db 列是 TEXT，接口曾原样透传 ⇒ 响应里是 `"[2, 1]"`（字符串），
+        #     前端 `Array.isArray()` 拿到即静默退化成 `[]` ⇒ 失败页永不显示。
+        #     本条跑在**打包产物自己起的服务**上，故它证明的是"修复已随产物
+        #     分发"，而非"源码树里写过这句话"。
+        #     ⚠️ **能力边界（诚实标注）**：本冒烟的成功路径不会产生失败页 ⇒
+        #     `failed_pages` 为 `None`，**修复前后都是 `None`** ⇒ 这条在此
+        #     场景下**不具判别力**。真正有判别力的是 #127 验收（用失效凭据
+        #     造出 `failed_pages=[2,1]` 并断言它是 list），二者互补，不可互替。
+        try:
+            fp = requests.get(
+                f"{BASE}/api/jobs/{job_id}", timeout=5
+            ).json().get("failed_pages")
+            assert not isinstance(fp, str), (
+                f"failed_pages 是字符串 {fp!r} —— 前端 Array.isArray 会静默丢弃（#132）"
+            )
+            assert fp is None or isinstance(fp, list), f"failed_pages 类型非法: {fp!r}"
+            ok("failed_pages_type", f"failed_pages={fp!r}")
+        except Exception as e:
+            fail("failed_pages_type", str(e))
+
         # 9. Review page
         try:
             r = requests.get(f"{BASE}/jobs/{job_id}/review", timeout=5)
