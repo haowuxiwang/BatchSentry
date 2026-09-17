@@ -42,11 +42,16 @@ lifespan 调一次 —— 不重启应用就没有任何兜底。一个卡死的
 假阳性，比晚判几分钟糟得多（本模块的定位是抓"永久停滞"，不是绩效考核）。
 
 OCR 基准取 4200s 的依据（旧值 1800s 是错的）：
-空页自愈**逐页**写心跳（`self_heal._report_heal_progress`），故心跳缺口的
-上界 = **单页补救预算** = 旋转候选角 3 个（`self_heal._ROTATION_CANDIDATES`）
-× 单页探测封顶（`ocr_client.poll_timeout_for` 对 1 页 = 600+30 = 630s）
-≈ 1890s，再加该页重分析的 ~180-240s ≈ **2100s**。
-旧值对 1 页文档只有 1800+120 = 1920s —— **低于合法上限**（2026-09-16 回审核实）。
+空页自愈在**每次探测尝试结束**与**每次拥塞退避开始前**都写心跳
+（`self_heal._probe_slice_angle` / `_report_heal_progress`），故心跳缺口
+**不跨尝试累加**，上界就是 `self_heal.rotation_silence_bound_s()`
+= max(单次尝试 2 × 单页封顶 630s, 单次退避封顶 300s) = **1260s**。
+
+> 2026-09-16 重新推导（缺陷 #120）：此前写法以「3 个候选角 × 630s ≈ 1890s」
+> 当上界 —— 既**漏了每角度 2 次尝试**（真实乘积是 3780s），又在自愈改为
+> 「逐次尝试写心跳 + 拥塞退避」之后**不再成立**（缺口不再跨尝试累加）。
+> 现在这个量由 `rotation_silence_bound_s()` 单一提供，机检断言它 ≤ 本阈值，
+> 不再手写推导（手写推导正是它一度算错的原因）。
 
 `cancelling` 基准取 2400s 的依据（旧值 900s 同样是错的，同一条不变式）：
 取消检查点只在 `run_cpu` **前后**（`stage1.py:49/54`），所以取消要等 Stage 0
@@ -204,6 +209,47 @@ def elapsed_seconds(last_activity_at: str, now: datetime | None = None) -> float
         return None
     ref = now or datetime.now()
     return (ref - ts).total_seconds()
+
+
+# 停滞预警比例（P2，docs/RUNTIME_WATCHDOG.md §8.7）：空闲达到基准阈值的该
+# 比例时，界面先**告知**用户「任务无进展，可取消或重试」，而不是让他一直
+# 等到看门狗杀任务。阈值经两轮抬高（1800→4200s）后，这一层从"可选"变成
+# "应当做"：否则在收到任何反馈前最长要等约 70 分钟。
+_STALL_WARN_FRACTION = 0.6
+
+
+def stall_report(
+    status: str, total_pages: int | None, last_activity_at: str | None,
+    *, has_live_task: bool = False, now: datetime | None = None,
+) -> dict | None:
+    """该 job 的停滞可见性 —— **纯派生**，不写库、不改 schema。
+
+    返回 None 表示"不适用"（状态不在监视范围，或没有可用的心跳）。
+    否则返回：
+
+    - ``idle_seconds``：距最后一次真实推进的秒数
+    - ``limit_seconds``：该状态 + 页数下的停滞阈值（看门狗收敛动作的触发点）
+    - ``warn``：空闲 ≥ 60% 阈值 —— UI 据此提示"可取消或重试"
+    - ``overdue``：空闲 ≥ 阈值（看门狗即将/已经收敛为 error）
+
+    与 `stall_limit_seconds` 共用**同一份**阈值表（含 `_scale()` 现场缩放）——
+    调用方**不得**另算一套阈值，两处阈值必然漂移（本项目反复踩过）。
+    纯函数（`now` 可注入），无需起 DB 即可单测。
+    """
+    if not is_watched(status, has_live_task=has_live_task):
+        return None
+    idle = elapsed_seconds(last_activity_at, now=now)
+    if idle is None:
+        return None
+    limit = stall_limit_seconds(status, total_pages, has_live_task=has_live_task)
+    if limit == float("inf"):  # 未监视：正常不会走到（is_watched 已挡）
+        return None
+    return {
+        "idle_seconds": int(idle),
+        "limit_seconds": int(limit),
+        "warn": idle >= limit * _STALL_WARN_FRACTION,
+        "overdue": idle >= limit,
+    }
 
 
 def _live_pipeline_tasks() -> dict:

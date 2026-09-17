@@ -72,6 +72,7 @@ async def get_job_status(job_id: str, request: Request = None):
         "page_finding_counts": page_finding_counts,
         "ocr_backend_used": job["ocr_backend_used"] if "ocr_backend_used" in job.keys() else None,
         "ocr_backend_display": _ocr_backend_display(job),
+        "stall": _stall_payload(job),
     }
 
 def _ocr_backend_display(job) -> str | None:
@@ -81,6 +82,31 @@ def _ocr_backend_display(job) -> str | None:
         return None
     from core.zh_map import zh_ocr_backend
     return zh_ocr_backend(raw)
+
+
+def _stall_payload(job) -> dict | None:
+    """派生停滞可见性（P2，「停滞可见性」）—— 见 `core.watchdog.stall_report`。
+
+    **派生量，不写库**：空闲秒数与阈值都能从既有字段算出，落库只会在
+    每次推送时多一次 fsync，并让"这个字段过期了"成为新的失效模式。
+    阈值口径由 watchdog 单一提供（含 PBC_WATCHDOG_SCALE 现场缩放）。
+
+    行内无 `last_activity_at` 列（如精简投影漏列）时返回 None —— 明确
+    "判不了"，而不是拿 0 冒充"没停滞"。
+    """
+    if "last_activity_at" not in job.keys():
+        return None
+    from core.watchdog import stall_report
+
+    try:
+        return stall_report(
+            job["status"],
+            job["total_pages"] if "total_pages" in job.keys() else None,
+            job["last_activity_at"],
+        )
+    except Exception:  # 可见性是增强项：绝不因此打断状态查询
+        logger.warning("stall_report failed (non-fatal)", exc_info=True)
+        return None
 
 
 async def _get_job_progress(db, job_id: str) -> dict:
@@ -105,7 +131,7 @@ async def _get_job_progress(db, job_id: str) -> dict:
     cursor = await db.execute(
         "SELECT id, status, total_pages, error_message, failed_pages, "
         "finished_at, stage1_ms, stage2_ms, stage3_ms, ocr_progress, "
-        "ocr_backend_used FROM jobs WHERE id = ?", (job_id,)
+        "ocr_backend_used, last_activity_at FROM jobs WHERE id = ?", (job_id,)
     )
     job = await cursor.fetchone()
     if not job:
@@ -155,6 +181,9 @@ async def _get_job_progress(db, job_id: str) -> dict:
         "page_finding_counts": page_finding_counts,
         "ocr_backend_used": job["ocr_backend_used"] if "ocr_backend_used" in job.keys() else None,
         "ocr_backend_display": _ocr_backend_display(job),
+        # P2 停滞可见性（派生）：SSE 每 2s 一帧，用户据此在"被杀之前"就知道
+        # 任务无进展，可以自己决定取消/重试。终态 job 不适用 → None。
+        "stall": _stall_payload(job),
     }
     if status not in _ACTIVE_STATUSES:
         _store_terminal_snapshot(job_id, _snap_key(status, job["finished_at"]), progress)

@@ -290,6 +290,15 @@
             </div>
             {% endif %}
 
+            {# P2 停滞可见性（2026-09-16）：任务长时间无新进展时**在界面上先告知**，
+               而不是让用户干等到看门狗收敛（阈值经两轮抬高后最长可达约 70 分钟）。
+               文案由 SSE 帧的 stall 字段驱动（review.js），此处只放骨架；
+               role=status + aria-live 让读屏用户同样能感知。 #}
+            <div id="stall-banner" class="rounded-md border-l-2 border-warning bg-card px-3 py-2 flex items-center gap-2 hidden">
+                <span class="w-1.5 h-1.5 rounded-full bg-warning shrink-0"></span>
+                <span id="stall-text" class="text-xs text-foreground" role="status" aria-live="polite"></span>
+            </div>
+
             <!-- LLM parse error — 同样左边框样式，不铺底 -->
             <div id="parse-error-banner" class="parse-error-banner rounded-md border-l-2 border-warning bg-card px-3 py-2 flex items-center gap-2{% if not page_parse_error %} hidden{% endif %}">
                 <span class="w-1.5 h-1.5 rounded-full bg-warning shrink-0"></span>
@@ -307,6 +316,17 @@
             <div id="ocr-empty-banner" class="ocr-empty-banner rounded-md border-l-2 border-warning bg-card px-3 py-2 flex items-center gap-2 hidden">
                 <span class="w-1.5 h-1.5 rounded-full bg-warning shrink-0"></span>
                 <span class="text-xs text-foreground">此页无 OCR 内容（空白页或扫描质量过低），未执行分析，请以 PDF 原图为准</span>
+            </div>
+            {% endif %}
+
+            {# 缺陷 #120（2026-09-16）：本页因**上游容量受限**（队列满/限流）
+               未能完成旋转补救 —— 这与"此页确实没有内容"是两件事，故独立成条
+               并给出可行动建议（稍后重试本任务）。诊断键 rotation_blocked 与
+               rotation_probed 互斥，见 _self_heal_diag 的说明。 #}
+            {% if ocr_diagnostics and ocr_diagnostics.rotation_blocked %}
+            <div id="rotation-blocked-banner" class="rounded-md border-l-2 border-warning bg-card px-3 py-2 flex items-center gap-2">
+                <span class="w-1.5 h-1.5 rounded-full bg-warning shrink-0"></span>
+                <span class="text-xs text-foreground">上游 OCR 服务繁忙，此页未能完成旋转补救（并非确认无内容）— 稍后重试本任务可能可恢复，请先以 PDF 原图为准</span>
             </div>
             {% endif %}
 

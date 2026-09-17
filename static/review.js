@@ -178,6 +178,29 @@
       const renderProgressText = () => {
         txt.textContent = lastLabel + elapsedSuffix();
       };
+      // P2 停滞可见性（2026-09-16）：任务长时间无新进展时**先告知**用户 ——
+      // 停滞阈值经两轮抬高后（1800→4200s）最长约 70 分钟才会被看门狗收敛，
+      // 不能让用户在此期间毫无反馈、只能干等或盲目重启。
+      // 数据来自服务端**派生**的 stall 字段（空闲秒数 + 同一份阈值表），
+      // 无额外请求、不写库；overdue 时文案升级为"即将判定失败"。
+      const renderStall = (d) => {
+        const el = document.getElementById("stall-banner");
+        if (!el) return;
+        const st = d && d.stall;
+        if (!st || !st.warn) {
+          el.classList.add("hidden");
+          return;
+        }
+        const idleMin = Math.max(1, Math.round(st.idle_seconds / 60));
+        const limitMin = Math.max(1, Math.round(st.limit_seconds / 60));
+        const textEl = document.getElementById("stall-text");
+        if (textEl) {
+          textEl.textContent = st.overdue
+            ? `任务已 ${idleMin} 分钟无新进展（超过 ${limitMin} 分钟阈值），系统即将判定为失败 — 建议取消后重试`
+            : `任务已 ${idleMin} 分钟无新进展（阈值约 ${limitMin} 分钟）— 可取消后重试，或继续等待上游恢复`;
+        }
+        el.classList.remove("hidden");
+      };
       const elapsedTimer = setInterval(() => {
         if (typeof PbcEta === "undefined" || !phaseState) return;
         phaseState = PbcEta.tickPhase(phaseState, phaseState.phase);
@@ -379,6 +402,7 @@
             lastLabel = label;
             labelEditable = true;
             renderProgressText();
+            renderStall(d);
             log("SSE progress", { status: d.status, pct, label, phase });
           } catch (err) {
             log.warn("SSE parse error", err);
