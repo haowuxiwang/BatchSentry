@@ -542,6 +542,15 @@ test_ocr_limit_covers_rotation_remediation_silence`（读 `rotation_silence_boun
 + `test_rotation_backoff_cap_fits_within_one_page_limit`。
 上一轮那条 `test_ocr_limit_covers_single_page_remediation` 因上式错误而**替换**。
 
+**口径自述（使上述不变式可在产物上复核）**：`GET /api/health/watchdog` 新增
+`rotation_silence_bound_s`（连同既有 `stall_limits_s` / `ocr_upstream_cap_s` /
+`cpu_task_cap_s`）。于是产物级冒烟可以断言"自述的 `ocr_running` 基准 ≥ 自述的
+静默上界"而**一行常量都不写** —— 这正是 §2 原则"让被验证的服务自述判定口径"的
+落实（阈值改动时护栏自动跟随；有人把阈值改小，产物冒烟当轮就红）。
+机检 `test_snapshot_self_reports_rotation_silence_bound`，并已并入
+`test_snapshot_leaks_no_secret` 的密钥护栏（新键名不得携带疑似凭据字样）。
+延迟导入 `self_heal` 以免巡检拉起整条 pipeline 依赖链；两者无导入环。
+
 **顺带查出的同源缺陷（已修，随本轮一并提交）**：`_probe_slice_text` 的
 `except Exception`（**先前就存在**）会把 `OCRCancelled` 也吞掉 ——
 `OCRCancelled` 是 `RuntimeError` 子类。后果：用户取消被记成"角度探测失败"
@@ -562,4 +571,24 @@ test_ocr_limit_covers_rotation_remediation_silence`（读 `rotation_silence_boun
   （`api/jobs/actions.py`），普通 `utf-8` 解出的首字符 `U+FEFF` 会让
   `ast.parse` 抛 `SyntaxError` —— 一次让 5 条用例集体报错，
   且**看起来像被测代码崩了**。解析失败一律跳过该文件，护栏自身永不崩。
+
+### 8.10 【低】巡检"先睡一个周期再首扫" —— 存活信号有 ~60s 空窗（**已记录，本轮不改**）
+
+**定位**（写产物级冒烟时发现）：`watchdog_loop` 的循环体是
+`await sleep(interval)` → `recover_stalled_jobs()`，而 `last_scan_at` 写在
+该轮迭代的 `finally`（`core/watchdog.py:443,455`）。故进程启动后**头一个
+interval（默认 60s）内 `last_scan_at` 恒为 `null`**。
+
+**两个后果**：
+1. 存活信号有 60s 空窗 —— 外部监控无法区分"刚启动还没扫"与"巡检已死"
+   （两者都报 `null`）。冒烟若在此窗口内断言 `last_scan_at` 非空会**假失败**
+   —— 本轮产物冒烟因此改为按**自述的 `interval_s` 派生等待预算**轮询，
+   而非硬编码 60。
+2. 崩溃后重启时，库里遗留的 `running`/`ocr_running` 行要等满 60s 才被回收。
+
+**为什么不现在改**：这属于**行为时序变更**（把首扫提到等待之前），
+与 #120/P2 无关，且需要在真实长跑上复核"启动即回收"不引入竞态。
+按纪律（不在同一轮里叠加无关变更）**记录待办、不改**：0–60s 的空窗相对
+4200s 的判定阈值无实际风险，收益（启动即回收 + 信号无空窗）留待独立一轮
+连同"启动时孤儿任务回收"一起做。
 
