@@ -67,6 +67,11 @@ _（暂无 —— 下一版待记）_
   前端 `static/review.js` 渲染 `role="status" aria-live="polite"` 横幅、`overdue`
   升级措辞。取数失败**永不**影响状态查询（兜异常 → `None` + warning）。
   护栏 `tests/unit/test_stall_visibility.py`。
+- **看门狗自述新增 `rotation_silence_bound_s`**（`GET /api/health/watchdog`）：
+  把 #120 引入的"旋转补救静默上界"连同既有 `stall_limits_s` / `ocr_upstream_cap_s` /
+  `cpu_task_cap_s` 一并向外部报出，使**产物级冒烟不硬编码任何常量**即可复核
+  "基准阈值 ≥ 其所覆盖的上游封顶"的不变式（阈值改动时护栏自动跟随）。延迟导入
+  `self_heal`（无导入环），且仍通过 `/api/health/watchdog` 的密钥护栏。
 
 ### 修复（e2e 驱动与文档 —— 原 `[Unreleased]` 内容，随本版一并落版）
 

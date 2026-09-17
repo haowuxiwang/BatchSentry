@@ -594,6 +594,26 @@ class TestStatusSnapshot:
                   "total_recovered"):
             assert k in snap
 
+    def test_snapshot_self_reports_rotation_silence_bound(self, monkeypatch):
+        """自述必须包含旋转补救的静默上界，且 `ocr_running` 基准 ≥ 该上界。
+
+        这是**产物级**复核的落点：/api/health/watchdog 报出"我的判定口径"，
+        冒烟脚本据此断言不变式而**一行常量都不用写**（阈值改了护栏自动跟随；
+        有人把阈值改小护栏立刻红）。见 docs/RUNTIME_WATCHDOG.md §8.9。
+        """
+        monkeypatch.delenv("PBC_WATCHDOG_SCALE", raising=False)
+        from core.pipeline import self_heal
+
+        snap = watchdog.status_snapshot()
+        bound = snap["rotation_silence_bound_s"]
+        assert bound == self_heal.rotation_silence_bound_s()
+        assert bound > 0
+        # 不变式：看门狗基准必须**容得下**它所覆盖的那次上游静默
+        assert snap["stall_limits_s"]["ocr_running"] >= bound, (
+            f"ocr_running 基准 {snap['stall_limits_s']['ocr_running']}s 小于"
+            f"旋转静默上界 {bound}s —— 会抢在上游超时前误报停滞"
+        )
+
     def test_snapshot_leaks_no_secret(self, monkeypatch):
         """健康端点无鉴权 → 绝不能带出密钥/连接串。"""
         monkeypatch.setenv("PADDLE_OCR_TOKEN", "sk-should-never-appear")

@@ -461,7 +461,15 @@ def status_snapshot() -> dict:
     """看门狗自述（`/api/health/watchdog`）。
 
     只暴露可观测性信息，不含任何密钥；`last_scan_at` 停滞即说明巡检已死。
+
+    **自述判定口径**（而非只报结论）是刻意设计：产物级冒烟据此**不硬编码任何
+    常量**就能复核"基准阈值 ≥ 它所覆盖的上游封顶"这条不变式（阈值一变，
+    护栏自动跟着走；有人把阈值改小，护栏立刻红）。
     """
+    # 延迟导入：self_heal 会拉起 pipeline 依赖链，而巡检本身不需要它。
+    # 二者无导入环（self_heal 不引用 watchdog），故此处安全。
+    from core.pipeline.self_heal import rotation_silence_bound_s
+
     return {
         "enabled": enabled(),
         "interval_s": scan_interval_seconds(),
@@ -475,5 +483,8 @@ def status_snapshot() -> dict:
         "cap_s": dict(_CAP_S),
         "ocr_upstream_cap_s": float(POLL_TIMEOUT_MAX),
         "cpu_task_cap_s": cpu_task_timeout_seconds(),
+        # 旋转补救路径的"静默上界"（#120）：同属判定口径，一并自述，
+        # 使 "/api/health/watchdog 上 ocr_running ≥ 该上界" 可在**产物上**复核。
+        "rotation_silence_bound_s": rotation_silence_bound_s(),
         **_STATE,
     }

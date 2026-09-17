@@ -58,6 +58,56 @@ try:
     except Exception as e:
         fail("health", str(e))
 
+    # 1.5 看门狗自述 + 阈值不变式（**在产物上**复核，不硬编码任何常量）
+    #
+    # 为什么必须在这里做：看门狗阈值是"停滞后杀任务"的唯一依据，而它一旦
+    # 低于它所覆盖的上游封顶，就会**抢在上游超时之前**误报（把"上游还在
+    # 正常等待"判成卡死）。源码侧有单测，但产物里跑的是**冻结的那份代码** ——
+    # 只有让产物自己报出判定口径，才能证明"要发出去的这个包"里不变式成立。
+    # 自述字段：stall_limits_s / ocr_upstream_cap_s / cpu_task_cap_s /
+    # rotation_silence_bound_s（#120 引入的旋转补救静默上界）。
+    section("Watchdog self-report (threshold invariant)")
+    try:
+        r = requests.get(f"{BASE}/api/health/watchdog", timeout=5)
+        assert r.status_code == 200, f"status={r.status_code}"
+        wd = r.json()
+        limits = wd["stall_limits_s"]
+        ocr_cap = float(wd["ocr_upstream_cap_s"])
+        cpu_cap = float(wd["cpu_task_cap_s"])
+        rot_bound = float(wd["rotation_silence_bound_s"])
+        # 不变式①：OCR 基准 ≥ 单次轮询封顶（否则上游正常等待会被判停滞）
+        assert limits["ocr_running"] >= ocr_cap, (
+            f"ocr_running={limits['ocr_running']} < ocr_upstream_cap_s={ocr_cap}"
+        )
+        # 不变式②：OCR 基准 ≥ 旋转补救静默上界（#120；同上道理）
+        assert limits["ocr_running"] >= rot_bound, (
+            f"ocr_running={limits['ocr_running']} < rotation_silence_bound_s={rot_bound}"
+        )
+        # 不变式③：cancelling 基准 ≥ CPU 任务封顶
+        assert limits["cancelling"] >= cpu_cap, (
+            f"cancelling={limits['cancelling']} < cpu_task_cap_s={cpu_cap}"
+        )
+        # 巡检存活证据：last_scan_at 必须最终被写上一次（证明后台巡检任务
+        # 在**这个冻结包里**真的起来了 —— 一个没启动的循环永远不会写它）。
+        # ⚠️ 不能启动后立刻断言：循环是"先等一个 interval 再扫"，故头 60s 内
+        # 本就为 null。等待预算由**自述的 interval_s** 派生（不硬编码 60）。
+        interval = float(wd.get("interval_s") or 60.0)
+        budget = interval + 30.0
+        deadline = time.time() + budget
+        while not wd.get("last_scan_at") and time.time() < deadline:
+            time.sleep(2)
+            wd = requests.get(f"{BASE}/api/health/watchdog", timeout=5).json()
+        assert wd.get("last_scan_at"), (
+            f"{budget:.0f}s 内 last_scan_at 仍为空 —— 巡检循环未运行"
+        )
+        ok("watchdog_invariants",
+           f"ocr_running={limits['ocr_running']} >= "
+           f"max(cap={ocr_cap}, rot_bound={rot_bound})"
+           f"; cancelling={limits['cancelling']} >= cpu_cap={cpu_cap}"
+           f"; scanned@t+{interval:.0f}s")
+    except Exception as e:
+        fail("watchdog_invariants", str(e))
+
     # 2. Upload page served
     section("Pages")
     try:
