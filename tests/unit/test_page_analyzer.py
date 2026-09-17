@@ -401,7 +401,7 @@ class TestHtmlCleaning:
         assert len(out) <= _MAX_HTML_CHARS
 
     def test_truncation_matches_table_with_attributes(self):
-        """B3 修复（对抗性审查）：带属性表格（<table border=...>）不再落入
+        r"""B3 修复（对抗性审查）：带属性表格（<table border=...>）不再落入
         非对齐截断 — 正则放宽为 <table[\s>]，带属性表也按表格优先策略处理。"""
         from core.page_analyzer import _clean_html, _MAX_HTML_CHARS
         html = '<table border="1" cellspacing="0"><tr><td>关键数据</td></tr></table>'
