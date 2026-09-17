@@ -11,6 +11,62 @@ _（暂无 —— 下一版待记）_
 
 ---
 
+## [1.1.6] — 2026-09-17
+
+> 本版修的是**「分析没跑成」与「记录没问题」在界面上长得一样**（缺陷 #127）：
+> 模型凭据失效时每页 Stage 2 都以 401 失败，job 报 `partial_review`、
+> `error_message` 为 NULL、0 条 finding，界面是**绿点 +「部分可复核」** ——
+> 对 GMP 复核者而言这与「记录确实无异常」不可区分，属**假阴性**。
+> 本版把配置级故障从"页级失败"提升为可判别的类型 + job 级原因，
+> 并让「零页产出」落到 `error`。推导与实测见 `docs/PROJECT_PITFALLS.md` §十五。
+
+### 修复
+
+- **【严重】配置级 LLM 故障被降级为页面级失败 ⇒ 界面呈现"绿色成功"（#127）**：
+  产物级 e2e 现场（v1.1.5 内嵌 exe）—— 模型 key 失效后 `pipeline.log` 记
+  `openai.AuthenticationError: 401 ... 'Token is invalid.'`，测试文档 6 页
+  **全部** Stage 2 失败；job 终态 `partial_review`、`jobs.error_message`
+  **为 NULL**、`findings` **0 条**。前端 `statusDotClass("partial_review")`
+  此前返回 **`bg-success`（绿点）**，失败原因只在 `error` 态显示，而
+  `failed_pages`（状态接口一直在返回）**界面零处渲染**。
+  根因三处、修复四条：
+  1. `llm/client.py`：「非可重试」判据（401/403/400/invalid…）**只用于控制流**，
+     抛出的仍是字符串化 `RuntimeError`，调用方无从判别 → 新增类型化
+     `LLMConfigError(RuntimeError)`（继承以保持 `except RuntimeError` 向后兼容），
+     关键词表提为**单一来源** `_NON_RETRYABLE_KEYWORDS`；
+  2. `stage2.py`：配置级故障走通用 `except Exception`，只留页级 `_parse_error`
+     → 新增 `except LLMConfigError`（**必须排在通用分支之前**，有 AST 护栏）
+     + `_handle_page_failure` 统一出口，把**首因提升到 job 级**
+     `error_message`（脱敏、并发下只写一次）；
+  3. **早停**：配置级故障是确定性的，不再"补刀" —— 未完成任务取消，且
+     `_analyze_one` 取到信号量后二次确认（`config_error` 非空即返回）；
+     未及尝试的页仍计入 `failed_pages`（与 Stage 1 缺页同口径）；
+  4. **终态**：`failed_pages` 非空且**无任何一页产出** → `error`。判据**从数据
+     派生**（复用 `_get_analyzed_pages` 的"排除 `_parse_error`"口径），
+     因此不依赖故障原因；有页成功时仍为 `partial_review`（不误伤真·部分场景）。
+- **前端可见性（#127 的另一半）**：
+  - `partial_review` **不再显示成功色** → 降为 `bg-warning`。它**定义上**
+    就不是成功态（见 `stage3` 的 `final_status` 判据：有失败页或双后端差异）；
+  - `partial_review` 下同样显示 `error_message`（SSE 实时更新 + 历史任务行两处）；
+  - 历史任务行渲染**失败页数与页码**（此前 `failed_pages` 零处消费）；
+  - 复核页页内横幅显示**真实原因**（`structured._error`），不再只有一句通用文案。
+
+### 护栏（把"看不见"锁死）
+
+- **`tests/unit/test_config_error_visibility.py`（新增）**：类型化异常 +
+  非可重试不重试 + 瞬态错误不误判为配置级 + 关键词单一来源 + `except`
+  顺序 AST 全文件扫描 + 前端源码契约（成功色分支不得含 `partial_review`／
+  必须消费 `failed_pages`／两处原因显示／横幅必须有可写入的 `id`）。
+- **`tests/unit/test_pipeline.py::TestConfigErrorVisibility`（新增）**：
+  全页失败 ⇒ `error` + job 级原因；配置级故障下 **LLM 只被调用一次**
+  （并发=1，确定性断言）+ 未尝试页计入 `failed_pages`；
+  **反向护栏**：有页成功时不得被误判为 `error`。
+- `tests/unit/test_config_db_pipeline_coverage.py::test_pipeline_handles_page_analysis_failure`
+  的终态断言随契约更新为 `error`（原 `partial_review` 是旧规则的副产品），
+  并补强"管线必须跑完不中断"的原意。
+
+---
+
 ## [1.1.5] — 2026-09-17
 
 > 本版修的是**上游「容量类」错误的处置**：旋转补救把上游拥塞当成永久失败，
