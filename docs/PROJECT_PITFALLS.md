@@ -98,6 +98,7 @@
 | SSE 轮询间隔 | `api/jobs/_SSE_POLL_SECONDS = 2` | `test_sse_poll_constant.py` |
 | 三色分级 / 绿覆盖 | `finding_quality.REVIEW_TIER_BY_SOURCE`（按 **source** 分层）；SSR+AJAX 共用 `attach_review_tier()` | `test_review_tier.py` |
 | 终态快照缓存 | `api/jobs/status.py`（存/返副本）| conftest autouse |
+| **"已分析页数"口径** | `pipeline/stage2._get_analyzed_pages`（**排除 `_parse_error`**）；状态接口必须**调它**（`_count_analyzed_pages`），不得自写 SQL | `test_config_error_visibility.py::TestAnalyzedPagesSingleSource`（AST 扫 `db.execute` 实参）+ 集成同值断言 |
 | OCR 后端能力 | `ocr_support.OcrCapabilities` + `_CAPABILITIES` | `test_ocr_backends.py` |
 | 归一化 / 标签闭集 | `pipeline/regions.normalize_bbox`/`extract_regions`/`CANONICAL_LABELS`（未知→`other`）| `test_regions_anchor*.py` |
 | 旋转逆映射 | `pipeline/regions.map_bbox_to_page(bbox, rotation)`（rotation 未知返 `None`，**不得猜方向**）| 同上 + `test_anchor_orientation_tool.py` |
@@ -518,3 +519,82 @@ Stage 2 都以 `401 Token is invalid` 失败，但 job 终态是 **`partial_revi
 测试要断言"LLM 只被调用一次"，必须用 `llm_concurrency=1` 让调度**确定**，
 否则断言靠运气。
 
+---
+
+## 十六、同一字段两套口径 ⇒ 同一份响应自相矛盾（缺陷 #131，2026-09-17）
+
+**症状（#127 的产物级实景验收现场抓出）**：job 终态 `error`，`error_message`
+写「**0 页产出可用结果**」，`failed_pages=[1,2]` —— 可同一份
+`GET /api/jobs/{id}` 里 `pages_analyzed` 却是 **1**。同一 payload 自相矛盾，
+GMP 复核者必问"到底分析了几页"。
+
+**根因 —— "已分析"的定义被复制了两份**：
+
+- 权威口径 `stage2._get_analyzed_pages` 的价值就是**排除 `_parse_error`
+  占位页**（该函数当初正是为修"retry 跳过失败页"而引入的）；
+- 而 `api/jobs/status.py` 的**两个入口**（`GET /{job_id}` 与 SSE 的
+  `_get_job_progress`）各自**复制**了一份宽口径 SQL：
+  `COUNT(*) ... WHERE structured_json IS NOT NULL`。
+
+失败页**同样**会写 `structured_json`（带 `_parse_error` 标记）⇒ 失败页被算成
+"已分析"。危害不止数字难看：`partial_review` 文案虚高成
+`部分可复核 · 10/10 页`，而实际只有 8 页有真产出。
+
+> **通用规矩**：同一语义的判据**只能有一个函数**。若两处各自写 SQL/正则，
+> 它们迟早漂移 —— 而且漂移时**两边都"看起来对"**，没人会去比对。
+> 复用要复用**函数**（`len(await _get_analyzed_pages(...))`），
+> 而不是把同一段 SQL 字符串抄两遍 —— 抄字符串仍然是两个真值源。
+
+**顺带的正面结论**：`pages_analyzed` 在产物里只被当作**进度分子**
+（`eta.js` 采样、"分析 N/M"文案），完成判定走 `TERMINAL_STATUSES`，
+**不以 `N == M` 判定** ⇒ 收紧口径不会让界面"看起来卡住"，只会更诚实。
+
+**护栏两条（缺一不可）**：
+
+1. 集成：`_parse_error` 页不计入 `pages_analyzed`，且**状态端点与 SSE 同值**；
+2. 源码契约：`api/jobs/status.py` 的 **`db.execute` 实参**里不得再出现
+   `structured_json IS NOT NULL`，并机检两个入口都调同一 helper。
+
+⚠️ **护栏首版扫文本 → 误报了自己**：它把**文档字符串里为解释口径而引用的那段
+SQL** 判成违规。护栏必须**扫代码（AST 的 `db.execute` 实参），不扫注释/文档** ——
+与 §十三（正则把文档里的说明算成重复定义）**同一个坑**。
+
+---
+
+## 十七、产品级验收必须证明"**到达了被测分支**"（2026-09-17 实测）
+
+**场景**：要用**已失效的真实 LLM 凭据**在**要分发的产物**上验收 #127
+（凭据失效正是 #127 的触发条件，故不需要有效 key）。第一版脚本只看终态
+字符串 —— 结果它拿到了 `status=error`，**看起来 PASS**。
+
+**但那不是 #127 的证据**：服务端日志显示失败发生在 **Stage 1 OCR**
+（`code:10010 任务提交队列已满`，Paddle 上游拥塞），根本**没走到 Stage 2**。
+`error` 是**旧路径**给的，与 #127 无关。
+
+**幸而护栏里先加了一条判别性前置断言**：
+
+```python
+ocr_done = data.get("pages_ocr_done") or 0
+if ocr_done and ocr_done >= total:   ok(...)
+else:                                fail("失败不可归因于 LLM，本轮结论作废")
+```
+
+它当场把"假证据"拦下。**若只看终态，这一轮就会产出"#127 已修"的错误结论**
+—— 而且带实证外观（有 job id、有日志、有 PASS）。
+
+> **通用规矩**：端到端验收的断言必须包含**"被测分支确实被执行了"**的证明
+> （这里 = OCR 全页完成、日志里出现 `LLMConfigError`），
+> 而不是只断言终态/最终状态码。终态是**多因**可致的 —— 只断言终态，
+> 等于断言了一个**必要不充分**条件。
+
+**修正路径**：探测到 MinerU token 有效（`POST /api/v4/file-urls/batch` →
+`code:0`）→ 把 Stage 1 切到 **mineru**（生产支持的远端后端）使 Stage 1
+**确定成功** → 把 Stage 2 的配置级故障**隔离成唯一变量** → 复跑即得
+**5/0 PASS**，且日志逐条对得上：
+`401 Token is invalid` → `LLMConfigError` → job 级原因升级 → 早停取消第 2 页
+→ `0 findings from 0 pages` → `error` +「0 页产出可用结果」。
+
+⚠️ 附带教训：**别把第三方服务当成"总在"的前提**。同一台机器上 Paddle
+可能整段时间被拥塞（`code:10010`），此时任何依赖它的验收都**不可重复** ——
+要么换一个**确定可用**的同类后端（本例 MinerU），要么显式记录"本轮不构成
+被测条件"而不是硬凑结论。
