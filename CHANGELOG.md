@@ -11,6 +11,39 @@ _（暂无 —— 下一版待记）_
 
 ---
 
+## [1.1.7] — 2026-09-17
+
+> 本版修的是**同一份响应自相矛盾**（缺陷 #131）：终态 `error` 的原因文本写
+> 「0 页产出可用结果」，可同一份 `/api/jobs/{id}` 里 `pages_analyzed` 却是
+> **1**（`failed_pages=[1,2]`）。根因是「已分析页数」有**两套口径** ——
+> 接口按 `structured_json IS NOT NULL` 计数，而失败页**同样**会写入
+> `structured_json`（带 `_parse_error` 标记）。GMP 复核者必问"到底分析了几页"。
+> 由 #127 的**产物级实景验收**现场抓出（不是推断）。
+
+### 修复
+
+- **【中】**「已分析页数」两套口径 ⇒ 同一 payload 自相矛盾（#131）：
+  权威口径 `stage2._get_analyzed_pages` 的价值是"**排除 `_parse_error`
+  占位页**"——该函数当初正是为修"retry 跳过失败页"而引入的；而
+  `api/jobs/status.py` 的两个入口（`GET /{job_id}` 与 SSE 的
+  `_get_job_progress`）各自**复制**了一份宽口径 SQL。失败页被算作"已分析"后：
+  - 终态语义矛盾：原因文本「0 页产出可用结果」vs `pages_analyzed=1`；
+  - `partial_review` 文案虚高：`部分可复核 · 10/10 页`，实际 8 页才是真产出。
+  修复：新增 `_count_analyzed_pages()`，**复用** `_get_analyzed_pages`（同一
+  函数，而非抄同一段 SQL）—— 两处入口同口径，杜绝再次漂移。
+  前端只把该字段当**进度分子**（ETA 采样 /「分析 N/M」文案），完成判定走
+  `TERMINAL_STATUSES`，故不影响"是否卡住"的判断。
+
+### 护栏
+
+- 集成：`_parse_error` 页不计入 `pages_analyzed`，且状态端点与 SSE 必须同值。
+- 单元（源码契约）：`api/jobs/status.py` 的 **`db.execute` 实参**中不得再出现
+  `structured_json IS NOT NULL`（AST 只扫代码实参，不扫注释/文档 —— 文档里为
+  解释口径而引用该 SQL 是正常的，扫文本会让护栏变成噪音）；
+  并机检两个入口都调用同一 helper。
+
+---
+
 ## [1.1.6] — 2026-09-17
 
 > 本版修的是**「分析没跑成」与「记录没问题」在界面上长得一样**（缺陷 #127）：
