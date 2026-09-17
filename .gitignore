@@ -5,6 +5,12 @@ dist/
 # -c.directories.output=dist-electron-locked 并尽力归位）。
 dist-electron*/
 build/
+# 历史版本的归档 zip（CLAUDE.md「Repo hygiene」规则 2 指示打包到此，故必须忽略）。
+# ⚠️ 这条曾经缺失：规则让 agent 往 release-archive/ 写 zip，忽略清单却不拦 ——
+# 规则与忽略清单不一致时，agent 会照规则做，然后 zip 出现在 git status 里。
+# 新增任何"允许写入的产物落点"必须**同一次提交**补进本文件（机检见
+# tests/unit/test_repo_hygiene.py）。
+release-archive/
 *.spec.bak
 
 # PyInstaller
@@ -99,19 +105,20 @@ test_results.xml
 .coverage.*
 cache/
 
-# Spike exploration directories (design notes, not app code)
-spike/baseline/
-spike/phase2/
+# Spike 探索/一次性实验（设计笔记与临时脚本，不属于应用）。
+# 整个目录忽略，**不再按扩展名逐个列举** —— 按扩展名挡不住新形态：
+# 实测 `touch spike/__probe__.png` 会让 `git status` 立刻报 `?? spike/`。
+# CLAUDE.md 把该目录列为 agent 可写入的落点，故必须整目录忽略（机检见
+# tests/unit/test_repo_hygiene.py）。
+spike/
 
 
 cov.xml
 
 
 # Spike ad-hoc experiments (one-shot scripts + run logs)
-spike/*.py
-spike/*.log
-spike/*.json
-spike/*.md
+# 已由上面的 `spike/` 整目录覆盖；保留本节仅为记录"这些形态曾经存在"，
+# 新增 spike 产物时**不需要**再往这里加一行。
 
 # 真实批记录样本（含企业数据，禁止入库）
 丝裂霉素提取批记录.pdf

@@ -191,9 +191,15 @@ class TestOrchestration:
                             lambda: rg.CheckResult("worktree_clean", rg.PASS, "ok"))
         results = rg.run_all(skip_tests=True)
         names = [r.name for r in results]
-        assert names == ["worktree_clean", "packaging_files", "rules_wired",
+        # 契约变更（2026-09-17，仓库卫生）：编排新增两项生成物检查，
+        # no_build_outputs（FAIL，拦 `git add -f` 产物）与 dist_variants（WARN，
+        # 提醒收敛 dist* 变体）。二者都属"工作区状态"，故紧随 worktree_clean。
+        assert names == ["worktree_clean", "no_build_outputs", "dist_variants",
+                         "packaging_files", "rules_wired",
                          "kb_corpus", "kb_packaging", "tests_coverage"]
         assert results[-1].status == rg.SKIP
+        # 结构检查必须能在**不跑测试**时给出（提交前的秒级检查路径）
+        assert all(r.status != rg.SKIP for r in results[:-1])
 
     def test_build_report_overall_fail_when_any_fail(self, monkeypatch):
         monkeypatch.setattr(rg, "run_cmd", lambda *a, **k: (0, "abc1234"))

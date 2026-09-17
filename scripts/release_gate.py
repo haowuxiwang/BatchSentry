@@ -6,12 +6,15 @@
 "当前工作区是否具备打包 v1.1 的信号"。
 
 检查项（每项独立、可单测）：
-  worktree_clean    工作区干净（打包必须来自干净树，未提交改动不可放行）
-  packaging_files   打包前置文件齐备（spec / 构建脚本 / electron 入口）
-  rules_wired       规则层已接线（core/rules/*.py 中 _check_* 数量 ≥ 阈值）
-  kb_corpus         知识库语料可用（core/kb/data/*.json 条目数 ≥ 阈值）
-  kb_packaging      每个 KB 源都随包分发（spec datas 覆盖 core/kb/data/*.json）
-  tests_coverage    单测通过 + 覆盖率 ≥ 门禁
+  worktree_clean      工作区干净（打包必须来自干净树，未提交改动不可放行）
+  no_build_outputs    构建产物**未入库**（拦 `git add -f` / .gitignore 被误改 /
+                      新落点未登记；已提交的产物删文件也抹不掉）
+  dist_variants       根目录 `dist*` 变体未堆积（WARN；提醒跑 clean_dist.py）
+  packaging_files     打包前置文件齐备（spec / 构建脚本 / electron 入口）
+  rules_wired         规则层已接线（core/rules/*.py 中 _check_* 数量 ≥ 阈值）
+  kb_corpus           知识库语料可用（core/kb/data/*.json 条目数 ≥ 阈值）
+  kb_packaging        每个 KB 源都随包分发（spec datas 覆盖 core/kb/data/*.json）
+  tests_coverage      单测通过 + 覆盖率 ≥ 门禁
 
 失败事实源：优先 `--junitxml`（机器可读，免疫 `log_cli` 日志交错）；XML 缺失/
 损坏才回落 stdout 文本解析。任何失败都会把原始 pytest 输出落盘
@@ -62,6 +65,23 @@ COVERAGE_SOURCES = "api,core,llm,db,config,main"
 
 # 打包前置文件（缺一不可）
 PACKAGING_FILES = ("pbc-server.spec", "build.ps1", "package.json", "electron/main.js")
+
+# ── 生成物根：这些路径**永远**不该出现在版本控制里 ──────────────────────────
+# 覆盖 构建产物 / 归档 / 日志 / 依赖 / 临时实验（不只是"build 输出"，而是"任何
+# 不属于应用的、由工具或 agent 生成的东西"）。与 .gitignore 一一对应，两侧由
+# tests/unit/test_repo_hygiene.py **双向**锁死：忽略清单新增一个"允许 agent 写入的
+# 落点"，本清单必须同一次提交同步。
+# 判定只看**第一段路径**（`dist-electron-out-2026…/x` → `dist-electron-out-2026…`），
+# 因为 electron-builder 的输出目录名会漂移（见 clean_dist.py 的模块 docstring）。
+BUILD_OUTPUT_DIRS = ("dist", "build", "release-archive", "devlogs", "node_modules",
+                     "spike")
+BUILD_OUTPUT_PREFIXES = ("dist-electron",)
+
+# 磁盘上 `dist*` 变体数超过该值即提示收敛（WARN，不 FAIL）。
+# 不 FAIL 是刻意的：多轮构建/发布会话期间并存两三个变体是正常状态
+# （锁竞争会导致输出目录改名），只有"忘了收敛"才需要提醒 —— 门禁只负责让
+# 它**可见**，清理动作仍由 `scripts/clean_dist.py` 这一唯一入口承担。
+DIST_VARIANT_WARN_AT = 3
 
 # 环境专有失败：TestServePdf 清理项目内 output/ 探针被沙箱 safe-delete 拦截
 # （隔离单跑通过 → 非代码回归）。仅前缀匹配的失败降级为 WARN，其余照常 FAIL。
@@ -174,6 +194,91 @@ def check_packaging_files(root: Path = REPO_ROOT) -> CheckResult:
                            "缺少前置文件：" + ", ".join(missing), _ms() - t0)
     return CheckResult("packaging_files", PASS,
                        f"{len(PACKAGING_FILES)} 个前置文件就位", _ms() - t0)
+
+
+def _tracked_paths() -> list[str]:
+    """`git ls-files` 的全部已跟踪路径。
+
+    用 `-z`：文件名可能含空格/中文/引号，`-z` 以 NUL 分隔，免去 git 的引号转义
+    解析（本项目已多次因"转义后的文本"而非"原始值"写错断言）。
+    """
+    rc, out = run_cmd(["git", "ls-files", "-z"])
+    if rc != 0:
+        return []
+    return [p for p in out.split("\0") if p]
+
+
+def is_build_output(path: str) -> bool:
+    """仓库相对路径是否落在生成物根内（纯函数，便于单测）。
+
+    只看**第一段路径**（`docs/dist/x` 不算产物），且前缀要求**后接 `-` 或到此为止**：
+    变体目录名一律形如 `dist-electron-<suffix>`（`-out-<ts>` / `-locked` / `-m8` /
+    `-v112`），而 `dist-electronica/` 这种恰好同前缀的**正文目录不得被误伤** ——
+    误报会让一条本该放行的检查变红，等于没检查。
+    """
+    head = path.replace("\\", "/").split("/", 1)[0]
+    if head in BUILD_OUTPUT_DIRS:
+        return True
+    return any(head == p or head.startswith(p + "-") for p in BUILD_OUTPUT_PREFIXES)
+
+
+def check_no_build_outputs_tracked() -> CheckResult:
+    """构建产物**绝不入库**。
+
+    为什么需要它：`.gitignore` 只挡"默认的 `git add`"。三种情形它挡不住 ——
+    ① `git add -f`（或被 `--force` 的批量脚本）；② `.gitignore` 被误改/漏改；
+    ③ 新增了一个"允许写入的产物落点"却没登记忽略清单（`release-archive/`
+    正是这样漏过一次）。这类错误一旦提交，**删文件也无法从历史里抹除**。
+
+    只问"git 里有没有"，不问"磁盘上有没有" —— 磁盘堆积归 `dist_variants` 与
+    `clean_dist.py` 管，两件事的处置完全不同，不该混在一条检查里。
+    """
+    t0 = _ms()
+    paths = _tracked_paths()
+    if not paths:
+        return CheckResult("no_build_outputs", WARN,
+                           "git ls-files 无输出（仓库或 git 不可用？）", _ms() - t0)
+    bad = [p for p in paths if is_build_output(p)]
+    if bad:
+        return CheckResult(
+            "no_build_outputs", FAIL,
+            f"{len(bad)} 个构建产物已入库（= 已进入提交历史，删文件也抹不掉）："
+            + ", ".join(bad[:5])
+            + "｜用 `git rm -r --cached <path>` 取消跟踪并补 .gitignore",
+            _ms() - t0)
+    return CheckResult("no_build_outputs", PASS,
+                       f"{len(paths)} 个已跟踪文件中无构建产物", _ms() - t0)
+
+
+def count_dist_variants(root: Path = REPO_ROOT) -> list[str]:
+    """枚举根目录下的 `dist*` 目录（`dist` 自身除外），按名排序。"""
+    try:
+        return sorted(
+            p.name for p in root.iterdir()
+            if p.is_dir() and p.name.startswith("dist-")
+        )
+    except OSError:
+        return []
+
+
+def check_dist_variants(root: Path = REPO_ROOT) -> CheckResult:
+    """磁盘上 `dist*` 变体堆积 → 提醒收敛（WARN，不影响退出码）。
+
+    对应 CLAUDE.md「Repo hygiene」规则 3。之所以做成门禁的一部分而不是只写进
+    文档：文档规则不会自我执行，而"每次打包前都会看一眼"的门禁天然会被看到。
+    """
+    t0 = _ms()
+    variants = count_dist_variants(root)
+    if len(variants) > DIST_VARIANT_WARN_AT:
+        return CheckResult(
+            "dist_variants", WARN,
+            f"根目录有 {len(variants)} 个 dist-* 变体（阈值 "
+            f"{DIST_VARIANT_WARN_AT}）：{', '.join(variants[:4])}…"
+            "｜收尾跑 `python scripts/clean_dist.py`（先 dry-run）",
+            _ms() - t0)
+    return CheckResult("dist_variants", PASS,
+                       f"{len(variants)} 个 dist-* 变体（阈值 {DIST_VARIANT_WARN_AT}）",
+                       _ms() - t0)
 
 
 def count_rule_checks(rules_dir: Path = RULES_DIR) -> int:
@@ -547,6 +652,8 @@ def run_all(*, skip_tests: bool = False, fail_under: int = 95,
     """按序执行全部检查（结构检查在前，重测试在后）。"""
     results = [
         check_worktree_clean(),
+        check_no_build_outputs_tracked(),
+        check_dist_variants(),
         check_packaging_files(),
         check_rules_wired(),
         check_kb_corpus(),
