@@ -7,25 +7,29 @@
 > 纪律（见 `CLAUDE.md`「Repo hygiene & release discipline」）：**先定位 → 再解决 → 最后测试**；
 > 结论必须挂证据；**不升版号的边界** = 改动是否进入 PyInstaller 产物。
 >
-> 最后更新：2026-09-17（Round 31 收尾）· 可分发版本 **v1.1.7** · 远端 `bf1ffd2`
+> 最后更新：2026-09-17（Round 32 进行中）· 可分发版本 **v1.1.8** · 远端 `2bffb99`（本轮改动待提交）
 
 ---
 
 ## A. 需要**用户**动作（我做不到，已在等）
 
-- [ ] **A1（阻塞 R3）把仓库目录加入安全软件信任区/白名单。**
-      8 个 `dist-*` 变体目录（≈2.7 GB）**全部**被占用，`--apply` 一个也删不掉。
-      实测证据：`win-unpacked/resources/app.asar` 改名被拒 `winerror=32`
-      （`ERROR_SHARING_VIOLATION`，句柄未带 `FILE_SHARE_DELETE`），**12 秒内 6 次全部失败
-      ⇒ 持续而非瞬态**；目录级 `winerror=5`（`ERROR_ACCESS_DENIED`）；
+- [ ] **A1（阻塞收敛）把仓库目录加入安全软件信任区/白名单。**
+      **现在它卡的不只是清理，而是"标准输出目录"本身**：`dist-electron/win-unpacked/resources/app.asar`
+      改名被拒 ⇒ electron-builder **无法写标准路径** ⇒ 本次 v1.1.8 被迫自愈到
+      `dist-electron-out-20260917-142437`（已按约定写 `PROVENANCE.txt` 留痕）。
+      实测证据（**复探，较 Round 31 再次确认**）：文件级 `winerror=32`
+      （`ERROR_SHARING_VIOLATION`，句柄未带 `FILE_SHARE_DELETE`）、目录级 `winerror=5`
+      （`ERROR_ACCESS_DENIED`）；**12.5 秒内 5 次全部失败 ⇒ 持续而非瞬态**；
       `tasklist` 无 electron/BatchSentry/pbc-server/python 进程 ⇒ 外部持有。
+      ⚠️ **不要在占用未解除时手动删 `dist-electron`**：删到被持有的 `app.asar` 会中途失败，
+      把一个完好的 v1.1.7 产物变成**残缺目录**（比不删更糟，且会让"最新产物"判定指向残缺目录）。
       解除占用后执行：
       ```
       python scripts/clean_dist.py            # dry-run，确认方案
       python scripts/clean_dist.py --apply    # 走回收站，可恢复
       ```
-      预期：保留 `dist/` + `dist-electron-out-20260917-103254`（v1.1.7），其余 8 个进回收站；
-      门禁的 `dist_variants` WARN 随之消失。**在此之前该 WARN 属预期，不是回归。**
+      预期收敛到：`dist/` + **一个** `dist-electron*`（v1.1.8）；门禁 `dist_variants` 保持 PASS。
+      **在此之前 `dist_variants` 显示 2 属预期，不是回归。**
 - [ ] **A2 轮换已泄漏的 LLM 凭据（必须厂商侧操作）。**
       `DeepSeek` / `SiliconFlow` 的 key 曾随提交进入 git 历史，**删文件删不掉历史**
       ⇒ 只能在厂商侧吊销并换新（本地已是新 key `sk-vhx…`，但旧 key 在历史里仍可见）。
@@ -73,7 +77,34 @@
       ⚠️ 定位时注意：**字段缺失 ≠ 路径未走**（`self_heal.py` 里 upgrade 页探测失败
       **故意不动诊断**）⇒ **只有日志能区分"没跑"和"跑了但失败"**。
 
-## D. 本轮（Round 31）已完成 —— 存档，勿重复做
+## D1. Round 32 已完成 —— 存档，勿重复做
+
+- [x] **修 #132（失败页被前端静默丢弃）**：`jobs.failed_pages` 是 SQLite TEXT 列（存 JSON），
+      JSON 接口**原样透传** ⇒ 响应是字符串 `"[2, 1]"` ⇒ 前端 `Array.isArray()` 静默退化成
+      `[]` ⇒ **失败页数与页码在任务列表里永不显示**；而复核页（SSR 自行 `json.loads`）却
+      正常 ⇒ 同一字段两张页面不一致，用户只会读成"这次没有失败页"，#127 的前端渲染形同虚设。
+      修法：`status.py` 新增 `_parse_failed_pages` 并接入 `GET /{id}` 与 SSE **两个**入口；
+      `main.py` 复用**同一**解析器（单一真值源）；降级**不伪造 `[]`**（无失败页 → `None`，
+      非法值 → `None` 并记 warning，否则"数据损坏"与"真的无异常"在界面上不可区分）。
+- [x] **护栏（含变异验证）**：6 例纯函数单测（断言**类型**而非取值）+ 1 例接口级
+      （断言**运行时返回数组**）+ 1 例产物级运行时断言 `failed_pages_type`。把两个入口分别
+      临时改回"原样透传"，新护栏**当场变红**（GET `实得 '[2, 1]'`；SSE `实得 ['[2]', '[2]']`），
+      还原后 149 passed ⇒ **实测能失败**，不是"两分支都判 PASS"。
+- [x] **修正两条"锁死错契约"的旧断言**：`test_api_jobs_coverage.py` 里写死的
+      `'"failed_pages": "[2]"'`（断言序列化字符 ⇒ 把缺陷本身固化成契约）改为**解析 SSE 的
+      `data:` 帧后断言结构**；`test_config_error_visibility.py` 补上前端类型预期
+      （`Array.isArray(job.failed_pages)`）。
+- [x] **升版 1.1.8 并重建产物**：改动落 `api/jobs/status.py` 与 `main.py`，**都进 PyInstaller
+      产物** ⇒ 4 处版本真值同步 + PyInstaller（6m30s）+ electron-builder（1m34s；因标准目录
+      被锁而自愈到 `dist-electron-out-20260917-142437`）。
+- [x] **产物验证**：asar 内版本 1.1.8 == 源码；`BatchSentry.exe` 188.8 MB；内嵌
+      `pbc-server.exe` 20.3 MB；`extraResources` 与 `dist/pbc-server` **811 文件 / 112.2 MB
+      逐一致**；备用目录已按约定写 `PROVENANCE.txt`。
+- [x] **文档**：`CLAUDE.md` 新增 Round 32 + 更新 `Current phase`；`CHANGELOG.md` 新增
+      `[1.1.8]`；`docs/PROJECT_PITFALLS.md` 新增 **§二十一**（字符串探针会给出**错误的否定**——
+      PYZ 是压缩的；同文件并行 `Edit` 会互相覆盖，回执不可信）。
+
+## D2. Round 31 已完成（存档，勿重复做）
 
 - [x] D1 e2e 夹具的"假绿"两处（空白样例 + 提供方与密钥错配）→ 提交 `417d3ee`；
       实测冒烟 **21/0**，`provider=siliconflow`、`findings=4`、`report 7049 B`。
@@ -91,10 +122,12 @@
 
 | 项 | 数值 | 证据 |
 |---|---|---|
-| 全量单测+集成 | **2622 passed / 0 failed** | pytest 输出（292.9s） |
-| 覆盖率 | **95.5%**（门禁 95%） | `devlogs/gate_report_20260917_122123.json` |
-| 打包信号 | **OVERALL pass**（7 PASS / 1 WARN / 0 FAIL） | 同上；WARN = `dist_variants`（见 A1） |
-| 冻结冒烟（v1.1.7 产物） | **21 passed / 0 failed** | `%TEMP%/pbc_frozen_e2e_v117c.log` |
-| #127/#131 产物级验收 | **5 passed / 0 failed** | `%TEMP%/pbc_127_appdata/PBC/acc-server.log` |
-| 多轮产物 e2e | `pdf,img,cancel` 与 `pdf,mineru` 均通过（`pdf` 曾因上游 `code:10010` 拥塞 FAIL，属上游） | `devlogs/e2e_sse_*.jsonl` |
-| 远端 | `bf1ffd2` | `git ls-remote origin main` |
+| 全量单测+集成 | **2629 passed / 0 failed**（= 上轮 2622 + 本轮 7 例新用例） | 门禁 `tests_coverage` / `devlogs/gate_junit_20260917_142736.xml` |
+| 覆盖率 | **95.5%**（门禁 95%） | `devlogs/gate_report_20260917_143524.json` |
+| 打包信号 | 提交前 **7 PASS / 1 FAIL** —— 唯一 FAIL 是 `worktree_clean`（**要求先提交**，属预期，非回归） | 同上 |
+| 版本真值 | 4 处一致 = **1.1.8**（`test_version_consistency` 4 passed） | `tests/unit/test_version_consistency.py` |
+| 产物（v1.1.8） | asar 内版本 = 1.1.8 == 源码；入口 188.8 MB；内嵌后端 20.3 MB；`extraResources` 与 `dist/pbc-server` **811 文件 / 112.2 MB 逐一致** | `%TEMP%/pbc_verify_artifact.py` |
+| 冻结冒烟（v1.1.8 产物） | **22 passed / 0 failed**（`health: v1.1.8`、`provider=siliconflow`、`pipeline_terminal=review`、`findings=3`、`report 4531 B`） | `%TEMP%/pbc_e2e_frozen_118.log` |
+| #127/#131 验收（v1.1.8 产物，**失效凭据**复现触发） | **7 passed / 0 failed**；含 **`failed_pages_type: type=list value=[2, 1]`**（#132 修复在产物内的**判别性**证据）、`terminal_is_error`、`reason_visible 201 字`、`pages_analyzed=0` | `%TEMP%/pbc_127_accept_v118.log` |
+| 产物目录 | `dist-electron-out-20260917-142437`（标准路径被锁 ⇒ 已按约定写 `PROVENANCE.txt`） | 见 A1 |
+| 远端 | `2bffb99`（本轮提交前） | `git ls-remote origin main` |

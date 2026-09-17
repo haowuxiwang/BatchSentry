@@ -7,10 +7,12 @@
 
 ## [Unreleased]
 
-> 本轮改动**不进入 PyInstaller 产物**（只落在 `.gitignore` / `scripts/` / `tests/` / 文档），
-> 已核实产物 `_internal` 内无 `scripts/` ⇒ 按既有约定 **不升版号**。可分发版本仍是 **1.1.7**。
+> 本节的 Round 30 / Round 31 改动**本身不进 PyInstaller 产物**（只落在 `.gitignore` /
+> `scripts/` / `tests/` / 文档；已核实产物 `_internal` 内无 `scripts/`），当时按约定
+> **不升版号**。**随后 Round 32 修的是产物内的缺陷（#132）** ⇒ 工作树整体升为
+> **1.1.8** 并重建产物（见上节）。可分发版本：**1.1.8**。
 >
-> 本轮含两件事：**Round 30** = 仓库卫生机检（生成物禁止入库 + 变体堆积可见化 +
+> 本节含两件事：**Round 30** = 仓库卫生机检（生成物禁止入库 + 变体堆积可见化 +
 > 「允许写入的落点」三处联动）；**Round 31** = 修 **e2e 夹具的"假绿"** 与
 > **`clean_dist` 认锁探测的"假慢"**。
 
@@ -103,6 +105,59 @@
   护栏扫**代码结构**不扫**文本** → 判定谓词**正反成对**（反向用例针对最近的边界）→
   本机 Git Bash 的 `sort`/`find`/`timeout` 会被 `C:\Windows\system32\*.exe` 抢占，
   以及 `rm "$TEMP/..."` 混合分隔符路径触发 `SAFE_DELETE_FAIL_CLOSED`。
+
+---
+
+## [1.1.8] — 2026-09-17
+
+> 本版修的是**「失败页」在两处表现不一致**（缺陷 #132）：`jobs.failed_pages` 在
+> SQLite 里是 TEXT（存 JSON），JSON 接口**原样透传**，于是 `/api/jobs/{id}` 与
+> SSE 快照返回的是字符串 `"[2, 1]"`；前端按 `Array.isArray()` 取用 ⇒ **静默退化
+> 为 `[]`** ⇒ 失败页数与页码在**任务列表里永不显示**。而复核页（SSR，`main.py`
+> 早已自行 `json.loads`）显示正常 —— 同一字段两张页面行为不一致，用户只会读成
+> "这次没有失败页"。**#127 专门为"让失败页可见"加的前端渲染，因此形同虚设。**
+> 由本轮对**打包产物**的端到端验收抓出（不是推断）。
+>
+> ⚠️ 本版**必须重建产物**：改动落在 `api/jobs/status.py` 与 `main.py`，两者都会
+> 打进 PyInstaller 产物（`main.APP_VERSION` 即版本真值）⇒ 按既有约定**升版号并
+> 重建**（4 处：`main.APP_VERSION` / `package.json` / `package-lock.json` 顶层与
+> `packages[""]` / `PORTABLE_README.txt`）。
+
+### Fixed
+- **`failed_pages` 双重编码**（#132）：`api/jobs/status.py` 新增
+  `_parse_failed_pages`（沿用同文件 `_parse_ocr_progress` / `_parse_self_heal_progress`
+  / `_parse_cross_progress` 的「TEXT → 结构」范式），并接入**两个**入口
+  （`GET /api/jobs/{id}` 与 SSE 快照 `_get_job_progress`）。降级语义刻意
+  **不伪造 `[]`**：无失败页 → `None`（"未能给出清单"），非法值 → `None` **并记
+  warning** —— 否则"数据损坏"与"记录真的无异常"在界面上不可区分。
+- **解析器收敛为单一真值源**：`main.py` 复核页原先自带一份 `json.loads`
+  （`except Exception: pass`），现改为复用同一函数（call-time 导入，避免与顶层
+  `from api.jobs import router` 形成循环）。同一列不再有两套降级规则。
+
+### Added
+- `tests/unit/test_job_status_parsers.py` 新增 `TestParseFailedPages`（6 例）：
+  断言**返回类型是 list**（不只是取值），并锁住 `None ≠ []` 的语义。
+- `tests/integration/test_api_jobs_coverage.py` 新增
+  `test_get_status_failed_pages_is_a_json_array` —— 断言接口**运行时返回数组**。
+  此前该类只断言字段**存在**（`field in data`），而字符串 `"[2, 1]"` 同样"存在"，
+  缺陷正是从这条缝里长期存活。
+- `tests/e2e_frozen.py` 新增运行时断言 `failed_pages_type`：向**打包产物自己起的
+  服务**取 `/api/jobs/{id}`，断言 `failed_pages` 不是字符串。这条断言跑在要分发
+  的那份东西上，证明的是"修复已随产物分发"，而非"源码树里写过这句话"。
+
+### Changed
+- `test_progress_snapshot_includes_failed_pages` 的断言由
+  `'"failed_pages": "[2]"' in body`（**把缺陷本身固化成契约**）改为**先解析 SSE 的
+  `data:` 帧、再断言结构**。
+- `test_failed_pages_are_rendered` 补上前端的类型预期
+  （`Array.isArray(job.failed_pages)`）。
+
+### Verification
+- **变异测试（把新纪律先用在自己身上）**：把两个入口分别临时改回"原样透传"，
+  新护栏**当场变红**且报出实得值（GET：`实得 '[2, 1]'`；SSE：`实得 ['[2]', '[2]']`），
+  还原后 149 passed —— 证明这些断言**能真的失败**，而不是"两个分支都判 PASS"。
+- 全量单测 + 集成、打包信号门禁、以及对 v1.1.8 产物的冻结冒烟与 #127/#131 验收
+  结果见当轮记录（`docs/TODO.md` 地面真值表）。
 
 ---
 
