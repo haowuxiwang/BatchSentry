@@ -201,12 +201,35 @@ try:
         print("    [WARN] 未提供 PBC_E2E_PADDLE_TOKEN / PBC_E2E_MINERU_TOKEN —— "
               "OCR 未配置，pipeline 无法跑通（下游将如实标注为降级，不冒充 PASS）")
 
-    # 6. PDF upload with small test PDF
+    # 6. PDF upload —— 样例必须**含真实文字**，不能是空白页。
+    # 为什么（2026-09-17 实测，两处盲区同根）：
+    #   (a) 空白页 ⇒ 每页被判为"空/稀疏" ⇒ 触发**旋转自愈** ⇒ 冒烟的时长与结果
+    #       被**上游 Paddle 状况**支配。实测同一样例：paddle 健康时 2m54s 通过；
+    #       拥塞时 >5min 仍停在 `Rotation probe upstream congestion … backing off`
+    #       （#120 的退避阶梯本身工作正常，但它让冒烟变得**不可重复**）。
+    #   (b) 空白页 ⇒ Stage 2 **无内容可分析** ⇒ 下面 `error and OCR_CONFIGURED`
+    #       分支**永不可达** —— "LLM 凭据失效"在冒烟里**报不出来**（实测：用已失效的
+    #       key 跑，仍得 status=review）。这违反项目自己的规矩"断言必须能真的失败"。
+    # 用 PyMuPDF 现生成一页带文字的小 PDF（项目已依赖 fitz），且**每次都重写** ——
+    # 此前是 `if not os.path.exists`，陈旧的空白件会被一直沿用。
     section("Upload")
-    test_pdf = os.path.join(os.environ["TEMP"], "e2e-test.pdf")
-    if not os.path.exists(test_pdf):
-        with open(test_pdf, "wb") as f:
-            f.write(b"%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n3 0 obj<</Type/Page/MediaBox[0 0 612 792]/Parent 2 0 R>>endobj\nxref\n0 4\n0000000000 65535 f \n0000000009 00000 n \n0000000058 00000 n \n0000000115 00000 n \ntrailer<</Size 4/Root 1 0 R>>\nstartxref\n190\n%%EOF")
+    test_pdf = os.path.join(os.environ["TEMP"], "e2e-test-text.pdf")
+    try:
+        import fitz  # PyMuPDF（项目依赖，随包分发）
+        _doc = fitz.open()
+        _pg = _doc.new_page()                       # A4
+        _pg.insert_text((72, 100),
+                        "Batch Production Record   batch no 72408119", fontsize=12)
+        _pg.insert_text((72, 130),
+                        "Step 1 Charge API  spec 10.0 mg  actual 9.8 mg", fontsize=12)
+        _pg.insert_text((72, 160),
+                        "Operator ZHANG   Reviewed by LI   2026-09-17", fontsize=12)
+        _doc.save(test_pdf)
+        _doc.close()
+        print(f"    smoke fixture = {test_pdf} "
+              f"({os.path.getsize(test_pdf)} B, 含真实文字)")
+    except Exception as e:
+        fail("smoke_pdf_fixture", f"生成含文字样例失败：{e}（下游上传将一并失败）")
     try:
         with open(test_pdf, "rb") as f:
             r = requests.post(f"{BASE}/api/jobs?force=1", files={"file": ("test.pdf", f, "application/pdf")}, timeout=10)
