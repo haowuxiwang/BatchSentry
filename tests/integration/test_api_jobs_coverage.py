@@ -194,6 +194,35 @@ class TestGetJobStatus:
         assert data["total_findings"] == 1
         assert data["review_findings"] == 1  # status=pending
 
+    @pytest.mark.asyncio
+    async def test_pages_analyzed_excludes_parse_error_pages(self, client_with_job, test_db):
+        """#131：`_parse_error` 失败页不得计入 pages_analyzed。
+
+        失败页也会写入 structured_json（含 `_parse_error` 标记）。若按
+        `structured_json IS NOT NULL` 直接计数，终态 error 的原因文本
+        "0 页产出可用结果" 会与同一份响应里的 pages_analyzed>0 自相矛盾
+        —— 复现自产物级验收：failed_pages=[1,2] 同时 pages_analyzed=1。
+        """
+        c, _ = client_with_job
+        # 追加一页"跑过 OCR 但分析失败"的页（现状 fixture 只有 1 页成功）
+        await test_db.execute(
+            "INSERT INTO page_cache (job_id, page, raw_html, structured_json) "
+            "VALUES (?, ?, ?, ?)",
+            ("coverage-job", 2, "<p>page 2</p>",
+             '{"_parse_error": true, "_error": "LLM 调用失败（配置级）"}'),
+        )
+        await test_db.commit()
+
+        data = (await c.get("/api/jobs/coverage-job")).json()
+        assert data["pages_ocr_done"] == 2, "两页都跑过 OCR"
+        assert data["pages_analyzed"] == 1, "只有 1 页产出可用结果"
+
+        # SSE 侧入口必须同口径（两者共用 _count_analyzed_pages）
+        from api.jobs import _get_job_progress
+
+        prog = await _get_job_progress(test_db, "coverage-job")
+        assert prog["pages_analyzed"] == 1, "SSE 进度与状态端点口径必须一致"
+
 
 class TestGetPageData:
     """GET /api/jobs/{id}/pages/{page} — 单页数据。

@@ -209,3 +209,58 @@ class TestFrontendVisibilityContract:
         assert 'id="parse-error-text"' in html, (
             "review.html 横幅缺 id，JS 无处写入真实原因"
         )
+
+
+STATUS_PY = REPO / "api" / "jobs" / "status.py"
+
+
+class TestAnalyzedPagesSingleSource:
+    """#131 — "已分析页数"只能有一个口径，不得复制判据。
+
+    失败页**同样**会写 structured_json（带 `_parse_error` 标记），所以
+    `structured_json IS NOT NULL` 并**不等于**"产出了可用结果"。该判据是
+    "哪些页需要重试"的真值，权威定义在 `stage2._get_analyzed_pages`。
+    接口若自行复制一份 SQL，两处迟早漂移 —— 且已经漂移过：产物级验收里
+    终态 error 的原因文本写"0 页产出可用结果"，同一份响应却报
+    `pages_analyzed=1`（failed_pages=[1,2]）。同一 payload 自相矛盾，
+    GMP 审阅必问"到底分析了几页"。
+    """
+
+    def _exec_sql_literals(self) -> list[str]:
+        """取出文件里所有 `db.execute("...")` 的 SQL 字面量。
+
+        只扫**代码里的实参**，不扫注释/文档字符串 —— 文档里为解释口径而
+        引用那段 SQL 是正常的（本文件自己的 docstring 就会引用它），
+        扫文本会把它当违规，护栏就成了噪音。
+        """
+        tree = ast.parse(STATUS_PY.read_text(encoding="utf-8"))
+        out: list[str] = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            f = node.func
+            if not (isinstance(f, ast.Attribute) and f.attr == "execute"):
+                continue
+            for arg in node.args:
+                if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                    out.append(arg.value)
+        return out
+
+    def test_status_api_has_no_duplicated_predicate(self):
+        sqls = self._exec_sql_literals()
+        assert sqls, "未扫到任何 db.execute SQL —— AST 扫描失效，护栏形同虚设"
+        offenders = [s for s in sqls if "structured_json IS NOT NULL" in s]
+        assert not offenders, (
+            f"api/jobs/status.py 又自行统计已分析页：{offenders!r} —— "
+            "必须复用 core.pipeline.stage2._get_analyzed_pages（单一真值源）"
+        )
+
+    def test_both_entrypoints_reuse_canonical_helper(self):
+        src = STATUS_PY.read_text(encoding="utf-8")
+        assert "from core.pipeline.stage2 import _get_analyzed_pages" in src, (
+            "_count_analyzed_pages 未复用规范函数"
+        )
+        n = src.count("await _count_analyzed_pages(db, job_id)")
+        assert n >= 2, (
+            f"GET /{{job_id}} 与 _get_job_progress 都应走同一口径，实测 {n} 处"
+        )

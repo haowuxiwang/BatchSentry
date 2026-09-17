@@ -12,6 +12,25 @@ from api.jobs.page_image import _page_finding_counts
 
 logger = logging.getLogger(__name__)
 
+
+async def _count_analyzed_pages(db, job_id: str) -> int:
+    """已**产出可用结果**的页数。
+
+    口径唯一来自 `core.pipeline.stage2._get_analyzed_pages`（排除
+    `_parse_error` 占位页）。
+
+    #131：此前这里直接 `COUNT(*) ... WHERE structured_json IS NOT NULL`，
+    但失败页同样会写入 structured_json（带 `_parse_error` 标记）→ 失败页被
+    算作"已分析"。后果是终态 `error`（原因文本写"0 页产出可用结果"）与
+    同一份响应里的 `pages_analyzed=1` **自相矛盾**，GMP 审阅会当场追问
+    "到底分析了几页"。现复用同一函数而非复制 SQL 字符串——避免再出现
+    第二个真值源（§十五 同款教训：可见性字段必须与真值同源）。
+    """
+    from core.pipeline.stage2 import _get_analyzed_pages
+
+    return len(await _get_analyzed_pages(db, job_id))
+
+
 @router.get("/{job_id}")
 async def get_job_status(job_id: str, request: Request = None):
     """Get job status, progress, and findings summary."""
@@ -30,11 +49,7 @@ async def get_job_status(job_id: str, request: Request = None):
     )
     pages_ocr = (await cursor.fetchone())[0]
 
-    cursor = await db.execute(
-        "SELECT COUNT(*) FROM page_cache WHERE job_id = ? AND structured_json IS NOT NULL",
-        (job_id,),
-    )
-    pages_analyzed = (await cursor.fetchone())[0]
+    pages_analyzed = await _count_analyzed_pages(db, job_id)
 
     cursor = await db.execute(
         "SELECT COUNT(*) FROM findings WHERE job_id = ?", (job_id,)
@@ -148,11 +163,7 @@ async def _get_job_progress(db, job_id: str) -> dict:
     )
     pages_ocr = (await cursor.fetchone())[0]
 
-    cursor = await db.execute(
-        "SELECT COUNT(*) FROM page_cache WHERE job_id = ? AND structured_json IS NOT NULL",
-        (job_id,),
-    )
-    pages_analyzed = (await cursor.fetchone())[0]
+    pages_analyzed = await _count_analyzed_pages(db, job_id)
 
     cursor = await db.execute(
         "SELECT COUNT(*) FROM findings WHERE job_id = ?", (job_id,)
