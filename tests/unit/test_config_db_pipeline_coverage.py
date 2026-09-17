@@ -585,7 +585,15 @@ class TestPipelineEdgeCases:
 
     @pytest.mark.asyncio
     async def test_pipeline_handles_page_analysis_failure(self, pipeline_db, tmp_path):
-        """单页 LLM 分析失败应记录 failed_pages 但 pipeline 继续。"""
+        """单页 LLM 分析失败：记录 failed_pages，管线继续跑完并给出负面对照。
+
+        ⚠️ 终态自 #127 起为 **error**（原为 partial_review）：这份 PDF 只有 1 页，
+        它失败 ⇒ **0 页产出可用结果** ⇒ 没有"可供复核的内容"，partial_review
+        会让"0 条 finding"与"记录确实无异常"不可区分（GMP 假阴性）。
+        partial_review 保留给"部分页成功"的情形 —— 见
+        test_pipeline.py::TestConfigErrorVisibility::test_partial_failure_still_partial_review
+        与 TestRobustnessChecks::test_parse_error_page_marks_partial_review。
+        """
         from core.pipeline import run_pipeline
         from unittest.mock import patch
 
@@ -615,12 +623,14 @@ class TestPipelineEdgeCases:
         ):
             await run_pipeline(job_id, pdf_path)
 
-        # 状态应为 partial_review（有失败页）
         cursor = await pipeline_db.execute(
-            "SELECT status, failed_pages FROM jobs WHERE id = ?", (job_id,)
+            "SELECT status, failed_pages, finished_at FROM jobs WHERE id = ?",
+            (job_id,),
         )
         row = await cursor.fetchone()
-        assert row["status"] == "partial_review"
+        # 管线必须"继续跑完"（这是本用例的原始意图）——终态而非中断
+        assert row["finished_at"], "失败页不应让管线中断在半路"
+        assert row["status"] == "error"
         # failed_pages 应包含 [1]
         import json
         failed = json.loads(row["failed_pages"])

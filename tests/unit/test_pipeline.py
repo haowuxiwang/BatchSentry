@@ -3638,3 +3638,150 @@ class TestPipelineEngineGuards:
         row = await cursor.fetchone()
         assert row["status"] == "error"
         assert "stage3 boom" in row["error_message"]
+
+
+# ─── #127：配置级故障的终态与可见性 ──────────────────────────────
+
+
+class TestConfigErrorVisibility:
+    """#127 — 零页产出不得呈现为「部分可复核」；配置级故障必须早停且有原因。
+
+    失效模式（GMP 假阴性）：模型 API Key 失效 → 每页 401 → 改动前 job 报
+    partial_review、``error_message`` 为 NULL、0 条 finding，界面绿点 +
+    "部分可复核"，与"记录确实无异常"无法区分。
+    """
+
+    @pytest.mark.asyncio
+    async def test_all_pages_parse_error_yields_error(self, pipeline_db, tmp_path):
+        """全页失败（无一页产出）→ error，并补一条 job 级原因。
+
+        与 test_parse_error_page_marks_partial_review 互补：那里有 1 页成功
+        （真·部分），这里 0 页成功（真·没分析出来）。
+        """
+        job_id = await _insert_job(pipeline_db, status="pending")
+        pdf_path = str(tmp_path / "fake.pdf")
+        Path(pdf_path).write_bytes(b"%PDF-1.4 fake")
+
+        fake_pages = [
+            {"markdown": {"text": "page 1"}},
+            {"markdown": {"text": "page 2"}},
+        ]
+
+        with patch(
+            "core.pipeline._get_ocr_backend",
+            return_value=lambda p, cb=None, job_id=None: fake_pages,
+        ), patch(
+            "core.pipeline.analyze_page",
+            new=AsyncMock(
+                return_value={
+                    "_parse_error": True, "_raw": "bad json",
+                    "overall_confidence": "low",
+                }
+            ),
+        ), patch(
+            "core.pipeline.analyze_cross_page", new=AsyncMock(return_value=[])
+        ):
+            await run_pipeline(job_id, pdf_path)
+
+        cursor = await pipeline_db.execute(
+            "SELECT status, failed_pages, error_message FROM jobs WHERE id = ?",
+            (job_id,),
+        )
+        row = await cursor.fetchone()
+        assert row["status"] == "error", "0 页产出却报 partial_review（假阴性）"
+        assert sorted(json.loads(row["failed_pages"])) == [1, 2]
+        assert row["error_message"], "0 页产出却没有 job 级原因可显示"
+
+    @pytest.mark.asyncio
+    async def test_config_error_sets_reason_and_stops_early(
+        self, pipeline_db, tmp_path
+    ):
+        """配置级故障：job 级原因落库 + 只调用一次 LLM（不在死 key 上打 N 次）。"""
+        from llm.client import LLMConfigError
+
+        job_id = await _insert_job(pipeline_db, status="pending")
+        pdf_path = str(tmp_path / "fake.pdf")
+        Path(pdf_path).write_bytes(b"%PDF-1.4 fake")
+
+        fake_pages = [{"markdown": {"text": f"page {i}"}} for i in range(1, 5)]
+        calls = {"n": 0}
+
+        async def _boom(*args, **kwargs):
+            calls["n"] += 1
+            raise LLMConfigError(
+                "LLM call failed (non-retryable): 401 Token is invalid"
+            )
+
+        orig_conc = config["app"].llm_concurrency
+        # 并发=1 → "确诊后不再补刀"必须是确定性行为，而不是靠调度碰运气
+        config["app"].llm_concurrency = 1
+        try:
+            with patch(
+                "core.pipeline._get_ocr_backend",
+                return_value=lambda p, cb=None, job_id=None: fake_pages,
+            ), patch("core.pipeline.analyze_page", new=_boom), patch(
+                "core.pipeline.analyze_cross_page",
+                new=AsyncMock(return_value=[]),
+            ):
+                await run_pipeline(job_id, pdf_path)
+        finally:
+            config["app"].llm_concurrency = orig_conc
+
+        cursor = await pipeline_db.execute(
+            "SELECT status, failed_pages, error_message FROM jobs WHERE id = ?",
+            (job_id,),
+        )
+        row = await cursor.fetchone()
+        assert row["status"] == "error"
+        assert "配置级故障" in (row["error_message"] or ""), (
+            "原因未提升到 job 级 → 前端仍无原因可显（#127 回归）"
+        )
+        assert "401" in row["error_message"]
+        assert calls["n"] == 1, (
+            f"配置级故障下仍调用了 {calls['n']} 次 LLM —— 早停失效"
+        )
+        # 未及尝试的页也必须计入 failed_pages：否则复核者以为"页数齐了"
+        assert sorted(json.loads(row["failed_pages"])) == [1, 2, 3, 4]
+
+    @pytest.mark.asyncio
+    async def test_partial_failure_still_partial_review(
+        self, pipeline_db, tmp_path
+    ):
+        """反向护栏：有页成功时**不得**被误判成 error（#127 不得过度收口）。"""
+        job_id = await _insert_job(pipeline_db, status="pending")
+        pdf_path = str(tmp_path / "fake.pdf")
+        Path(pdf_path).write_bytes(b"%PDF-1.4 fake")
+
+        fake_pages = [
+            {"markdown": {"text": "page 1"}},
+            {"markdown": {"text": "page 2"}},
+            {"markdown": {"text": "page 3"}},
+        ]
+
+        def _fake_analyze(raw_html, **kwargs):
+            if "page 2" in raw_html:
+                return {
+                    "_parse_error": True, "_raw": "bad json",
+                    "overall_confidence": "low",
+                }
+            return {"steps": [], "findings": [], "overall_confidence": "high"}
+
+        with patch(
+            "core.pipeline._get_ocr_backend",
+            return_value=lambda p, cb=None, job_id=None: fake_pages,
+        ), patch(
+            "core.pipeline.analyze_page",
+            new=AsyncMock(side_effect=_fake_analyze),
+        ), patch(
+            "core.pipeline.analyze_cross_page", new=AsyncMock(return_value=[])
+        ):
+            await run_pipeline(job_id, pdf_path)
+
+        cursor = await pipeline_db.execute(
+            "SELECT status, error_message FROM jobs WHERE id = ?", (job_id,)
+        )
+        row = await cursor.fetchone()
+        assert row["status"] == "partial_review"
+        # 非配置级的部分失败没有 job 级原因 → 不得凭空造一条
+        assert not row["error_message"]
+
