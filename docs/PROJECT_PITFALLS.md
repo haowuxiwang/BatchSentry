@@ -470,3 +470,51 @@ ELECTRON_BUILDER_CACHE='C:/Users/WuSiTan/AppData/Local/electron-builder/Cache/' 
 - **`dist-electron*` 一律被 gitignore**，故"工作区干净"不代表"没产生多余产物"；
   产物收敛仍须单独跑 `scripts/clean_dist.py`（R3）。
 
+
+## 十五、「故障分类只用于控制流」⇒ 全局故障被降级成局部失败（缺陷 #127，2026-09-17）
+
+**症状（产物级 e2e 实录）**：模型 API Key 失效后，一份 6 页批记录**每一页**
+Stage 2 都以 `401 Token is invalid` 失败，但 job 终态是 **`partial_review`**、
+`jobs.error_message` **为 NULL**、`findings` **0 条**；前端显示
+**绿色状态点 +「部分可复核」** —— 与"记录确实无异常"**完全无法区分**。
+对 GMP 工具，这是**假阴性**：复核者会把"没分析出来"读成"没问题"。
+
+**根因（一条主因 + 三个放大器）**：
+
+1. **主因 —— 分类信息在调用边界被丢掉**。`llm/client.py` 早就有
+   `is_non_retryable`（401/403/400/invalid…），但它**只驱动控制流**
+   （决定"不重试、立刻抛"），抛出的却是**字符串化**的普通
+   `RuntimeError("LLM call failed (non-retryable)...")`。
+   于是上游**无法按类型判别**，只能在 `stage2` 落进通用 `except Exception`，
+   把"整份文档都分析不了"记成"某几页失败"。
+   > **通用规矩**：判定分类的代码若只影响"接下来怎么走"，而**不进入异常类型
+   > （或结构化错误对象）**，那么分类在第一个 `except Exception` 处就已经没了。
+   > 分类要活下来，就必须**随错误一起上抛**。
+2. **放大器 A —— 页级只留痕，job 级不落因**。Stage 2 的失败只写页级
+   `structured_json._parse_error/_error`；`jobs.error_message` 仅在**硬 error**
+   路径写入 → `partial_review` 时恒为 NULL，界面**无原因可显**。
+3. **放大器 B —— 终态判据把"零产出"当"部分可复核"**。`stage3` 的
+   `"partial_review" if (failed_pages or dual_diff) else "review"` 不区分
+   "1/10 页失败"与"10/10 页失败"。**零页可复核 ≠ 部分可复核**。
+4. **放大器 C —— 接口返回了、界面没人渲染**。`api/jobs/status.py` 一直返回
+   `failed_pages`，但全仓**零处消费**；`statusDotClass("partial_review")`
+   返回 `bg-success`；失败原因只在 `error` 态显示。
+   > **通用规矩**：新增一个"可见性"字段后，**必须同时指出它的消费终端**
+   > （界面/通知/报告任一）。只加不渲染 = 静默的可见性黑洞。
+
+**修法（四条，缺一不可）**：类型化异常 `LLMConfigError(RuntimeError)`（继承以
+保持 `except RuntimeError` 向后兼容）→ 在**通用分支之前**捕获并统一出口
+（`_handle_page_failure`）→ 首因**提升到 job 级**并为零产出翻成 `error`
+（判据从数据派生，不依赖故障原因）→ 前端**非绿点 + 显原因 + 显失败页**。
+
+⚠️ **`except` 顺序是这套修法的命门**：`LLMConfigError` 继承 `RuntimeError`，
+写在 `except Exception` **之后**就会被吞掉、故障原样退回页级。
+故把它锁成**全文件 AST 扫描**（`test_config_error_visibility.py`），
+而不是单点断言 —— 第二条同型异常出现时护栏自动覆盖。
+
+⚠️ **早停的两层防护**：只"取消未完成任务"是不够的 —— 信号量上排队的协程仍会在
+确诊后**陆续补刀**（把同一个确定性失败重复 N 遍）。故 `_analyze_one`
+在**拿到信号量之后**还要二次确认 `config_error` 非空即返回。
+测试要断言"LLM 只被调用一次"，必须用 `llm_concurrency=1` 让调度**确定**，
+否则断言靠运气。
+
