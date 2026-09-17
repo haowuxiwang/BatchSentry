@@ -152,13 +152,14 @@
 
 | 项 | 数值 | 证据 |
 |---|---|---|
-| 全量单测+集成 | **2629 passed / 0 failed**（= 上轮 2622 + 本轮 7 例新用例） | 门禁 `tests_coverage` / `devlogs/gate_junit_20260917_142736.xml` |
-| 覆盖率 | **95.5%**（门禁 95%） | `devlogs/gate_report_20260917_143524.json` |
-| 打包信号 | **OVERALL pass（8 PASS / 0 FAIL / 0 WARN）**（提交后复跑；提交前唯一 FAIL 是 `worktree_clean` = "要求先提交"，属预期） | `devlogs/gate_report_20260917_145645.json` |
+| 全量单测+集成 | **2635 passed / 0 failed**（= 上轮 2629 + 本轮 6 例新用例） | 门禁 `tests_coverage` / `devlogs/gate_junit_20260917_160048.xml` |
+| 覆盖率 | **95.5%**（门禁 95%） | `devlogs/gate_report_20260917_160411.json` |
+| 打包信号 | **OVERALL pass（8 PASS / 0 FAIL / 0 WARN）**（Round 33 提交后复跑） | `devlogs/gate_report_20260917_160411.json` |
 | 版本真值 | 4 处一致 = **1.1.8**（`test_version_consistency` 4 passed） | `tests/unit/test_version_consistency.py` |
 | 产物（v1.1.8） | asar 内版本 = 1.1.8 == 源码；入口 188.8 MB；内嵌后端 20.3 MB；`extraResources` 与 `dist/pbc-server` **811 文件 / 112.2 MB 逐一致** | `%TEMP%/pbc_verify_artifact.py` |
 | 冻结冒烟（v1.1.8 产物） | **22 passed / 0 failed**（`health: v1.1.8`、`provider=siliconflow`、`pipeline_terminal=review`、`findings=3`、`report 4531 B`） | `%TEMP%/pbc_e2e_frozen_118.log` |
 | #127/#131 验收（v1.1.8 产物，**失效凭据**复现触发） | **7 passed / 0 failed**；含 **`failed_pages_type: type=list value=[2, 1]`**（#132 修复在产物内的**判别性**证据）、`terminal_is_error`、`reason_visible 201 字`、`pages_analyzed=0` | `%TEMP%/pbc_127_accept_v118.log` |
 | 多轮产物 e2e（`pdf,img`） | **FAIL —— 外部阻塞：账户余额 402**（非产品缺陷）。两轮 OCR 均成功、终态如实 `error`、0 findings ⇒ 驱动**拒绝**记作成功（判别性正确） | `%TEMP%/pbc_e2e_rounds_118.log`；详见 **A4** |
-| 产物目录 | `dist-electron-out-20260917-142437`（标准路径被锁 ⇒ 已按约定写 `PROVENANCE.txt`） | 见 A1 |
-| 远端 | `a004e04`（已推送） | `git ls-remote origin main` |
+| 目录锁持有者（Round 33 实测） | **WorkBuddy.exe（宿主进程）pid 16220 / 14048**；**只锁 `*.asar`**（同目录 exe 全 FREE）；**不是安全软件** | Restart Manager `RmGetList`；复现实验与证据链见 `docs/PROJECT_PITFALLS.md` §二十二 |
+| 产物目录 | `dist-electron-out-20260917-142437`（标准路径被锁 ⇒ 已按约定写 `PROVENANCE.txt`，其 `unblock` 段已更正） | 见 A1 |
+| 远端 | `fd93759`（已推送） | `git ls-remote origin main` |
