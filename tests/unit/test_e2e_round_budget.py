@@ -1,13 +1,16 @@
 """e2e 轮次预算护栏：必须是"基线 + 每页"，且大于实测耗时。
 
-背景 —— 同一类缺陷**已经犯过两次**，两次都是"写死单值"：
+背景 —— 同一类缺陷**已经犯过三次**，每次都是"写死单值"：
   - 2026-09-04 rot 轮实跑 620s > 默认 600s，被误杀 20s（旋转证据其实完整）；
   - 2026-09-16 pdf 轮实跑 835s > 默认 600s，被判超时（该 job 之后正常进了
-    ``review``，835s 是**真实耗时**而非卡死）。
+    ``review``，835s 是**真实耗时**而非卡死）；
+  - 2026-09-17 **冻结冒烟**（``tests/e2e_frozen.py``）写死 60s（30×sleep(2)）等终态，
+    而上游 Paddle 排队时单页 120s 仍停在 ``ocr_running`` ⇒ 把一次**完全正常**的
+    作业判成 FAIL（同轮另有 17 项 PASS，只有这一项红）。
 
 固定值的病根是它同时**对小文档太紧、对大文档太松**。修法是把预算表达成
 ``基线 + 每页 × 页数``（与 ``core/watchdog.py`` 的产品侧阈值同一思路），
-本文件把这个契约锁成机检。
+冻结冒烟则派生自"一次 1 页轮询封顶 + 分析基线"。本文件把这两个契约都锁成机检。
 """
 import re
 import sys
@@ -21,6 +24,7 @@ sys.path.insert(0, str(_ROOT))
 import e2e_run  # noqa: E402
 
 _DRIVER = _ROOT / "e2e_run.py"
+_FROZEN = _ROOT / "tests" / "e2e_frozen.py"
 
 # 冻结产物实测（docs/ADVERSARIAL_AUDIT.md §5 / 2026-09-16 本轮）
 _MEASURED = {
@@ -28,6 +32,9 @@ _MEASURED = {
     "rot": (4, 1031),
     "real": (51, 1975),
 }
+
+# 冻结冒烟单页实测（2026-09-17）：上游排队时 120s 仍在 ocr_running。
+_FROZEN_MEASURED_S = 120
 
 
 @pytest.fixture(autouse=True)
@@ -152,3 +159,40 @@ def test_removed_constants_are_not_referenced():
         assert not re.search(rf"\b{gone}\b", src), (
             f"{gone} 已被移除，不应再被引用"
         )
+
+
+# ── 冻结冒烟（tests/e2e_frozen.py）的终态预算 ────────────────────────
+# 注意：该模块**在 import 期就会起服务**，故只能静态检查，不能 import。
+
+def test_frozen_smoke_terminal_budget_is_derived_and_overridable():
+    """**静态护栏**：冻结冒烟的终态等待必须是"派生 + 可覆盖"，不得写死。
+
+    第三次前科（2026-09-17）：写死 60s（``for i in range(30): sleep(2)``）
+    把一次完全正常的作业判成 FAIL（上游排队，单页 2 分钟仍在 ``ocr_running``）。
+    """
+    src = _FROZEN.read_text(encoding="utf-8")
+    assert "poll_timeout_for_pages" in src, (
+        "冻结冒烟的终态预算必须由产品侧的轮询封顶派生（不得写死单值）"
+    )
+    assert '"E2E_FROZEN_TERMINAL_TIMEOUT"' in src, (
+        "冻结冒烟的终态预算必须支持 env 覆盖（便于按当日上游状况放宽）"
+    )
+    bad = re.findall(
+        r"for\s+\w+\s+in\s+range\(\s*\d+\s*\)\s*:\s*\n\s*time\.sleep\(", src)
+    assert not bad, (
+        f"冻结冒烟又出现「固定次数」等待: {bad} —— 写死即误杀（见本文件 docstring）"
+    )
+
+
+def test_single_page_poll_cap_covers_the_measured_frozen_run():
+    """派生预算的主项（一次 1 页轮询封顶）必须覆盖实测单页耗时。
+
+    这一条顺带守住产品侧：若有人把 ``POLL_TIMEOUT`` 调小到实测排队时间之下，
+    上游还在正常等待就会被判超时。
+    """
+    from core.ocr_client import poll_timeout_for_pages
+
+    assert poll_timeout_for_pages(1) > _FROZEN_MEASURED_S, (
+        f"单页轮询封顶 {poll_timeout_for_pages(1)}s ≤ 实测 {_FROZEN_MEASURED_S}s"
+        f" —— 上游正常排队会被误判为卡死"
+    )

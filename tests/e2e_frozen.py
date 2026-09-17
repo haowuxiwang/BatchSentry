@@ -240,7 +240,16 @@ try:
         #     "静默成功"）。
         section("Pipeline -> Review")
         terminal, err_msg = "", ""
-        for i in range(30):
+        # 终态等待预算**派生**而非写死（`docs/RUNTIME_WATCHDOG.md` §8.4 同源教训：
+        # 写死单值会因上游排队把真实长跑误判为失败）。组成 = 一次 1 页轮询封顶
+        # （`poll_timeout_for_pages(1)`，当前 630s）+ 分析阶段基线；env 可覆盖。
+        # 2026-09-17 实测：上游 Paddle 排队时，单页 2 分钟仍在 `ocr_running`
+        # —— 旧的写死 60s 当场把一次**完全正常**的作业判成 FAIL。
+        from core.ocr_client import poll_timeout_for_pages
+        _budget_s = float(os.environ.get(
+            "E2E_FROZEN_TERMINAL_TIMEOUT", poll_timeout_for_pages(1) + 300))
+        _deadline = time.time() + _budget_s
+        while time.time() < _deadline:
             time.sleep(2)
             try:
                 r = requests.get(f"{BASE}/api/jobs/{job_id}", timeout=5)
@@ -266,7 +275,8 @@ try:
                 print(f"    [SKIP] pipeline_terminal status={terminal} —— 环境未配 OCR "
                       f"凭据，属预期的降级路径（error_message={err_msg[:160]}）")
             else:
-                fail("pipeline_terminal", f"未在 60s 内到达终态: status={terminal!r}")
+                fail("pipeline_terminal",
+                     f"未在 {_budget_s:.0f}s 内到达终态: status={terminal!r}")
         except Exception as e:
             fail("pipeline_terminal", str(e))
 
