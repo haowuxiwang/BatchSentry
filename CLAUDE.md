@@ -371,6 +371,7 @@ The probe does NOT submit real OCR/LLM work — it just verifies auth + connecti
 8. **禁止 `git add -f` 生成物（round-30）**：`dist*` / `build/` / `devlogs/` / `node_modules/` / `release-archive/` / `spike/` **一律不得入库**。`.gitignore` 只挡**默认**的 `git add`：它挡不住 `-f`、挡不住忽略清单被误改、也挡不住"新落点没登记" —— 这三种由门禁的 **`no_build_outputs`（FAIL 级）** 兜底，`dist_variants`（WARN 级）另负责让磁盘堆积**可见**。
    ⚠️ **一旦提交就删不干净**：git 历史里删掉文件不等于抹除内容（本项目已有一例：`tests/e2e_frozen.py` 曾把真实 key 写死并推送，见 `scripts/check_leaked_keys.py`）。所以这道闸门必须在**提交之前**响。
    ⚠️ **忽略写法要覆盖"整目录"，别按扩展名列举**：`spike/` 曾被写成 `spike/*.py` / `*.log` / `*.json` / `*.md` 四条，实测 `touch spike/__probe__.png` 立刻让 `git status` 报 `?? spike/`。按扩展名列举挡不住新形态，**一条整目录忽略**才闭合。
+10. **待办单一入口（round-30 立）**：所有待办只写在 **`docs/TODO.md`**，完成一项就地把 `[ ]` 改 `[x]` 并**填证据**（提交号 / 日志路径 / 数字）。`PLAN.md`、`docs/PLAN_v1.1_EXECUTION.md`、`docs/ROADMAP_v1.1.md` 是**存档**、不再更新。开工先读 `docs/TODO.md`，**不要另开 TODO 文件** —— 多份清单必然漂移（本项目的"两份词汇表"同型）。其中"需要用户动作"的项（如安全软件白名单、厂商侧轮换密钥）要单列，别混在可自办事项里装作能自己推进。
 9. **不升版号的边界（round-30 明确）**：改动只落在 `scripts/`、`tests/`、`docs/`、`.gitignore`、`CLAUDE.md` 等**不进 PyInstaller 产物**的文件时，**不升版号**、记 `[Unreleased]`。判定方法不是"我觉得"，而是**核实产物内容**：`ls dist-electron-*/win-unpacked/resources/pbc-server/_internal/ | grep -i scripts`（实测无输出 ⇒ `scripts/` 不入包）。反之，任何改到 `api/`/`core/`/`llm/`/`db/`/`static/`/`templates/` 的改动**必须**重建产物重跑产物级 e2e。
 
 ---
