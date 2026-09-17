@@ -323,7 +323,12 @@
   }
 
   function statusDotClass(st) {
-    if (["review", "partial_review", "done"].includes(st)) return "bg-success";
+    if (["review", "done"].includes(st)) return "bg-success";
+    // #127：partial_review 的**定义**就是"存在失败页或双后端差异"（见
+    // core/pipeline/stage3.py 的 final_status 判据）——它永远不是成功态。
+    // 此前与 review 同归 bg-success，使"0 条 finding 是因为压根没分析成功"
+    // 与"记录确实无异常"在界面上长得一样（GMP 假阴性）。
+    if (st === "partial_review") return "bg-warning";
     if (st === "error") return "bg-destructive";
     if (["cancelled", "cancelling", "archived"].includes(st))
       return "bg-muted-foreground/40";
@@ -618,7 +623,9 @@
       } else if (st === "analyzing") {
         base = `分析 ${d.pages_analyzed || 0}/${d.total_pages || "?"}` +
           etaSuffixFor(li.dataset.jobId, d.total_pages);
-      } else if (st === "partial_review" && d.error_message) {
+      } else if (st === "partial_review") {
+        // #127：不再以 error_message 为条件 —— "有几页没出结果"本身就是
+        // 复核者最需要的信息；仅双后端差异等无 error_message 的情形同样要显示。
         base = `部分可复核 · ${d.pages_analyzed}/${d.total_pages || "?"} 页`;
       } else {
         base = `${d.total_pages || "?"} 页`;
@@ -633,8 +640,10 @@
       }
     }
     // cr-19：错误行实时显示失败原因（旧实现只有红点"出错"，原因需点进复核页）
+    // #127 扩展：partial_review 同样显示 —— 否则"有页失败"在界面上只剩一个
+    // 色点，用户无从分辨"记录有问题"还是"这次根本没分析成功"。
     if (err) {
-      if (st === "error" && d.error_message) {
+      if ((st === "error" || st === "partial_review") && d.error_message) {
         err.textContent = d.error_message;
         err.classList.remove("hidden");
       } else {
@@ -725,14 +734,27 @@
     const metaEl = document.createElement("div");
     metaEl.className =
       "text-[11px] text-muted-foreground mt-0.5 tabular-nums job-meta";
-    metaEl.textContent = `${job.id} · ${job.created_at}`;
+    // #127：失败页数直接进摘要行 —— 接口一直在返回 failed_pages
+    // （api/jobs/status.py），但界面此前**零处**渲染，用户看不到是哪几页。
+    const failedPages = Array.isArray(job.failed_pages) ? job.failed_pages : [];
+    metaEl.textContent =
+      `${job.id} · ${job.created_at}` +
+      (failedPages.length
+        ? ` · 失败页 ${failedPages.length} 页（${failedPages
+            .slice(0, 12)
+            .join(",")}${failedPages.length > 12 ? "…" : ""}）`
+        : "");
     // cr-19：出错任务行直接显示失败原因（快照已透传 error_message，
     // 旧实现 renderJobRow 不渲染 — 用户看不到错误，只能点进复核页）
+    // #127：partial_review 也显示 —— 这是"0 条 finding 到底是记录没问题、
+    // 还是压根没分析成功"能否被正确解读的关键。
     const errEl = document.createElement("div");
     errEl.className =
       "job-error text-[11px] text-destructive mt-0.5 truncate";
     errEl.textContent = job.error_message || "";
-    if (st !== "error" || !job.error_message) errEl.classList.add("hidden");
+    errEl.title = job.error_message || "";
+    if (!["error", "partial_review"].includes(st) || !job.error_message)
+      errEl.classList.add("hidden");
     info.appendChild(titleEl);
     info.appendChild(metaEl);
     info.appendChild(errEl);

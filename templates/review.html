@@ -302,7 +302,7 @@
             <!-- LLM parse error — 同样左边框样式，不铺底 -->
             <div id="parse-error-banner" class="parse-error-banner rounded-md border-l-2 border-warning bg-card px-3 py-2 flex items-center gap-2{% if not page_parse_error %} hidden{% endif %}">
                 <span class="w-1.5 h-1.5 rounded-full bg-warning shrink-0"></span>
-                <span class="text-xs text-foreground">此页 LLM 解析失败，分析结果仅供参考，请以 OCR 原文为准</span>
+                <span class="text-xs text-foreground" id="parse-error-text">此页 LLM 解析失败，分析结果仅供参考，请以 OCR 原文为准</span>
             </div>
 
             {# robustness-D1: 空页横幅 — OCR 对该页无任何内容，未调 LLM（节省

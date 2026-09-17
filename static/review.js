@@ -883,9 +883,24 @@
     }
 
     // 2. parse-error 横幅
+    // #127：把**实际失败原因**写进横幅。此前只有一句通用文案 —— 复核者知道
+    // "这页没解析出来"，却不知道是 PDF 本身损坏、网关超时，还是模型凭据失效。
+    // 后者是**全局性**故障（每页都一样），必须能一眼认出：否则整份 0 条 finding
+    // 会被当成"记录无异常"（GMP 假阴性）。
     const parseBanner = document.getElementById("parse-error-banner");
     if (parseBanner) {
       parseBanner.classList.toggle("hidden", !pageParseError);
+      const parseText = document.getElementById("parse-error-text");
+      if (parseText) {
+        // 首帧模板文案即"通用兜底"的**唯一副本**：缓存后复用，
+        // 不在 JS 里再抄一份（两处文案必然漂移）。
+        if (parseText.dataset.fallback === undefined)
+          parseText.dataset.fallback = parseText.textContent.trim();
+        const reason = String(structured._error || "").trim();
+        parseText.textContent = reason
+          ? `此页 LLM 解析失败：${reason}`
+          : parseText.dataset.fallback;
+      }
     }
 
     // 2b. 幻觉防护横幅 — LLM 提取数值未在 OCR 原文找到（疑似臆造）
