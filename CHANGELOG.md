@@ -7,7 +7,53 @@
 
 ## [Unreleased]
 
-_（暂无 —— 下一版待记）_
+> 本轮改动**不进入 PyInstaller 产物**（只落在 `.gitignore` / `scripts/` / `tests/` / 文档），
+> 已核实产物 `_internal` 内无 `scripts/` ⇒ 按既有约定 **不升版号**。可分发版本仍是 **1.1.7**。
+
+### Added
+- **打包信号新增两项生成物检查**（`scripts/release_gate.py`）：
+  - `no_build_outputs`（**FAIL**）—— `git ls-files` 不得包含任何生成物根
+    （`dist*` / `build/` / `devlogs/` / `node_modules/` / `release-archive/`）。
+    拦三种 `.gitignore` **挡不住**的情形：`git add -f`、忽略清单被误改、
+    新增落点未登记。只问"git 里有没有"，磁盘堆积交给下一项。
+  - `dist_variants`（**WARN**）—— 根目录 `dist-*` 变体数超阈值时提示跑
+    `scripts/clean_dist.py`。刻意不判 FAIL：多轮构建/发布会话并存几个变体是正常状态。
+- **`tests/unit/test_repo_hygiene.py`**（新）：四条不变式 ——
+  ① 忽略清单**实测**覆盖"文档允许 agent 写入的产物落点"（问 `git check-ignore` 的
+  **返回值**，不读 `.gitignore` 的文本）；② 门禁清单与忽略清单**双向同步**
+  （门禁盯着的路径必须真被忽略，否则门禁会误报）；③ 检查确实被编排注册
+  （防重构摘掉，而"检查消失"不会让任何用例变红）；④ 判定谓词**不过度匹配**。
+  含一组**接线证明**（喂入一份含产物的已跟踪清单，必须 FAIL）。
+
+### Fixed
+- **`.gitignore` 漏了 `release-archive/`**：`CLAUDE.md`「Repo hygiene」规则 2 明确指示
+  agent 把人为留存的历史版本打成 zip 放 `release-archive/`，而忽略清单里**没有这条**
+  （`git check-ignore` 实测未忽略）⇒ **规则与忽略清单不一致时 agent 会照规则做**，
+  几百 MB 的 zip 随后出现在 `git status`，下一次 `git add -A` 就进去了。已补齐，
+  并由上述护栏把"落点必须三处联动"锁死。
+
+### Changed
+- `release_gate.is_build_output` 的前缀判定修正：`head.startswith("dist-electron")`
+  会把 `dist-electronica/` 这类**恰好同前缀的正文目录**误判为产物 →
+  改为"等于前缀 或 前缀后接 `-`"。**由护栏自己写的反向用例当场抓出**。
+- `CLAUDE.md`：
+  - 补 **Round 29**（v1.1.7 / #131，上一轮未落笔）。
+  - 「Repo hygiene」新增规则 **7–9**（产物落点三处联动 / 禁止 `git add -f` 生成物 /
+    不升版号的判定边界），并**修正规则 6** —— 原文要求引用 `devlogs/` 里的日志，
+    但产物级 e2e 的 transcript 实际写在运行目录，且 `devlogs/` 本身可再生产物；
+    现明确"同机可复核 vs 跨机可会审"的区别。
+  - **修正构建指令**：原写 `.\build.ps1`（"must run in real PowerShell, NOT IDE Sandbox"），
+    但实测该环境下**面向 agent 的 PowerShell 通道不执行、输出恒空** —— 照文档走的 agent
+    会静默失败。改为**实测可用的 Bash 三连**，并把四个前置条件（python 3.11 置顶 /
+    `CODEBUDDY_SAFE_DELETE_ENABLED=0` / `ELECTRON_BUILDER_CACHE` 指向既有缓存 /
+    时间戳输出目录）连同各自的失败原因一并写进命令块。
+  - Conventions 新增 **Test assertions** 条：改期望值必须同时写明理由；断言"解析后的
+    结构"或"实测行为"而非"序列化后的字符"；断言必须**能真的失败**。
+- `docs/PROJECT_PITFALLS.md` **§十八**：仓库卫生五条可复用教训 ——
+  先定位（表象"仓库被污染"经实测是**误判**）→ 规则必须**自闭合** →
+  护栏扫**代码结构**不扫**文本** → 判定谓词**正反成对**（反向用例针对最近的边界）→
+  本机 Git Bash 的 `sort`/`find`/`timeout` 会被 `C:\Windows\system32\*.exe` 抢占，
+  以及 `rm "$TEMP/..."` 混合分隔符路径触发 `SAFE_DELETE_FAIL_CLOSED`。
 
 ---
 

@@ -598,3 +598,87 @@ else:                                fail("失败不可归因于 LLM，本轮结
 可能整段时间被拥塞（`code:10010`），此时任何依赖它的验收都**不可重复** ——
 要么换一个**确定可用**的同类后端（本例 MinerU），要么显式记录"本轮不构成
 被测条件"而不是硬凑结论。
+
+---
+
+## 十八、仓库卫生：规则与忽略清单不一致 ⇒ agent 会"照规则做错事"（2026-09-17）
+
+**场景**：仓库根目录堆了 **8 个 `dist-electron-*`**（≈2.9 GB），用户问
+"如何避免 AI agent 把仓库搞成这样"。
+
+### 18.1 先定位：表象（"仓库被污染"）是错的
+
+实测三项，结论与表象相反：
+
+| 问 | 实测 | 结论 |
+|---|---|---|
+| 这些目录在版本控制里吗？ | `git log --all --diff-filter=A` 为空 | **从未入库** |
+| 忽略清单覆盖它们吗？ | `git status --ignored` 全部为 `!!` | 已覆盖 |
+| 仓库因此变大吗？ | `.git` 内最大 blob = 554 KB 的发布说明 PDF | 无关 |
+
+⇒ 真正的缺陷不是"产物入库"，而是 **(a)** 磁盘堆积无人收敛（已有的
+`scripts/clean_dist.py` 没被跑），**(b) 规则与忽略清单不一致** ——
+`CLAUDE.md`「Repo hygiene」规则 2 明确指示 agent"人为留存历史版本 → 打包 zip
+到 `release-archive/`"，而 `.gitignore` 里**没有这一条**（`git check-ignore`
+实测未忽略）。
+
+> **通用规矩**：**规则让 agent 往哪儿写，忽略清单就必须在那儿拦**。
+> 不一致时 agent 会**照规则做**（它读的是文档），于是产物出现在
+> `git status` 里，下一次 `git add -A` 就进去了。这类错误**一旦提交就删不干净**
+> —— git 历史里删文件 ≠ 抹除内容（本项目已有一例：`tests/e2e_frozen.py`
+> 曾把真实 key 写死并推送，见 `scripts/check_leaked_keys.py`）。
+>
+> 处置不是"加审批流程"，而是**三处联动 + 机检兜底**：新落点必须在
+> `.gitignore`、`release_gate` 的 `BUILD_OUTPUT_DIRS`、
+> `tests/unit/test_repo_hygiene.py::DOCUMENTED_ARTIFACT_ROOTS`
+> **同一次提交**里齐备，缺一处就红。
+
+### 18.2 护栏必须扫**代码结构**，不能扫**文本**
+
+护栏第一版按**文本**搜索 `"structured_json IS NOT NULL"` 断言"没有第二套口径"，
+结果命中的是**我自己注释里引用该 SQL 的说明文字**（误报）。改为**只扫
+`ast` 里 `db.execute(...)` 的实参字面量**后才正确。同源教训见 Round 25
+「**断言解析后的结构，永不断言序列化后的字符**」。
+
+同一原则的另一个面：判断"某路径是否被忽略"要问 `git check-ignore` 的
+**返回值**，而不是读 `.gitignore` 的**内容** —— 后者会把注释里提到该路径的
+说明也当成规则。
+
+### 18.3 新写的判定谓词，第一件事是**拿它照自己**
+
+```python
+# 第一版（错）
+head in BUILD_OUTPUT_DIRS or head.startswith(BUILD_OUTPUT_PREFIXES)
+```
+`"dist-electronica".startswith("dist-electron")` → **True**：
+一个恰好同前缀的**正文目录**会被误判成产物。是我自己写的反向用例
+（`dist-electronica/x.js` 必须判 False）当场抓住的。
+
+**若只写正向用例，这个过度匹配会一直躺着** —— 直到某天真有同名目录出现，
+门禁在那里**误报 FAIL**，而"一条永远弄不绿的检查"最终会被绕过。
+
+> **通用规矩**：谓词的测试必须**正反成对**，反向用例要针对**最接近的边界**
+> （同前缀不同词、只出现在非首段路径、大小写变体），而不是随便挑几个明显不相关的。
+
+### 18.4 本机工具链：`sort` / `find` / `timeout` 会被 Windows 同名 exe 抢走
+
+Git Bash 下 `PATH` 里 `/c/Windows/system32` 可能排在 `/usr/bin` 之前：
+
+- `sort -k1,1nr` → `-k1,1nr系统找不到指定的文件`（收到的是 Windows `sort.exe`）
+- `find . -name "e2e_run*.py"` → **返回空**，而该文件明明存在（收到 `find.exe`，
+  它是"在文件里搜文本"的工具，语义完全不同）
+- `timeout 90 git push …` → Windows 版把 `90` 当 `/T`，**被包裹的命令根本没执行**
+
+⇒ **凡得出"探测不到 X / 找不到文件"的结论，先证明探针自己跑成功了**
+（打印原始输出 + `$?`）。要限时/排序/查找，写绝对路径 `/usr/bin/timeout`。
+（本例曾据此误判"`e2e_run.py` 不存在"。）
+
+### 18.5 沙箱：删 `$TEMP` 下的文件别用 `$TEMP` 变量
+
+`rm -f "$TEMP/pbc_artifact_e2e.log"` 里 `$TEMP` 展开为 `C:\Users\…\Temp`，
+与 cwd 拼成**混合分隔符路径** → safe-delete 无法规范化 →
+`SAFE_DELETE_FAIL_CLOSED`，**整条命令链在第一步就死**。症状是
+"e2e 只跑了 18 秒就失败、且**没有任何输出**"（看起来像被测程序崩了，
+其实它**从未启动**）。临时文件用 POSIX 形式
+（`/c/Users/…/Temp/x.log`），或干脆**不删**（本次驱动是 append 模式，
+换个 tee 文件名即可）。
