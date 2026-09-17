@@ -422,3 +422,51 @@
 取消后**再打一次上游**、并继续试其余角度。已修，并上升为**全仓机检**：
 AST 扫 `core/api/llm/db/models`，任何 try 里通用分支不得排在 `OCRCancelled` 之前
 （并要求至少扫到 3 处 —— 一处都扫不到的护栏永远通过）。
+
+---
+
+## 十四、Windows 无「创建符号链接」特权时 electron-builder 必然失败（2026-09-17）
+
+**症状**：`npx electron-builder --win --x64` 在**打包已基本完成之后**退出码 1，
+报错栈极深（`app-builder.exe process failed ERR_ELECTRON_BUILDER_CANNOT_EXECUTE`），
+而 `win-unpacked/` 里 `BatchSentry.exe`、`resources/app.asar`、
+`resources/pbc-server/pbc-server.exe` **三件套齐全** —— 极易被当成"已经好了"。
+
+**根因（两层，缺一不可）**：
+
+1. electron-builder 在最后一步（写 exe 图标/版本资源的 `rcedit`，以及 signtool
+   路径探测）需要 `winCodeSign-2.6.0.7z`。该归档里含 **macOS 符号链接**
+   （`darwin/10.12/lib/libssl.dylib`、`libcrypto.dylib`）。
+   7za 以 `-snld` 解包时要**真的创建符号链接** → 非提权进程 / 未开开发者模式
+   时 `SeCreateSymbolicLinkPrivilege` 不可用 → `ERROR: Cannot create symbolic
+   link : 客户端没有所需的特权` → 7za 退 2 → electron-builder 重试 4 次后整体失败。
+2. **为什么没走缓存**（真正的坑）：`app-builder` 的缓存根是**从 HOME 推**的。
+   从 Git Bash 启动时它算到 `$HOME/.cache/electron-builder`，那里**没有**已解包好的
+   `winCodeSign-2.6.0` → 触发重新下载 + 重新解包 → 撞上第 1 层。
+   而机器上**其实早已有**一份完好的缓存：
+   `%LOCALAPPDATA%\electron-builder\Cache\winCodeSign\winCodeSign-2.6.0`（2026-07-22
+   的旧构建留下，含 `rcedit-x64.exe`）。
+   ⚠️ 叠加网络因素：本次 GitHub **直连不可达**（`curl --noproxy '*' → 000`，且
+   7897 代理未监听）⇒ 重新下载**必然失败**，缓存命中从"更快"变成"唯一出路"。
+
+**解法（不改 `package.json`、不动仓库）**：把缓存根显式指到那份既有缓存即可 ——
+
+```bash
+ELECTRON_BUILDER_CACHE='C:/Users/WuSiTan/AppData/Local/electron-builder/Cache/' \
+  npx electron-builder --win --x64 -c.directories.output=dist-electron-out-<ts>
+# 之后日志里 "download" 计数应为 0，退出码 0
+```
+
+若缓存确实缺失且无网络：备份方案是自行解包（**不创建符号链接**）后再指过去 ——
+`7za x -bd -y -snl- -o<root>/winCodeSign/winCodeSign-2.6.0 <archive>.7z`
+（`-snl-` 把符号链接落成普通文件；macOS 的 dylib 对 Windows 打包无意义）。
+⚠️ 用 7za 时**必须传 Windows 路径**，Git Bash 的 `/d/...` 它认不出。
+
+**排查时自己踩的两个坑（务必记住）**：
+
+- **`find -maxdepth 4` 把既有缓存漏掉了**：`AppData/Local/electron-builder/Cache/winCodeSign`
+  是**第 5 层**。据此得出"机器上根本没有该缓存"的结论是错的，并因此先走了注定失败的路。
+  凡"搜不到 X"的结论，先确认**搜索深度/范围**覆盖了目标。
+- **`dist-electron*` 一律被 gitignore**，故"工作区干净"不代表"没产生多余产物"；
+  产物收敛仍须单独跑 `scripts/clean_dist.py`（R3）。
+
