@@ -26,6 +26,33 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# ── 「非可重试」判据的**单一来源**（#127）─────────────────────────────
+# 命中即代表问题在配置/权限/请求本身：重试无意义（同一进程内后续每次调用
+# 都会以同样方式失败），只能人工处置（换 key / 补权限 / 修请求）。
+_NON_RETRYABLE_KEYWORDS = (
+    "401", "authentication", "unauthorized",
+    "403", "forbidden",
+    "400", "bad request", "invalid",
+)
+
+
+class LLMConfigError(RuntimeError):
+    """LLM 配置级故障：凭据无效/过期、权限不足、请求非法。
+
+    重试无用 —— 调用方应据此**早停**，并把原因提升到 job 级，
+    而不是把它降级成一堆互不相关的页面级失败。
+
+    为什么需要这个类型（#127 根因）：此前只抛字符串化的
+    ``RuntimeError("LLM call failed (non-retryable)...")``，Stage 2 只能
+    走通用 ``except Exception`` 分支，把"整份文档都分析不了"记成"某几页
+    失败"；``jobs.error_message`` 保持 NULL，前端在 partial_review 下无因
+    可显，最终呈现为**绿点 + 0 条 finding**，与"记录确实无异常"不可区分。
+
+    继承 ``RuntimeError``：既有 ``except RuntimeError`` 调用方与测试的
+    行为完全不变，新增的只是"可被判别的子类"。
+    """
+
+
 # 密钥脱敏，防止 SDK 异常消息把鉴权头/URL 里的密钥带回日志与
 # llm_call_audit.error（对抗审查：此前错误串原样落库，密钥可能随异常
 # 消息泄露到 error.log / audit 表）。
@@ -237,11 +264,9 @@ class LLMClient:
                     )
                 # Distinguish retryable vs non-retryable errors
                 err_str = str(e).lower()
-                is_non_retryable = any(kw in err_str for kw in [
-                    "401", "authentication", "unauthorized",
-                    "403", "forbidden",
-                    "400", "bad request", "invalid",
-                ])
+                is_non_retryable = any(
+                    kw in err_str for kw in _NON_RETRYABLE_KEYWORDS
+                )
                 if is_non_retryable:
                     logger.error(
                         f"LLM call failed (non-retryable){ctx_tag}: "
@@ -254,7 +279,7 @@ class LLMClient:
                             success=False,
                             error=_mask_secrets(str(last_error))[:200],
                         )
-                    raise RuntimeError(
+                    raise LLMConfigError(
                         f"LLM call failed (non-retryable){ctx_tag}: "
                         f"{_mask_secrets(str(last_error))}"
                     )

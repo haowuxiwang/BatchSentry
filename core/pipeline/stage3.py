@@ -300,17 +300,48 @@ async def _run_stage3_cross_analysis(
         "partial_review" if (failed_pages or dual_diff) else "review"
     )
 
-    await db.execute(
+    # ── #127：零页产出 ≠ 「部分可复核」 ────────────────────────────────
+    # partial_review 的语义是"有部分内容可供复核"。当**没有任何一页**完成
+    # 分析时（典型：模型 API Key 失效 → 每页 Stage 2 都以 401 失败），
+    # 报 partial_review 会让"0 条 finding"与"记录确实无异常"不可区分 ——
+    # GMP 场景下这是**假阴性**。此时正确的终态是 error：这次分析没有产出。
+    #
+    # 判据**从数据派生**（复用 _get_analyzed_pages 的"排除 _parse_error"
+    # 口径），因此不依赖具体故障原因：上游 OCR 整体不可用等同理归类。
+    fallback_error_message = None
+    if failed_pages:
+        from core.pipeline.stage2 import _get_analyzed_pages
+        if not await _get_analyzed_pages(db, job_id):
+            final_status = "error"
+            cursor = await db.execute(
+                "SELECT error_message FROM jobs WHERE id = ?", (job_id,)
+            )
+            row = await cursor.fetchone()
+            if not (row and row["error_message"]):
+                # 页级只留了 _parse_error（原因分散各页），这里补一条 job 级
+                # 说明。Stage 2 的配置级路径已写过更精确的文案 → 不覆盖。
+                fallback_error_message = (
+                    f"全部分析页失败（0 页产出可用结果，共 {len(failed_pages)} 页）"
+                    "｜已产出内容不足以复核，请检查模型凭据或重试"
+                )
+
+    update_sql = (
         "UPDATE jobs SET finished_at = datetime('now','localtime'), "
         "stage1_ms = ?, stage2_ms = ?, stage3_ms = ?, failed_pages = ? "
-        "WHERE id = ?",
-        (stage1_ms, stage2_ms, stage3_ms,
-         json.dumps(failed_pages) if failed_pages else None, job_id),
     )
+    update_params: list = [stage1_ms, stage2_ms, stage3_ms,
+                           json.dumps(failed_pages) if failed_pages else None]
+    if fallback_error_message:
+        update_sql += ", error_message = ? "
+        update_params.append(fallback_error_message)
+    update_sql += "WHERE id = ?"
+    update_params.append(job_id)
+    await db.execute(update_sql, tuple(update_params))
     status_detail = (
         f"流水线完成：{len(findings)} 条问题，{len(failed_pages)} 页失败"
         + (f"，双后端差异 {len(dual_diff)} 页" if dual_diff else "")
         + (f"，{empty_pages_count} 页内容为空/解析错误" if empty_pages_count else "")
+        + ("（0 页产出可用结果 → error）" if final_status == "error" else "")
     )
     await transition_status(db, job_id, final_status, status_detail)
 
