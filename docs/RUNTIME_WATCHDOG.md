@@ -174,18 +174,47 @@ SQS/Celery 用 visibility timeout 让"超时未 ACK"的任务重新可见。
 > ⚠️ `ocr_running` / `cancelling` 两个基准在 v1.1.3 首版分别写成 1800s / 900s，
 > 都**低于**它们所覆盖的上游封顶 —— 属 §8.2 / §8.5 的缺陷，v1.1.4 已按
 > "基准 ≥ 上游封顶 + 余量"的不变式修正。
+>
+> 📐 **`ocr_running` 的第二条依据（§8.9，2026-09-16）**：旋转补救期间的**静默上界**
+> 不再是"整页补救总时长"，而是由 `core/pipeline/self_heal.rotation_silence_bound_s()`
+> 派生的 **1260s**（`= max(每角度尝试次数 2 × poll_timeout_for_pages(1) 630s,
+> 退避封顶 300s)`），前提是**每次探测尝试后都写心跳**。
+> 机检锁定：该值 ≤ 本表 `ocr_running` 单页上限（4200 + 120 = 4320s）。
+> 改动**退避阶梯 / 每角度尝试次数 / 轮询封顶**任一项都会自动触发
+> `test_watchdog.py::TestThresholdsAboveUpstreamCaps` —— 不需要有人记得回来改阈值。
 
 **仍然不做的**：不动"事件循环整停"那一类（GIL 饿死）—— 同循环内的定时器
 也停摆，捕获不了。那类问题由 `core/procpool.py` 的进程隔离解决（Round 15），
 两者是不同手段，不能互相替代（对照本文件 §4 第 2 条）。
 
-### P2 —— 可选（不依赖 schema）
+### P2 —— **已实施（2026-09-16）**（不依赖 schema）
 
 SSE 停滞可见性：服务端记录"同一状态已持续多久"（内存计数即可），
 超过阈值时推送一个**普通 message 帧**（注意不能用 `event: error` ——
 SSE 规范中 error 是保留类型，浏览器会立即断连且不暴露 data，
 见 `api/jobs/status.py:328-330` 的既有注释）。前端据此显示
 "任务似乎停滞，可取消或重试"，把"无声转圈"变成"有信息的选择"。
+
+**实施时选的形态与原文不同 —— 更好，且成本更低**：不引入内存计数器，
+也不新增字段，而是**纯派生**：
+
+- `core/watchdog.py::stall_report(job_row, ...)` 用 `last_activity_at`（P1 已有的
+  心跳，唯一真值）+ 同一个 `stall_limit_seconds()` 阈值表算出
+  `{idle_seconds, limit_seconds, warn, overdue}`，**不写任何 DB / 不动 schema**。
+  → 阈值只在**一处**（`stall_limit_seconds`），判定表不会与 P1 漂移；
+  → 无状态 ⇒ 重启即一致，不存在"计数器与真实心跳对不上"的窗口。
+- `warn` 在**阈值 60%**（`_STALL_WARN_FRACTION`）时置位：用户先于看门狗的
+  杀任务动作拿到信号（这正是 §8.7 要求 P2 的理由）。
+- 暴露在 **两个**载荷里（缺陷护栏：`"stall": _stall_payload(job)` 必须出现 2 次）：
+  `GET /api/jobs/{id}` 与 SSE 快照（SSE 投影相应多选一列 `last_activity_at`）。
+- 前端 `static/review.js::renderStall` 渲染普通横幅（`role="status"` +
+  `aria-live="polite"`）；`overdue` 时升级措辞。**不新增 SSE 事件类型**
+  （机检：AST 扫 `ast.Yield`，事件名集合仍 ⊆ `{"done"}`）。
+- 取数失败**永不**影响状态查询：`_stall_payload` 兜住异常 → 返回 `None`、
+  记一条 warning（`last_activity_at` 不存在 / 不可解析同样返回 `None`）。
+
+护栏 `tests/unit/test_stall_visibility.py`（含"60% 边界""非终态才判"
+"`PBC_WATCHDOG_SCALE` 被尊重""JSON 安全"与三条接线自检）。
 
 ### 不推荐的做法
 
@@ -369,10 +398,12 @@ CPU 重活的封顶 —— 进程池隔离决定了 `run_cpu` 跑到一半无法
 
 ### 8.7 本轮之后仍不做的
 
-**P2（SSE 停滞可见性）** —— 8.2 把阈值抬高之后，它从"可选"升级为"应当做"：
+**P2（SSE 停滞可见性）** —— ~~8.2 把阈值抬高之后，它从"可选"升级为"应当做"：
 在杀掉任务之前，UI 应当先给出"任务似乎停滞，可取消或重试"的信号，否则用户
 要多等几十分钟才看到任何反馈。方案见 §5 P2（注意不能用 `event: error`，
-SSE 规范里 error 是保留类型）。
+SSE 规范里 error 是保留类型）。~~
+
+**→ 2026-09-16 已实施**，见 §5 P2（实际形态 = 纯派生，无 DB 写入、无新事件类型）。
 
 ### 8.8 把"三问测试"用到看门狗**自己**身上（本轮调研的收尾动作）
 
@@ -445,4 +476,90 @@ invariant ok: cancelling=2400.0 >= cpu_task_cap_s=1800.0
 
 **教训（已登记到 `docs/PROJECT_PITFALLS.md`）**：护栏必须断言**解析后的结构**，
 永远不要断言**序列化后的字符**。
+
+### 8.9 【严重】旋转补救把上游拥塞当永久故障 → 一个角度都没读到（#120，2026-09-16）
+
+**性质**：不是看门狗自身的缺陷，而是**它监视的那条链路**的缺陷 —— 但它让
+"任务看起来在跑"掩盖了"根本没有可用上游"，且静默地把**基础设施状况**写成
+**内容结论**（GMP 复核里这两件事的处置完全不同）。
+
+**现场证据**（job `234d3838-29d`，v1.1.3 产物）：
+
+```
+11:36:04 → 11:37:05   五次旋转探测**全部**被 Paddle 拒绝
+                       HTTP 400 code:10010 任务提交队列已满
+间隔 7–15s（≈15s/角度）→ 全部角度尝试在 61s 内耗尽
+```
+
+而**同一天实测的拥塞窗口是分钟级（≥18 分钟）**。对照（健康期同链路）：
+p2 自愈读出 2098 字 / p3 升级读出 1169 而非 206 —— 同一份代码在健康期是能工作的。
+**结论：不是旋转逻辑错，是它对"上游忙"和"上游说这个角度读不出"用了同一种反应。**
+
+**两个后果**：
+1. 旋转通道在最需要它的场景（上游降级造成空页 —— 正是它被设计的场景）**放弃得最快**；
+2. `rotation_probed=True` 把上游繁忙写成了"已探测全部角度未果"的内容结论。
+
+**根因**：完全没有错误分类；而且**两层退避相乘** —— 内层 `_probe_slice_text`
+对任意异常退避 2s 重试一次，外层再换角度，于是 ≈15s/角度。
+
+**正解（五项，互相咬合）**：
+
+1. **分类器单一真值** `core/ocr_client.is_congestion_error()` —— 容量/拥塞类
+   （`10010` / 队列已满 / `too many requests` / `please try again later` /
+   `parsing failed` / 词边界 `HTTP 429|5xx`）vs 永久类（400 参数错）。
+   `mineru_client` 原先**内联了自己的 `transient_markers`** → 已删除，收敛到一处
+   （机检：`core/`+`api/` 全仓 AST 扫字符串字面量，标记不得在别处重新写死）。
+2. **轮询超时刻意不算拥塞**。它已被自身封顶（单页 630s）；若按拥塞退避重试，
+   一次 630s 等待会被乘 4，**直接抬高下面的静默上界**。这是设计决定，不是遗漏。
+3. **退避重试同一角度**（`_probe_slice_angle`）：阶梯 `(30, 60, 120, 240, 300)`s，
+   **不消耗有限的角度预算**；分片睡眠（15s 粒度）保持取消响应；**每次退避开始前
+   写心跳**（"有界的刻意等待"不是假心跳）。
+4. **区分性诊断且互斥**：`rotation_blocked="upstream_congestion"`（**从未探测**）
+   vs `rotation_probed`（探测过、内容读不出）。互斥由结构保证
+   （`if rotation_blocked: … elif rotation_probed:`），并新增审计
+   `stage1_rotation_blocked`，文案明确写 "NOT probed (retrying the job later
+   may recover them)"。
+5. **预算**：单页 1200s + 整轮 1800s（`≥` 实测拥塞窗口）。整轮预算耗尽时剩余
+   目标页**一并如实标记为 blocked 且不再探测**（不假装试过）。
+
+**看门狗联动（本轮最需要推导的地方）**：退避抬高了 OCR 阶段的实际延迟，
+所以必须回答"这会不会撞上 `ocr_running` 阈值"。答案是**不会**，但**上一轮的
+推导本身是错的**，必须更正：
+
+| | 上一轮（§8.2 的旧注） | 本轮（更正后） |
+|---|---|---|
+| 式 | 3 角度 × 630s ≈ 1890s | `max(2 次尝试 × 630s, 退避封顶 300s)` = **1260s** |
+| 错在哪 | ①漏了**每角度 2 次尝试**（真实乘积 3×2×630 = **3780s**，不是 1890s）；②心跳改为**每次尝试后**写入之后，"整页总时长"已经不是静默上界了 | —— |
+
+关键点：**心跳绑定前进**之后，静默上界从"整页补救总时长"降到"**单次探测尝试**"。
+若不这么做，就得把看门狗放宽到 ≈3780s + 余量（2 小时级），那等于让看门狗失去意义。
+现值 `rotation_silence_bound_s() = 1260s` ≤ `ocr_running` 单页上限 4320s，
+**阈值 4200s 无需改动**（不变式：基准 ≥ 被覆盖调用的自身上限 + 余量）。
+
+机检：`test_watchdog.py::TestThresholdsAboveUpstreamCaps::
+test_ocr_limit_covers_rotation_remediation_silence`（读 `rotation_silence_bound_s()`
+而非硬编码）+ `test_rotation_silence_bound_is_derived_from_primitives`
++ `test_rotation_backoff_cap_fits_within_one_page_limit`。
+上一轮那条 `test_ocr_limit_covers_single_page_remediation` 因上式错误而**替换**。
+
+**顺带查出的同源缺陷（已修，随本轮一并提交）**：`_probe_slice_text` 的
+`except Exception`（**先前就存在**）会把 `OCRCancelled` 也吞掉 ——
+`OCRCancelled` 是 `RuntimeError` 子类。后果：用户取消被记成"角度探测失败"
+（又一次把操作状况写成内容结论），且取消后还会**再打一次上游**、继续试其余角度。
+修法：`except OCRCancelled: raise` 排在通用分支之前；`_rotation_heal`
+内外两层都按取消语义收尾（保留已恢复页、停止本轮、**不写任何诊断**）。
+护栏上升为**全仓机检**：AST 扫 `core/api/llm/db/models`，任何 try 里通用分支
+不得排在 `OCRCancelled` 之前；并断言**至少扫到 3 处**（一处都扫不到的护栏永远通过）。
+
+**护栏设计上又被验证一次的两条教训**：
+
+- 断言**结构**而非字符：本文件第一版"标记只许出现在一处"的检查用正则，
+  把**文档字符串里解释该标记的说明文字**判成了重复定义（误报 3 条）
+  → 改走 AST（注释不是 AST 节点，文档字符串显式排除）。
+  同理 `test_no_new_sse_event_type_is_introduced` 只能扫 `ast.Yield`
+  （源码注释里就写着"不能用 `event: error`"）。
+- **读取源码一律用 `utf-8-sig`**：本仓库部分文件带 UTF-8 **BOM**
+  （`api/jobs/actions.py`），普通 `utf-8` 解出的首字符 `U+FEFF` 会让
+  `ast.parse` 抛 `SyntaxError` —— 一次让 5 条用例集体报错，
+  且**看起来像被测代码崩了**。解析失败一律跳过该文件，护栏自身永不崩。
 
