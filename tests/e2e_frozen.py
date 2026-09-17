@@ -3,7 +3,8 @@ import subprocess, time, requests, sys, os, json, signal, re
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from tests.e2e_proc import (  # noqa: E402
-    EXE_ENV, LLM_KEY_ENV, llm_key, resolve_exe, spawn_server, stop_server,
+    EXE_ENV, LLM_KEY_ENV, llm_key, llm_provider, resolve_exe, spawn_server,
+    stop_server,
 )
 
 # 被测产物：默认 PyInstaller 的直接产物；用 PBC_E2E_EXE 指向 Electron 打包后
@@ -148,27 +149,49 @@ try:
     # 5. Configure LLM provider
     # 密钥只从环境取（PBC_E2E_DEEPSEEK_KEY），绝不写进仓库。
     # 未提供时如实登记为"未配置"，不伪造通过。
+    #
+    # ⚠️ 提供方**不得写死**：字段名必须由提供方名派生（f"{prov}_api_key"）。
+    # 反例（2026-09-17 实测，本段曾在真实产物上 401）：原先固定写
+    #   {"llm_provider": "deepseek", "deepseek_api_key": key}
+    # 而注入的是**硅基流动**的 key ⇒ 请求打到 api.deepseek.com 得
+    # `401 Authentication Fails, Your api key: ****ucgz is invalid`。
+    # 这一错配长期"绿"着，因为样例 PDF 曾是**空白页**：Stage 2 无内容可分析
+    # ⇒ 从不调用 LLM ⇒ 401 从未发生。夹具改为含真实文字后**当场暴露** ——
+    # 这正是"断言必须能真的失败"为什么必须成立。
     section("Configure LLM")
     _key = llm_key()
+    _prov = llm_provider()
     if not _key:
         print(f"    [WARN] 未设置 {LLM_KEY_ENV} —— 跳过 LLM 配置，"
               f"下游流水线将走降级路径（不是缺陷）")
     try:
         r = requests.post(f"{BASE}/api/settings", json={
-            "llm_provider": "deepseek",
-            "deepseek_api_key": _key,
+            "llm_provider": _prov,
+            f"{_prov}_api_key": _key,
         }, timeout=5)
         print(f"    POST settings status={r.status_code} body={r.text[:300]}")
-        # Verify GET returns the key
+        # Verify GET returns the key for THAT provider
         r2 = requests.get(f"{BASE}/api/settings", timeout=5)
         settings = r2.json()
         llm = settings.get("llm", {})
         provider = llm.get("provider") or llm.get("active_provider")
         providers_list = llm.get("providers", [])
-        ds = next((p for p in providers_list if p.get("name") == "deepseek"), {})
-        ds_configured = ds.get("configured", False)
-        ds_key_masked = ds.get("api_key", "")
-        ok("settings_configure_llm", f"provider={provider} deepseek_configured={ds_configured} key={ds_key_masked}")
+        p = next((x for x in providers_list if x.get("name") == _prov), {})
+        p_configured = p.get("configured", False)
+        p_key_masked = p.get("api_key", "")
+        ok("settings_configure_llm",
+           f"provider={provider} {_prov}_configured={p_configured} key={p_key_masked}")
+        # 判别性前置：密钥非空却"没配上"或"活动提供方不是它" ⇒ 后续任何
+        # 结论都无意义（会被误报成产品缺陷），故当场 FAIL。
+        if _key:
+            if provider and provider != _prov:
+                fail("settings_llm_provider_matches_key",
+                     f"活动提供方={provider}，密钥却是给 {_prov} 的 —— 配置未生效")
+            elif not p_configured:
+                fail("settings_llm_provider_matches_key",
+                     f"{_prov} 收到密钥后仍 configured=False（密钥被拒写？）")
+            else:
+                ok("settings_llm_provider_matches_key", _prov)
     except Exception as e:
         fail("settings_configure_llm", str(e))
 

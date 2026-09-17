@@ -37,6 +37,26 @@ DEFAULT_EXE = REPO_ROOT / "dist" / "pbc-server" / "pbc-server.exe"
 # 未提供时不阻断（LLM 步骤降级），但会明确提示。
 LLM_KEY_ENV = "PBC_E2E_DEEPSEEK_KEY"
 
+# LLM 提供方：冒烟必须把密钥发给**与该密钥匹配**的那一家。
+# 反例（2026-09-17 实测）：`e2e_frozen.py` 曾写死
+# ``{"llm_provider": "deepseek", "deepseek_api_key": key}``，而注入的却是
+# **硅基流动**的 key ⇒ 请求打到 ``api.deepseek.com`` 得 401。此前长期"绿"
+# 是因为样例 PDF 是**空白页**：Stage 2 无内容可分析 ⇒ 从不调用 LLM ⇒ 401
+# 从未发生（假绿；夹具改为含真实文字后当场暴露）。
+# 默认 siliconflow 沿用本项目"LLM 凭据即硅基流动 key"的既有约定；
+# 运行方可用 :data:`LLM_PROVIDER_ENV` 显式覆盖成自己真实在用的提供方。
+LLM_PROVIDER_ENV = "PBC_E2E_LLM_PROVIDER"
+DEFAULT_LLM_PROVIDER = "siliconflow"
+
+
+def llm_provider(default: str = DEFAULT_LLM_PROVIDER) -> str:
+    """返回 e2e 用的 LLM 提供方名（小写），由 ``PBC_E2E_LLM_PROVIDER`` 覆盖。
+
+    与 :func:`llm_key` 配对使用：``{llm_provider()}_api_key`` 才是该密钥
+    应当归属的字段名。**不要**在调用点再写死提供方名。
+    """
+    return (os.environ.get(LLM_PROVIDER_ENV) or default).strip().lower()
+
 
 def resolve_exe(default=None) -> str:
     """解析被测 pbc-server 可执行文件路径。

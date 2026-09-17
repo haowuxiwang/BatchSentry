@@ -112,3 +112,59 @@ def test_cli_secrets_have_env_fallback(env_name):
         assert "required=True" not in m.group(1), (
             f"{flag} 仍是 required=True，环境变量回落不会生效"
         )
+
+
+# ── LLM 密钥必须配给"它自己所属"的提供方 ─────────────────────────────
+#
+# 实测（2026-09-17，真实冻结产物）：`e2e_frozen.py` 曾把配置写死成
+# ``{"llm_provider": "deepseek", "deepseek_api_key": key}``，而实际注入的是
+# **硅基流动**的 key ⇒ 请求打到 api.deepseek.com 得
+# `401 Authentication Fails, Your api key: **** is invalid`。
+# 该错配长期"绿"着：样例 PDF 曾是**空白页** ⇒ Stage 2 无内容可分析 ⇒
+# 从不调用 LLM ⇒ 401 从未发生（假绿）。夹具改为含真实文字后当场暴露。
+
+
+def test_proc_exposes_provider_selector():
+    """提供方名有环境变量回落（与密钥同等地位），默认 siliconflow。"""
+    from tests.e2e_proc import (DEFAULT_LLM_PROVIDER, LLM_PROVIDER_ENV,
+                                llm_provider)
+    assert LLM_PROVIDER_ENV == "PBC_E2E_LLM_PROVIDER"
+    assert DEFAULT_LLM_PROVIDER == "siliconflow"
+    assert callable(llm_provider)
+
+
+def test_smoke_derives_key_field_from_provider():
+    """密钥字段名必须由提供方名派生 —— 不得写死任何一家。
+
+    ⚠️ 只看**真正生效的结构**（AST 里的字典字面量键），不看源码文本：
+    按文本搜索会命中**注释里引用同一段代码的说明文字**（本项目已因此误报过
+    两次 —— Round 25 与 Round 29）。本段注释里就写着反例
+    ``{"llm_provider": "deepseek", "deepseek_api_key": key}``，
+    用文本匹配会当场假红。
+    """
+    src = (_ROOT / "tests" / "e2e_frozen.py").read_text(encoding="utf-8")
+    assert "llm_provider" in src, "冒烟必须显式设置 llm_provider"
+
+    literal_keys, derived_keys = [], []
+    for node in ast.walk(ast.parse(src)):
+        if not isinstance(node, ast.Dict):
+            continue
+        for k in node.keys:
+            if isinstance(k, ast.Constant) and isinstance(k.value, str) \
+                    and k.value.endswith("_api_key"):
+                literal_keys.append(k.value)
+            elif isinstance(k, ast.JoinedStr):  # f"{...}_api_key"
+                parts = "".join(
+                    str(p.value) if isinstance(p, ast.Constant) else "<expr>"
+                    for p in k.values
+                )
+                if parts.endswith("_api_key"):
+                    derived_keys.append(parts)
+
+    assert derived_keys, (
+        "密钥字段必须写成 f'{provider}_api_key' 形式（由提供方派生）；"
+        "写死字段名会让'A 家 key 发给 B 家端点'的错配静默成立"
+    )
+    assert not literal_keys, (
+        f"出现写死的提供方密钥字段 {literal_keys} —— 必须改为 f'{{provider}}_api_key'"
+    )
