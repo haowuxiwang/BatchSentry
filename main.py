@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 # Application version — single source of truth.
 # Avoids duplicate hardcoded "1.1.0" in FastAPI(app=...) and /health endpoint.
 # 与 package.json 的 version 必须一致（tests/unit/test_version_consistency.py 机检）。
-APP_VERSION = "1.1.7"
+APP_VERSION = "1.1.8"
 
 
 # Phase 5B: resolve resource paths under both dev and PyInstaller frozen mode.
@@ -606,13 +606,14 @@ async def review_page(job_id: str, request: Request, page: int = 1):
             page_finding_counts[p][sev] += r["cnt"]
         page_finding_counts[p]["total"] += r["cnt"]
 
-    # Parse failed_pages
-    failed_pages = []
-    if job["failed_pages"]:
-        try:
-            failed_pages = __import__("json").loads(job["failed_pages"])
-        except Exception:
-            pass
+    # Parse failed_pages —— 与 JSON 接口共用同一解析器（api/jobs/status.py），
+    # 避免同一列在 SSR 与 API 两处各有一套降级规则（仓库约定：可见性字段
+    # 必须与真值同源）。call-time 导入：main.py 顶层已 `from api.jobs import
+    # router`，此处若顶层导入 status 会与之形成循环。
+    from api.jobs.status import _parse_failed_pages
+    # 模板契约是"可迭代列表"（`{% if ... and failed_pages %}` + join），
+    # 故把"未知"（None）落成空列表再交给模板。API 侧保留 None/[] 之分。
+    failed_pages = _parse_failed_pages(job["failed_pages"]) or []
 
     # 三色复核分级（M6/T6.4）：本页 finding 按来源分层（规则=红 / LLM=蓝），
     # 并给出全 job 的规则覆盖面（系统校验通过=绿）。tier 由 core 单一来源

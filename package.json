@@ -1,6 +1,6 @@
 {
   "name": "batchsentry",
-  "version": "1.1.7",
+  "version": "1.1.8",
   "description": "BatchSentry — GMP 批生产记录半自动合规检查系统",
   "main": "electron/main.js",
   "author": "BatchSentry",

@@ -68,7 +68,9 @@ async def get_job_status(job_id: str, request: Request = None):
         "filename": job["filename"],
         "status": job["status"],
         "total_pages": job["total_pages"],
-        "failed_pages": job["failed_pages"],
+        # #132：必须解成 list —— 原样透传会得到 "[2, 1]" 字符串，前端
+        # `Array.isArray()` 拿到即静默丢弃（见 _parse_failed_pages）。
+        "failed_pages": _parse_failed_pages(job["failed_pages"]),
         "pages_ocr_done": pages_ocr,
         "pages_analyzed": pages_analyzed,
         "total_findings": total_findings,
@@ -180,7 +182,8 @@ async def _get_job_progress(db, job_id: str) -> dict:
         "pages_analyzed": pages_analyzed,
         "total_findings": total_findings,
         "error_message": job["error_message"],
-        "failed_pages": job["failed_pages"],
+        # #132：SSE 快照与 GET 状态端点同契约 —— 也必须是 list。
+        "failed_pages": _parse_failed_pages(job["failed_pages"]),
         "stage1_ms": job["stage1_ms"],
         "stage2_ms": job["stage2_ms"],
         "stage3_ms": job["stage3_ms"],
@@ -300,6 +303,42 @@ def _parse_cross_progress(raw) -> dict | None:
     except (ValueError, TypeError):
         pass
     return None
+
+
+def _parse_failed_pages(raw) -> list[int] | None:
+    """解析 `jobs.failed_pages` JSON 字符串 → [页码, ...]。
+
+    该列在 SQLite 里只能存 TEXT（无原生数组类型），但**字段语义是列表**，
+    所以接口层必须解出来再交给 JSON 编码。直接透传会得到
+    `"failed_pages": "[2, 1]"` —— 一个装着 JSON 的字符串，客户端得二次解码。
+
+    #132（本轮产物级 e2e 发现）：前端按 `Array.isArray(job.failed_pages)`
+    取用，收到字符串即**静默退化为 `[]`** ⇒ 失败页数与页码在任务列表里
+    永远不显示；而复核页（SSR，`main.py` 早已自行 `json.loads`）却显示正常。
+    同一字段在两张页面上行为不一致，用户只会读成"这次没有失败页"——
+    #127 专门为"让失败页可见"加的前端渲染，就此形同虚设。
+    同一文件里 `_parse_ocr_progress` / `_parse_self_heal_progress` /
+    `_parse_cross_progress` 都做了同类的「TEXT → 结构」解析，此列是遗漏。
+
+    None/空/非法 JSON → `None`（= "未能给出失败页清单"），**不伪造 `[]`**：
+    `[]` 是"确认零失败页"的断言，GMP 审阅下两者含义不同。非法值记
+    warning —— 否则"数据损坏"与"记录真的无异常"在界面上不可区分。
+    """
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        logger.warning("failed_pages 不是合法 JSON，按未知处理：%r", str(raw)[:80])
+        return None
+    if not isinstance(data, list):
+        logger.warning("failed_pages 不是数组，按未知处理：%r", str(raw)[:80])
+        return None
+    try:
+        return [int(p) for p in data]
+    except (TypeError, ValueError):
+        logger.warning("failed_pages 含非页码元素，按未知处理：%r", str(raw)[:80])
+        return None
 
 
 def _derive_phase(status: str, pages_analyzed: int, total_pages: int,
