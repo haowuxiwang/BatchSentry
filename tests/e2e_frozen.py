@@ -1,5 +1,5 @@
 """Frozen build e2e smoke tests."""
-import subprocess, time, requests, sys, os, json, signal
+import subprocess, time, requests, sys, os, json, signal, re
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from tests.e2e_proc import (  # noqa: E402
@@ -330,6 +330,42 @@ try:
         ok("review_js", f"len={len(r.text)}")
     except Exception as e:
         fail("review_js", str(e))
+
+    # 13b. #127 的可见性修复必须**在产物里**。
+    #     这才是"验产物而非验源码"的实质：修复有没有到达用户手上，是一个
+    #     **分发事实**，源码树干净并不蕴含它。静态资源由冻结包直接提供，
+    #     故这几条断言证明的正是"要分发的那份东西带着修复"。
+    section("Frontend #127 Visibility (shipped bundle)")
+    try:
+        up = requests.get(f"{BASE}/static/upload.js", timeout=5).text
+        # 成功色分支不得包含 partial_review（它定义上就不是成功态）
+        success_branch = re.findall(
+            r'if \(([^)]+)\)\s*return "(bg-[a-z-]+)"', up
+        )
+        bad_success = [
+            c for c, ret in success_branch
+            if ret == "bg-success" and "partial_review" in c
+        ]
+        checks = {
+            "partial_review_not_green": not bad_success and "bg-warning" in up,
+            "failed_pages_rendered": "job.failed_pages" in up,
+            "reason_shown_for_partial_review": (
+                '(st === "error" || st === "partial_review")' in up
+                or '["error", "partial_review"].includes(st)' in up
+            ),
+        }
+        missing = [k for k, v in checks.items() if not v]
+        assert not missing, f"产物内缺 #127 修复标记: {missing}"
+        ok("upload_js_127", "非绿点 / 显失败页 / 显原因")
+    except Exception as e:
+        fail("upload_js_127", str(e))
+
+    try:
+        rj = requests.get(f"{BASE}/static/review.js", timeout=5).text
+        assert "structured._error" in rj, "review.js 未消费 structured._error"
+        ok("review_js_127", "页内横幅显真实原因")
+    except Exception as e:
+        fail("review_js_127", str(e))
 
     # 14. API docs
     section("API Docs")
