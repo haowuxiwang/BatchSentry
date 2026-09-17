@@ -286,3 +286,81 @@ def test_dir_level_denial_without_a_locked_file_is_reported_honestly(
     out = cd.locked_files(d)
     assert out, "不得返回空表 —— 空表会被下游读成'无占用、可删除'"
     assert "目录级" in out[0]
+
+
+# ── 持有者具名（Restart Manager）─────────────────────────────────────
+#
+# 2026-09-17 实测：`tasklist` 排除法把持有者误判成"安全软件"，于是给出的处置是
+# "加白名单"——**完全无效**（真凶是宿主进程按包打开 .asar 后留下持久句柄）。
+# 教训固化：① 持有者必须**具名**而不是推测；② 报告不得再出现"加白名单"这条建议。
+
+
+def test_long_variant_name_does_not_run_into_the_kind_column(tmp_path, capsys):
+    """时间戳变体名很长，列宽不够就会与"类型"列粘成一串（2026-09-17 实跑发现）。"""
+    long_name = "dist-electron-out-20260917-142437"
+    _make(tmp_path, long_name, electron=True, complete=True)
+    assert main(["--root", str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert long_name + "electron" not in out, (
+        f"长目录名挤爆列宽，与类型列粘连：{[l for l in out.splitlines() if long_name in l]}"
+    )
+
+
+def test_who_holds_is_fail_soft(tmp_path, monkeypatch):
+    """诊断辅助绝不能把清理工具带崩：路径不存在 / dll 不可用都只返回空表。"""
+    import scripts.clean_dist as cd
+    assert cd.who_holds(tmp_path / "nope.asar") == []
+    assert cd.who_holds(tmp_path) == []          # 目录、且无人持有
+
+    def boom(*a, **k):
+        raise OSError("rstrtmgr 不可用")
+
+    monkeypatch.setattr(cd.ctypes, "WinDLL", boom)
+    assert cd.who_holds(__file__) == [], "查询失败必须返回空表，而不是抛出去"
+
+
+def test_describe_holders_is_empty_when_nobody_holds(tmp_path):
+    """无人持有时返回空串（调用方据此判空，不必区分"查不到"与"没人"）。"""
+    import scripts.clean_dist as cd
+    f = tmp_path / "free.asar"
+    f.write_bytes(b"x")
+    assert cd.describe_holders(f) == ""
+
+
+def test_describe_holders_names_the_process(tmp_path, monkeypatch):
+    import scripts.clean_dist as cd
+    f = tmp_path / "held.asar"
+    f.write_bytes(b"x")
+    monkeypatch.setattr(cd, "who_holds",
+                        lambda p: [{"pid": 4242, "app": "SomeApp", "type": "Unknown"}])
+    assert "SomeApp" in cd.describe_holders(f) and "4242" in cd.describe_holders(f)
+
+
+def test_advice_names_the_holder_and_negates_the_ineffective_fix(
+        tmp_path, capsys, monkeypatch):
+    """报告必须① 具名持有者 ② 明说"加白名单无效"（旧建议已被实测否定）。"""
+    import scripts.clean_dist as cd
+    _make(tmp_path, "dist-electron-v112", electron=True, complete=True)
+    _make(tmp_path, "dist-electron-m8", electron=True, complete=True)
+    _touch_newer(tmp_path / "dist-electron-v112", 2_000_000_000)
+    _touch_newer(tmp_path / "dist-electron-m8", 1_000_000_000)
+    monkeypatch.setattr(cd, "locked_files",
+                        lambda p: ["win-unpacked/resources/app.asar  (OSError: winerror=32)"]
+                        if p.name.endswith("m8") else [])
+    monkeypatch.setattr(cd, "who_holds",
+                        lambda p: [{"pid": 99, "app": "RealHolder", "type": "Unknown"}])
+    assert main(["--root", str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert "RealHolder(pid=99" in out, "必须具名持有者，不能只报'被外部句柄占用'"
+    assert "退出持有者进程" in out, "处置应是「释放持有者」，不是加白名单"
+    assert "无效" in out, "必须显式否掉已验证无效的「加白名单」建议"
+    assert "dist-electron-m8" in out and "dist-electron-v112" in out
+
+
+def test_module_docstring_states_the_measured_root_cause():
+    """根因写错会把人引向无效操作 ⇒ 把实测结论锁进文档字符串。"""
+    import scripts.clean_dist as cd
+    doc = cd.__doc__ or ""
+    assert "WorkBuddy" in doc, "须写明实测持有者是谁"
+    assert "不是安全软件" in doc, "必须显式否掉旧的「杀软/火绒」误判"
+

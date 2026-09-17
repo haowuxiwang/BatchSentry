@@ -112,8 +112,9 @@ npm run dev
 - `dist/pbc-server/pbc-server.exe` — PyInstaller 打包的后端
 - `dist-electron/win-unpacked/` — Electron 文件夹便携版（双击 `BatchSentry.exe` 运行，无需安装）
 
-> 产物目录名不一定是 `dist-electron/`：安全软件（火绒等）占锁 `resources/app.asar`
-> 时 `build.ps1` 会自愈到 `dist-electron-locked/`，手工重打包时也可能指定别的名字。
+> 产物目录名不一定是 `dist-electron/`：外部进程持有 `resources/app.asar` 句柄时
+> （**本机实测是宿主进程，不是杀毒软件**），`build.ps1` 会自愈到**带时间戳**的备用
+> 目录，手工重打包时也可能指定别的名字。
 > **不要凭目录名假定要发哪一个** —— 跑体检脚本，它按"最新且完整"给出方案，并点名
 > 报出被外部句柄占用、导致整个目录删不掉的文件：
 >

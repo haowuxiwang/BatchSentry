@@ -263,12 +263,14 @@ if (-not $SkipElectron) {
 
     # ── 3.0 占用检测 + 输出目录自愈 ────────────────────────────────
     # electron-builder 先清空 win-unpacked 再重装 Electron。若上一次产物仍被
-    # 占用（BatchSentry.exe 未退出；或安全软件正在扫描 190MB 的 app.asar/
-    # exe），EnsureEmptyDir 会以 "The process cannot access the file" 失败，
+    # 占用（BatchSentry.exe 未退出；或外部进程正持有 app.asar 的句柄），
+    # EnsureEmptyDir 会以 "The process cannot access the file" 失败，
     # 报错栈是 app-builder 的 Go 内部栈，极难定位。
     #
-    # 自愈策略（M8 实测：火绒类实时防护会长期持有 app.asar 句柄，重启亦不释放）：
-    #   检测到占用 → 自动切到备用输出目录 dist-electron-locked；
+    # 自愈策略（M8 起实测：外部进程会长期持有 app.asar 句柄，重启应用亦不释放。
+    # ⚠️ 归因已于 2026-09-17 更正：**不是安全软件**，是**宿主进程**把 .asar 当"包"
+    # 打开后留下未带 FILE_SHARE_DELETE 的句柄 —— 详见 docs/PROJECT_PITFALLS.md §二十二）：
+    #   检测到占用 → 自动切到**带时间戳**的备用输出目录（每次唯一）；
     #   构建成功后 → best-effort 归位到标准 dist-electron\win-unpacked；
     #   归位仍失败 → 保留备用目录并打印可执行的归位命令（不使构建整体失败）。
     $stdUnpacked = "dist-electron\win-unpacked"
@@ -287,14 +289,16 @@ if (-not $SkipElectron) {
     }
     if ($locked) {
         # 备用目录名必须**每次都是新的**。历史实现用固定名 `dist-electron-locked`，
-        # 但备用目录自己写过之后，其 app.asar 同样会被安全软件持有 ——
+        # 但备用目录自己写过之后，其 app.asar 同样会被该进程持有 ——
         # 2026-09-16 实测：dist-electron / dist-electron-locked / dist-electron-v112 /
         # dist-electron-m8 四个目录的 app.asar **全部被锁**（PermissionError 32，
         # 重启不释放）。也就是说固定名备用目录 = **第二次自愈必然失败**。
         # 按时间戳生成即可保证唯一，不需要事先探测。
         $outDir = "dist-electron-out-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
         Write-Host "  [WARN] $stdUnpacked 被占用（resources\app.asar 无法重命名）。" -ForegroundColor Yellow
-        Write-Host "         原因：BatchSentry.exe 未退出，或安全软件正持有上次产物句柄。" -ForegroundColor Yellow
+        Write-Host "         原因：BatchSentry.exe 未退出，或外部进程正持有上次产物句柄" -ForegroundColor Yellow
+        Write-Host "         （2026-09-17 实测：本机为宿主 WorkBuddy —— 它把 .asar 当包打开；" -ForegroundColor Yellow
+        Write-Host "          解锁须完全退出该进程，加杀软白名单无效。详见 docs/PROJECT_PITFALLS.md §二十二）。" -ForegroundColor Yellow
         Write-Host "         自愈：本次改用全新输出目录 $outDir（固定名备用目录是一次性的）。" -ForegroundColor Yellow
     }
 
@@ -364,7 +368,7 @@ if (-not $SkipElectron) {
 
     # dir target produces win-unpacked/ folder (not a single exe)
     # 3.2 变体目录留痕（round-27 卫生规则 R2）：凡最终产物不在标准路径
-    # dist-electron/win-unpacked（安全软件锁 app.asar 时自愈到带时间戳的
+    # dist-electron/win-unpacked（外部进程锁 app.asar 时自愈到带时间戳的
     # 备用目录且归位失败），就地写 PROVENANCE.txt —— 出处（HEAD/时间/版本）
     # + 收敛指引。没有出身的变体目录会被下一个会话当成"身份不明垃圾"，
     # 判定成本（哈希比对/健康探测/时间线推理）远高于写这个文件的成本。
@@ -383,6 +387,12 @@ if (-not $SkipElectron) {
             "version:  $appVer"
             "verify:   `$env:PBC_E2E_EXE = '<this dir>\resources\pbc-server\pbc-server.exe'; python tests/e2e_frozen.py"
             "cleanup:  python scripts/clean_dist.py  (dry-run first; --apply sends to recycle bin)"
+            "unblock:  fully EXIT the process holding resources\app.asar, then re-run"
+            "          'python scripts/clean_dist.py --apply'. Measured on this host"
+            "          (2026-09-17): the holder is the WorkBuddy host process - it opens"
+            "          .asar as a package and keeps a handle without FILE_SHARE_DELETE."
+            "          An antivirus allow-list does NOT help (the holder is not AV)."
+            "          Details: docs/PROJECT_PITFALLS.md section 22."
         ) -join "`r`n" | Set-Content -Path $prov -Encoding UTF8
         Write-Host "  [INFO] PROVENANCE.txt written to $prov" -ForegroundColor DarkGray
     }

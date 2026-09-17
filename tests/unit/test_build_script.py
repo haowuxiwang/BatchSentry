@@ -70,8 +70,11 @@ def test_build_ps1_electron_lock_self_heals(ps1_bytes):
     """electron 产物被常驻进程占用时，构建脚本必须**自愈**而非整体失败。
 
     背景（M8 实测）：`dist-electron\\win-unpacked\\resources\\app.asar` 会被
-    安全软件类常驻进程长期独占（可读、可复制，但删除与重命名均失败），
-    重启应用亦不释放。旧行为只打印 WARN，随后 electron-builder 仍写标准
+    常驻进程长期独占（可读、可复制，但删除与重命名均失败），
+    重启应用亦不释放。⚠️ **归因已于 2026-09-17 更正**：**不是安全软件**，是
+    **宿主进程**按包打开 `.asar` 后留下未带 `FILE_SHARE_DELETE` 的句柄
+    （见 `docs/PROJECT_PITFALLS.md` §二十二）。
+    旧行为只打印 WARN，随后 electron-builder 仍写标准
     目录 → 以 app-builder 的 Go 内部栈失败，整次构建报废。
 
     **契约在 2026-09-16 被实测修正**：原实现"切到固定名备用目录 +

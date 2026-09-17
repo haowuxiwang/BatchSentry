@@ -84,7 +84,7 @@ def test_documented_build_switches_exist_in_build_ps1():
 
 
 def _artifact_dirs():
-    """所有 `dist-electron*/win-unpacked` 目录（含历史残留与安全软件占锁的备用目录）。"""
+    """所有 `dist-electron*/win-unpacked` 目录（含历史残留与外部句柄占锁的备用目录）。"""
     return sorted(p for p in _ROOT.glob("dist-electron*/win-unpacked") if p.is_dir())
 
 

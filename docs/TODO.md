@@ -7,28 +7,36 @@
 > 纪律（见 `CLAUDE.md`「Repo hygiene & release discipline」）：**先定位 → 再解决 → 最后测试**；
 > 结论必须挂证据；**不升版号的边界** = 改动是否进入 PyInstaller 产物。
 >
-> 最后更新：2026-09-17（Round 32 进行中）· 可分发版本 **v1.1.8** · 远端 `2bffb99`（本轮改动待提交）
+> 最后更新：2026-09-17（Round 33：A1 归因更正为宿主进程占用）· 可分发版本 **v1.1.8** · 远端 `6332f17`
 
 ---
 
 ## A. 需要**用户**动作（我做不到，已在等）
 
-- [ ] **A1（阻塞收敛）把仓库目录加入安全软件信任区/白名单。**
-      **现在它卡的不只是清理，而是"标准输出目录"本身**：`dist-electron/win-unpacked/resources/app.asar`
-      改名被拒 ⇒ electron-builder **无法写标准路径** ⇒ 本次 v1.1.8 被迫自愈到
-      `dist-electron-out-20260917-142437`（已按约定写 `PROVENANCE.txt` 留痕）。
-      实测证据（**复探，较 Round 31 再次确认**）：文件级 `winerror=32`
-      （`ERROR_SHARING_VIOLATION`，句柄未带 `FILE_SHARE_DELETE`）、目录级 `winerror=5`
-      （`ERROR_ACCESS_DENIED`）；**12.5 秒内 5 次全部失败 ⇒ 持续而非瞬态**；
-      `tasklist` 无 electron/BatchSentry/pbc-server/python 进程 ⇒ 外部持有。
+- [ ] **A1（阻塞收敛）完全退出 WorkBuddy 宿主，然后在普通终端跑收敛脚本。**
+      **归因已更正（Round 33 实测，旧处置无效）**：持有者**不是安全软件**，是
+      **WorkBuddy 宿主进程**（Restart Manager 具名：`WorkBuddy.exe` pid=16220 / 14048）。
+      机制：宿主把 `.asar` 当"包"打开后**持久留下未带 `FILE_SHARE_DELETE` 的句柄**
+      ⇒ 含 `app.asar` 的目录既不能改名也不能删除 ⇒ electron-builder 写不进标准输出目录
+      ⇒ 本次 v1.1.8 自愈到 `dist-electron-out-20260917-142437`（已按约定写 `PROVENANCE.txt`）。
+      ⚠️ 因此**"把仓库加入杀软信任区/白名单"对本案无效**（不是杀软）。
+      证据链 + 可复现的控制实验（新建 `.asar` 空闲 → 宿主读一次即持续 `winerror=32`；
+      对照读 `.txt` 仍空闲；同目录 exe 全部空闲）见 `docs/PROJECT_PITFALLS.md` §二十二。
+      **为什么必须由用户做**：宿主就是当前会话的运行环境，我在它里面**杀不掉它自己**。
+      步骤（顺序不能反）：
+      1. 保存工作后**完全退出 WorkBuddy**（确认任务管理器里已无 `WorkBuddy.exe`）；
+      2. 在**普通终端**（cmd / PowerShell）里执行：
+         ```
+         python scripts/clean_dist.py            # dry-run：应显示「待清理: dist-electron」且不再报占用
+         python scripts/clean_dist.py --apply    # 走回收站，可恢复
+         ```
+      3. 预期收敛到 `dist/` + **一个** `dist-electron*`（保留 1.1.8 那份；版本由 asar 内的
+         `package.json` 读出，不靠 mtime 猜）⇒ `dist_variants` 回到 PASS。
+      4. 收敛**不影响已交付产物的正确性**（它只是磁盘/仓库卫生），产物本身已通过全部验收。
       ⚠️ **不要在占用未解除时手动删 `dist-electron`**：删到被持有的 `app.asar` 会中途失败，
       把一个完好的 v1.1.7 产物变成**残缺目录**（比不删更糟，且会让"最新产物"判定指向残缺目录）。
-      解除占用后执行：
-      ```
-      python scripts/clean_dist.py            # dry-run，确认方案
-      python scripts/clean_dist.py --apply    # 走回收站，可恢复
-      ```
-      预期收敛到：`dist/` + **一个** `dist-electron*`（v1.1.8）；门禁 `dist_variants` 保持 PASS。
+      ⚠️ 现状中 `dist-electron/win-unpacked/resources/__lockscan_probe.asar`（729 B）**是 Round 33 我留下的
+      诊断探针**，它同样被宿主锁住 ⇒ 删不掉，会随该目录一起进回收站，无需单独处理。
       **在此之前 `dist_variants` 显示 2 属预期，不是回归。**
 - [ ] **A2 轮换已泄漏的 LLM 凭据（必须厂商侧操作）。**
       `DeepSeek` / `SiliconFlow` 的 key 曾随提交进入 git 历史，**删文件删不掉历史**

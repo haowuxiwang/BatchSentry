@@ -53,7 +53,11 @@
 - 便携交付物 `win-unpacked/BatchSentry.exe`（~180 MB），不产 NSIS。
 
 真实障碍（**本机实测，非推断**）：
-1. **安全软件驱动级持有** `resources/app.asar`：`tasklist` 查不到、重启不释放 →
+1. **外部进程持有** `resources/app.asar`：`tasklist` 查不到该进程（**排除法在此失效**）、
+   重启不释放 →
+   🔁 **归因更正（2026-09-17 实测）**：持有者是**宿主进程 WorkBuddy**（Restart Manager
+   具名，pid 16220 / 14048），**不是安全软件**，且**只有 `*.asar` 被占**
+   （同目录 `pbc-server.exe` / `BatchSentry.exe` 全部空闲）。详见 `PROJECT_PITFALLS.md` §二十二。
    electron-builder 只能不断换**全新输出目录**（自愈目录是一次性的）。
 2. **PyInstaller 被 safe-delete 钩子直接打死** → 构建必须显式关掉钩子。
 3. **从 agent shell 起 `BatchSentry.exe` 必然 ~1s rc=0 退出**（非交互式会话，

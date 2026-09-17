@@ -12,9 +12,42 @@
 > **不升版号**。**随后 Round 32 修的是产物内的缺陷（#132）** ⇒ 工作树整体升为
 > **1.1.8** 并重建产物（见上节）。可分发版本：**1.1.8**。
 >
-> 本节含两件事：**Round 30** = 仓库卫生机检（生成物禁止入库 + 变体堆积可见化 +
+> 本节含三件事：**Round 30** = 仓库卫生机检（生成物禁止入库 + 变体堆积可见化 +
 > 「允许写入的落点」三处联动）；**Round 31** = 修 **e2e 夹具的"假绿"** 与
-> **`clean_dist` 认锁探测的"假慢"**。
+> **`clean_dist` 认锁探测的"假慢"**；**Round 33** = **归因更正**（目录锁的持有者是
+> **宿主进程**，不是安全软件）+ 工具报告**具名持有者**。Round 33 同样**不进产物**，
+> **不升版号**。
+
+### Fixed (Round 33, 2026-09-17 — 归因更正：锁的持有者是宿主进程，不是安全软件)
+- **更正散落多处的错误归因**（`README.md` / `DEPLOYMENT.md` /
+  `docs/ARCHITECTURE_AND_QUALITY_REVIEW.md` / `docs/ADVERSARIAL_AUDIT.md` /
+  `docs/PROJECT_PITFALLS.md` / `build.ps1` / `scripts/clean_dist.py`）：
+  `resources/app.asar` 无法改名/删除此前被记作"**安全软件（火绒）驱动级锁**"，
+  处置写成"加入信任区/白名单" —— **实测推翻**。持有者是 **WorkBuddy 宿主进程**
+  （Restart Manager 具名：pid 16220 / 14048），且**只有 `*.asar` 被占**
+  （同目录 `pbc-server.exe` / `BatchSentry.exe` / `app.asar.unpacked` 全部空闲）。
+  ⇒ 加杀毒白名单**无效**，必须**完全退出该进程**。
+- **`scripts/clean_dist.py`：报告不再靠猜**。新增 `who_holds()` / `describe_holders()`
+  （Restart Manager；**fail-soft** —— 非 Windows / dll 缺失 / 任何异常都只返回空表，
+  绝不让诊断把清理工具带崩），锁定目录时**直接具名持有者进程**，并明写
+  "加杀软白名单对本案**无效**"。
+- **两处只有实跑工具才会暴露的输出缺陷**：长目录名（时间戳变体）挤爆列宽、与"类型"
+  列粘连；持有者行按 `", "` 切分导致条目被截断（条目内部本身含 `", "`）⇒ 改为按
+  **结构化行**去重。
+
+### Added (Round 33)
+- `tests/unit/test_clean_dist.py` 新增 **6** 例（20 → 26）：`who_holds` **fail-soft**（路径不存在 /
+  dll 不可用）、无人持有时 `describe_holders` 返回空串、具名渲染、**报告必须具名持有者
+  且否定"加白名单"建议**、**模块 docstring 必须写明实测持有者并否掉旧误判**、
+  长目录名不得与类型列粘连。
+- `build.ps1` 自愈生成的 `PROVENANCE.txt` 模板新增 `unblock:` 段（正确的解锁指引：
+  退出持有者进程；加白名单无效）。
+
+### Changed (Round 33)
+- ⚠️ **核验 `app.asar` 一律走子进程读取**（`clean_dist.asar_version()`）。用宿主/IDE 的
+  读取能力打开 `.asar` 会**留下持久句柄**（实测：新建 `.asar` 空闲 → 宿主读一次即持续
+  `winerror=32`；对照读 `.txt` 仍空闲）⇒ 锁死产物目录 ⇒ 下次构建清不掉标准输出目录
+  ⇒ 又自愈出时间戳目录 ⇒ **目录越堆越多**。这就是 A1 会复发的机制。
 
 ### Added
 - **`tests/unit/test_e2e_backend_assert.py` 新增两条护栏**：提供方选择器

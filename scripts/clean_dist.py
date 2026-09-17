@@ -2,10 +2,29 @@
 
 ## 为什么需要它
 
-electron-builder 的输出目录名会**漂移**：安全软件（本机为火绒）占锁
-``resources/app.asar`` 时，``build.ps1`` 会自愈到备用目录
-``dist-electron-locked``；手工重打包又可能显式指定 ``dist-electron-v112``。
-日积月累，仓库里就堆着四五个 ``dist*`` 目录，"该发哪一个"只能靠人肉比对。
+electron-builder 的输出目录名会**漂移**：``resources/app.asar`` 被外部句柄占住时，
+``build.ps1`` 会自愈到备用目录 ``dist-electron-locked``；手工重打包又可能显式指定
+``dist-electron-v112``。日积月累，仓库里就堆着四五个 ``dist*`` 目录，"该发哪一个"
+只能靠人肉比对。
+
+## 占用者是谁（2026-09-17 实测，**别再猜**）
+
+本机的持有者是 **WorkBuddy 宿主进程**（``WorkBuddy.exe``），**不是安全软件**
+（此前文档写作"火绒"是**未经验证的推测**，已按实测更正）。机制：宿主把 ``.asar``
+当作"包"去打开，这条通道会**持久留下未带 ``FILE_SHARE_DELETE`` 的句柄**。
+
+控制实验（可复现）：
+
+- 新建 ``*.asar`` → 空闲；**用宿主的读取通道打开一次** → 立刻 ``winerror=32`` 且持续；
+  对照读 ``*.txt`` → 仍空闲（⇒ 是 asar 专属通道，不是"读文件就锁"）；
+- 范围：**只有 ``*.asar`` 被占**，同目录 ``pbc-server.exe`` / ``BatchSentry.exe`` /
+  ``app.asar.unpacked`` 全部空闲 ⇒ 过滤驱动式的"整目录拦截"可以排除；
+- 因此**不要用宿主的读取能力去看 ``app.asar``**（例如核验打包版本）。本文件的
+  :func:`asar_version` 走子进程 ``open()``，读完即关，**不产生**这个句柄。
+
+⇒ 释放方式：**退出持有进程**（本机＝完全退出 WorkBuddy），句柄随进程消失；
+把仓库加进杀毒白名单对本例**无效**（不是杀毒软件）。持有者由 :func:`who_holds`
+直接具名，不必再靠 ``tasklist`` 反推。
 
 ## 本脚本做什么
 
@@ -200,6 +219,102 @@ def locked_files(path: Path) -> list[str]:
     return out
 
 
+# ── 持有者具名（Restart Manager，官方接口） ───────────────────────────
+#
+# 为什么不用"猜"：``tasklist`` 只能告诉你"有哪些进程在跑"，推不出"谁拿着这个句柄"。
+# 此前正是靠排除法误判成"安全软件"。Restart Manager（``rstrtmgr.dll``）就是
+# 安装程序用来问"谁占着这个文件、要不要帮你关掉"的官方接口，一条调用直接具名。
+
+CCH_RM_SESSION_KEY = 32
+CCH_RM_MAX_APP_NAME = 255
+CCH_RM_MAX_SVC_NAME = 63
+ERROR_SUCCESS = 0
+ERROR_MORE_DATA = 234
+
+RM_APP_TYPE_NAMES = {0: "Unknown", 1: "MainWindow", 2: "OtherWindow", 3: "Service",
+                     4: "Explorer", 5: "Console", 1000: "Critical"}
+
+
+class RM_UNIQUE_PROCESS(ctypes.Structure):
+    _fields_ = [("dwProcessId", wintypes.DWORD),
+                ("ProcessStartTime", wintypes.FILETIME)]
+
+
+class RM_PROCESS_INFO(ctypes.Structure):
+    _fields_ = [("Process", RM_UNIQUE_PROCESS),
+                ("strAppName", wintypes.WCHAR * (CCH_RM_MAX_APP_NAME + 1)),
+                ("strServiceShortName", wintypes.WCHAR * (CCH_RM_MAX_SVC_NAME + 1)),
+                ("ApplicationType", ctypes.c_uint),
+                ("AppStatus", wintypes.ULONG),
+                ("TSSessionId", wintypes.DWORD),
+                ("bRestartable", wintypes.BOOL)]
+
+
+def who_holds(path) -> list[dict]:
+    """返回正在持有 ``path`` 的进程：``[{"pid": int, "app": str, "type": str}]``。
+
+    失败一律返回 ``[]`` —— 这只是**诊断**辅助，绝不能让清理脚本因它崩掉。
+    是否"可删"由 :func:`locked_files` 的改名探测决定，与本函数无关。
+    """
+    if sys.platform != "win32":
+        return []
+    path = Path(path)
+    if not path.exists():
+        return []
+    try:
+        rm = ctypes.WinDLL("rstrtmgr", use_last_error=True)
+        rm.RmStartSession.argtypes = [ctypes.POINTER(wintypes.DWORD), wintypes.DWORD,
+                                      wintypes.WCHAR * (CCH_RM_SESSION_KEY + 1)]
+        rm.RmRegisterResources.argtypes = [wintypes.DWORD, ctypes.c_uint,
+                                           ctypes.POINTER(ctypes.c_wchar_p), ctypes.c_uint,
+                                           ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p]
+        rm.RmGetList.argtypes = [wintypes.DWORD, ctypes.POINTER(ctypes.c_uint),
+                                 ctypes.POINTER(ctypes.c_uint),
+                                 ctypes.POINTER(RM_PROCESS_INFO),
+                                 ctypes.POINTER(wintypes.DWORD)]
+        rm.RmEndSession.argtypes = [wintypes.DWORD]
+
+        sess = wintypes.DWORD(0)
+        key = ctypes.create_unicode_buffer(CCH_RM_SESSION_KEY + 1)
+        if rm.RmStartSession(ctypes.byref(sess), 0, key) != ERROR_SUCCESS:
+            return []
+        try:
+            files = (ctypes.c_wchar_p * 1)(str(path))
+            if rm.RmRegisterResources(sess, 1, files, 0, None, 0, None) != ERROR_SUCCESS:
+                return []
+            need = ctypes.c_uint(0)
+            have = ctypes.c_uint(0)
+            reasons = wintypes.DWORD(0)
+            # 首次调用只为问"要几个"：有占用者返 ERROR_MORE_DATA，无占用者返 SUCCESS
+            rc = rm.RmGetList(sess, ctypes.byref(need), ctypes.byref(have), None,
+                              ctypes.byref(reasons))
+            if rc != ERROR_MORE_DATA or need.value == 0:
+                return []
+            arr = (RM_PROCESS_INFO * need.value)()
+            have = ctypes.c_uint(need.value)
+            if rm.RmGetList(sess, ctypes.byref(need), ctypes.byref(have), arr,
+                            ctypes.byref(reasons)) != ERROR_SUCCESS:
+                return []
+            return [{"pid": int(arr[i].Process.dwProcessId),
+                     "app": arr[i].strAppName,
+                     "type": RM_APP_TYPE_NAMES.get(arr[i].ApplicationType,
+                                                   str(arr[i].ApplicationType))}
+                    for i in range(have.value)]
+        finally:
+            rm.RmEndSession(sess)
+    except Exception:                      # dll 缺失 / 结构不匹配 / 平台差异
+        return []
+
+
+def describe_holders(path) -> str:
+    """把持有者渲染成一行文本；无持有者或查询失败返回空串（供调用方判空）。"""
+    try:
+        rows = who_holds(path)
+    except Exception:
+        return ""
+    return ", ".join(f"{r['app'] or '(未具名)'}(pid={r['pid']}, {r['type']})" for r in rows)
+
+
 # ── 方案（纯函数，便于单测） ─────────────────────────────────────────
 
 
@@ -319,15 +434,15 @@ def main(argv=None):
                           "locks": locks}, ensure_ascii=False, indent=2))
     else:
         print(f"仓库根: {root}")
-        print(f"\n{'目录':<26}{'类型':<10}{'体积':>10}  {'状态':<8}{'版本':<8}")
-        print("-" * 72)
+        print(f"\n{'目录':<38}{'类型':<10}{'体积':>10}  {'状态':<8}{'版本':<8}")
+        print("-" * 84)
         for it in items:
             if it["kind"] == KIND_ELECTRON:
                 status = "完整" if it["complete"] else "残缺"
             else:
                 status = "-"
             ver = it["version"] or "-"
-            print(f"{it['name']:<26}{it['kind']:<10}{it['mb']:>8} MB  {status:<8}{ver:<8}")
+            print(f"{it['name']:<38}{it['kind']:<10}{it['mb']:>8} MB  {status:<8}{ver:<8}")
         print("\n保留:", ", ".join(i["name"] for i in keep) or "(无)")
         print("待清理:", ", ".join(i["name"] for i in doom) or "(无)")
         if review:
@@ -336,11 +451,30 @@ def main(argv=None):
             print(f"\n⚠ {name} 内有 {len(lk)} 个文件被外部句柄占用，整目录无法删除：")
             for one in lk[:10]:
                 print(f"    {one}")
-            print("    → 常见原因：杀毒/安全软件（如火绒）持有 resources/app.asar。")
-            print("      错误码判别（2026-09-17 实测）：**文件级 winerror=32**")
-            print("      （ERROR_SHARING_VIOLATION，有句柄未带 FILE_SHARE_DELETE）且**持续**")
-            print("      复现 ⇒ 外部进程/驱动长期持有；此时只读、可写都正常，唯独改名/删除被拒。")
-            print("      处置：把本仓库目录加入其信任区/白名单，或临时退出后重跑本脚本。")
+            # 具名持有者：把"可能是谁"变成"就是谁"（Restart Manager，实测可用）
+            # ⚠️ 只能按 who_holds 的**结构化行**去重，不能对 describe_holders 的
+            #    文本按 ", " 切分 —— 条目内部本身就含 ", "（如 "App(pid=1, Unknown)"），
+            #    切分会把条目截断成 "App(pid=1"（2026-09-17 实测踩到）。
+            holders: list[str] = []
+            for one in lk:
+                rel = one.split("(", 1)[0].strip()
+                if not rel:                  # 目录级伪条目，没有文件路径可查
+                    continue
+                for r in who_holds(root / name / rel):
+                    s = f"{r['app'] or '(未具名)'}(pid={r['pid']}, {r['type']})"
+                    if s not in holders:
+                        holders.append(s)
+            if holders:
+                print(f"    → 实测持有者：{'; '.join(holders)}（Restart Manager 具名，非推测）")
+            else:
+                print("    → 未能具名持有者（Restart Manager 查不到 ⇒ 可能是驱动级拦截）")
+            print("    → 处置：**退出持有者进程后重跑本脚本**，句柄随进程消失。")
+            print("      注：加杀软白名单对本例**无效**（持有者不是杀软）。")
+            print("      判别（2026-09-17 实测）：文件级 winerror=32")
+            print("      （ERROR_SHARING_VIOLATION，句柄未带 FILE_SHARE_DELETE）且**持续**复现；")
+            print("      此时只读、可写都正常，唯独改名/删除被拒。")
+            print('      已知机制：WorkBuddy 宿主把 .asar 当"包"打开后会持久持有 ——')
+            print("      所以**核验 app.asar 请走子进程读取**（见 asar_version），别用宿主读取通道。")
             print("      （它不可用 `--apply` 绕过：SHFileOperationW 会以 DE_INVALIDFILES 整单失败）")
 
     if args.apply:

@@ -37,9 +37,10 @@ cd d:\learn\claudecode\pharma-batch-checker
 | Python 后端 | `dist/pbc-server/pbc-server.exe` | PyInstaller 打包的后端，嵌入 win-unpacked/resources/ |
 | Tailwind CSS | `static/app.css` | 压缩后的样式（~14KB） |
 
-> ⚠️ **产物目录名不一定是 `dist-electron/`。** 若安全软件（火绒等）持有上一轮
-> `win-unpacked/resources/app.asar` 的文件句柄，`build.ps1` 会自愈到备用目录
-> `dist-electron-locked/`；手工重打包也可能显式指定别的名字（曾输出到
+> ⚠️ **产物目录名不一定是 `dist-electron/`。** 若外部进程持有上一轮
+> `win-unpacked/resources/app.asar` 的文件句柄（**本机实测＝WorkBuddy 宿主进程，
+> 不是杀毒软件**），`build.ps1` 会自愈到带时间戳的备用目录
+> `dist-electron-out-<时间戳>/`；手工重打包也可能显式指定别的名字（曾输出到
 > `dist-electron-v112/`）。
 >
 > 这是仓库里积出**多个 `dist*` 目录**的根因，不是构建逻辑的缺陷：只要那个句柄
@@ -56,13 +57,14 @@ cd d:\learn\claudecode\pharma-batch-checker
 >
 > 它按"最新且完整"判定该保留哪一个（完整 = 含 `BatchSentry.exe`、
 > `resources/app.asar`、`resources/pbc-server/pbc-server.exe`），并把**被外部
-> 句柄占用**的文件点名报出来。若报出占用：把本仓库目录加入安全软件的信任区/
-> 白名单（或临时退出安全软件），再重跑 `--apply`。清理**只走回收站**，可恢复。
+> 句柄占用**的文件点名报出来，还会用 Restart Manager **具名持有者进程**。
+> 若报出占用：**完全退出该持有者进程**后重跑 `--apply`（本机实测持有者是宿主
+> WorkBuddy —— 加杀毒白名单**无效**）。清理**只走回收站**，可恢复。
 
 ### 分发前检查清单
 
 > **分发入口唯一**：只分发 `dist-electron/win-unpacked/`。带 `PROVENANCE.txt` 的
-> `dist-electron-out-<时间戳>` 变体是构建自愈的产物（标准目录被安全软件占用时
+> `dist-electron-out-<时间戳>` 变体是构建自愈的产物（标准目录被外部句柄占用时
 > 的落点），验证通过后用 `scripts/clean_dist.py` 归位或清理；历史版本一律打包
 > zip 存 `release-archive/`，不散放目录。详见 CLAUDE.md「仓库卫生与发布纪律」。
 

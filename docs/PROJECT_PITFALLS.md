@@ -194,8 +194,8 @@
   safe-delete 钩子直接打死**（`shutil.rmtree(build/pbc-server)` → 回收站不可用 → fail-closed）
   → 必须 `CODEBUDDY_SAFE_DELETE_ENABLED=0`（仅构建进程；它只删可再生的 `build/`、`dist/`）。
   （`build.ps1 -Clean` 的 `Remove-Item` 是 PS 原生、不经钩子，总能过。）
-- ⚠️ electron-builder 被安全软件**驱动级**长期持有 `resources/app.asar`（`tasklist` 查不到、
-  **重启也不释放**）→ 换**全新输出目录**：
+- ⚠️ electron-builder 的输出被外部句柄**长期持有** `resources/app.asar`（`tasklist` 查不到该进程、
+  **重启也不释放**；**归因见 §二十二：不是安全软件，是宿主进程**）→ 换**全新输出目录**：
   `npx electron-builder --win --x64 -c.directories.output=dist-electron-<新名>`。
   自愈目录 `dist-electron-locked` 是**一次性的**（用过就被锁）→ **命名带时间戳/序号**
   （`build.ps1` 现用 `dist-electron-out-$(Get-Date -Format 'yyyyMMdd-HHmmss')`）。
@@ -235,9 +235,11 @@
 
 ## 六、产物目录 / 删除通道 / OCR 后端
 
-- ⚠️ **火绒占 `resources/app.asar` → 整个目录动不了**：单文件"**可写但不可改名**"
+- ⚠️ **外部句柄占 `resources/app.asar` → 整个目录动不了**：单文件"**可写但不可改名**"
   （`PermissionError:13`），整目录 `SHFileOperationW` 返 `DE_INVALIDFILES(0x7C)`。
-  **不是**权限/超长路径问题 → 清 `dist*` 前先释放占用（火绒信任区/白名单或临时退出）。
+  **不是**权限/超长路径问题 → 清 `dist*` 前先释放占用。⚠️ **归因已更正（§二十二）**：
+  持有者是**宿主进程 WorkBuddy**（Restart Manager 具名），**不是火绒** ⇒
+  加信任区/白名单**无效**，必须**退出该进程**。
 - ✅ **本机唯一可用删除通道 = ctypes 直调 `SHFileOperationW`**（`FOF_ALLOWUNDO`，真进回收站）。
   已被拦：Bash `rmtree`、PS `New-Object -ComObject`、PS `Add-Type`。入口 `scripts/clean_dist.py`
   （默认 dry-run，`--apply` 才动手）；**认锁必须先做**。
@@ -724,8 +726,9 @@ Git Bash 下 `PATH` 里 `/c/Windows/system32` 可能排在 `/usr/bin` 之前：
 ## 二十、探测类工具：探**最粗的粒度**，别逐文件（2026-09-17 实测）
 
 **场景**：`scripts/clean_dist.py` 的认锁探测（"改名再改回"）在待清理目录上
-无条件**逐文件**做 ⇒ 本机 ≈6500 次改名，每次都被安全软件拦一道 ⇒
+无条件**逐文件**做 ⇒ 本机 ≈6500 次改名，每次都被外部句柄拦一道 ⇒
 **>10 分钟仍无任何结论**（R3「收敛 8 个变体目录」迟迟不动）。
+（持有者是谁见 §二十二：**不是安全软件**，是宿主进程。）
 
 **两层修法**：
 
@@ -747,9 +750,10 @@ Git Bash 下 `PATH` 里 `/c/Windows/system32` 可能排在 `/usr/bin` 之前：
 | 目录改名 | `5` | `ERROR_ACCESS_DENIED` —— 内部有子项被占用（NTFS 拒改目录名） |
 | 文件改名 | `32` | `ERROR_SHARING_VIOLATION` —— 有句柄未带 `FILE_SHARE_DELETE` |
 
-**判别瞬态 vs 持续**：连续探测（本例 6 次 / 12 秒）**全部失败** ⇒ 持续持有
-（外部进程或安全软件），**重试无用**，只能加白名单或退出该软件；若一两失败后
-成功，则是瞬态，工具里加退避重试即可。
+**判别瞬态 vs 持续**：连续探测（本例 6 次 / 12 秒）**全部失败** ⇒ 持续持有，
+**重试无用**，只能**退出持有者进程**（具名方法见 §二十二；加杀软白名单对本例
+**无效**——持有者不是杀软，这一点曾误判）；若一两失败后成功，则是瞬态，
+工具里加退避重试即可。
 
 ⚠️ **不能用"能否打开"代替"能否改名/删除"**：本例文件属性仅 `A`（非只读）、
 `W_OK=True`、`open(r+b)` **成功**，唯独改名/删除被拒 —— 因为 `FILE_SHARE_*`
@@ -798,4 +802,69 @@ main.py:   版本号 "1.1.7"   MISSING      ← 连版本号都 MISSING
 **处置**：同一文件的多次编辑**必须顺序执行，并在每次之后回读核对**；
 **"工具回执"不是事实证据，文件内容才是**。需要批量改动时，优先用一条
 `old_string` 覆盖足够长的上下文一次改完，而不是拆成多条并行调用。
+
+
+## 二十二、锁的持有者要**具名**，别用排除法猜（2026-09-17 实测｜归因更正）
+
+**背景**：`dist-electron/win-unpacked/resources/app.asar` 长期无法改名/删除，
+导致 electron-builder 写不进标准输出目录、被迫自愈到时间戳目录（A1）。
+此前文档把它归因于**安全软件（火绒）驱动级锁**，处置写的是"加白名单"。
+**这个归因是错的**，处置因此**指向一条无效路径**。
+
+### (a) 实测：持有者是宿主进程，且只锁 `*.asar`
+
+`RmGetList`（Restart Manager，`rstrtmgr.dll`）**直接具名**：
+
+```
+dist-electron/win-unpacked/resources/app.asar → WorkBuddy.exe(pid=16220)
+探针 __lockscan_probe.asar                     → WorkBuddy.exe(pid=14048)
+```
+
+⇒ `C:\Users\...\Programs\WorkBuddy\WorkBuddy.exe`（宿主自身，且**两个**进程都持有）。
+
+**控制实验（可复现，这是"谁锁的"唯一可信判据）**：
+
+| 动作 | 结果 |
+|---|---|
+| 新建 `*.asar`（2 MB，仿 asar 头） | 空闲（7 次采样 / 13 秒全空闲） |
+| **用宿主读取通道打开一次该 `.asar`** | 之后**立刻 `winerror=32` 且持续** |
+| 对照：宿主读 `*.txt` / `*.exe` / `*.dll` | 仍空闲 |
+| 同目录 `pbc-server.exe` / `BatchSentry.exe` / `app.asar.unpacked` | 全部空闲 |
+
+三条推论：① **不是杀软**（否则同目录的 exe 也会被挡，或整目录被驱动拦截）；
+② **不是"读文件就锁"**（`.txt` 读后仍空闲）；③ 是**asar 专属通道** ——
+宿主把 `.asar` 当"包"打开，该通道会持久留下**未带 `FILE_SHARE_DELETE`** 的句柄。
+
+### (b) 因此：**别用宿主读取能力去看 `.asar`**
+
+用它"看一眼打包版本"就会把产物目录锁死 → 下次 electron-builder 清不掉
+`dist-electron` → 再次自愈到时间戳目录 → **目录越堆越多**（仓库卫生问题的根因）。
+
+⇒ 核验 `app.asar` 一律走**子进程读取**：`scripts/clean_dist.py` 的
+`asar_version()`（`open('rb')` 读完即关）就是安全做法；它已用于判"哪个变体是当前
+版本"（实测读出 `dist-electron`=**1.1.7** / 时间戳目录=**1.1.8**，据此决定留哪一个，
+不靠 mtime 猜）。
+
+### (c) 解锁与处置
+
+**退出持有者进程**（本机＝完全退出 WorkBuddy）⇒ 句柄随进程消失 ⇒
+`python scripts/clean_dist.py --apply` 即可收敛（走回收站）。
+**加杀软白名单无效**（不是杀软）；`--apply` 也不能绕过被占用的目录
+（`SHFileOperationW` 会以 `DE_INVALIDFILES` 整单失败）。
+
+### (d) 顺带：这一幕里"工具回执"**连续骗人三次**
+
+1. **`tasklist` 排除法**：无 electron/BatchSentry/pbc-server/python 进程 ⇒ 误得
+   "外部持有"，再一步就猜成了杀软。（**漏了宿主自身**。）
+2. **宿主读 `.asar` 的回执**：先报 `Invalid package`；换成合法 asar 后报
+   **`File does not exist`**（还给出同目录兄弟文件的"建议"）——**而文件确实在**
+   （729 B，`ls` / `find` 双证）。在 `.asar` 上，宿主的读取回执**不可信**。
+3. **`SHFileOperationW` 回收站**：对 4 个对照探针全部返回 **`rc=2`
+   （ERROR_FILE_NOT_FOUND）**，但文件**确实已被删除**（以 `ls` 为准）。
+   ⇒ 成功也可能带错误码，**以文件系统为唯一事实**。
+
+**通用规矩**（与用户级 memory"探针本身会骗人"同源）：凡得出"找不到 / 删不掉 /
+没进程"的结论，先证明**探测命令自己跑成功了** —— 换一个独立手段复核
+（`ls` vs API 回执；`RmGetList` vs `tasklist`），两侧不一致时**以可独立复现的
+那一侧为准**。
 
