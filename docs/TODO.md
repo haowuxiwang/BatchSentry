@@ -38,6 +38,28 @@
 - [ ] **A3 提供第 2 份真实批记录 PDF 用于泛化验证（缺陷 #126）。**
       目前**只有一份**真实批记录（丝裂霉素提取批记录，51 页）⇒ 规则/OCR 的泛化性
       **未经检验**。缺它就无法回答"换一份记录还准不准"。
+- [ ] **A4（阻塞"需真实 findings 的多轮 e2e"）硅基流动账户余额不足（402）。**
+      实测（v1.1.8 产物，`e2e_run.py --rounds pdf,img`）——驱动**自检**就报出来了：
+      ```
+      test_provider -> 200 {"ok":false,"provider":"siliconflow",
+        "reason":"...APIStatusError: Error code: 402 -
+         {'code': 30001, 'message': 'Sorry, your account balance is insufficient'}"}
+      ```
+      时间线（同一天，同一 key）：
+      `14:36–14:42 冻结冒烟 findings=3`（**LLM 当时可用**）→ `14:43–14:44 #127 验收`
+      （用**失效凭据**故意触发失败路径，消耗 0）→ `14:56–15:02 多轮 e2e` **402**。
+      **后果**：两轮 OCR 均成功（`backend=paddle`，6 页 / 1 页），但 Stage 2 无法调用
+      LLM ⇒ 0 findings ⇒ 驱动的**内容断言 FAIL**。
+      ⚠️ **这两条 FAIL 是正确行为**：驱动不能把"0 findings"记作成功（否则就是"假绿"）；
+      同时**产品侧行为正确** —— 终态如实报 `error`（SSE `ocr → analyze → done:error`），
+      未伪装成绿点或 `partial_review`，这正是 #127/#131 的**实战确认**。
+      **处置**：充值，或在 `%APPDATA%/PBC/config.json` 换成有额度的提供方/密钥，然后重跑：
+      ```
+      python %TEMP%/pbc_run_artifact_e2e.py <产物>\win-unpacked\resources\pbc-server\pbc-server.exe \
+             e2e_run.py --rounds pdf,img
+      ```
+      注：本地目前**只配了 `siliconflow` 一家**（`DEEPSEEK_API_KEY` 等键不存在）⇒ 没有可直接
+      切换的备选供应方。
 
 ## B. 高优先（可做，且不依赖 A）
 
@@ -124,10 +146,11 @@
 |---|---|---|
 | 全量单测+集成 | **2629 passed / 0 failed**（= 上轮 2622 + 本轮 7 例新用例） | 门禁 `tests_coverage` / `devlogs/gate_junit_20260917_142736.xml` |
 | 覆盖率 | **95.5%**（门禁 95%） | `devlogs/gate_report_20260917_143524.json` |
-| 打包信号 | 提交前 **7 PASS / 1 FAIL** —— 唯一 FAIL 是 `worktree_clean`（**要求先提交**，属预期，非回归） | 同上 |
+| 打包信号 | **OVERALL pass（8 PASS / 0 FAIL / 0 WARN）**（提交后复跑；提交前唯一 FAIL 是 `worktree_clean` = "要求先提交"，属预期） | `devlogs/gate_report_20260917_145645.json` |
 | 版本真值 | 4 处一致 = **1.1.8**（`test_version_consistency` 4 passed） | `tests/unit/test_version_consistency.py` |
 | 产物（v1.1.8） | asar 内版本 = 1.1.8 == 源码；入口 188.8 MB；内嵌后端 20.3 MB；`extraResources` 与 `dist/pbc-server` **811 文件 / 112.2 MB 逐一致** | `%TEMP%/pbc_verify_artifact.py` |
 | 冻结冒烟（v1.1.8 产物） | **22 passed / 0 failed**（`health: v1.1.8`、`provider=siliconflow`、`pipeline_terminal=review`、`findings=3`、`report 4531 B`） | `%TEMP%/pbc_e2e_frozen_118.log` |
 | #127/#131 验收（v1.1.8 产物，**失效凭据**复现触发） | **7 passed / 0 failed**；含 **`failed_pages_type: type=list value=[2, 1]`**（#132 修复在产物内的**判别性**证据）、`terminal_is_error`、`reason_visible 201 字`、`pages_analyzed=0` | `%TEMP%/pbc_127_accept_v118.log` |
+| 多轮产物 e2e（`pdf,img`） | **FAIL —— 外部阻塞：账户余额 402**（非产品缺陷）。两轮 OCR 均成功、终态如实 `error`、0 findings ⇒ 驱动**拒绝**记作成功（判别性正确） | `%TEMP%/pbc_e2e_rounds_118.log`；详见 **A4** |
 | 产物目录 | `dist-electron-out-20260917-142437`（标准路径被锁 ⇒ 已按约定写 `PROVENANCE.txt`） | 见 A1 |
-| 远端 | `2bffb99`（本轮提交前） | `git ls-remote origin main` |
+| 远端 | `a004e04`（已推送） | `git ls-remote origin main` |
