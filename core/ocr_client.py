@@ -6,6 +6,7 @@ Kept minimal: submit, poll, download result JSONL.
 import json
 import logging
 import os
+import re
 import time
 from pathlib import Path
 
@@ -42,6 +43,18 @@ POLL_TIMEOUT_PER_PAGE = 30
 POLL_TIMEOUT_MAX = 3600  # 单任务轮询上限 1 小时
 
 
+def poll_timeout_for_pages(pages: int) -> int:
+    """按**页数**计算轮询超时（纯函数形式）。
+
+    与 `poll_timeout_for` 同一公式 —— 抽出来是为了让「上游单次调用封顶」
+    可以被**推导它的地方**读取（如 self_heal 的旋转补救预算、看门狗的
+    阈值不变式），而不必各自手写 630 这个数字。本项目的教训：同一个
+    数字被写死两处，迟早漂移（见 docs/PROJECT_PITFALLS.md）。
+    """
+    return min(POLL_TIMEOUT + POLL_TIMEOUT_PER_PAGE * max(0, int(pages)),
+               POLL_TIMEOUT_MAX)
+
+
 def poll_timeout_for(pdf_path: str) -> int:
     """按页数计算轮询超时：base + per_page × 页数（封顶 POLL_TIMEOUT_MAX）。"""
     try:
@@ -51,7 +64,54 @@ def poll_timeout_for(pdf_path: str) -> int:
             pages = doc.page_count
     except Exception:
         pages = 0
-    return min(POLL_TIMEOUT + POLL_TIMEOUT_PER_PAGE * pages, POLL_TIMEOUT_MAX)
+    return poll_timeout_for_pages(pages)
+
+
+# ─── 上游错误分类：跨后端「容量/拥塞类」的单一真值 ────────────────────
+# 判据：**容量/拥塞类**（上游队列满、限流、5xx、服务端明示可重试）与
+# **永久类**（参数错、格式错）必须分开处置 —— 前者等一会儿可恢复，
+# 后者等多久都一样。
+#
+# 为什么必须有这张表（2026-09-16 实测，见 docs/PROJECT_PITFALLS.md §十一）：
+# 该词汇表此前**散落两处**（mineru_client.run_ocr 内联的 transient_markers
+# 元组 + 各处裸字符串），而「容量类」**无人识别** —— self_heal 的旋转探测
+# 把 Paddle `HTTP 400 code:10010 任务提交队列已满` 当成永久失败，每个角度
+# 只花 ~15s 就换下一个，**61s 内耗尽全部角度尝试**；而实测拥塞窗口是
+# **分钟级**（同日 ≥18 分钟）。结果旋转通道在**最需要它的场景**（上游
+# 降级造成空页，正是它被设计的场景）放弃得最快 → 内容永久丢失。
+#
+# **刻意不把「轮询超时」算作拥塞**：它已被自身封顶约束
+# （`poll_timeout_for` 对单页 = 630s），若再按拥塞退避重试，等于把一次
+# 630s 等待乘 4 —— 看门狗的 OCR 单页缺口上界会随之爆掉（阈值不变式，
+# docs/RUNTIME_WATCHDOG.md §5）。超时是「上游慢」，不是「上游拒绝服务」，
+# 重试的边际收益远低于成本。
+_CONGESTION_MARKERS: tuple[str, ...] = (
+    "10010",                    # Paddle：任务提交队列已满
+    "队列已满",
+    "queue is full",
+    "too many requests",        # 429 的文本形态（状态码另有正则兜底）
+    "please try again later",   # MinerU：终态但明示可重试
+    "parsing failed",           # MinerU：同上（与之成对出现）
+)
+# 429 / 5xx 的**状态码**形态：`submit_pdf` 的消息形如
+# "提交失败 HTTP 503: ..."。带词边界，避免 "HTTP 5001" 这类自造码误命中
+# （`5\d\d` 后紧跟数字则不构成词边界）。
+_CONGESTION_STATUS_RE = re.compile(r"\bHTTP\s*(?:429|5\d\d)\b", re.IGNORECASE)
+
+
+def is_congestion_error(err: object) -> bool:
+    """该错误是否属「上游容量/拥塞类」—— 等一会儿可恢复？
+
+    入参可以是异常对象，或已 redact 的字符串（调用方在日志里已脱敏的
+    场景；标记词与状态码都不含 URL，脱敏不影响判定）。
+
+    **只看容量/拥塞**，不看超时（理由见上方常量区的说明）。
+    """
+    text = str(err)
+    if _CONGESTION_STATUS_RE.search(text):
+        return True
+    lowered = text.lower()
+    return any(m.lower() in lowered for m in _CONGESTION_MARKERS)
 
 
 def submit_pdf(pdf_path: str, retries: int = 3) -> str:

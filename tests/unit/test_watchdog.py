@@ -148,24 +148,64 @@ class TestThresholdsAboveUpstreamCaps:
         assert (watchdog._BASE_STALL_S["cancelling"]
                 - cpu_task_timeout_seconds()) >= watchdog._STALL_MARGIN_S
 
-    def test_ocr_limit_covers_single_page_remediation(self):
-        """单页补救期间**没有**心跳（逐页上报），缺口上界必须落在阈值内。
+    def test_ocr_limit_covers_rotation_remediation_silence(self):
+        """旋转补救期间的**静默上界**必须落在阈值内（#120 后重新推导）。
 
-        上界 = 候选角数 × 单页探测封顶（`poll_timeout_for` 对 1 页）
-             = 3 × 630 = 1890s，再加该页重分析的余量。
+        2026-09-16 更正：旧用例把上界算作「候选角 3 × 单页探测封顶 630s
+        = 1890s」，**漏了每角度 2 次尝试**（真实乘积 3780s）；而且自愈改为
+        「每次尝试写心跳 + 拥塞退避前写心跳」之后，缺口**不再跨尝试累加**，
+        旧推导已整体失效。现在上界由 `self_heal.rotation_silence_bound_s()`
+        单一提供，本用例只断言**关系**，不再手写推导（手写推导正是它一度
+        算错的原因 —— 见 docs/PROJECT_PITFALLS.md）。
         """
-        from core.ocr_client import POLL_TIMEOUT, POLL_TIMEOUT_PER_PAGE, POLL_TIMEOUT_MAX
-        from core.pipeline.self_heal import _ROTATION_CANDIDATES
-
-        single_page_probe_cap = min(
-            POLL_TIMEOUT + POLL_TIMEOUT_PER_PAGE * 1, POLL_TIMEOUT_MAX)
-        worst_gap = single_page_probe_cap * len(_ROTATION_CANDIDATES)
-
-        assert worst_gap > 0
-        assert watchdog.stall_limit_seconds("ocr_running", 1) > worst_gap, (
-            f"1 页文档的阈值 {watchdog.stall_limit_seconds('ocr_running', 1):.0f}s "
-            f"不足以覆盖单页补救缺口 {worst_gap}s —— 会误杀"
+        from core.pipeline.self_heal import (
+            _ROTATION_PAGE_BUDGET_S,
+            rotation_silence_bound_s,
         )
+
+        bound = rotation_silence_bound_s()
+        limit = watchdog.stall_limit_seconds("ocr_running", 1)
+        reanalysis_allowance = 240.0  # 该页补救成功后紧接的逐页重分析
+        assert bound + reanalysis_allowance <= limit, (
+            f"1 页文档的阈值 {limit:.0f}s 不足以覆盖旋转补救静默 "
+            f"{bound:.0f}s + 重分析余量 {reanalysis_allowance:.0f}s —— 会误杀"
+        )
+        # 单页预算必须**至少容得下一次完整尝试**：否则 `remaining` 在第一次
+        # 尝试后就必然 ≤ 0，退避分支永远进不去 —— 阶梯末项沦为死常量。
+        # 2026-09-16 机检当场抓到过：手写的 1200s < 一次尝试的 1260s。
+        # 故 `_ROTATION_PAGE_BUDGET_S` 已改为**派生量**（取"尝试成本"与
+        # "实测拥塞窗口"的较大者），这里断言的是它**不允许**再被改小。
+        assert _ROTATION_PAGE_BUDGET_S >= bound, (
+            f"单页预算 {_ROTATION_PAGE_BUDGET_S:.0f}s < 一次完整尝试 "
+            f"{bound:.0f}s —— 退避逻辑将永远无法执行"
+        )
+
+    def test_rotation_silence_bound_is_derived_from_primitives(self):
+        """静默上界必须是**推导量**，而不是又一个写死的魔数。"""
+        from core.ocr_client import poll_timeout_for_pages
+        from core.pipeline.self_heal import (
+            _ROTATION_CONGESTION_BACKOFF_S,
+            _ROTATION_PROBE_ATTEMPTS,
+            rotation_silence_bound_s,
+        )
+
+        expected = max(
+            _ROTATION_PROBE_ATTEMPTS * poll_timeout_for_pages(1),
+            _ROTATION_CONGESTION_BACKOFF_S[-1],
+        )
+        assert rotation_silence_bound_s() == float(expected)
+
+    def test_rotation_backoff_cap_fits_within_one_page_limit(self):
+        """**单次退避**的封顶不得超过看门狗允许的静默。
+
+        退避前写心跳只能覆盖"退避开始"这个时点；sleep 期间本身没有心跳，
+        所以单次退避时长就是一次真实静默 —— 它必须自己落在阈值内，
+        否则"按预算等待上游恢复"这个正常动作会直接触发误判。
+        """
+        from core.pipeline.self_heal import _ROTATION_CONGESTION_BACKOFF_S
+
+        assert max(_ROTATION_CONGESTION_BACKOFF_S) <= (
+            watchdog.stall_limit_seconds("ocr_running", 1))
 
     def test_analyzing_base_covers_single_llm_call(self):
         """逐页 LLM 单次调用超时（适配器默认参数）必须被基准覆盖。"""

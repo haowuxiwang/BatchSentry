@@ -5,11 +5,17 @@ import asyncio
 import json
 import logging
 import re
+import time
 from pathlib import Path
 
 from config import config
+from core.ocr_client import (
+    OCRCancelled,
+    is_congestion_error,
+    poll_timeout_for_pages,
+)
 from core.pipeline.ocr_support import _sanitize_ocr_text
-from core.pipeline.state import _audit_log
+from core.pipeline.state import _audit_log, touch_activity
 from core.security import redact_urls
 
 logger = logging.getLogger(__name__)
@@ -56,6 +62,81 @@ def _accept_heal_text(md: str | None) -> bool:
 # /Rotate 元数据）时 OCR 返回稀疏/空文本，切片重试无法恢复 — 逐角度
 # 重渲染探测。90/270 在前（横放扫描最常见），180 最后。
 _ROTATION_CANDIDATES = (90, 270, 180)
+
+# ─── 旋转补救的时长预算（2026-09-16，缺陷 #120）─────────────────────────
+# 背景：上游拥塞窗口是**分钟级**（同日实测 ≥18 分钟），而旧实现对上游错误
+# **不做分类** —— 每个角度失败即换下一个，全部角度在 ~61s 内耗尽。拥塞期间
+# 旋转通道因此**必然**空手而归，还把基础设施状况写成「已探测全部角度未果」
+# 的内容结论（GMP 复核里这两件事不是一回事）。
+# 修法：拥塞类错误**退避重试同一角度**（不消耗有限的角度预算），等待总量由
+# 下面的页面/文档预算封顶。
+#
+# ⚠️ 这些常量是**看门狗阈值不变式的联动项**（docs/RUNTIME_WATCHDOG.md §5）：
+# 等待期间必须持续写心跳（`state.touch_activity`），否则看门狗会把「正在按
+# 预算等待」判成停滞。心跳写好之后，OCR 期的**静默上界**不再是「整页补救
+# 总时长」，而是「单次探测尝试」与「单次退避」中的较大者 —— 见
+# `rotation_silence_bound_s()`（被 test_watchdog.py 机检锁定）。
+# 这也是不把「轮询超时」当拥塞的原因：超时重试会把单次尝试从 630s 拉到
+# 1260s，直接抬高静默上界。
+_ROTATION_PROBE_ATTEMPTS = 2
+# 拥塞退避阶梯（秒）：递增到末项后保持；消费受页面/文档截止点约束。
+# - 30s 起：下游抖动一两分钟即恢复的常见情形，一次就够。
+# - 封顶 300s：**单次退避不得超过看门狗允许的静默**（见 rotation_silence_bound_s）。
+_ROTATION_CONGESTION_BACKOFF_S: tuple[float, ...] = (30.0, 60.0, 120.0, 240.0, 300.0)
+# 一次**完整探测尝试**的最坏耗时（秒）：每角度 `attempts` 次，每次受轮询封顶
+# 约束。这是"相邻两次心跳之间能有多久"的直接来源 —— 见
+# `rotation_silence_bound_s()`。**不得手抄**，否则轮询封顶一改就悄悄失配。
+_ROTATION_PROBE_COST_S = float(
+    _ROTATION_PROBE_ATTEMPTS * poll_timeout_for_pages(1)
+)
+# 实测拥塞窗口的**下界**（秒）：同日 Paddle `code:10010` 连续拒绝持续 ≥18 分钟。
+_ROTATION_CONGESTION_WINDOW_S = float(18 * 60)
+# 单页旋转补救预算 = 上面两者取大：
+# ① **至少容得下一次完整尝试** —— 否则预算在第一次尝试就必然超支，退避
+#    阶梯永远拿不到执行机会（末项退避沦为死常量）。这一条是 2026-09-16
+#    机检抓出来的：手写的 1200s < 一次尝试的 1260s，属自相矛盾的配置。
+# ② **不小于实测拥塞窗口** —— 一个拥塞窗口之内，被阻塞的那一页仍有真实
+#    机会等到上游恢复（旧实现在 61s 内即放弃）。
+_ROTATION_PAGE_BUDGET_S = max(
+    _ROTATION_PROBE_COST_S, _ROTATION_CONGESTION_WINDOW_S
+)
+# 文档级旋转补救总预算：30 分钟 —— 多页先后被拥塞阻塞时封顶整轮，
+# 防止「单页预算 × 页数」把任务拖成小时级。超出后剩余目标页**如实**标记为
+# 「因上游容量受限未完成」，不再尝试，也不再假装探测过。
+# 必须 ≥ `_ROTATION_PAGE_BUDGET_S`（否则单页预算被 min() 架空，机检锁定）。
+_ROTATION_DOC_BUDGET_S = 1800.0
+# 退避期间取消响应的检查粒度（秒）：不能在 300s 的 sleep 里对取消失聪
+# （本项目对取消响应性有明确要求，见 OCRCancelled 的设计说明）。
+_ROTATION_COOLDOWN_CANCEL_POLL_S = 15.0
+
+# rotation_blocked 的取值（诊断/审计共用同一字面量，避免两处漂移）。
+ROTATION_BLOCKED_CONGESTION = "upstream_congestion"
+
+
+class _HealCancelled(Exception):
+    """自愈期间检测到用户取消（**不是**失败）。
+
+    与 `core.ocr_client.OCRCancelled` 同款语义：取消不能被当成故障处理
+    （否则会把「用户点了取消」写成探测失败/内容不可识别）。仅在本模块内部
+    流转，由 `_rotation_heal` 捕获后保留已恢复页退出。
+    """
+
+
+def rotation_silence_bound_s() -> float:
+    """旋转补救期间**相邻两次心跳之间的最大静默**（秒）。
+
+    看门狗对 `ocr_running` 的停滞阈值必须 ≥ 本值，否则会把「正在按预算
+    重试/等待」的正常 job 误判为停滞（阈值不变式）。
+    机检：tests/unit/test_watchdog.py::TestThresholdsAboveUpstreamCaps。
+
+    组成 = max(单次探测尝试封顶, 单次退避封顶)：
+    - 心跳在每个角度尝试结束、以及每次退避**开始前**写入；
+    - 故静默不跨尝试累加 —— 这是本设计相对「把整页预算当阈值」的关键改进
+      （整页最坏 = 3 角度 × 2 次尝试 × 630s ≈ 3780s，那会把看门狗逼到
+      不得不放宽到 2 小时级）。
+    """
+    return float(max(_ROTATION_PROBE_COST_S,
+                     _ROTATION_CONGESTION_BACKOFF_S[-1]))
 
 # 嫌疑横置页升级裕度（round-23 A3，e2e 实证）：VL 对横排文本有旋转
 # 容忍度 —— 切片重跑能读出横置页的大部分表格但标题/细字乱码（e2e p3:
@@ -138,13 +219,22 @@ async def _prescreen_rotation_angles(
 
 
 async def _probe_slice_text(
-    slice_path: str, backend: str, job_id: str, attempts: int = 2,
+    slice_path: str, backend: str, job_id: str,
+    attempts: int = _ROTATION_PROBE_ATTEMPTS,
 ) -> str:
-    """单角度旋转切片 OCR（含瞬态上游错误重试，round-23 A4）。
+    """单角度旋转切片 OCR（含**瞬态**上游错误重试，round-23 A4）。
 
     e2e 实证上游「系统错误-拆页」为随机瞬态失败：首试异常时退避 2s 重试
     一次，显著提高正确角度存活率（90°/270° 探测不再被单次瞬态错误杀死
     而让位给乱序角度）；重试耗尽后抛末次异常由调用方记录并继续下一角度。
+
+    **拥塞类错误不在此处重试**（2026-09-16 修 #120）：直接上抛给
+    `_probe_slice_angle` 按预算做分钟级退避。理由有二 ——
+    ① 2s 的短退避对分钟级的拥塞窗口毫无用处，纯属白烧一次上游调用；
+    ② 两层退避会**相乘**，正是实测「~15s/角度、61s 耗尽全部角度」的成因。
+
+    **用户取消同样不重试**：`OCRCancelled` 原样上抛，由 `_rotation_heal`
+    按取消语义收尾（保留已恢复页、停止后续探测）。
     """
     import core.ocr_client as ocr_client  # runtime-visible for PyInstaller
 
@@ -165,7 +255,15 @@ async def _probe_slice_text(
             return (
                 slice_pages[0]["markdown"]["text"] if slice_pages else ""
             )
+        except OCRCancelled:
+            # 用户取消**不是**瞬态故障：不得退避重试（那会在用户已取消后
+            # 再打一次上游，并掩盖取消语义）。OCRCancelled 是 RuntimeError
+            # 子类，必须排在通用分支之前 —— 本项目在 mineru_client /
+            # ocr_support 都踩过这个顺序坑。
+            raise
         except Exception as e:
+            if is_congestion_error(e):
+                raise  # 拥塞：交外层按预算退避（不消耗内层尝试次数）
             last_err = e
             if attempt < attempts:
                 logger.info(
@@ -175,6 +273,81 @@ async def _probe_slice_text(
                 await asyncio.sleep(2)
     assert last_err is not None
     raise last_err
+
+
+async def _probe_slice_angle(
+    slice_path: str, backend: str, job_id: str, *,
+    page_deadline: float, db, is_cancelled,
+) -> tuple[str, bool]:
+    """探测单个角度；**拥塞类错误退避重试同一角度**（缺陷 #120 的正面修法）。
+
+    返回 `(md, congestion_blocked)`：
+
+    - `md`：该角度的 OCR 文本（未过 `_accept_heal_text` 验收时调用方照旧
+      换下一个角度 —— 那是"内容不对"，不是"读不到"）。
+    - `congestion_blocked=True`：**预算耗尽时最后一次失败仍是拥塞类**，
+      即「根本没读到」而非「读到了但内容不达标」。调用方必须据此落
+      **区分性**诊断（`rotation_blocked=upstream_congestion`）—— 旧实现
+      把它写成 `rotation_probed=True`（"已探测全部角度未果"），等于把
+      上游容量状况说成内容结论，复核者会据此认为"此页真没内容可读"。
+
+    非拥塞异常原样上抛（由调用方记 warning 后换角度）；用户取消抛
+    `_HealCancelled`。
+
+    `page_deadline`：本页补救的单调时钟截止点（页面预算与文档预算取小），
+    保证退避不会越界侵占后续页面的预算。
+    """
+    waited = 0.0
+    backoff_idx = 0
+    while True:
+        try:
+            return await _probe_slice_text(slice_path, backend, job_id), False
+        except Exception as e:
+            if not is_congestion_error(e):
+                raise
+            remaining = page_deadline - time.monotonic()
+            if remaining <= 0:
+                logger.warning(
+                    f"[{job_id}] Rotation probe blocked by upstream "
+                    f"congestion (waited {waited:.0f}s, page budget "
+                    f"exhausted; {redact_urls(str(e))[:120]}) — "
+                    f"marking page as not-probed"
+                )
+                return "", True
+            nap = min(
+                _ROTATION_CONGESTION_BACKOFF_S[
+                    min(backoff_idx, len(_ROTATION_CONGESTION_BACKOFF_S) - 1)
+                ],
+                remaining,
+            )
+            logger.warning(
+                f"[{job_id}] Rotation probe upstream congestion "
+                f"({redact_urls(str(e))[:120]}) — backing off {nap:.0f}s "
+                f"then retrying the same angle (waited {waited:.0f}s, "
+                f"{remaining:.0f}s left on this page)"
+            )
+            # 心跳：进入一次**有界**的刻意等待。循环由预算封顶，所以这不是
+            # 「定时器式假心跳」—— 它无法掩盖永久停滞（看门狗仍会在预算
+            # 之外的真实停滞上触发）。
+            await touch_activity(db, job_id)
+            await _interruptible_sleep(nap, is_cancelled)
+            waited += nap
+            backoff_idx += 1
+
+
+async def _interruptible_sleep(seconds: float, is_cancelled) -> None:
+    """按 `_ROTATION_COOLDOWN_CANCEL_POLL_S` 粒度分片睡眠，保持取消响应性。
+
+    直接 `asyncio.sleep(300)` 会让用户点取消后最多 300s 才生效 —— 本项目
+    对取消响应性有明确要求（见 `core.ocr_client.OCRCancelled`）。
+    """
+    slept = 0.0
+    while slept < seconds:
+        step = min(_ROTATION_COOLDOWN_CANCEL_POLL_S, seconds - slept)
+        await asyncio.sleep(step)
+        slept += step
+        if is_cancelled is not None and await is_cancelled():
+            raise _HealCancelled("cancelled during rotation backoff")
 
 
 def _write_rotated_slice(src_path: str, page_no: int, angle: int,
@@ -226,12 +399,24 @@ async def _rotation_heal(
     方差只探测几何上可能正确的角度（横置页跳过 180°），配合瞬态错误
     单次重试（_probe_slice_text）双保险：前者杜绝错误采纳，后者提高
     正确角度存活率。
+
+    上游拥塞（2026-09-16，缺陷 #120）：返回 `(recovered, blocked)` ——
+    `blocked` 是 `{page: 原因}`。当某个角度因**上游容量**失败时，不再换
+    下一个角度（其余角度同样会被拒，只是白烧预算），而是按 `_ROTATION_
+    CONGESTION_BACKOFF_S` 退避后**重试同一角度**，直到该页预算用尽才记为
+    `ROTATION_BLOCKED_CONGESTION`。这样「等上游恢复」与「换个角度读」两件
+    事互不挤占：角度预算是有限的（3 个），等待预算是时间。
     """
     from core.pipeline import _is_cancelled as _run_is_cancelled
+
+    def _is_cancelled():
+        return _run_is_cancelled(job_id)
 
     job_dir_p = Path(config["app"].output_dir) / job_id
     _upgrades = upgrade_pages or {}
     recovered: dict[int, int] = {}
+    blocked: dict[int, str] = {}
+    doc_deadline = time.monotonic() + _ROTATION_DOC_BUDGET_S
     for done_idx, pno in enumerate(targets, 1):
         if await _run_is_cancelled(job_id):
             logger.info(
@@ -239,6 +424,9 @@ async def _rotation_heal(
                 f"{len(recovered)} recovered pages"
             )
             break
+        page_deadline = min(
+            time.monotonic() + _ROTATION_PAGE_BUDGET_S, doc_deadline
+        )
         chosen_angle, chosen_md = None, ""
         candidates = await _prescreen_rotation_angles(pdf_path, pno)
         if candidates is None:
@@ -248,37 +436,68 @@ async def _rotation_heal(
                 f"[{job_id}] Rotation prescreen p{pno}: probing "
                 f"{list(candidates)}deg only (geometric)"
             )
-        for angle in candidates:
-            slice_path = job_dir_p / f"rot{angle}-p{pno}.pdf"
-            try:
-                await asyncio.to_thread(
-                    _write_rotated_slice, pdf_path, pno, angle, str(slice_path)
-                )
-                md = await _probe_slice_text(str(slice_path), backend, job_id)
-                if _accept_heal_text(md):
-                    if pno in _upgrades:
-                        # 嫌疑横置页升级：旋转读取须明显富于切片恢复结果
-                        # 才替换（正常横版宽表旋转后读取更差，自然被拒）。
-                        if len(md.strip()) <= _upgrades[pno] * _ROTATION_UPGRADE_FACTOR:
-                            continue
-                        logger.info(
-                            f"[{job_id}] Rotation upgrade: p{pno} rotated "
-                            f"{angle}deg read {len(md.strip())} chars vs "
-                            f"slice { _upgrades[pno]} — replacing"
-                        )
-                    chosen_angle, chosen_md = angle, md
-                    logger.info(
-                        f"[{job_id}] Rotation heal: p{pno} recovered at "
-                        f"{angle}deg ({len(md.strip())} chars)"
+        try:
+            for angle in candidates:
+                slice_path = job_dir_p / f"rot{angle}-p{pno}.pdf"
+                try:
+                    await asyncio.to_thread(
+                        _write_rotated_slice, pdf_path, pno, angle,
+                        str(slice_path)
                     )
-                    break
-            except Exception as rot_err:
-                logger.warning(
-                    f"[{job_id}] Rotation probe p{pno}@{angle}deg failed: "
-                    f"{redact_urls(str(rot_err))[:200]}"
-                )
-            finally:
-                slice_path.unlink(missing_ok=True)
+                    md, congested = await _probe_slice_angle(
+                        str(slice_path), backend, job_id,
+                        page_deadline=page_deadline, db=db,
+                        is_cancelled=_is_cancelled,
+                    )
+                    if congested:
+                        # 上游容量受限：本页**未被真正读到**。不再试其余
+                        # 角度（同样会被拒），如实记录原因后退出本页。
+                        blocked[pno] = ROTATION_BLOCKED_CONGESTION
+                        logger.warning(
+                            f"[{job_id}] Rotation heal p{pno}: upstream "
+                            f"congestion persisted past the page budget — "
+                            f"page left unprobed (NOT the same as "
+                            f"'content unreadable')"
+                        )
+                        break
+                    if _accept_heal_text(md):
+                        if pno in _upgrades:
+                            # 嫌疑横置页升级：旋转读取须明显富于切片恢复
+                            # 结果才替换（正常横版宽表旋转后读取更差，
+                            # 自然被拒）。
+                            if (len(md.strip())
+                                    <= _upgrades[pno] * _ROTATION_UPGRADE_FACTOR):
+                                continue
+                            logger.info(
+                                f"[{job_id}] Rotation upgrade: p{pno} rotated "
+                                f"{angle}deg read {len(md.strip())} chars vs "
+                                f"slice { _upgrades[pno]} — replacing"
+                            )
+                        chosen_angle, chosen_md = angle, md
+                        logger.info(
+                            f"[{job_id}] Rotation heal: p{pno} recovered at "
+                            f"{angle}deg ({len(md.strip())} chars)"
+                        )
+                        break
+                except (OCRCancelled, _HealCancelled):
+                    raise
+                except Exception as rot_err:
+                    logger.warning(
+                        f"[{job_id}] Rotation probe p{pno}@{angle}deg failed: "
+                        f"{redact_urls(str(rot_err))[:200]}"
+                    )
+                finally:
+                    slice_path.unlink(missing_ok=True)
+        except (OCRCancelled, _HealCancelled):
+            # 取消（用户点了取消 / 在退避期间检测到取消）：**不是**探测失败。
+            # 保留已恢复页并停止本轮 —— 旧实现把 OCRCancelled 当普通探测
+            # 异常记录，于是"用户已取消"被写成"角度探测失败"，还会继续
+            # 试其余角度、继续打上游。
+            logger.info(
+                f"[{job_id}] Rotation heal cancelled — keeping "
+                f"{len(recovered)} recovered pages"
+            )
+            break
         if chosen_angle is not None:
             clean = _sanitize_ocr_text(chosen_md.strip())
             await db.execute(
@@ -294,6 +513,20 @@ async def _rotation_heal(
             if pno in pages_by_num:
                 pages_by_num[pno]["markdown"]["text"] = clean
             recovered[pno] = chosen_angle
+        elif pno in blocked:
+            # **区分性诊断**（缺陷 #120）：上游容量受限 → 本页根本没轮上
+            # 探测。绝不与 rotation_probed 并存（互斥）—— 并存会把上游
+            # 繁忙误读成"此页无内容"，而后者是内容结论。
+            # raw_html 不动（保留 stage1 空页警告横幅，走人工复核路径）。
+            await db.execute(
+                "UPDATE page_cache SET ocr_diagnostics = ? "
+                "WHERE job_id = ? AND page = ?",
+                (_self_heal_diag(
+                    prior_diags.get(pno), recovered=False,
+                    rotation_blocked=blocked[pno],
+                 ),
+                 job_id, pno),
+            )
         elif prior_diags.get(pno) and pno not in _upgrades:
             # 旋转探测未果（90/270/180° 重渲染后 OCR 仍稀疏/空）：落
             # rotation_probed 诊断（round-23 A2）— 复核页据此提示"系统
@@ -312,13 +545,35 @@ async def _rotation_heal(
             [p for p in targets if p not in recovered],
         )
         await db.commit()
-    return recovered
+        if time.monotonic() >= doc_deadline:
+            # 文档级预算耗尽：剩余目标页一并如实标记（不假装探测过），
+            # 停止整轮 —— 上游持续拥塞时继续只是白等。
+            rest = [p for p in targets[done_idx:] if p not in recovered]
+            for p in rest:
+                blocked.setdefault(p, ROTATION_BLOCKED_CONGESTION)
+            if rest:
+                logger.warning(
+                    f"[{job_id}] Rotation heal stopped: document budget "
+                    f"({_ROTATION_DOC_BUDGET_S:.0f}s) exhausted — "
+                    f"{len(rest)} page(s) left unprobed: p{rest}"
+                )
+            break
+    if blocked:
+        await _audit_log(
+            db, job_id, "stage1_rotation_blocked",
+            f"pages={ {p: blocked[p] for p in sorted(blocked)} } — upstream "
+            f"capacity limited; these pages were NOT probed (retrying the "
+            f"job later may recover them)",
+        )
+        await db.commit()
+    return recovered, blocked
 
 
 def _self_heal_diag(prior: dict | None, *, recovered: bool = False,
                     content_len: int = 0, round_num: int = 0,
                     rotation_deg: int | None = None,
-                    rotation_probed: bool = False) -> str | None:
+                    rotation_probed: bool = False,
+                    rotation_blocked: str | None = None) -> str | None:
     """自愈恢复页的诊断 JSON：保留原始完整性证据，标记自愈状态。
 
     门禁 1（页级诊断可追溯）：旧实现自愈 UPDATE 把 ocr_diagnostics 置 NULL，
@@ -328,22 +583,40 @@ def _self_heal_diag(prior: dict | None, *, recovered: bool = False,
     自愈效果（哪一轮恢复、恢复后内容量）。rotation_deg 为旋转恢复采纳角
     （round-23 A）；rotation_probed=True 表示旋转探测已尝试但未过验收
     （round-23 A2，复核页提示人工核对原图）。
+
+    rotation_blocked（2026-09-16，缺陷 #120）：**上游容量受限导致未能真正
+    完成探测**时取 `"upstream_congestion"`。与 rotation_probed **互斥**，
+    因为两者是不同的事实：
+
+      旋转探测跑了、结论是"这几张角度都读不出内容"  → rotation_probed
+      根本没轮上跑（上游一直拒绝服务）              → rotation_blocked
+
+    互斥是刻意的：若两者并存，任何"看 rotation_probed 就知道系统尽力了"的
+    读者（含复核页提示）都会把**上游繁忙**误读成**此页无内容**。后者是内容
+    结论，前者是可重试的基础设施状况 —— 在 GMP 复核里不是一回事。
+    这也是本键能在 prior 缺失时**单独**存在的原因（必须留痕）。
     """
-    if not prior:
+    if not prior and not rotation_blocked:
         return None
-    diag = {
+    diag: dict = {
         "self_healed": True,
         "recovered": recovered,
-        "source": prior.get("source", "unknown"),
-        "prior_diagnostics": prior,
+        "source": (prior or {}).get("source", "unknown"),
     }
+    if prior:
+        diag["prior_diagnostics"] = prior
     if round_num:
         diag["recovery_round"] = round_num
     if content_len:
         diag["content_length"] = content_len
     if rotation_deg is not None:
         diag["rotation_deg"] = rotation_deg
-    if rotation_probed:
+    if rotation_blocked:
+        # 互斥由结构保证（见 docstring）：被上游容量挡住时**不得**声称
+        # "探测过"。写成 elif 而非两个独立 if —— 即便调用方两个都传了，
+        # 也不会产出自相矛盾的诊断。
+        diag["rotation_blocked"] = rotation_blocked
+    elif rotation_probed:
         diag["rotation_probed"] = True
     return json.dumps(diag, ensure_ascii=False)
 
@@ -641,10 +914,13 @@ async def _self_heal_empty_pages(
                     and (prior_diags.get(p) or {}).get("aspect_ratio", 0) > 1.0
                 }
                 rot_targets = list(still_empty) + list(upgrade_pages)
+                rot_blocked: dict[int, str] = {}
                 if rot_targets:
                     # 旋转恢复通道（round-23 A）：内容横置页切片重试必然
                     # 仍空 — 逐角度重渲染探测，采纳首个通过验收的角度。
-                    rot_recovered = await _rotation_heal(
+                    # 返回 (recovered, blocked)：blocked 为因**上游容量受限**
+                    # 而未真正探测的页（缺陷 #120），须与"探测无果"区分。
+                    rot_recovered, rot_blocked = await _rotation_heal(
                         db, job_id, pdf_path, rot_targets, backend,
                         pages_by_num, prior_diags,
                         upgrade_pages=upgrade_pages,
@@ -664,11 +940,25 @@ async def _self_heal_empty_pages(
                             p for p in still_empty if p not in rot_recovered
                         ]
                 if still_empty:
-                    logger.warning(
-                        f"[{job_id}] Empty-page retry: still empty "
-                        f"after re-OCR — p{still_empty} truly "
-                        f"unrecognizable by the OCR backend"
-                    )
+                    # 区分两种"仍未恢复"（缺陷 #120）：被上游容量挡住的页
+                    # **没有**被真正读过，说成"内容不可识别"会把基础设施
+                    # 状况包装成内容结论，误导复核者。
+                    truly_unrecognizable = [
+                        p for p in still_empty if p not in rot_blocked
+                    ]
+                    if truly_unrecognizable:
+                        logger.warning(
+                            f"[{job_id}] Empty-page retry: still empty "
+                            f"after re-OCR — p{truly_unrecognizable} truly "
+                            f"unrecognizable by the OCR backend"
+                        )
+                    if rot_blocked:
+                        logger.warning(
+                            f"[{job_id}] Empty-page retry: {len(rot_blocked)} "
+                            f"page(s) NOT probed due to upstream capacity — "
+                            f"p{sorted(rot_blocked)} (retrying the job later "
+                            f"may recover them)"
+                        )
                 # 自愈结束：清除 self_heal 子键（total<=0 时 state 层跳过写入）
                 await _report_heal_progress(db, job_id, 0, 0, [])
             except Exception as retry_err:

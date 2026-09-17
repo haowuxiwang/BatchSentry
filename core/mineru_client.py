@@ -30,7 +30,7 @@ import requests
 
 # OCRCancelled 定义在 ocr_client（failover 链据此放行取消、不切备选）；
 # MinerU 轮询线程内同样用它在用户取消时中止阻塞等待
-from core.ocr_client import OCRCancelled
+from core.ocr_client import OCRCancelled, is_congestion_error
 
 from config import config
 from core.security import redact_urls
@@ -1027,10 +1027,16 @@ def run_ocr(
     瞬态失败重提交（2026-08-24 e2e 实证）：MinerU 服务端偶发
     "parsing failed, please try again later" 终态 —— 任务级失败但
     明示可重试；退避 20s 重新提交一次，二次失败才走 failover 链。
+
+    分类口径（2026-09-16 收敛）：判据统一走 `core.ocr_client.
+    is_congestion_error`（单一真值）—— 原内联的 `transient_markers`
+    元组已删除。该函数是原标记的**超集**（额外含 Paddle 的 10010 队列满、
+    429、5xx），故 MinerU 侧若返回 5xx 现在也会退避重提一次再走 failover：
+    对「上游容量」类一律给一次机会是更一致的行为（原实现只认两条字符串，
+    同一台上游换个错误形态就退化成直接 failover）。
     """
     if job_id:
         _token = ocr_job_id_var.set(job_id)
-    transient_markers = ("please try again later", "parsing failed")
     try:
         for attempt in (1, 2):
             try:
@@ -1041,10 +1047,13 @@ def run_ocr(
                     cancel_check=cancel_check,
                 )
                 return download_result(task_result, pdf_path=pdf_path)
+            except OCRCancelled:
+                # 用户取消不是容量问题：绝不退避重提（OCRCancelled 是
+                # RuntimeError 子类，必须先于下面的分支放行）
+                raise
             except RuntimeError as e:
-                # OCRCancelled 是 RuntimeError 子类：无瞬态标记 → 落到 raise
                 msg = str(e)
-                if attempt == 1 and any(m in msg.lower() for m in transient_markers):
+                if attempt == 1 and is_congestion_error(msg):
                     logger.warning(f"[MinerU] 瞬态解析失败，20s 后重新提交: {msg}")
                     if cancel_check is not None and cancel_check():
                         raise OCRCancelled(
