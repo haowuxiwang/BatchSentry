@@ -194,3 +194,95 @@ def test_cli_apply_skips_locked_dirs(tmp_path, capsys, monkeypatch):
     assert called == [], "被占锁的目录不应尝试删除"
     out = capsys.readouterr().out
     assert "跳过" in out and "dist-electron-m8" in out
+
+
+# ── 认锁探测的复杂度（2026-09-17 实测的性能修复） ────────────────────
+#
+# 实测：无条件逐文件"改名再改回"，在本机 3 GB / 数万文件的待清理目录上
+# 跑了 **>10 分钟仍无任何结论**（每次改名都被安全软件拦一道）。而 NTFS
+# 拒绝重命名含被占用子项的目录 ⇒ **目录级改名成功即证明内部无占用者**，
+# 一次 syscall 就能定案。下面三条锁住这个性质。
+
+
+def test_rename_probe_leaves_path_intact(tmp_path):
+    """探针成功时必须把对象改回原名（不能把目录留在探针名下）。"""
+    import scripts.clean_dist as cd
+    d = tmp_path / "dist-electron-x"
+    d.mkdir()
+    (d / "a.txt").write_text("x", encoding="utf-8")
+    assert cd._rename_probe(d) is None
+    assert d.is_dir() and not (tmp_path / "__lockprobe__.dist-electron-x").exists()
+
+
+def test_probe_name_is_not_mistakable_for_a_variant(tmp_path):
+    """探针目录名不得以 ``dist`` 开头 —— 否则中途被打断会被误认成真实变体。"""
+    import scripts.clean_dist as cd
+    (tmp_path / "dist-electron-real").mkdir()
+    (tmp_path / "__lockprobe__.dist-electron-real").mkdir()
+    names = {p.name for p in cd.discover(tmp_path)}
+    assert names == {"dist-electron-real"}, (
+        f"discover 把探针目录也算进来了：{names} —— 探针名必须避开 dist 前缀"
+    )
+
+
+def test_clean_dir_probe_short_circuits_the_descent(tmp_path, monkeypatch):
+    """目录级探测通过时**不得**再做下钻（这是 >10min → O(1) 的关键）。"""
+    import scripts.clean_dist as cd
+    d = tmp_path / "dist-electron-clean"
+    (d / "win-unpacked").mkdir(parents=True)
+
+    def _boom(*a, **k):
+        raise AssertionError("目录级探测已通过，不该再下钻")
+
+    monkeypatch.setattr(cd, "_find_locked", _boom)
+    assert cd.locked_files(d) == []
+
+
+def test_locked_file_is_named_when_dir_probe_fails(tmp_path, monkeypatch):
+    """目录级被拒时要下钻并**指名**挡路的文件（加白名单要的是文件名）。
+
+    注意 fake 必须符合物理现实：NTFS 拒绝重命名含被占用子项的目录，所以
+    被占用文件的**全部祖先目录**也必然改名失败。若 fake 只让文件本身失败、
+    却让它的父目录改名成功，那是自相矛盾的状态，测不出真实行为。
+    """
+    import scripts.clean_dist as cd
+    d = tmp_path / "dist-electron-locked"
+    (d / "win-unpacked" / "resources").mkdir(parents=True)
+    locked = d / "win-unpacked" / "resources" / "app.asar"
+    locked.write_text("x", encoding="utf-8")
+    (d / "win-unpacked" / "ok.txt").write_text("x", encoding="utf-8")
+
+    real = cd._rename_probe
+
+    def fake(p):
+        p = Path(p)
+        if p == locked or locked.is_relative_to(p):   # p 是 locked 自身或其祖先
+            return OSError(13, "locked")
+        return real(p)
+
+    monkeypatch.setattr(cd, "_rename_probe", fake)
+    out = cd.locked_files(d)
+    assert len(out) == 1 and "app.asar" in out[0], (
+        f"只应指名被占用的那一个文件，实得 {out}"
+    )
+
+
+def test_dir_level_denial_without_a_locked_file_is_reported_honestly(
+        tmp_path, monkeypatch):
+    """目录级被拒但找不到任何被占用项时，不得返回空表（那会被读成"可以删"）。"""
+    import scripts.clean_dist as cd
+    d = tmp_path / "dist-electron-denied"
+    (d / "win-unpacked").mkdir(parents=True)
+    (d / "win-unpacked" / "BatchSentry.exe").write_text("x", encoding="utf-8")
+
+    real = cd._rename_probe
+
+    def fake(p):
+        if Path(p) == d:                 # 只有目录本身被拒，内部文件都能改名
+            return OSError(13, "denied")
+        return real(p)
+
+    monkeypatch.setattr(cd, "_rename_probe", fake)
+    out = cd.locked_files(d)
+    assert out, "不得返回空表 —— 空表会被下游读成'无占用、可删除'"
+    assert "目录级" in out[0]

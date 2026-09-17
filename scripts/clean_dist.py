@@ -119,6 +119,60 @@ def asar_version(asar: Path) -> str | None:
 # ── 占锁探测 ────────────────────────────────────────────────────────
 
 
+def _rename_probe(p: Path):
+    """尝试把 ``p`` 改名再改回。可改名返回 ``None``，否则返回那个 ``OSError``。
+
+    探针名**刻意不带 ``dist`` 前缀**：本文件自己的 :func:`discover` 用
+    ``startswith("dist")`` 找变体目录，若探针叫 ``dist-xxx.lockprobe`` 且
+    中途被打断，它会被**误认成一个真实变体**（并把体检结论带偏）。
+    """
+    probe = p.with_name("__lockprobe__." + p.name)
+    try:
+        os.rename(p, probe)
+    except OSError as e:
+        return e
+    try:
+        os.rename(probe, p)
+    except OSError as e:
+        # 改回来了却失败：尽力复原，别把对象留在探针名下。
+        try:
+            os.rename(probe, p)
+        except OSError:
+            pass
+        return e
+    return None
+
+
+def _find_locked(path: Path, out: list[str], rel: str = "") -> None:
+    """在 ``path`` 子树内定位被占用者（**按目录递归二分**）。
+
+    NTFS 拒绝重命名含被占用子项的目录 ⇒ 某目录能整体改名，就证明它**整棵子树**
+    都没有占用者，可以直接跳过。于是代价从"文件数"降到"目录数 + 被占用的文件数"。
+
+    为什么必须这样（2026-09-17 实测）：逐文件探测在本机待清理目录上约
+    6500 次改名，每次都撞安全软件，实测 **>10 分钟仍无结论**；而按目录下钻
+    只需数十次探测即可指名到具体文件。
+    """
+    if _rename_probe(path) is None:
+        return
+    if not path.is_dir():
+        out.append(f"{rel or path.name}  (被外部句柄占用)")
+        return
+    try:
+        children = sorted(path.iterdir())
+    except OSError:
+        out.append(f"{rel or path.name}  (目录不可读)")
+        return
+    for c in children:
+        if c.is_dir():
+            _find_locked(c, out, f"{rel}{c.name}/")
+        else:
+            e = _rename_probe(c)
+            if e is not None:
+                out.append(f"{rel}{c.name}  ({type(e).__name__}: errno={e.errno}"
+                           f" winerror={getattr(e, 'winerror', None)})")
+
+
 def locked_files(path: Path) -> list[str]:
     """返回目录内**无法重命名**的文件（=被外部句柄占用）。
 
@@ -126,16 +180,23 @@ def locked_files(path: Path) -> list[str]:
     ``FILE_SHARE_DELETE`` 的方式打开，改名就会失败 —— 而这类文件同样会让
     **整个目录**无法删除/改名（NTFS 拒绝重命名含被占用子项的目录）。
     这也是历史构建被迫"自愈"到备用目录的根因。
+
+    ⚠️ **先整目录探一次，失败才下钻**（2026-09-17 实测的性能修复）：
+    目录级改名成功即证明内部无占用者，一次 syscall 定案；只有真被占用才
+    按目录递归下钻（见 :func:`_find_locked`），只为**指名到具体文件**
+    （"加白名单"要的是文件名，不是"某目录被占"）。
     """
-    out = []
-    for r, _dirs, fs in os.walk(path):
-        for f in fs:
-            p = os.path.join(r, f)
-            try:
-                os.rename(p, p + ".lockprobe")
-                os.rename(p + ".lockprobe", p)
-            except OSError as e:
-                out.append(f"{os.path.relpath(p, path)}  ({type(e).__name__}: errno={e.errno})")
+    e = _rename_probe(path)
+    if e is None:
+        return []
+    out: list[str] = []
+    _find_locked(path, out)
+    if not out:
+        # 目录级被拒、却没有**任何**单文件/子目录被占用 ⇒ 大概率是安全软件的
+        # **目录级**拦截（过滤驱动直接拒绝目录改名），而非"某个文件被打开"。
+        # 如实说明，别让"没找到占用者"被读成"可以放心删"。
+        out.append(f"(目录级改名被拒 winerror={getattr(e, 'winerror', None)}，"
+                   f"但逐项探测未见被占用者 —— 可能是安全软件的目录级拦截)")
     return out
 
 
@@ -276,7 +337,11 @@ def main(argv=None):
             for one in lk[:10]:
                 print(f"    {one}")
             print("    → 常见原因：杀毒/安全软件（如火绒）持有 resources/app.asar。")
-            print("      处理：把本仓库目录加入其信任区/白名单，或临时退出后重跑本脚本。")
+            print("      错误码判别（2026-09-17 实测）：**文件级 winerror=32**")
+            print("      （ERROR_SHARING_VIOLATION，有句柄未带 FILE_SHARE_DELETE）且**持续**")
+            print("      复现 ⇒ 外部进程/驱动长期持有；此时只读、可写都正常，唯独改名/删除被拒。")
+            print("      处置：把本仓库目录加入其信任区/白名单，或临时退出后重跑本脚本。")
+            print("      （它不可用 `--apply` 绕过：SHFileOperationW 会以 DE_INVALIDFILES 整单失败）")
 
     if args.apply:
         blocked = sorted(set(doom_names) & set(locks))
