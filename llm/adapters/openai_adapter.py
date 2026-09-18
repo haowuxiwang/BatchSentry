@@ -18,9 +18,31 @@ import logging
 from openai import AsyncOpenAI
 
 from config import ProviderConfig
-from .base import LLMAdapter, ChatResult
+from .base import (
+    LLMAdapter, ChatResult, ContentInput, ImagePart, content_parts,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _to_openai_content(user_content: ContentInput) -> str | list[dict]:
+    """把协议无关的输入翻译成 OpenAI Chat Completions 的 content 形态。
+
+    ⚠️ **纯文本必须原样返回字符串**（而不是 `[{"type":"text",...}]`）：
+    两者在该协议下等价，但前者是既有全部调用路径的报文形态 —— 为了支持
+    多模态而顺手统一成 parts 列表，会让每一次普通调用的请求体都变样，
+    徒增与各家兼容网关的兼容风险。
+    """
+    parts = content_parts(user_content)
+    if len(parts) == 1 and isinstance(parts[0], str):
+        return parts[0]
+    out: list[dict] = []
+    for p in parts:
+        if isinstance(p, ImagePart):
+            out.append({"type": "image_url", "image_url": {"url": p.data_url()}})
+        else:
+            out.append({"type": "text", "text": p})
+    return out
 
 
 class OpenAIAdapter(LLMAdapter):
@@ -38,7 +60,7 @@ class OpenAIAdapter(LLMAdapter):
     async def chat(
         self,
         system_prompt: str,
-        user_content: str,
+        user_content: ContentInput,
         max_tokens: int = 4000,
         temperature: float = 0.1,
         timeout: float = 180.0,
@@ -46,7 +68,7 @@ class OpenAIAdapter(LLMAdapter):
     ) -> ChatResult:
         messages = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_content},
+            {"role": "user", "content": _to_openai_content(user_content)},
         ]
         kwargs = {}
         if response_format:

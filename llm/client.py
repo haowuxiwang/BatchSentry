@@ -14,11 +14,13 @@ send chat requests should use `client.chat()` / `client.chat_json()`.
 import asyncio
 import json
 import logging
+import re
 import time
 from typing import TYPE_CHECKING
 
 from config import config
 from llm.adapters import get_adapter
+from llm.adapters.base import ContentInput, append_text_part
 
 if TYPE_CHECKING:
     from llm.adapters.base import ChatResult
@@ -26,14 +28,65 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-# ── 「非可重试」判据的**单一来源**（#127）─────────────────────────────
-# 命中即代表问题在配置/权限/请求本身：重试无意义（同一进程内后续每次调用
-# 都会以同样方式失败），只能人工处置（换 key / 补权限 / 修请求）。
-_NON_RETRYABLE_KEYWORDS = (
-    "401", "authentication", "unauthorized",
-    "403", "forbidden",
-    "400", "bad request", "invalid",
+# ── 「配置级故障」判据的**单一来源**（#127 / #143）─────────────────────
+# 判为配置级 = 问题在凭据 / 权限 / 请求本身：重试无意义，**且同一进程内
+# 每次调用都会以同样方式失败**（调用方据此做 job 级早停）。
+#
+# 两级判据，**顺序不可颠倒**：
+#
+# 1) **结构化（优先）**：直接用 SDK 异常自带的 `status_code`。HTTP 层已经
+#    给出了权威答案，再去猜错误文本必然误判。实测反例（#143）：
+#    限流 `429 Rate limit reached … Limit 40000` 的错误串里恰好含 "400"，
+#    子串判据把它读成"请求非法" ⇒ 整份文档早停 + 提示"请检查 API Key"，
+#    而用户遇到的只是一次本可自愈的限流。
+#
+# 2) **文本兜底（仅当拿不到状态码）**：包装层可能只抛
+#    `RuntimeError("401 unauthorized")`。此时才退回文本判据，且：
+#    - 状态码一律带 `\b` 词边界（裸 "400" 会命中 "40000"）；
+#    - **不用裸 `invalid`** —— 它会命中本地
+#      `ValueError("invalid literal for int()")`，把代码缺陷报成凭据故障。
+_CONFIG_ERROR_STATUS = frozenset({400, 401, 403})
+_CONFIG_ERROR_KEYWORDS = (
+    r"\b400\b", r"\b401\b", r"\b403\b",
+    r"authentication", r"unauthorized", r"forbidden", r"bad request",
+    r"invalid api key", r"invalid_api_key", r"invalid token",
+    r"invalid key", r"incorrect api key",
+    r"permission denied", r"insufficient permission",
 )
+
+# 本地编程错误类型：由本项目代码抛出，与凭据/权限无关，且**必然可复现**。
+# 这类异常连文本判据都不该走 —— 否则 `KeyError("invalid key: 'choices'")`
+# 这种"字典里没有 choices 键"的代码缺陷会被报成"API Key 无效"。
+# ⚠️ 不含 RuntimeError / ConnectionError / OSError：包装层可能用它们承载
+# 传输与鉴权错误，正是文本兜底要覆盖的场景。
+_LOCAL_PROGRAMMING_ERRORS = (
+    ValueError, TypeError, LookupError, AttributeError,
+    ArithmeticError, NameError,
+)
+
+
+def is_config_error(exc: BaseException) -> bool:
+    """配置级故障判定 —— 全局**唯一入口**（#127 / #143）。
+
+    返回 True 才允许提升为 job 级原因并早停；返回 False 的异常一律按
+    "可重试 / 页级失败"处理，不再给出"请检查 API Key"这类与真实原因
+    不符的处置建议。
+
+    判据顺序（结构化 → 文本）与其理由见上方常量区的注释。
+    """
+    if isinstance(exc, _LOCAL_PROGRAMMING_ERRORS):
+        return False
+    status = getattr(exc, "status_code", None)
+    if status is None:
+        # 部分 SDK / 包装层把状态码放在 response 上（httpx.Response）。
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+    if status is not None:
+        try:
+            return int(status) in _CONFIG_ERROR_STATUS
+        except (TypeError, ValueError):
+            pass  # 非数值状态码（少见）→ 落回文本兜底
+    err = str(exc).lower()
+    return any(re.search(kw, err) for kw in _CONFIG_ERROR_KEYWORDS)
 
 
 class LLMConfigError(RuntimeError):
@@ -141,7 +194,7 @@ class LLMClient:
     async def chat(
         self,
         system_prompt: str,
-        user_content: str,
+        user_content: ContentInput,
         max_tokens: int = 4000,
         temperature: float = 0.1,
         retries: int = 3,
@@ -152,6 +205,8 @@ class LLMClient:
         """Send a chat completion request with retry and exponential backoff.
 
         Args:
+            user_content: 纯文本或多模态片段列表（`list[str | ImagePart]`，
+                #159）。协议差异由 adapter 消化，本层只做透传。
             audit_ctx: Optional dict with keys {job_id, page, stage,
                 prompt_version}. If provided, the call is recorded in the
                 llm_call_audit table for GMP traceability. Set to None for
@@ -262,12 +317,10 @@ class LLMClient:
                         f"LLM call timed out{ctx_tag}: "
                         f"{_mask_secrets(str(last_error))}"
                     )
-                # Distinguish retryable vs non-retryable errors
-                err_str = str(e).lower()
-                is_non_retryable = any(
-                    kw in err_str for kw in _NON_RETRYABLE_KEYWORDS
-                )
-                if is_non_retryable:
+                # Distinguish retryable vs config-level errors (#127 / #143).
+                # 结构化优先：HTTP 状态码是权威判据，文本匹配只在拿不到
+                # 状态码时兜底。判据本体见 is_config_error（单一真值）。
+                if is_config_error(e):
                     logger.error(
                         f"LLM call failed (non-retryable){ctx_tag}: "
                         f"{_mask_secrets(f'{type(e).__name__}: {e}')}"
@@ -306,7 +359,7 @@ class LLMClient:
     async def chat_json(
         self,
         system_prompt: str,
-        user_content: str,
+        user_content: ContentInput,
         max_tokens: int = 4000,
         temperature: float = 0.1,
         retries: int = 3,
@@ -374,12 +427,15 @@ class LLMClient:
                 )
             raw = await self.chat(
                 system_prompt,
-                user_content
-                + (
+                # 追加修复提示：纯文本路径字节级不变，多模态路径追加一个
+                # text 片段（`list + str` 会 TypeError —— 这正是扩展
+                # user_content 签名时必须一并改掉的调用点）。
+                append_text_part(
+                    user_content,
                     "\n\n[系统提示] 你上一次的输出无法解析为合法 JSON"
                     "（可能包含 Markdown 代码块围栏、尾随文本或非法转义字符）。"
                     "请重新输出：只输出一个合法 JSON 对象，不要 Markdown 代码块、"
-                    "不要注释、不要多余说明文字。"
+                    "不要注释、不要多余说明文字。",
                 ),
                 max_tokens=max_tokens,
                 temperature=temperature,

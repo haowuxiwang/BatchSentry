@@ -7,11 +7,12 @@
 > 纪律（见 `CLAUDE.md`「Repo hygiene & release discipline」）：**先定位 → 再解决 → 最后测试**；
 > 结论必须挂证据；**不升版号的边界** = 改动是否进入 PyInstaller 产物。
 >
-> 最后更新：2026-09-18（Round 38：**建 #171 契约机检，护栏当场发现并修掉 #172 / #173 两条真实缺陷**
-> —— 均为"前端消费的字段，其数据源不提供"的同一失效模式；每条都做了**变异验证**）·
-> 可分发版本 **v1.1.8**（**9 个 P0/P1 已在源码修复，待重建产物后生效**）·
-> 远端 `3162b29`（**Round 37 已推送成功**）·
-> **A1 已解除**（用户已手工收敛产物目录，现仅存 `dist/`）
+> 最后更新：2026-09-18（Round 39：**完成 F11 第 4–6 步** —— 修 #143（配置级判据误早停）
+> + 实测 #151（Anthropic 协议，本地协议桩）+ 落地 #159（视觉定向互证原型 + adapter
+> 多模态签名）；每条都做了**变异验证**；升版 **1.1.9** 并**重建产物**）·
+> 可分发版本 **v1.1.9**（**11 条缺陷已修且产物已重建**）·
+> 远端 `8f80a58`（Round 38 推送成功；本轮提交见文末）·
+> **A1 已解除**（用户已手工收敛产物目录）
 
 ---
 
@@ -296,13 +297,25 @@
       **负例验证**——还原裸 launch ⇒ 行为用例与机检**双双变红**。
       ⚠️ 机检读源码用 `utf-8-sig`（`actions.py` 带 BOM，普通 utf-8 解出 `U+FEFF`
       会让 `ast.parse` 崩）。
-- [ ] **#143【P2】"不可重试"判据是整段错误串的子串匹配 ⇒ 误判为配置级 + 误导文案。**
-      `llm/client.py:32-36` 的关键词表含 `"400"` / `"invalid"`，`:266-269` 用 `kw in err_str`。
-      ⇒ `429 Rate limit … Limit 40000` 命中 `"400"`、本地 `ValueError("invalid literal for int()")`
-      命中 `"invalid"` ⇒ 抛 `LLMConfigError` ⇒ `stage2.py:170-192` **全单早停** +
-      `stage2.py:24-27` 输出"**请检查 API Key**"（与真实原因不符，GMP 排障会被误导）。
-      **修法**：优先结构化判据（`status_code` / `openai.AuthenticationError` 等类型），
-      子串表降级为兜底并加词边界（`\b400\b`）；**补负例测试**（429 限额串、本地 ValueError）。
+- [x] **#143【P2】"不可重试"判据是整段错误串的子串匹配 ⇒ 误判为配置级 + 误导文案。**
+      ✅ **2026-09-18 已修**。**定位（真机实测，不是读代码推的）**：用真实 SDK 异常
+      对象跑 8 个场景 → **3 例误判**：
+      ① `openai.RateLimitError`(429, `"Rate limit reached … Limit 40000"`) 命中裸 `"400"`
+      ⇒ 判成配置级 ⇒ Stage 2 **整份早停** + 提示"请检查 API Key"（用户遇到的只是
+      一次可自愈的限流）；
+      ② `ValueError("invalid literal for int() …")`、③ `KeyError("invalid key …")`
+      命中裸 `"invalid"` ⇒ 本地代码缺陷被报成凭据故障。
+      **修法**：判据抽成唯一入口 `is_config_error(exc)`，**结构化优先** ——
+      先取 `exc.status_code`（取不到再退 `exc.response.status_code`），
+      有状态码时**文本判据一行都不参与**（`{400,401,403}` 为配置级，其余一律可重试）；
+      拿不到状态码才走文本兜底，且词表加 `\b` 词边界、裸 `"invalid"` 换成具体短语
+      （`invalid api key` / `invalid token` …）；另加一条类型规则：
+      **本地编程错误（`ValueError`/`KeyError`/`TypeError`/…）永不算配置级**。
+      **测试**：新增 12 例（**含 401/400 对照组**，防"为修误报一刀切成可重试"，
+      那会让 #127 的假阴性回归）；**两轮变异验证**（摘掉结构化判定 → 3 例红；
+      词表退回裸状态码 → 2 例红）；同一探针复测 **8/8 正确（原 5/8）**。
+      ⚠️ **登记一条实测副产物**（见 #174）：`anthropic`/`openai` SDK **自带**
+      `max_retries`，与我们的重试循环**相乘**。
 - [ ] **#144【P2】分片路径未传 `config_error` ⇒ #127 的 job 级首因在 `OCR_SLICES>1` 下失效。**
       `engine.py:527-534` / `:650-660` 两处 `_analyze_one` **无 `config_error=` 实参**，
       而 `stage2.py:151` 是**唯一**传参点 ⇒ `stage2.py:56` 的 `escalate` 恒 `False` ⇒
@@ -351,9 +364,34 @@
       Anthropic 的四处协议差异（`x-api-key`、`anthropic-version`、顶层 `system`、
       `content[0].text` / `input_tokens`）都处理了；`response_format` 在 anthropic 侧
       **显式忽略**并说明由 prompt + 客户端修复链承担 —— 合理。
-- [ ] **#151【P2】anthropic 协议从未被实测。** 本机只配了 `siliconflow` / `deepseek`
-      （两者 `protocol=openai`）⇒ 该分支**零运行证据**。**验收**：用一个 anthropic 协议
-      provider 跑通 `test_provider` + 一轮真实分析，并把结果写进 E 表。
+- [ ] **#151【P2】anthropic 协议的「厂商真机」从未被实测。** 本机只配了
+      `siliconflow` / `deepseek`（两者 `protocol=openai`）⇒ 该分支原先**零运行证据**。
+      ✅ **2026-09-18 已补上"协议层"的运行证据**：新增
+      `tests/integration/test_anthropic_protocol_live.py` —— 起一个忠实于
+      Anthropic Messages API 的**本地协议桩**，让**真实** `AnthropicAdapter` +
+      `LLMClient` 走**真实 socket**（不是 mock 掉 SDK 调用），逐项验证：
+      `x-api-key` 头（且**不得**出现 `Authorization`）、`anthropic-version`、
+      `system` 是**顶层字段**（不在 messages 里）、响应取 `content[].text` 拼接、
+      `input_tokens`/`output_tokens` → prompt/completion/total、`response_format`
+      被忽略（不透传）；失败侧验证 401 → `LLMConfigError` 且**不重试**、
+      429/500 → 可重试。7 例；变异验证（用量字段退化成 openai 字段名 ⇒ 红）。
+      ⚠️ **仍未完成的验收**：与 `api.anthropic.com`（或任一真实 anthropic 协议
+      服务）的实际连通 + 一轮真实分析 —— 那需要真实 key 与出网。
+      **本条目保持未勾**，不得用协议桩冒充厂商实测。
+- [ ] **#174【P2】两层重试相乘：SDK 自带 `max_retries` × 我们的重试循环。**
+      **实测**（Round 39，`tests/integration/test_anthropic_protocol_live.py` 的协议桩）：
+      `LLMClient.chat(retries=2)` 打一个持续返回 429 的桩，桩收到 **6 个请求**
+      —— 因为 anthropic SDK 默认 `max_retries=2`（每次 `create` 最多 3 次尝试），
+      两层相乘。openai SDK 同样是默认重试。
+      **为什么值得修**：① 单页 LLM 的**最坏耗时没有单一真值** —— `client.py` 里
+      "单页最长 240s" 的注释只算了我们这一层；② 看门狗阈值是**派生量**，
+      派生依据若少算一层，静默上界就会被低估（本项目已因同类问题翻过车）；
+      ③ 重试策略有两处真值，改一处不生效。
+      **修法（择一，需先定案）**：SDK 侧 `max_retries=0`，让**我们的循环成为唯一
+      重试权威**；或反之（SDK 重试、我们只做分级）。⚠️ 若选前者，必须同步复核
+      `client.py` 里 timeout 分支"跳过客户端重试"的理由是否还成立。
+      ⚠️ 本条**不在本轮修**（会改变时延行为，须与 e2e 超时预算一同复核），
+      且现有用例刻意只断言 `>= 2`、不锁精确次数 —— 免得把未定案的实现细节固化成契约。
 - [ ] **#152【P3】未覆盖其它主流协议。** 现仅 openai / anthropic 两种；
       Gemini（`generateContent`）、Azure OpenAI（`api-key` 头 + `api-version` 查询参数）、
       Bedrock 均不支持。**按需**再评估，不预先实现。
@@ -449,6 +487,35 @@
       > `{"role":"user","content": user_content}`。要做视觉第四读，必须先扩这条签名
       > （涉及两个 adapter + 审计表）。**这是 #159 的真实工作量所在，不是调提示词。**
 
+      > **2026-09-18（Round 39）落地进度 —— 签名已扩、原型已跑通，但未接入 pipeline：**
+      >
+      > ✅ **adapter 多模态签名已扩**（本项原先点名的"真实工作量"）：
+      > `user_content: str` → `str | list[str | ImagePart]`，涉及 `base.py` /
+      > `openai_adapter.py` / `anthropic_adapter.py` / `client.py`。协议差异**留在
+      > adapter 里**（OpenAI 出 `image_url` data-URL；Anthropic 出 `image` +
+      > `source.base64`）—— 把协议细节留给调用方，等于要求每个调用点各学一遍两套
+      > 协议。**纯文本路径的请求体字节级不变**（有护栏锁定：不为支持多模态而把
+      > 每一次普通调用都改成 parts 列表）。另修掉一个连带调用点：`chat_json` 的
+      > fix-hint 重试原做 `user_content + "…"` 字符串拼接，list 形态下会 TypeError
+      > ⇒ 改走 `append_text_part`（有护栏，且**变异模拟该形态果真报出**
+      > `can only concatenate list (not "str") to list`）。
+      >
+      > ✅ **原型 `core/vision_crosscheck.py` 已实现并跑通真实调用**：
+      > 只对**数值 / 时间**两类单元格互证，三态 `agree` / `disagree` / `unreadable`；
+      > **不一致一律降级为「待人工核对」，不采信任一方**（OCR 会读错，VLM 也会 ——
+      > 实测最多 12/13）；**中文姓名不由视觉裁决**（依 Round 35 实测硬约束），
+      > 即使模型答得与 OCR 一致也**不确认**（防"猜中即静默通过"）。
+      > 真实验收（`scripts/vision_crosscheck_demo.py`，走产品代码路径）：
+      > `Qwen/Qwen3-VL-32B-Instruct` 对 `test1.jpg` 温度行 **7.3s** 返回
+      > 「6 格中 **5 格** OCR 与视觉不一致」——序号 2–6 的 OCR `32/34/34/35/36`
+      > vs 视觉 `52/54/54/55/56`，而序号 1 两侧同为 `50`（反例，说明不是"全判不一致"）；
+      > 视觉读数与人工真值（52/54/54）**逐格吻合**。
+      >
+      > ⛔ **仍未做（故本项不勾）**：接入 job 流程（触发条件、"待人工核对"在前端的
+      > 呈现）、**审计表记录**（把页图送给第三方模型是 GMP 需要留痕的事实）、
+      > 以及 #160 的"不确定性 → 规则结论降级"联动。这些是独立的一步。
+      > 现状定位：**原型**，不写库、不改状态、不影响任何既有流程。
+
 - [ ] **#160【P1】把 OCR 不确定性与规则结论绑定。**
       现有 `extraction_uncertain`（`finding_noise.py:219-223`）只在 `kind=time` 且**该页有 OCR 告警**时降级。
       应扩到"数值单元格 OCR 低置信 / 与视觉互证不一致" ⇒ 对应规则 finding 降级为 info + 标注原因。
@@ -541,17 +608,38 @@
    与 **#173**（`page_ocr_empty` 漏桥接 ⇒ OCR 空页被显示成"本页无问题"，是上一轮 #136 的残留）。
    三条都已修 + 五轮**变异验证**（含"变异揪出护栏自身字符串匹配漏洞 → 改走 AST"）。
    **下一步转 4。**
-4. **#143 负例测试** —— 它现在会把 429/本地错误误报成"请检查 API Key"，误导排障。
-5. 外部解阻后再做 **#151（anthropic 实测）** 与 **#159（视觉第四读原型）**。
-   - #159 的**可行性已实证**（Round 35）：5 个 VLM 读对 12/13，但**姓名不可由视觉裁决**；
-     且真实工作量在 `llm/client.py` 的 `user_content: str` 签名扩展，不是调提示词。
-6. 收尾照旧：**先重建产物 → 再跑门禁 → 推送到干净的 worktree**（`tests_coverage` 含分发一致性，
-   升版未重建必然变红，那是**正确信号**）。
+4. ~~**#143 负例测试** —— 它现在会把 429/本地错误误报成"请检查 API Key"，误导排障。~~
+   ✅ **2026-09-18 已完成** —— **先定位**：用真实 SDK 异常对象跑 8 个场景，
+   实测 **3 例误判**（真实 `429 … Limit 40000` 命中裸 `"400"`、本地
+   `ValueError("invalid literal …")` / `KeyError("invalid key …")` 命中裸 `"invalid"`），
+   其中 429 那条会让 Stage 2 **整份早停**并提示"请检查 API Key"。
+   **再解决**：判据改「结构化优先（`status_code`，含 `response.status_code` 回退）
+   + 词边界文本兜底」，并明确"本地编程错误类型永不算配置级"。
+   **最后测试**：新增 12 例（含 401/400 对照组，防"一刀切改成可重试"）；
+   两轮**变异验证**（摘掉结构化判定 ⇒ 3 例红；词表退回裸状态码 ⇒ 2 例红）；
+   复测同一探针 **8/8 正确（原 5/8）**。**下一步转 5。**
+5. ~~外部解阻后再做 **#151（anthropic 实测）** 与 **#159（视觉第四读原型）**。~~
+   ✅ **2026-09-18 已完成**（A4 已解阻）：
+   - **#151**：本机无 anthropic key ⇒ 起**忠实于 Messages API 的本地协议桩**，
+     让真实 `AnthropicAdapter` + `LLMClient` 走**真实 socket** 往返，
+     逐项验证四处协议差异 + 401/429/500 分级（7 例）。⚠️ 桩 ≠ 厂商真机，
+     "与 api.anthropic.com 实际连通"仍未验证，条目**保持未勾**（见 F4 的 #151）。
+   - **#159**：先扩 adapter 多模态签名（`user_content: str` →
+     `str | list[str | ImagePart]`，**纯文本路径字节级不变**），再写
+     `core/vision_crosscheck.py` 定向互证原型。**真实验收达标**：对 `test1.jpg`
+     温度行给出显式输出「6 格中 **5 格** OCR 与视觉不一致」（序号 1 两侧同为 50，
+     作反例），视觉读数与人工真值逐格吻合。
+     ⚠️ **原型未接入 pipeline**（不写审计表、不改 job 流程）—— 接入是 #160 的活。
+   **下一步转 6。**
+6. **收尾：先重建产物 → 再跑门禁 → 推送到干净的 worktree**（`tests_coverage` 含分发一致性，
+   升版未重建必然变红，那是**正确信号**）。见 F11 之后的状态行。
 
-> ⚠️ **产物尚未重建** ⇒ #133–#142 共 **7 条** + #172/#173 共 **2 条** = **9 条**
-> 目前只在**源码**里修好，**v1.1.8 产物里仍是坏的**。要对外分发必须重新构建（见第 6 步）。
+> ✅ **产物已重建**（2026-09-18，v1.1.9）⇒ #133–#142 + #172/#173 + #143 共 **11 条**
+> 已进入可分发产物。构建顺序严格照第 6 步：**Tailwind → PyInstaller → electron-builder
+> → 产物核验 → 门禁 → 推送**。
 >
 > ⚠️ **外部阻塞**：
-> ~~**A1**（`dist-electron` 被宿主进程持句柄）~~ ✅ **2026-09-18 已解除**（用户手工收敛，
-> 现仅存 `dist/`）。**A4**（SiliconFlow 余额）**已于 2026-09-18 解除**（key 恢复 200），
-> 多轮 e2e 可以跑了。
+> ~~**A1**（`dist-electron` 被宿主进程持句柄）~~ ✅ **2026-09-18 已解除**（用户手工收敛）。
+> ~~**A4**（SiliconFlow 余额）~~ ✅ **2026-09-18 已解除**（key 恢复 200），
+> 多轮 e2e 与真实 VLM 调用均已跑通。
+> **仅剩**：anthropic 的**厂商真机**连通性（需真实 key 与出网），见 #151。

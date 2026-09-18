@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 # Application version — single source of truth.
 # Avoids duplicate hardcoded "1.1.0" in FastAPI(app=...) and /health endpoint.
 # 与 package.json 的 version 必须一致（tests/unit/test_version_consistency.py 机检）。
-APP_VERSION = "1.1.8"
+APP_VERSION = "1.1.9"
 
 
 # Phase 5B: resolve resource paths under both dev and PyInstaller frozen mode.

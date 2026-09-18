@@ -141,6 +141,114 @@
 
 ---
 
+## [1.1.9] — 2026-09-18
+
+> 本版是**缺陷修复版**：Round 34–39 的对抗性审查一共确认 **11 条**「GMP 假阴性 /
+> 无终态 / 误导性处置」缺陷（2 个 P0 + 9 个 P1/P2），全部**先在源码修好、再重建
+> 产物**。之所以**升补丁号**而不是复用 1.1.8：1.1.8 的产物已经构建过一次（其内容
+> 含这 11 条缺陷，且已被删除），同一个版本号对应两份内容不同的二进制，对一个
+> GMP 工具是不可接受的追溯性问题。
+
+### Fixed
+
+- **#133（P0）复核页状态点是硬编码绿色。** `templates/review.html` 无条件写
+  `bg-success`，与 `upload.js` 的颜色映射各持一份 ⇒ 失败页 / 差异页在复核页
+  看起来是「成功」。修法：抽共享件 `static/status.js`，SSR 侧由
+  `core/zh_map.py:status_dot_class` 注入同一映射，两侧逐值等价由机检锁定。
+- **#134（P0）列表端点不返回 `failed_pages` / `error_message`。** SQLite 里是
+  TEXT 存 JSON，接口原样透传；前端 `Array.isArray` 静默丢弃 ⇒ 冷加载时失败页数
+  与原因**永不显示**，只剩一个颜色点。
+- **#135（P1）复核页首屏只显示通用横幅文案。** 具体原因只由 AJAX/SSE 之后写入，
+  而 `DOMContentLoaded` 不触发 ⇒ 直接打开终态任务看不到真实原因。修法：从
+  `structured_json` 提取 `_error` 注入 SSR，首屏复用**同一个** `updatePageLevelUI`。
+- **#136（P1）失败页显示「本页无问题」。** 空态只按 findings 数量判断，未结合
+  `page_parse_error` ⇒ 分析失败的页与确实合规的页视觉相同。修法：空态文案分
+  分析失败 / 无 OCR 内容 / 确实无问题 三支，判据读**当前页**标记（首屏注入的
+  `ctx` 翻页后过期）。
+- **#140（P1）外部取消只终止父任务，派生的页分析任务继续跑 LLM 并写库。** 孤儿
+  会刷新 `touch_activity` 掩盖停滞，并与用户重试后的新一轮抢同一页。修法：新增
+  `core/pipeline/locks.ChildTasks`（spawn 登记 + 级联 drain），`run_pipeline` 的
+  `finally` **首要动作**即级联取消（顺序不可颠倒：子任务会写库，会把刚收敛的
+  终态再改回去）。
+- **#141（P1）任务注册表按 job_id 单值覆盖 ⇒ 持锁孤儿失去引用 ⇒ 重试永久挂死。**
+  注册表只记得住最新的 task（等待者），看门狗每轮杀等待者、真凶仍持 per-job 锁，
+  形成「重试 → 超时被杀 → 再重试」的无限循环。修法：注册表改
+  `dict[str, set[Task]]`，终止时取消该 job **全部**未完成 task —— 持锁真凶收到
+  取消后才释放锁，等待者随之取到锁并因 `status=cancelled` 干净退出。
+- **#142（P1）`pending` 且无注册任务 = 无终态黑洞。** 两处 `launch_pipeline` 调用
+  点不在 `try` 内（`api/jobs/upload.py`、`api/jobs/actions.py`），启动失败即留下
+  永不收敛的任务，而启动恢复只认「早于本进程启动」的 pending ⇒ 同进程内只能等
+  下次重启，期间 SSE 无限等待且界面无提示。修法：`mark_launch_failed()` 做条件
+  UPDATE + 审计，两处调用点包 `try`，失败即转 `error` 并返回 500。
+- **#143（P2）「配置级故障」判据是整段错误串的子串匹配 ⇒ 误早停 + 误导排障。**
+  词表含裸 `"400"` / `"invalid"`，于是真实限流 `429 … Limit 40000` 命中 `"400"`、
+  本地 `ValueError("invalid literal for int() …")` 命中 `"invalid"` ⇒ 都判成配置级
+  ⇒ Stage 2 **整份早停**并提示「请检查 API Key」。实测 8 个场景误判 3 个。修法：
+  改为**结构化优先**（`status_code`，含 `response.status_code` 回退）+ 词边界文本
+  兜底（`\b400\b` 不再命中 `40000`，裸 `invalid` 换成具体短语），并明确
+  「本地编程错误类型（ValueError/KeyError/…）永不算配置级」。
+- **#172（P1）列表端点还差 5 个行字段。** `renderJobRow` 是冷加载唯一的行构建器，
+  消费 13 个字段而 `/api/jobs` 只给 9 个（缺 `ocr_backend_used` /
+  `ocr_backend_display` / `pages_analyzed` / `phase` / `self_heal_progress`）。
+  其中 `ocr_backend_used` 影响最实：缺失时 OCR 标签被隐藏 ⇒ 老任务超出 SSE
+  10 分钟推送窗口后**永久显示不出用过哪个 OCR 后端**（呈现为「这份记录没用过
+  OCR」）。这是 #134「只修了报告点名的那两列」的后遗症。
+- **#173（P1）`page_ocr_empty` 漏在 `window.__PBC__` ⇒ OCR 空页被显示成
+  「本页无问题」。** 该键一直在服务端上下文里（模板据此 SSR 正确渲染），却漏在
+  给 JS 的桥接对象里 ⇒ 首屏兜底把「本页无 OCR 内容」覆盖成「本页无问题」——
+  正是 #136 要消灭的假阴性，属上一轮修复的残留。
+
+### Added
+
+- **#171 前端字段契约机检**（`tests/integration/test_frontend_field_contract.py`）：
+  字段集**从 JS 函数体派生**（不手写，避免第二份真值），对 `GET /api/jobs`、
+  `GET /api/jobs/{id}`、SSE 快照**三个真实数据源**断言存在性 + 类型 + 取值，并
+  **跨来源比对一致性**（「同一字段在列表与详情行为不一致」正是 #132/#134 的成因）；
+  `window.__PBC__` 也纳入契约。**这条护栏建成即发现并驱动修掉了 #172 / #173。**
+- **#151 Anthropic 协议实测**：此前该分支零运行证据（本机只有 openai 协议
+  provider）。新增 `tests/integration/test_anthropic_protocol_live.py` —— 起一个
+  忠实于 Anthropic Messages API 的**本地协议桩**，让真实 adapter + client 走真实
+  socket 往返，逐项验证 `x-api-key` / `anthropic-version` / 顶层 `system` /
+  `content[].text` / `input_tokens` 映射与 401/429 的分级。⚠️ 这是**协议桩不是
+  厂商真机**，与 `api.anthropic.com` 的实际连通性仍未验证。
+- **#159 视觉定向互证原型**（`core/vision_crosscheck.py` + adapter 多模态签名）：
+  `user_content: str` 扩展为 `str | list[str | ImagePart]`（协议差异由各 adapter
+  翻译：OpenAI `image_url` data-URL / Anthropic `image` + `source.base64`）。
+  只对**数值 / 时间**单元格与像素互证，结论三态 `agree` / `disagree` /
+  `unreadable`，**不一致一律降级为「待人工核对」，不采信任一方**；
+  ⚠️ 依实测硬约束，**中文姓名不由视觉裁决**（7 个模型给出的姓名全错，没有一个
+  读对「眭」），只标 `must_verify`。
+  真实验收：对 `test1.jpg` 温度行给出显式输出「6 格中 5 格 OCR 与视觉不一致」
+  （序号 1 两侧同为 50，作为反例）。
+  ⚠️ **原型未接入 pipeline**：不写审计表、不改 job 流程 —— 接入是独立一步（#160）。
+- 新增 `scripts/vision_crosscheck_demo.py`（真实验收脚本，走产品代码路径）。
+
+### Changed
+
+- `llm/adapters`：新增 `ImagePart` / `ContentInput` / `append_text_part` /
+  `content_parts`。**纯文本路径的请求体字节级不变**（不为支持多模态而把每一次
+  普通调用都改成 parts 列表）。
+- `core/pipeline` / `core/watchdog.py` / `api/jobs` / `main.py`：随上述并发与
+  可见性修复调整（注册表集合语义、级联取消、启动失败收敛、shutdown 双层遍历）。
+- 前端：状态映射收敛到 `static/status.js` 单一副本；`upload.js` 的行摘要抽成
+  `buildMetaLine`（静态与实时两条路径结构上共用，杜绝漂移）。
+
+### 测试
+
+- 全量 unit + integration **2710 passed / 3 skipped / 0 failed**
+  （上轮 2674 ⇒ **+36**：11 #143 分级判据 + 8 多模态报文形态 + 10 定向互证
+  + 7 Anthropic 协议桩；逐文件 collect 计数核对过，不是估的）。
+- 每条修复**都做了变异验证**（把缺陷改回去 ⇒ 护栏当场变红），包括：
+  注册表单值覆盖、移除级联取消、还原裸 launch、失败页退回「本页无问题」、
+  去掉 `status_code` 结构化判据、词表退回裸状态码、姓名纳入视觉裁决、
+  空回答当成一致、用量字段映射退化、纯文本被包装成 parts 列表、
+  fix-hint 退回字符串拼接。
+  ⚠️ 其中一次变异**揪出了护栏自身的漏洞**：结构断言原写
+  `assert "json.loads" not in src`，变异改用别名 `_j.loads(...)` 即全绿通过
+  ⇒ 改为走 **AST 认调用形态**。凡是「查字面量」的护栏都可能被同义改写绕过。
+
+---
+
 ## [1.1.8] — 2026-09-17
 
 > 本版修的是**「失败页」在两处表现不一致**（缺陷 #132）：`jobs.failed_pages` 在

@@ -19,9 +19,39 @@ from __future__ import annotations
 import logging
 
 from config import ProviderConfig
-from .base import LLMAdapter, ChatResult
+from .base import (
+    LLMAdapter, ChatResult, ContentInput, ImagePart, content_parts,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _to_anthropic_content(user_content: ContentInput) -> str | list[dict]:
+    """翻译成 Anthropic 的 content 形态。
+
+    ⚠️ 与 OpenAI **不通用**（这正是 adapter 存在的理由）：
+        OpenAI:    {"type": "image_url", "image_url": {"url": "data:..."}}
+        Anthropic: {"type": "image", "source": {"type": "base64",
+                     "media_type": ..., "data": ...}}
+    纯文本同样**原样返回字符串**，理由见 openai_adapter 的同名函数。
+    """
+    parts = content_parts(user_content)
+    if len(parts) == 1 and isinstance(parts[0], str):
+        return parts[0]
+    out: list[dict] = []
+    for p in parts:
+        if isinstance(p, ImagePart):
+            out.append({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": p.media_type,
+                    "data": p.base64_data,
+                },
+            })
+        else:
+            out.append({"type": "text", "text": p})
+    return out
 
 
 class AnthropicAdapter(LLMAdapter):
@@ -46,7 +76,7 @@ class AnthropicAdapter(LLMAdapter):
     async def chat(
         self,
         system_prompt: str,
-        user_content: str,
+        user_content: ContentInput,
         max_tokens: int = 4000,
         temperature: float = 0.1,
         timeout: float = 180.0,
@@ -58,7 +88,10 @@ class AnthropicAdapter(LLMAdapter):
         resp = await self.client.messages.create(
             model=self.model,
             system=system_prompt,
-            messages=[{"role": "user", "content": user_content}],
+            messages=[{
+                "role": "user",
+                "content": _to_anthropic_content(user_content),
+            }],
             max_tokens=max_tokens,
             temperature=temperature,
             timeout=timeout,

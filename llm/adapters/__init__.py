@@ -17,7 +17,14 @@ Supported protocols:
 """
 from config import ProviderConfig
 
-from .base import LLMAdapter, ChatResult
+from .base import (
+    LLMAdapter,
+    ChatResult,
+    ContentInput,
+    ImagePart,
+    append_text_part,
+    content_parts,
+)
 from .openai_adapter import OpenAIAdapter
 from .anthropic_adapter import AnthropicAdapter
 
@@ -49,6 +56,10 @@ def get_adapter(provider_cfg: ProviderConfig) -> LLMAdapter:
 __all__ = [
     "LLMAdapter",
     "ChatResult",
+    "ContentInput",
+    "ImagePart",
+    "append_text_part",
+    "content_parts",
     "OpenAIAdapter",
     "AnthropicAdapter",
     "get_adapter",
