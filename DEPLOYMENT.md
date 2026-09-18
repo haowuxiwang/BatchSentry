@@ -119,12 +119,25 @@ Remove-Item Env:\PBC_E2E_EXE
 - 门禁 8 项全绿、覆盖率 95.24%；分发一致性机检（`test_distribution_parity.py`）通过。
 - **产物与 `app.asar` 二进制内不含密钥**：对 3 把历史 `sk-` 值逐一字节搜索 + `sk-[A-Za-z0-9]{32,}`
   全量正则扫描，**0 命中**。
+- **产物级端到端测试已跑通（2026-09-18，Round 42）**：用 `tests/e2e_run.py` 驱动
+  `win-unpacked/resources/pbc-server/pbc-server.exe`（**正是用户双击运行时内嵌的那一份**），
+  7 个轮次全部 PASS：`pdf` / `img` / `cancel` / **`real`（51 页真实批记录）** / `rot` /
+  `robust`×2，driver 报 `ALL ROUNDS PASSED` 且 `exit=0`。
+  real 轮 **293 findings / 14 类 / `gmp_basis` 293/293**、`ocr_backend_used=paddle`
+  （**无 failover 掩盖**）、`error_message=null`、`failed_pages=null`。
+  **独立核验**（不采信 driver 自述）：findings **直查隔离库**与 driver 逐条一致、
+  SSE 帧数吻合（real 507 帧）、真实 `%APPDATA%/PBC` **未被写入**（mtime 未变）；
+  且**内嵌 exe 与 `dist/pbc-server/pbc-server.exe` 的 sha256 完全相同**
+  ⇒ 分发件 = 构建产物（不存在「测 A 发 B」）。逐项证据见 `docs/TODO.md` B0-3。
 
 **未验证（不得当作已通过）**：
 
 - **无他机验证**：未在干净 Windows 机器 / 新用户账户下解压运行；GUI 仅人工双击，无自动化 UI 断言。
-- **未在 v1.1.9 产物上重跑真实文档全链路**（51 页 e2e 最后一次是 v1.1.7 产物）——
-  门禁与烟雾**覆盖不到 LLM 侧的输出质量**。
+- **「功能跑通」≠「判定正确」**：本轮已在 v1.1.9 产物上跑通 51 页真实文档全链路（见上），
+  并用**视觉直读原页**核实出多条 **LLM 层假阳性** —— 日期判据方向反（`2025.01.30 晚于
+  2026.09.18`）、跨行串位（把「退出循环」的时间配到「清洗罐搅拌」上）、把非数值/日期形态
+  当超差（`P3='A'`、`F3='2025.01.21'`）。详见 `docs/TODO.md` **B1-4 / B1-5**。
+  ⇒ 若你的用途要求**判定准确性**，请把本轮结果看作「链路可用」，而非「结论可信」。
 - **上游凭据与真机连通性未验**：本机 LLM key 可用性、Anthropic **厂商真机**（仅有本地协议桩）。
 - **无真实标注集** ⇒ 精度/召回**没有可信数字**（`docs/FINDING_GROUND_TRUTH.json` 是合成件，不可外推）。
 - **200 页上传上限是线性外推**，未实跑。

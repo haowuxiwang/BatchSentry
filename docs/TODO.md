@@ -7,7 +7,18 @@
 > 纪律（见 `CLAUDE.md`「Repo hygiene & release discipline」）：**先定位 → 再解决 → 最后测试**；
 > 结论必须挂证据；**不升版号的边界** = 改动是否进入 PyInstaller 产物。
 >
-> 最后更新：2026-09-18（Round 41：**基线冻结 + 密钥卫生实测复核** ——
+> 最后更新：2026-09-18（Round 42：**产物级端到端测试（#149 闭环）** ——
+> 用 `tests/e2e_run.py` 驱动 **Electron 内嵌的那份 exe**（`win-unpacked/resources/
+> pbc-server/pbc-server.exe`），跑 **7 个轮次全部 PASS**（`pdf` / `img` / `cancel` /
+> **`real` 51 页真实批记录** / `rot` / `robust`×2），driver 报 `ALL ROUNDS PASSED` + `exit=0`。
+> **独立核验**（不采信自述）：findings **直查库**与 driver 逐条一致（real **293 条** /
+> 14 类 / `gmp_basis` **293/293**）、SSE 帧数吻合（real 507）、`ocr_backend_used` 全为
+> `paddle`（**无 failover 掩盖**）、真实 `%APPDATA%/PBC` **未被污染**；
+> 且 `win-unpacked` 内嵌 exe 与 `dist/` 那份 **sha256 完全相同** ⇒ 不存在「测 A 发 B」。
+> **判定：功能面可分发**。同时用**多模态直读原图**核实出 **3 类 LLM 层假阳性**
+> （日期判据方向反 / 串位幻觉造出图上不存在的值 / 非数值与日期形态输入无防线）
+> + 1 条日志口径缺陷（`measurements=0` 恒为 0）⇒ 已登记 B1-4 / B1-5 / B2-6）·
+> Round 41：**基线冻结 + 密钥卫生实测复核** ——
 > 判定 v1.1.9 可分发；**全历史密钥扫描**得 3 把 `sk-` 值，逐把对两家厂商**实测**，
 > **全部 `401 invalid`**（K1/`5d855143`、K2/`838c00a7`、K3/`2608ecd2`）⇒ 泄露面已关闭；
 > 当前生效 key（`%APPDATA%` 配置，`c11aa513`）**从未入库**；**产物与 `app.asar`
@@ -727,6 +738,50 @@
       （无他机验证、未在 v1.1.9 产物上重跑 51 页全链路、Anthropic 真机未连通、
       无标注集故 P/R 无可信数字、200 页上限仅线性外推）。
       验收达成：新接手的人只看 `DEPLOYMENT.md` 就能知道哪些结论未被验证。
+      ⚠️ **Round 42 更新**：其中「未在 v1.1.9 产物上重跑 51 页全链路」一条**已于本轮消除**
+      （见 B0-3），`DEPLOYMENT.md` 的「未验证」栏已同步收敛。
+
+- [x] **B0-3 `#149` 产物级端到端测试**（唯一未验的执行项）—— ✅ **2026-09-18 完成**
+      被测对象：`dist-electron/win-unpacked/resources/pbc-server/pbc-server.exe`
+      （sha256 `cfe28a30…`，20 340 967 B）—— **即用户双击运行时内嵌的那一份**。
+      驱动：`tests/e2e_run.py`（`PBC_E2E_EXE` 指向上述 exe；driver 自行以
+      `APPDATA=%TEMP%/pbc_e2e_appdata` + `PORT=58799` 隔离）。
+      **结果：7 个轮次全过、`ALL ROUNDS PASSED`、exit=0**：
+
+      | 轮次 | 终态 | 耗时 | 页 | findings | 类型 | gmp_basis |
+      |---|---|---|---|---|---|---|
+      | `pdf` | review | 285s | 6 | 27 | 7 | 27/27 |
+      | `img` | review | 120s | 1 | 17 | 4 | 17/17 |
+      | `cancel` | cancelled | 9s | — | 0 | — | — |
+      | **`real`** | **review** | **1049s** | **51** | **293** | **14** | **293/293** |
+      | `rot` | review | 100s | 4 | 16 | 3 | 16/16 |
+      | `robust` o6（小字号低 DPI） | review | 213s | 1 | 1 | 1 | 1/1 |
+      | `robust` o1（小框） | review | 33s | 1 | 1 | 1 | 1/1 |
+
+      **独立核验（不采信 driver 自述）**：
+      - findings **直查隔离库** 与 driver 逐条一致（27/17/0/**293**/16/1/1）；
+        real 轮 **缺 `gmp_basis` 的条数为 0**（证明 293/293 有依据）。
+      - SSE 帧数吻合（143 / 61 / 5 / **507** / 51 / 107 / 18），phase 链均为
+        `ocr → analyze → cross → done`（cancel 为 `ocr → idle → done`）。
+      - `ocr_backend_used` **全部 `paddle`**、`backend_mismatch=null`
+        ⇒ 无「Paddle 失败静默 failover 到 MinerU」的掩盖。
+      - `error_message=null`、`failed_pages=null`、7 个 job 全部 `terminal=True`。
+      - 审计留痕：`audit_log=89` / `llm_call_audit=71` / `finding_suppressions=15`。
+        rot 轮的旋转自愈**有审计**：`action=stage1_rotation_recovered,
+        recovered_pages={2: 90, 3: 90}`，且 `rot_lost=[]`（内容未丢失）。
+      - **污染核查**：真实 `%APPDATA%/PBC/data.db` mtime 仍为 **09-16 10:12**
+        （`-wal` 09-16 11:06）⇒ 本轮 e2e **未写入真实库**。
+      - **字节一致**：`win-unpacked` 内嵌 exe 与 `dist/pbc-server/pbc-server.exe`
+        **sha256 完全相同** ⇒ 分发件 = 构建产物。
+      - robust 契约满足：`o6_page1_signal=true`、`integrity=incomplete`、
+        `reasons=["小字号（4.0pt < 6pt）叠加低 DPI（72.0 < 150），识别风险高，需人工复核"]`
+        ⇒「不可无损修复页不得静默标记成功」成立。
+
+      ⚠️ **测试保真度留白（如实标注）**：driver 在 `e2e_run.py:308` **硬编码**
+      `siliconflow_model = "Qwen/Qwen2.5-72B-Instruct"`，而生效生产配置是
+      `SILICONFLOW_MODEL = deepseek-ai/DeepSeek-V3.2` —— 两者均走 OpenAI adapter、
+      协议一致，故链路验证有效，但**「生产模型」这一具体路径本轮未覆盖**
+      （已登记 B5-4）。
 
 ### B1 精度与准确性（用户最关心，优先级最高）
 
@@ -755,6 +810,49 @@
   （至少：本页有哪些真实偏差、哪些是噪声），标注过程与判据写进文档。
   验收：能算出**可复现**的 P/R 与"每条 finding 的人工判定"；此后所有"提准"改动都必须挂 R4 数字。
   备注：**这是 B1-1/B1-2 效果的唯一可信裁判**，建议与它们并行推进。
+
+- [ ] **B1-4 LLM 的"日期 vs 当前日期"判据方向不稳定（P1，Round 42 实测新发现）**
+  现象：同一次 51 页真实运行内，LLM 对同一类比较给出**互相矛盾**的结论，且把
+  **当前日期误当成生产日期**。全部来源为 `source='llm_page'` / `'llm_cross'`（**不是规则**）。
+  证据（real 轮 job `6f80145a`，均 `severity=critical`）：
+
+  | 页 | LLM 断言 | 用视觉读原图核实的结果 |
+  |---|---|---|
+  | p2 | 「车间负责人审核日期 2025.01.30 **晚于**当前日期 2026.09.18」 | `p02.jpg`：该处手写**就是 `2025.01.30`** ⇒ 日期读对，**比较方向反了** |
+  | p38 | 「复核者/操作者签名时间 **2027.01.17 早于**生产日期 2025年01月20日」 | 2027 明显**晚于** 2025 ⇒ 方向反 |
+  | p49 | 「审核人签名日期 2025.02.24 **早于**当前年份 2026.09.18」 | 过去日期**本是记录常态**，不该判 critical |
+  | p38 | 「生产日期 2025年01月20日与当前年份 2026年09月18日**不符**」 | `p38.jpg`：生产日期确为 `2025年01月20日`；二者不等是**必然**，非异常 |
+  | p28 | 「记录的日期 2015-01-23 与**生产日期 2026-09-18** 矛盾」 | 与 p38 自述互斥 ⇒ **同一次运行内自相矛盾**（把当前日期当生产日期） |
+
+  动作：① 把"日期语义"从 LLM 自由裁量改为**规则化判据**（给定 today、生产日期、
+  各签名日期，用确定性比较得出结论，LLM 只负责**抽取值**）；
+  ② 对"生产日期"这类**基准值**改为跨页**单源确定**（一次解析、全页复用），禁止各页各解一次。
+  验收：构造上表 5 个场景 ⇒ **0 条 critical 假阳性**；变异验证：把基准值改回"每页各解"
+  ⇒ 立刻重现 p28/p38 互斥。
+
+- [ ] **B1-5 LLM 对"非法形态输入"无防线 + 跨页串位（P1，Round 42 实测新发现）**
+  现象 A（**非数值当超差**）：`param_out_of_spec` 的"实际值"是 `'A'` 或一个日期字符串时，
+  LLM 仍判 `critical`「不符合规格范围」，**不质疑输入合法性**。
+  证据：p17 `llm_page`×2 + `llm_cross`×2（**同一根因重复 4 条**）——
+  「13:18 时 P3 (MPa) 的实际值为 `'A'`」「F3 累计流量 (L) 的实际值为 `'2025.01.21'`」。
+  视觉核实（`p17.jpg`）：附表 6 的 `P3` 列**四行全是 `0`**、`F3` 列为 0/854/1708/2578；
+  表格**下方**的手写签名日期 `2025.01.21` 被**串进了 F3 列**。
+  ⇒ 链条 = OCR 误读（`0`→`A`）+ 列串行 → **LLM 照单全收并升格为 critical**。
+
+  现象 B（**串位 + 幻觉出图上不存在的值**）：p38 `llm_cross`
+  「清洗罐搅拌**结束时间 18:30 早于**清洗罐搅拌**开始时间 19:15**」。
+  视觉核实（`p38.jpg`）：该页「清洗罐搅拌」实为 **开始 19:04 / 结束 19:41**（顺序正常）；
+  LLM 用的是同页**另一行「退出循环」**的时间（开始 18:20 / 结束 19:15），并把 18:20 读成 18:30。
+  ⇒ **跨行串位**（把 A 行的时间配到 B 行的字段上）。
+
+  动作：① 在页级/跨页 LLM **之前**加一道**形态闸门**：`actual` 若不含任何数字、
+  或匹配日期形态（`\d{4}[-./]\d{1,2}`），则**不得**判 `param_out_of_spec`，
+  改判"待人工核对"并保留 OCR 原文；② 时间倒序判据必须校验**两个时间来自同一行/同一字段组**
+  （LLM 需回填 `source_row`/`field`，无法回填则降级为 warning）。
+  验收：把 p17/p38 的两段输入喂进去 ⇒ 产出 **0 条 critical**（转为"待人工核对"）；
+  变异验证：摘掉形态闸门 ⇒ p17 的 `'A'` 重新变成 critical。
+  ⚠️ 本条与 B1-2（`vision_crosscheck`）天然互补：视觉读到的 `0` vs OCR 的 `A`
+  正是"待人工核对"的触发条件。
 
 ### B2 正确性与可观测性
 
@@ -787,6 +885,30 @@
   ⇒ 前端 `upload.js:326` 是 `bg-success` 绿点、**0 条 finding、无原因** ⇒ 与"记录真的无异常"不可区分。
   动作：类型化异常透传 + 早停 + job 级信号 + **非绿点** + 机检护栏。
   验收：把 key 改成无效 ⇒ 界面**明确失败**且给出原因；变异验证：去掉 job 级信号 ⇒ 护栏红。
+
+- [ ] **B2-6 `Stage 2` 日志的 `measurements=` 恒为 0（P2，Round 42 实测新发现）**
+  现象：逐页日志形如
+  `Stage 2: Page 42/51 LLM done in ...ms (confidence=low, measurements=0, findings=4, ...)`，
+  其中 `measurements` **在任何页上都是 0**，无论实际提取到多少测量值。
+  证据：`core/pipeline/stage2.py:320`
+  `measurements_count = len(structured.get("measurements", []))` —— 读的是**顶层**键，
+  而真实结构里 `measurements` **嵌在 `steps[]` 内部**，顶层根本没有这个键。
+  实测（视觉 + 直查库双证）：
+  - 真实文档 p8 的 `structured_json` 顶层 keys = `page_info / event_year_groups / steps /
+    findings / time_anomalies / ocr_noise / overall_confidence …`，**无 `measurements`**；
+    而 `steps[0].measurements` 有 **7 条**（每个时间点一条），每条含 **13 个**测量值
+    （`进料_压力` / `回流_流量` / `TMPs` …）。
+  - 本轮 real 轮 48 个已完成页**全部** `measurements=0`。
+  - **只影响该日志行**（全仓 `measurements_count` 仅 2 处引用，均为日志）⇒ 不改变功能：
+    `param_out_of_spec` 正常产出（pdf 2 条 / img 12 条 / real 38 条）。
+  影响：**误导排障** —— 看日志会以为「LLM 完全没提取到测量值」，从而去查一个不存在的
+  提取故障；而数据完好地存在 `steps[].measurements[].values` 里。这正是「日志要方便定位」
+  的反面（用户明确关注项）。
+  动作：改为从 steps 汇总，例如
+  `sum(len(s.get("measurements") or []) for s in structured.get("steps") or [])`；
+  并顺带记 `steps` 数与测量值总数（两个口径都可见，避免下次再被单一数字误导）。
+  验收：跑一页含测量值的真实页 ⇒ 日志 `measurements` > 0 且与直查库一致；
+  变异验证：改回读顶层 ⇒ 立刻重回恒 0。
   ⚠️ 需升版重建。
 
 - [ ] **B2-6 TOCTOU：并发上限检查与 INSERT 原子化**（P2，旧）
