@@ -428,7 +428,7 @@ class TestFailedPageIsNotRenderedAsClean:
         await test_db.execute(
             "INSERT INTO jobs (id, filename, pdf_path, status, total_pages, "
             "error_message) VALUES (?, ?, ?, ?, ?, ?)",
-            ("bad-llm", "test.pdf", "/tmp/test.pdf", "partial_review", 2,
+            ("bad-llm", "test.pdf", "/tmp/test.pdf", "partial_review", 3,
              "LLM 凭据失效"),
         )
         # 第 1 页：分析失败（_parse_error + 具体原因）
@@ -446,6 +446,13 @@ class TestFailedPageIsNotRenderedAsClean:
             "VALUES (?, ?, ?, ?)",
             ("bad-llm", 2, "<p>OCR 原文</p>",
              json.dumps({"overall_confidence": "high"}, ensure_ascii=False)),
+        )
+        # 第 3 页：OCR 空页（#171 —— 与上两种又是不同文案）
+        await test_db.execute(
+            "INSERT INTO page_cache (job_id, page, raw_html, structured_json) "
+            "VALUES (?, ?, ?, ?)",
+            ("bad-llm", 3, "", json.dumps({"_ocr_empty": True},
+                                          ensure_ascii=False)),
         )
         await test_db.commit()
         from main import app
@@ -512,6 +519,28 @@ class TestFailedPageIsNotRenderedAsClean:
         assert "currentPageFlags" in src, (
             "空态判据必须用当前页标记（ctx 是首屏注入、翻页后过期）")
         assert "flags.parseError" in src and "flags.ocrEmpty" in src
+
+    @pytest.mark.asyncio
+    async def test_ocr_empty_page_bridges_the_flag_to_js(self, parse_error_job):
+        """#171：OCR 空页的标记必须**真的**桥进 `window.__PBC__`。
+
+        此前 `page_ocr_empty` 只在 Jinja 上下文里（模板据此 SSR 渲染），
+        却漏在 JS 桥接对象里 ⇒ review.js 读到 undefined ⇒
+        `currentPageFlags.ocrEmpty` 恒为 false ⇒ 首屏兜底把该页的
+        "本页无 OCR 内容"**覆盖成"本页无问题"**，正是 #136 要消灭的
+        GMP 假阴性。
+
+        本用例查的是**真实响应**（main.py 上下文 → 模板 → HTML），
+        不是源码里出现某个字符串 —— 后者在"漏注入"时照样全绿。
+        """
+        r = await parse_error_job.get("/jobs/bad-llm/review?page=3")
+        assert r.status_code == 200
+        html = r.text
+        assert "page_ocr_empty: true" in html, (
+            "OCR 空页标记未到达 window.__PBC__ —— 该页首屏文案会被兜底逻辑"
+            "从『本页无 OCR 内容』改写成『本页无问题』"
+        )
+        assert "本页无 OCR 内容" in html, "OCR 空页的 SSR 文案缺失"
 
 
 from pathlib import Path  # noqa: E402  (供上面的静态机检使用)

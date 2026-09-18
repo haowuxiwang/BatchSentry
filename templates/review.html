@@ -669,6 +669,15 @@
            ⇒ 直接打开终态任务看不到"401 凭据失效"这类全局原因。 #}
         page_parse_error_reason: {{ page_parse_error_reason | tojson }},
         page_confidence: {{ page_confidence | tojson }},
+        {# #171（契约机检发现）：`page_ocr_empty` 一直在 Jinja 上下文里
+           （main.py 已注入，模板 314/573 行据此 SSR 渲染），却**漏在了本
+           JS 桥接对象里** ⇒ review.js 读到的永远是 undefined。
+           后果不是"少个标记"而是**改错文案**：首屏兜底
+           （applyInitialPageLevelUI → emptyFindingsNote）把 OCR 空页的
+           SSR 文案"本页无 OCR 内容"覆盖成"本页无问题"—— 正是 #136 要消灭的
+           GMP 假阴性。守卫：test_frontend_field_contract.py::
+           TestSsrBridgeContract。 #}
+        page_ocr_empty: {{ page_ocr_empty | tojson }},
         {# P0-3：首屏 findings 由 SSR 渲染、不经过 AJAX，锚点必须随 ctx 注入，
            否则首屏的"定位原图"按钮点了没反应（翻页后才生效 = 假缺陷）。 #}
         region_refs: {{ region_refs | tojson }},

@@ -49,7 +49,9 @@ async def list_jobs(page: int = 1, page_size: int = 20, request: Request = None)
         # 列表上只剩一个颜色点，用户无法区分"记录真的无异常"与"这次没分析成功"
         # （GMP 假阴性表面）。注意 `/api/jobs/{id}` 早已返回这两列 ——
         # 同一字段在详情与列表行为不一致，正是本缺陷的成因。
-        "SELECT id, filename, status, total_pages, created_at, finished_at, pdf_path, ocr_progress, failed_pages, error_message "
+        # #171：同一成因下还漏了 ocr_backend_used（见下方逐字段注释）。
+        "SELECT id, filename, status, total_pages, created_at, finished_at, pdf_path, "
+        "ocr_progress, failed_pages, error_message, ocr_backend_used "
         "FROM jobs WHERE status != 'archived' "
         "ORDER BY created_at DESC LIMIT ? OFFSET ?",
         (page_size, offset),
@@ -57,12 +59,42 @@ async def list_jobs(page: int = 1, page_size: int = 20, request: Request = None)
     rows = [dict(r) for r in await cursor.fetchall()]
     # Don't expose pdf_path in JSON response
     from api.jobs.status import (  # call-time (route order)
+        _count_analyzed_pages,
+        _derive_phase,
+        _ocr_backend_display,
+        _parse_cross_progress,
         _parse_failed_pages,
         _parse_ocr_progress,
+        _parse_self_heal_progress,
     )
     for r in rows:
         r.pop("pdf_path", None)
-        r["ocr_progress"] = _parse_ocr_progress(r.get("ocr_progress"))
+        # #171（契约机检发现）：本端点此前只补 failed_pages / error_message
+        # 两列，而 `static/upload.js` 的 renderJobRow **是冷加载唯一的行构建
+        # 器** —— 它共消费 13 个字段，列表只给了 9 个。缺的 5 个里
+        # `ocr_backend_used` 影响最实在：失败时 `ocrTagEl` 被隐藏，
+        # 而这个标签的用途正是"failover/自愈后留痕，GMP 追溯可见"
+        # ⇒ 老任务（超出 SSE 的 10 分钟推送窗口）**永远不会**显示它，
+        # 界面上表现为"这份记录没用过 OCR"，与"用了备用后端"无法区分。
+        #
+        # 修法上**一律复用 status.py 的派生函数**，不在此处内联实现 ——
+        # 两个端点各自解析同一列就会成为两套口径，正是 #132/#134 的成因。
+        # 守卫：tests/integration/test_frontend_field_contract.py::
+        # TestDerivationsAreSharedNotDuplicated。
+        raw_ocr = r.get("ocr_progress")   # 解析前留原值：下面三个派生都从它来
+        r["ocr_progress"] = _parse_ocr_progress(raw_ocr)
+        r["self_heal_progress"] = _parse_self_heal_progress(raw_ocr)
+        cross = _parse_cross_progress(raw_ocr)
+        # 实测成本（20 job × 51 页 ≈ 1020 行结构化数据）：逐 job 调用约 5.3 ms，
+        # 与"一条分组查询"的 4.5 ms 仅差 1.2×（瓶颈是 structured_json 的读取量，
+        # 不在往返次数）⇒ 复用单 job 口径函数即可，不值得为 0.8 ms 引入
+        # 第二套判据（`_parse_error` 排除逻辑在 stage2._get_analyzed_pages 里）。
+        r["pages_analyzed"] = await _count_analyzed_pages(db, r["id"])
+        r["phase"] = _derive_phase(
+            r["status"], r["pages_analyzed"], r["total_pages"] or 0,
+            cross_started=bool(cross),
+        )
+        r["ocr_backend_display"] = _ocr_backend_display(r)
         # #132 同源解析：该列在 SQLite 里是 TEXT，直接透传会得到
         # `"[2, 1]"` 这样的**字符串**，前端 `Array.isArray` 一判即静默丢弃。
         r["failed_pages"] = _parse_failed_pages(r.get("failed_pages"))
