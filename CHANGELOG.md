@@ -235,9 +235,15 @@
 
 ### 测试
 
-- 全量 unit + integration **2710 passed / 3 skipped / 0 failed**
-  （上轮 2674 ⇒ **+36**：11 #143 分级判据 + 8 多模态报文形态 + 10 定向互证
-  + 7 Anthropic 协议桩；逐文件 collect 计数核对过，不是估的）。
+- 全量 unit + integration **2713 passed / 0 skipped / 0 failed**（交付态口径：
+  产物已重建，`tests/unit/test_distribution_parity.py` 里 3 条依赖实物产物的用例
+  由 skip 转为 PASS）。同一提交在**产物被清空时**跑得 2710 passed / 3 skipped ——
+  两个数字都对，差别只在于 `dist-electron/` 是否存在（collect 数恒为 2713）。
+  上轮 2674 ⇒ **+39**：11 #143 分级判据 + 8 多模态报文形态 + 10 定向互证
+  + 7 Anthropic 协议桩 + 3 条 parity 用例由 skip 转 pass；逐文件 collect 计数核对过，不是估的。
+- 发布门禁六项 **OVERALL: pass（pass=8 fail=0 warn=0 skip=0）**，覆盖率 **95.24%**；
+  事实源取自 junit 审计副本 `devlogs/gate_junit_20260918_112408.xml`（实测
+  `tests=2713 failures=0 errors=0 skipped=0`，非文本解析）。
 - 每条修复**都做了变异验证**（把缺陷改回去 ⇒ 护栏当场变红），包括：
   注册表单值覆盖、移除级联取消、还原裸 launch、失败页退回「本页无问题」、
   去掉 `status_code` 结构化判据、词表退回裸状态码、姓名纳入视觉裁决、

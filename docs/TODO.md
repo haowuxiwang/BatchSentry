@@ -9,7 +9,8 @@
 >
 > 最后更新：2026-09-18（Round 39：**完成 F11 第 4–6 步** —— 修 #143（配置级判据误早停）
 > + 实测 #151（Anthropic 协议，本地协议桩）+ 落地 #159（视觉定向互证原型 + adapter
-> 多模态签名）；每条都做了**变异验证**；升版 **1.1.9** 并**重建产物**）·
+> 多模态签名）；每条都做了**变异验证**；升版 **1.1.9** 并**重建产物**；
+> 门禁 **OVERALL: pass（8 项全绿 / 覆盖 95.24%）**、**2713 passed / 0 skipped / 0 failed**）·
 > 可分发版本 **v1.1.9**（**11 条缺陷已修且产物已重建**）·
 > 远端 `8f80a58`（Round 38 推送成功；本轮提交见文末）·
 > **A1 已解除**（用户已手工收敛产物目录）
@@ -637,6 +638,28 @@
 > ✅ **产物已重建**（2026-09-18，v1.1.9）⇒ #133–#142 + #172/#173 + #143 共 **11 条**
 > 已进入可分发产物。构建顺序严格照第 6 步：**Tailwind → PyInstaller → electron-builder
 > → 产物核验 → 门禁 → 推送**。
+>
+> **实证（全部实测，非推断）**：
+> - Tailwind exit 0 → PyInstaller exit 0（`dist/pbc-server/pbc-server.exe` 20.3 MB）
+>   → electron-builder exit 0（19s，**日志无任何 download 行** = 命中缓存）。
+> - 冻结点烟：`/health` → `{"status":"ok","version":"1.1.9"}`；**Electron 资源里那份 exe
+>   也实跑过**（不只验字节一致）—— 起服 3.1s，`/api/health/watchdog` 回传 `ocr_running: 4200`
+>   （符合阈值不变式），隔离库 `total_jobs: 0`。
+> - 目录唯一性：`clean_dist.py` dry-run → **待清理:(无)**、`dist-electron` 状态「完整」版本 1.1.9；
+>   **未产生**多余的 `dist-electron/resources/`（`ls dist-electron/` 仅 `builder-debug.yml` + `win-unpacked/`）。
+> - `asar_version()` **子进程读** = `1.1.9`（绝不用宿主读取 —— 那会锁死 asar，是目录堆积的复发机制）。
+> - `test_distribution_parity.py` **13 passed / 0 skipped**（无产物时其中 3 条会 skip）。
+> - 门禁六项 **OVERALL: pass（pass=8 fail=0 warn=0 skip=0）**，覆盖 **95.24%**，
+>   报告 `devlogs/gate_report_20260918_112932.json`。
+> - ⚠️ **新认知（省下下次 10 分钟排查）**：**用例数会随「产物是否存在」变化** ——
+>   junit 审计副本实测 `tests=2713 failures=0 errors=0 skipped=0`（产物就位）；
+>   同一提交在产物被清空时是 `2710 passed / 3 skipped`。**collect 数恒为 2713**。
+>   看到 2713 vs 2710 的差异**不是回归**，先看 `dist-electron/` 在不在。
+> - ⚠️ **踩坑记录（探针问题，非产物缺陷）**：产物冒烟必须传 **`PORT`**（`server.py` 读它，
+>   默认 58765），**不是** `APP_PORT`（那是 `config.py` 的值）；隔离数据目录要**覆盖 `APPDATA`**
+>   （`config.py:41`），**不是** `PBC_APPDATA`。写错变量名的后果很隐蔽：服务照常启动，
+>   但监听在 58765（探针在 8123 上等 60s 超时），且**读写真实 `%APPDATA%\PBC`**。
+>   （本次误用后已核验：`data.db` 与 `data.db-wal` mtime 未变，仅 `data.db-shm` 被触碰，无数据损失。）
 >
 > ⚠️ **外部阻塞**：
 > ~~**A1**（`dist-electron` 被宿主进程持句柄）~~ ✅ **2026-09-18 已解除**（用户手工收敛）。
