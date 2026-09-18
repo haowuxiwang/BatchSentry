@@ -7,9 +7,9 @@
 > 纪律（见 `CLAUDE.md`「Repo hygiene & release discipline」）：**先定位 → 再解决 → 最后测试**；
 > 结论必须挂证据；**不升版号的边界** = 改动是否进入 PyInstaller 产物。
 >
-> 最后更新：2026-09-18（Round 35：**LLM 恢复后立刻做的视觉第四读定点验证** ⇒ 收紧 #159/#160，
-> 新增"姓名不可由视觉裁决"硬约束 + "Qwen2.5 系列非 VLM"登记）· 可分发版本 **v1.1.8**
-> （**内部基线可用；对外分发前先修 2 个 P0**）· 远端 `e4f5b81`
+> 最后更新：2026-09-18（Round 36：**修掉两个 P0** —— #133 复核页硬编码绿点、
+> #134 列表缺失败字段；均"先补护栏 → 再改代码 → 负例验证"）· 可分发版本 **v1.1.8**
+> （**2 个 P0 已在源码修复，待重建产物后生效**）· 远端 `0ef38b4`（本地领先 `177a6d9`，推送受网络阻塞）
 
 ---
 
@@ -193,24 +193,25 @@
 
 ### F1. 前端（P0 是"错误态伪装成功"）
 
-- [ ] **#133【P0】复核页页头状态点硬编码绿色。**
-      `templates/review.html:34` 写死 `bg-success`，而 `static/review.js:375-378`
-      只改 `#status-badge` 的 `textContent`，**从不改这个点的 class**（`statusDotClass`
-      只存在于 `upload.js`）。⇒ `status=error` / `partial_review` 时页面显示
-      **"绿点 + 出错/部分可复核"**。这正是 #127 的同类回归：**upload 页修了、复核页没修**。
-      **修法**：把 `statusDotClass` 抽到共享模块（`static/` 已有 `eta.js` / `confirm-dialog.js`
-      两个共享件先例），SSR 与 SSE 两处都用它。**验收**：SSR 渲染 `error` 时必须输出非绿色类；
-      并加机检（断言模板里**不存在**无条件的 `bg-success`）。
-- [ ] **#134【P0】列表页冷加载看不到失败页与失败原因。**
-      `api/jobs/listings.py:46` 的 SELECT **不投影** `failed_pages` / `error_message`，
-      而 `static/upload.js:739,754` 依赖这两个字段 ⇒ 冷加载时 `failedPages` 恒 `[]`、
-      `errEl` 恒 `hidden`；`buildRowFromSnapshot`（`upload.js:667-681`）**丢弃** `failed_pages`；
-      `updateJobRowLive`（`:645-652`）只写 `.job-error`、不写 `.job-meta`。
-      ⇒ 列表上只剩一个颜色点，用户仍无法区分"**记录真的无异常**"与"**这次没分析成功**"。
-      **实测复现**：产物 `/api/jobs` 字段集确无这两列（见 E 表）。
-      **修法**：`listings.py` 投影 `failed_pages`（复用 `_parse_failed_pages`）与 `error_message`；
-      `buildRowFromSnapshot` 透传 `failed_pages`；`updateJobRowLive` 同步写 `.job-meta`。
-      **验收**：冷加载一个 `partial_review` job，摘要行必须出现"失败页 N 页（…）"。
+- [x] **#133【P0】复核页页头状态点硬编码绿色。** ✅ **2026-09-18 已修（`177a6d9`）**
+      修法：抽出共享件 `static/status.js`（照 `eta.js` 既有先例），SSR 侧加
+      `core/zh_map.py:status_dot_class` —— 二者**逐值等价由机检锁定**
+      （`tests/unit/test_status_js.py`，12 例）。`upload.js` / `review.js` 均改为
+      委托共享件（顺带收敛 #139 的状态映射重复）。模板改为
+      `{{ status_dot_class }}`，`review.js` 的 SSE 显式更新 `#status-dot` 的 class。
+      **验证**：端到端（真起 ASGI）`partial_review→bg-warning`、
+      `review→bg-success`、`error→bg-destructive`；**负例验证**——把
+      `bg-success` 写回模板 ⇒ 护栏立刻变红（不是空护栏）。
+- [x] **#134【P0】列表页冷加载看不到失败页与失败原因。** ✅ **2026-09-18 已修（`177a6d9`）**
+      修法：`listings.py` 投影 `failed_pages`（复用 `_parse_failed_pages`，避免
+      TEXT 透传成字符串被前端 `Array.isArray` 静默丢弃）与 `error_message`；
+      `buildRowFromSnapshot` 透传 `failed_pages`；摘要行抽成 `buildMetaLine`
+      供**静态与实时两条路径共用**，结构上杜绝再次漂移。
+      **验证**：端到端列表返回 `failed_pages=[2, 1]` 且 `type=list`、
+      `error_message` 可见；**负例验证**——还原旧 SELECT ⇒ 3 条用例必红。
+      ⚠️ 注意 `None`（"未能给出清单"）与 `[]`（"确认零失败页"）在 GMP 语义下
+      **不同**，接口刻意保留该区分（`api/jobs/status.py:_parse_failed_pages` 的注释），
+      前端用 `Array.isArray` 容错 —— **不要**为了"接口好看"把它们归一。
 - [ ] **#135【P1】复核页首屏 parse-error 横幅只有通用文案。**
       `templates/review.html:305` 是静态句；具体 `_error` 只由 `review.js:899-902` 在
       AJAX/SSE 后写入，而调用点仅 `review.js:805` / `855` —— `DOMContentLoaded` **不触发**。
@@ -468,14 +469,20 @@
 
 ### F11. 下一轮开工顺序（建议）
 
-1. **先修 2 个 P0（#133 / #134）** —— 它们直接决定"用户会不会把失败读成成功"，且改动面小。
+1. ~~**先修 2 个 P0（#133 / #134）**~~ ✅ **2026-09-18 已完成（`177a6d9`）** ——
+   两条都做了负例验证；全量 2651 passed。**下一步转 2。**
 2. **同步修 P1 的错误可见性（#135 / #136）与后端并发（#140 / #141 / #142）** —— 后者是"重试永久挂死"的根因。
 3. **加 #171 契约机检** —— 先补护栏，再改代码，避免修完又漂。
 4. **#143 负例测试** —— 它现在会把 429/本地错误误报成"请检查 API Key"，误导排障。
 5. 外部解阻后再做 **#151（anthropic 实测）** 与 **#159（视觉第四读原型）**。
+   - #159 的**可行性已实证**（Round 35）：5 个 VLM 读对 12/13，但**姓名不可由视觉裁决**；
+     且真实工作量在 `llm/client.py` 的 `user_content: str` 签名扩展，不是调提示词。
 6. 收尾照旧：**先重建产物 → 再跑门禁 → 推送到干净的 worktree**（`tests_coverage` 含分发一致性，
    升版未重建必然变红，那是**正确信号**）。
 
-> ⚠️ 两条**外部阻塞**仍在，不解决就别假装跑通：
-> **A1**（`dist-electron` 被宿主进程持句柄 ⇒ 需完全退出 WorkBuddy 后 `python scripts/clean_dist.py --apply`）
-> 与 **A4**（SiliconFlow 402 余额不足 ⇒ 需充值或换有余额的 provider）。
+> ⚠️ **产物尚未重建** ⇒ #133 / #134 目前只在**源码**里修好，**v1.1.8 产物里仍是坏的**。
+> 要对外分发必须重新构建（见第 6 步）。
+>
+> ⚠️ **外部阻塞**：
+> **A1**（`dist-electron` 被宿主进程持句柄 ⇒ 需完全退出 WorkBuddy 后 `python scripts/clean_dist.py --apply`）仍在。
+> **A4**（SiliconFlow 余额）**已于 2026-09-18 解除**（key 恢复 200），多轮 e2e 可以跑了。
