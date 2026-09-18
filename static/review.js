@@ -376,6 +376,15 @@
             // 修复：旧代码 `|| 未知()` 引用未定义函数，ReferenceError 被外层
             // catch 吞掉 → 整个 SSE 帧更新中断；与上方 label 兜底逻辑对齐
             if (badgeEl) badgeEl.textContent = statusZh[d.status] || d.status;
+            // #133(P0)：状态点颜色必须跟着状态走。旧实现只改 textContent，
+            // 点保持模板里硬编码的 bg-success ⇒ error/partial_review 显示
+            // "绿点 + 出错"，与"记录确实无异常"不可区分（GMP 假阴性）。
+            // 真值源 static/status.js（与 core/zh_map.py 由机检锁定一致）。
+            const dotEl = document.getElementById("status-dot");
+            if (dotEl && window.PbcStatus) {
+              dotEl.className =
+                "w-1.5 h-1.5 rounded-full " + window.PbcStatus.statusDotClass(d.status);
+            }
             const cancelBtn = document.getElementById("cancel-btn");
             if (cancelBtn) {
               const canCancel = ["pending", "ocr_running", "ocr_done", "analyzing"].includes(d.status);

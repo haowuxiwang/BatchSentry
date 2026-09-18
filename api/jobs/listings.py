@@ -43,17 +43,34 @@ async def list_jobs(page: int = 1, page_size: int = 20, request: Request = None)
     total_pages = (total_jobs + page_size - 1) // page_size
 
     cursor = await db.execute(
-        "SELECT id, filename, status, total_pages, created_at, finished_at, pdf_path, ocr_progress "
+        # #134(P0)：必须投影 failed_pages / error_message。
+        # 此前这两列**不在 SELECT 里**，而 `static/upload.js` 依赖它们渲染
+        # 失败页数与失败原因 ⇒ 冷加载时 failedPages 恒 []、原因恒 hidden：
+        # 列表上只剩一个颜色点，用户无法区分"记录真的无异常"与"这次没分析成功"
+        # （GMP 假阴性表面）。注意 `/api/jobs/{id}` 早已返回这两列 ——
+        # 同一字段在详情与列表行为不一致，正是本缺陷的成因。
+        "SELECT id, filename, status, total_pages, created_at, finished_at, pdf_path, ocr_progress, failed_pages, error_message "
         "FROM jobs WHERE status != 'archived' "
         "ORDER BY created_at DESC LIMIT ? OFFSET ?",
         (page_size, offset),
     )
     rows = [dict(r) for r in await cursor.fetchall()]
     # Don't expose pdf_path in JSON response
-    from api.jobs.status import _parse_ocr_progress  # call-time (route order)
+    from api.jobs.status import (  # call-time (route order)
+        _parse_failed_pages,
+        _parse_ocr_progress,
+    )
     for r in rows:
         r.pop("pdf_path", None)
         r["ocr_progress"] = _parse_ocr_progress(r.get("ocr_progress"))
+        # #132 同源解析：该列在 SQLite 里是 TEXT，直接透传会得到
+        # `"[2, 1]"` 这样的**字符串**，前端 `Array.isArray` 一判即静默丢弃。
+        r["failed_pages"] = _parse_failed_pages(r.get("failed_pages"))
+        # error_message 可为 NULL（normal 终态）→ 保持 None，前端据此
+        # 决定是否渲染原因行；**不要**归一成空串（会让"无原因"和
+        # "原因为空"在接口上不可区分）。
+        if "error_message" in r and not r["error_message"]:
+            r["error_message"] = None
 
     return {
         "jobs": rows,

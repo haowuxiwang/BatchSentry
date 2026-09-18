@@ -298,45 +298,28 @@
 
   // === Job 历史记录 AJAX 加载 ===
 
-  const STATUS_ZH = {
-    pending: "待处理",
-    confirmed: "已确认",
-    rejected: "已拒绝",
-    corrected: "已修正",
-    queued: "排队中",
-    processing: "处理中",
-    review: "可复核",
-    partial_review: "部分可复核",
-    error: "出错",
-    cancelled: "已取消",
-    cancelling: "取消中",
-    ocr_running: "识别中",
-    ocr_done: "识别完成",
-    analyzing: "分析中",
-    done: "已完成",
-    archived: "已归档",
-  };
+  // 状态 → 中文 / 状态点颜色：**单一真值在 static/status.js**（缺陷 #133/#139）。
+  // 此前这里另有一份 STATUS_ZH + statusDotClass，与 review.js、模板各持一份 ⇒
+  // 复核页漏改（写死 bg-success）就是这么来的。保留 PbcStatus 缺失时的
+  // 兜底，是为了"共享件没加载"时不至于整页崩掉（降级为不显色，而非报错）。
+  const PbcStatus = window.PbcStatus || null;
+  if (!PbcStatus) {
+    log.warn("PbcStatus 未加载 — 状态徽章将退化为兜底显示（检查 status.js 是否引入）");
+  }
 
-  // 未知状态兜底中文（后端新增枚举时若不更新此表也不会显示裸英文）
   function statusZh(st) {
-    return STATUS_ZH[st] || (st ? `未知(${st})` : "");
+    return PbcStatus
+      ? PbcStatus.statusZh(st)
+      : (st || "");
   }
 
   function statusDotClass(st) {
-    if (["review", "done"].includes(st)) return "bg-success";
-    // #127：partial_review 的**定义**就是"存在失败页或双后端差异"（见
-    // core/pipeline/stage3.py 的 final_status 判据）——它永远不是成功态。
-    // 此前与 review 同归 bg-success，使"0 条 finding 是因为压根没分析成功"
-    // 与"记录确实无异常"在界面上长得一样（GMP 假阴性）。
-    if (st === "partial_review") return "bg-warning";
-    if (st === "error") return "bg-destructive";
-    if (["cancelled", "cancelling", "archived"].includes(st))
-      return "bg-muted-foreground/40";
-    return "bg-info";
+    return PbcStatus ? PbcStatus.statusDotClass(st) : "bg-muted-foreground/40";
   }
 
-  // 与后端 _ACTIVE_STATUSES 对齐：运行中状态禁用删除（防孤儿 pipeline task）
-  const ACTIVE_STATUSES = [
+  // 与后端 _ACTIVE_STATUSES 对齐：运行中状态禁用删除（防孤儿 pipeline task）。
+  // 真值源 static/status.js（PbcStatus.ACTIVE_STATUSES），同样避免多份副本漂移。
+  const ACTIVE_STATUSES = (PbcStatus && PbcStatus.ACTIVE_STATUSES) || [
     "pending",
     "ocr_running",
     "ocr_done",
@@ -659,6 +642,18 @@
         ocrTag.classList.add("hidden");
       }
     }
+    // #134(P0)：摘要行也要跟着实时快照更新 —— 旧实现只写 .job-pages，
+    // 失败页数永远停在冷加载那一刻（通常还没有失败页）。
+    // 只在**确实有 failed_pages 快照**时改写，避免覆盖掉
+    // `buildRowFromSnapshot` 从旧行继承来的 created_at（SSE 快照不带该字段）。
+    const metaEl = li.querySelector(".job-meta");
+    if (metaEl && Array.isArray(d.failed_pages) && d.failed_pages.length) {
+      metaEl.textContent = buildMetaLine({
+        id: li.dataset.jobId || "",
+        created_at: (metaEl.textContent || "").split(" · ")[1] || "",
+        failed_pages: d.failed_pages,
+      });
+    }
   }
 
   // 用 SSE 快照重建终态行（filename/created_at 从旧行保留）
@@ -678,6 +673,11 @@
       ocr_backend_used: d.ocr_backend_used || "",
       ocr_backend_display: d.ocr_backend_display || d.ocr_backend_used || "",
       error_message: d.error_message || "",
+      // #134(P0)：failed_pages 此前**没被透传**（只在静态渲染路径里有），
+      // 而 updateJobRowLive 走的是这条函数 ⇒ 实时阶段失败页数直接消失。
+      // 接口契约是数组（`_parse_failed_pages` 已解过 JSON），这里按数组取用，
+      // 非数组一律退化为空数组（**不**把字符串当数组用）。
+      failed_pages: Array.isArray(d.failed_pages) ? d.failed_pages : [],
     };
     return renderJobRow(job, 0);
   }
@@ -691,6 +691,25 @@
     pollTimers.forEach((t) => clearInterval(t));
     pollTimers.clear();
     stopStageTicker();
+  }
+
+  /* 摘要行文案（任务号 · 时间 · 失败页 N 页（…））。
+   *
+   * #134(P0)：抽成单一函数 —— 之前"静态渲染"与"实时更新"各写一份，
+   * 而实时那份**压根没写 meta**（`updateJobRowLive` 只动 `.job-pages`），
+   * 于是任务一进入实时更新，失败页数就消失，用户再也看不到哪几页失败。
+   * 两条路径共用本函数后，这种漂移在结构上不可能再发生。
+   */
+  function buildMetaLine(job) {
+    const failedPages = Array.isArray(job.failed_pages) ? job.failed_pages : [];
+    return (
+      `${job.id} · ${job.created_at}` +
+      (failedPages.length
+        ? ` · 失败页 ${failedPages.length} 页（${failedPages
+            .slice(0, 12)
+            .join(",")}${failedPages.length > 12 ? "…" : ""}）`
+        : "")
+    );
   }
 
   function renderJobRow(job, i) {
@@ -736,14 +755,9 @@
       "text-[11px] text-muted-foreground mt-0.5 tabular-nums job-meta";
     // #127：失败页数直接进摘要行 —— 接口一直在返回 failed_pages
     // （api/jobs/status.py），但界面此前**零处**渲染，用户看不到是哪几页。
-    const failedPages = Array.isArray(job.failed_pages) ? job.failed_pages : [];
-    metaEl.textContent =
-      `${job.id} · ${job.created_at}` +
-      (failedPages.length
-        ? ` · 失败页 ${failedPages.length} 页（${failedPages
-            .slice(0, 12)
-            .join(",")}${failedPages.length > 12 ? "…" : ""}）`
-        : "");
+    // #134：抽成 buildMetaLine 供实时路径复用 —— 否则"静态行有失败页数、
+    // 实时更新后消失"这种漂移会一直存在（本缺陷的成因就是两条路径各写各的）。
+    metaEl.textContent = buildMetaLine(job);
     // cr-19：出错任务行直接显示失败原因（快照已透传 error_message，
     // 旧实现 renderJobRow 不渲染 — 用户看不到错误，只能点进复核页）
     // #127：partial_review 也显示 —— 这是"0 条 finding 到底是记录没问题、

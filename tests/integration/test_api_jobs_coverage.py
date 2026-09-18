@@ -1232,3 +1232,100 @@ class TestStreamAllLiveJobs:
 
         # 首轮错误被吞掉，第二轮快照正常送达
         assert "recovered-job" in body
+
+
+class TestListJobsProjectsFailureFields:
+    """#134(P0)：`GET /api/jobs` 必须投影 failed_pages / error_message。
+
+    缺陷本质：这两列**不在 SELECT 里**，而 `static/upload.js` 依赖它们渲染
+    失败页数与失败原因 ⇒ 冷加载时 failedPages 恒为空、原因恒 hidden，
+    列表上只剩一个颜色点，用户无法区分"记录真的无异常"与"这次没分析成功"
+    （GMP 假阴性表面）。`/api/jobs/{id}` 早已返回这两列 —— 同一字段在详情与
+    列表行为不一致，是本次要根除的部分。
+
+    注意本用例是**行为级**的（真调接口取字段），不是"断言源码里出现了某个
+    标识符" —— 后者只能证明接线被写过，证明不了数据真的流出来（本项目
+    已经因此吃过一次亏，见 test_config_error_visibility 的注释）。
+    """
+
+    @pytest_asyncio.fixture
+    async def seeded(self, test_db):
+        """造 3 个 job：正常终态 / 部分可复核（有失败页+原因）/ 出错。
+
+        ⚠️ 不要再 `await test_db` —— `test_db` 是**已 await 过**的 Connection
+        实例，再次 await 会触发 aiosqlite `Connection.start()` 重入
+        （实测 `RuntimeError: threads can only be started once`）。
+        直接把它当连接用即可（与 `client_with_job` 一致）。
+        """
+        db = test_db
+        for row in (
+            ("j-normal", "ok.pdf", "review", 3, None, None),
+            ("j-partial", "partial.pdf", "partial_review", 6, "[2, 1]", "第 2 页分析失败"),
+            ("j-error", "bad.pdf", "error", 1, "[1]", "凭据失效"),
+        ):
+            await db.execute(
+                "INSERT INTO jobs (id, filename, status, total_pages, pdf_path, "
+                "created_at, failed_pages, error_message) VALUES (?,?,?,?,?,?,?,?)",
+                (row[0], row[1], row[2], row[3], "", "2026-09-18T10:00:00",
+                 row[4], row[5]),
+            )
+        await db.commit()
+        # client 必须在此处创建（与 client_with_job 同构）—— 详见 docstring
+        from main import app
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://localhost:8000"
+        ) as c:
+            yield c, db
+
+    @pytest.mark.asyncio
+    async def test_failed_pages_is_json_array_not_string(self, seeded):
+        """必须解成 JSON 数组。
+
+        该列在 SQLite 里是 TEXT，透传会得到 `"[2, 1]"` 这样的字符串，
+        前端 `Array.isArray()` 一判即静默丢弃（#132 同源）。
+        """
+        c, _ = seeded
+        r = await c.get("/api/jobs")
+        assert r.status_code == 200
+        jobs = {j["id"]: j for j in r.json()["jobs"]}
+
+        assert "failed_pages" in jobs["j-partial"], (
+            "列表未投影 failed_pages ⇒ 前端渲染不出失败页（#134 回归）"
+        )
+        got = jobs["j-partial"]["failed_pages"]
+        assert isinstance(got, list), (
+            f"failed_pages 必须是 list，实际是 {type(got).__name__}（{got!r}）"
+            " —— 字符串会被前端 Array.isArray 静默丢弃"
+        )
+        assert sorted(got) == [1, 2]
+
+    @pytest.mark.asyncio
+    async def test_error_message_is_projected(self, seeded):
+        """列表也要带失败原因 —— 否则用户只能点进复核页才知道为什么失败。"""
+        c, _ = seeded
+        r = await c.get("/api/jobs")
+        jobs = {j["id"]: j for j in r.json()["jobs"]}
+        assert "error_message" in jobs["j-error"], (
+            "列表未投影 error_message ⇒ 失败原因在列表上不可见（#134 回归）"
+        )
+        assert jobs["j-error"]["error_message"] == "凭据失效"
+
+    @pytest.mark.asyncio
+    async def test_normal_job_has_no_failed_pages(self, seeded):
+        """正向对照：正常终态不得被误标失败页（否则是"假阳性"方向的回归）。"""
+        c, _ = seeded
+        r = await c.get("/api/jobs")
+        jobs = {j["id"]: j for j in r.json()["jobs"]}
+        fp = jobs["j-normal"]["failed_pages"]
+        assert not fp, f"正常任务不应有失败页，实际 {fp!r}"
+        assert jobs["j-normal"]["error_message"] in (None, ""), (
+            "正常任务不应有 error_message"
+        )
+
+    @pytest.mark.asyncio
+    async def test_pdf_path_still_not_exposed(self, seeded):
+        """回归门：加投影时别把 pdf_path 一起漏出去。"""
+        c, _ = seeded
+        r = await c.get("/api/jobs")
+        for j in r.json()["jobs"]:
+            assert "pdf_path" not in j, "pdf_path 不得出现在列表响应里"

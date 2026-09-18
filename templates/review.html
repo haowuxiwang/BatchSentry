@@ -31,7 +31,11 @@
             <span class="text-muted-foreground/40">/</span>
             <span class="text-[13px] font-medium truncate max-w-[280px]">{{ filename }}</span>
             <span class="inline-flex items-center gap-1 text-[11px] text-muted-foreground">
-                <span class="w-1.5 h-1.5 rounded-full bg-success"></span>
+                {# #133(P0)：状态点颜色必须随 status 变化。旧实现把 bg-success 写死在这里，
+                   而 review.js 的 SSE 只改文案不改 class ⇒ error/partial_review 显示"绿点+出错"。
+                   单一真值在 static/status.js 的 statusDotClass；SSR 侧用后端同源实现
+                   （core/zh_map.py:status_dot_class），二者由机检锁定一致。 #}
+                <span id="status-dot" class="w-1.5 h-1.5 rounded-full {{ status_dot_class }}"></span>
                 <span id="status-badge">{{ job_status_zh.get(status, status) }}</span>
             </span>
             <span class="text-[11px] text-muted-foreground font-mono">{{ job_id }}</span>
@@ -660,6 +664,7 @@
       };
     </script>
     <script src="/static/eta.js?v={{ asset_ver('eta.js') }}" defer></script>
+    <script src="/static/status.js?v={{ asset_ver('status.js') }}" defer></script>
     <script src="/static/confirm-dialog.js?v={{ asset_ver('confirm-dialog.js') }}" defer></script>
     <script src="/static/review.js?v={{ asset_ver('review.js') }}" defer></script>
 </body>

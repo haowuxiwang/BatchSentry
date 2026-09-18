@@ -94,6 +94,38 @@ def zh_job_status(key: str) -> str:
     return JOB_STATUS_ZH.get(key, key)
 
 
+# job status → 状态点颜色类（Tailwind class 片段）。
+#
+# 与 `static/status.js` 的 `statusDotClass` **必须逐值等价**（由
+# `tests/unit/test_status_js.py` 机检锁定：两侧对全部状态枚举 + 未知值
+# 输出同名 class）。SSR 用它渲染首屏，前端用它做 SSE 实时更新 ——
+# 此前只有前端一份，导致模板只能硬编码 `bg-success`（缺陷 #133，P0：
+# error/partial_review 的复核页显示"绿点+出错"，GMP 假阴性表面）。
+#
+# 排序按"用户会不会误读为成功"，不按"状态看起来像不像完成了"：
+# partial_review 的**定义**就是"存在失败页或双后端差异"，永远不是成功态。
+STATUS_DOT_CLASS = {
+    "review": "bg-success",
+    "done": "bg-success",
+    "partial_review": "bg-warning",
+    "error": "bg-destructive",
+    "cancelled": "bg-muted-foreground/40",
+    "cancelling": "bg-muted-foreground/40",
+    "archived": "bg-muted-foreground/40",
+}
+# 非终态/未知状态 → 中性蓝（"还在跑"）。与 JS 侧 `bg-info` 默认分支一致。
+_STATUS_DOT_DEFAULT = "bg-info"
+
+
+def status_dot_class(key: str | None) -> str:
+    """job status → 状态点 Tailwind 颜色类。未知状态 → `bg-info`。
+
+    空值也走默认分支（SSR 时 status 理论上非空，但模板不该因脏数据渲染出
+    一个"无色点"—— 那比错色更难察觉）。
+    """
+    return STATUS_DOT_CLASS.get(key or "", _STATUS_DOT_DEFAULT)
+
+
 def zh_finding_type(key: str) -> str:
     """finding type → 中文；未知值原样返回。"""
     return FINDING_TYPE_ZH.get(key, key)

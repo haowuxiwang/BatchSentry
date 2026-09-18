@@ -50,7 +50,7 @@ from api.jobs import router as jobs_router
 from api.review import router as review_router
 from api.report import router as report_router
 from api.settings import router as settings_router
-from core.zh_map import zh_ocr_backend
+from core.zh_map import status_dot_class, zh_ocr_backend
 
 
 @asynccontextmanager
@@ -638,6 +638,10 @@ async def review_page(job_id: str, request: Request, page: int = 1):
         "job_id": job_id,
         "filename": job["filename"],
         "status": job["status"],
+        # #133(P0)：状态点颜色由后端同源给出。旧实现把 bg-success 写死在模板里，
+        # 而前端 SSE 只改文案不改 class ⇒ error/partial_review 首屏与实时都显示
+        # "绿点 + 出错"（GMP 假阴性）。真值源 core/zh_map.py:status_dot_class。
+        "status_dot_class": status_dot_class(job["status"]),
         "error_message": job["error_message"] if "error_message" in job.keys() else None,
         "page": page,
         "total_pages": total_pages,

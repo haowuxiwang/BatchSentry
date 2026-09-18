@@ -34,6 +34,8 @@ CLIENT_PY = REPO / "llm" / "client.py"
 STAGE2_PY = REPO / "core" / "pipeline" / "stage2.py"
 UPLOAD_JS = REPO / "static" / "upload.js"
 REVIEW_JS = REPO / "static" / "review.js"
+# #133：状态→颜色/中文的单一真值（upload.js 与 review.js 共同依赖）
+STATUS_JS = REPO / "static" / "status.js"
 REVIEW_HTML = REPO / "templates" / "review.html"
 
 
@@ -164,11 +166,20 @@ class TestHandlerOrdering:
 
 class TestFrontendVisibilityContract:
     def _status_dot_body(self) -> str:
-        js = UPLOAD_JS.read_text(encoding="utf-8")
+        """取状态点颜色映射的实现体。
+
+        #133：真值源已从 `upload.js` 抽到共享件 `static/status.js`
+        （原因见那个文件头部——`upload.js` 与 `review.js` 各持一份，
+        导致复核页画了**硬编码的绿点**）。本护栏因此改为读共享件；
+        断言内容（partial_review 永不为绿）不变。
+
+        ⚠️ 若哪天共享件又改名，`assert m` 会立刻报出来，不会静默通过。
+        """
+        js = STATUS_JS.read_text(encoding="utf-8")
         m = re.search(
             r"function statusDotClass\(st\)\s*\{(.*?)\n  \}", js, re.S
         )
-        assert m, "upload.js 未找到 statusDotClass（改名了？同步更新本护栏）"
+        assert m, "static/status.js 未找到 statusDotClass（改名了？同步更新本护栏）"
         return m.group(1)
 
     def test_partial_review_is_never_a_success_dot(self):
