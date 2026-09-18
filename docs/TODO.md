@@ -7,8 +7,9 @@
 > 纪律（见 `CLAUDE.md`「Repo hygiene & release discipline」）：**先定位 → 再解决 → 最后测试**；
 > 结论必须挂证据；**不升版号的边界** = 改动是否进入 PyInstaller 产物。
 >
-> 最后更新：2026-09-17（Round 34：**v1.1.8 对抗性审查** ⇒ 新增 **F 组 v1.1.9 迭代计划**，
-> 缺陷编号 #133–#171）· 可分发版本 **v1.1.8**（**内部基线可用；对外分发前先修 2 个 P0**）· 远端 `09e6623`
+> 最后更新：2026-09-18（Round 35：**LLM 恢复后立刻做的视觉第四读定点验证** ⇒ 收紧 #159/#160，
+> 新增"姓名不可由视觉裁决"硬约束 + "Qwen2.5 系列非 VLM"登记）· 可分发版本 **v1.1.8**
+> （**内部基线可用；对外分发前先修 2 个 P0**）· 远端 `e4f5b81`
 
 ---
 
@@ -47,7 +48,15 @@
 - [ ] **A3 提供第 2 份真实批记录 PDF 用于泛化验证（缺陷 #126）。**
       目前**只有一份**真实批记录（丝裂霉素提取批记录，51 页）⇒ 规则/OCR 的泛化性
       **未经检验**。缺它就无法回答"换一份记录还准不准"。
-- [ ] **A4（阻塞"需真实 findings 的多轮 e2e"）硅基流动账户余额不足（402）。**
+- [ ] **A4（阻塞"需真实 findings 的多轮 e2e"）硅基流动账户余额不足（402）—— 2026-09-18 已解除。**
+      > **✅ 2026-09-18 复核：key 已恢复可用。** 实测 `POST /v1/chat/completions`
+      > `model=deepseek-ai/DeepSeek-V3.2` → **HTTP 200**，正常返回内容（usage 18 tokens）。
+      > ⚠️ 但**仓库内的 `config.json` 里那把 key 仍是失效的旧 key**
+      > （`sk-vprn...` → `30014 Token is invalid`）。**真正生效的是
+      > `%APPDATA%/PBC/config.json` 里的另一把**（`sk-vhxq...`，2026-09-17 10:55 更新）。
+      > ⇒ 用仓库 `config.json` 做任何自检都会**假红**；自检脚本应显式读 `%APPDATA%/PBC/config.json`。
+      > **本条阻塞已解除，多轮 e2e 现在可以跑**（尚未跑，见 F11 开工顺序）。
+      > ① 旧证据（2026-09-17，保留以说明"驱动拒绝假绿是正确的"）：
       实测（v1.1.8 产物，`e2e_run.py --rounds pdf,img`）——驱动**自检**就报出来了：
       ```
       test_provider -> 200 {"ok":false,"provider":"siliconflow",
@@ -161,10 +170,12 @@
 | 产物（v1.1.8） | asar 内版本 = 1.1.8 == 源码；入口 188.8 MB；内嵌后端 20.3 MB；`extraResources` 与 `dist/pbc-server` **811 文件 / 112.2 MB 逐一致** | `%TEMP%/pbc_verify_artifact.py` |
 | 冻结冒烟（v1.1.8 产物） | **22 passed / 0 failed**（`health: v1.1.8`、`provider=siliconflow`、`pipeline_terminal=review`、`findings=3`、`report 4531 B`） | `%TEMP%/pbc_e2e_frozen_118.log` |
 | #127/#131 验收（v1.1.8 产物，**失效凭据**复现触发） | **7 passed / 0 failed**；含 **`failed_pages_type: type=list value=[2, 1]`**（#132 修复在产物内的**判别性**证据）、`terminal_is_error`、`reason_visible 201 字`、`pages_analyzed=0` | `%TEMP%/pbc_127_accept_v118.log` |
-| 多轮产物 e2e（`pdf,img`） | **FAIL —— 外部阻塞：账户余额 402**（非产品缺陷）。两轮 OCR 均成功、终态如实 `error`、0 findings ⇒ 驱动**拒绝**记作成功（判别性正确） | `%TEMP%/pbc_e2e_rounds_118.log`；详见 **A4** |
+| 多轮产物 e2e（`pdf,img`） | **2026-09-17 FAIL（外部阻塞：402）→ 2026-09-18 阻塞已解除**（key 恢复 HTTP 200，但**用 `%APPDATA%/PBC/config.json` 那把**）。**尚未重跑** | `%TEMP%/pbc_e2e_rounds_118.log`；详见 **A4** |
+| 关键配置真值（2026-09-18 复核） | `LLM_PROVIDER=siliconflow`、模型 `deepseek-ai/DeepSeek-V3.2`、`OCR_BACKEND=mineru`；**密钥源 = `%APPDATA%/PBC/config.json`（`sk-vhxq…`）**，仓库 `config.json` 里是**失效旧 key**（`sk-vprn…`） | 两文件直读 + 各一次 HTTP 探测 |
 | 目录锁持有者（Round 33 实测） | **WorkBuddy.exe（宿主进程）pid 16220 / 14048**；**只锁 `*.asar`**（同目录 exe 全 FREE）；**不是安全软件** | Restart Manager `RmGetList`；复现实验与证据链见 `docs/PROJECT_PITFALLS.md` §二十二 |
 | 产物目录 | `dist-electron-out-20260917-142437`（标准路径被锁 ⇒ 已按约定写 `PROVENANCE.txt`，其 `unblock` 段已更正） | 见 A1 |
-| 远端 | `09e6623`（已推送，`HEAD == origin/main`，worktree 干净） | `git rev-parse HEAD` / `origin/main` |
+| 远端 | `e4f5b81`（已推送，`HEAD == origin/main`，worktree 干净） | `git rev-parse HEAD` / `origin/main` |
+| **视觉第四读可行性（2026-09-18 定点实测）** | 7 个 VLM 直读 `test1.jpg`，只问上一轮 OCR 读错的 13 字段：**5 个模型 12/13**（`GLM-4.5V`/`Qwen3-VL-32B-Instruct` 各 3 次重现均 12/12/12），`Qwen3-Omni-30B-A3B` 仅 5/13（不可用）；**中文姓名 7 个模型全错**（无人读对"眭"） | `scripts/probe_vlm_fields.py`；`%TEMP%/vlm_probe_result.json` |
 | 产物接口行为（Round 34 实测，**唯一可信判据**） | `/health` → `{"status":"ok","version":"1.1.8"}`；`/api/jobs/{id}` → `failed_pages=[1] type=list`（#132 在产物内**行为验证通过**）；`/api/jobs` 字段集 = `created_at, filename, finished_at, id, ocr_progress, status, total_pages`（**无 failed_pages / error_message / stall**） | `%TEMP%/pbc_probe_out.log` |
 | 产物内容 vs 源码 | `static/*.js` + `templates/*.html` 构建快照与工作树**哈希一致**；后端 `.py` 在 PYZ 内（松散文件里找不到属**预期**，字符串探测不可信） | sha256 逐文件比对 |
 
@@ -362,6 +373,43 @@
       **不一致时降级为"待人工核对"而非直接采信任一方**。
       这与 **B3** 的既有结论完全吻合，但本轮给出了**具体的触发条件与真实反例**。
       **验收**：对 `test1.jpg` 这一页，能给出"温度行 5 个单元格 OCR 与视觉不一致"的显式输出。
+
+      > **2026-09-18 补充实测（LLM 恢复后立刻做的定点验证，把本项的"待定"变成"已定"）：**
+      > 用 `scripts/probe_vlm_fields.py` 把 `test1.jpg` 交给 7 个候选 VLM，只问上一轮
+      > OCR 读错的 13 个字段（含那 4 类系统性误读），与**人工视觉真值**逐格比对：
+      >
+      > | 模型 | 正确/13 | 3 次重现 | 耗时 |
+      > |---|---|---|---|
+      > | `zai-org/GLM-4.5V` | **12** | 12/12/12 | ~8s |
+      > | `Qwen/Qwen3-VL-32B-Instruct` | **12** | 12/12/12 | ~8s |
+      > | `Qwen/Qwen3-VL-32B-Thinking` | **12** | — | ~9s |
+      > | `Qwen/Qwen3-VL-30B-A3B-Thinking` | **12** | — | ~7s |
+      > | `Qwen/Qwen3-VL-8B-Instruct` | **12** | — | ~11s |
+      > | `Qwen/Qwen3-VL-30B-A3B-Instruct` | 11（温度54→55） | — | ~10s |
+      > | `Qwen/Qwen3-VL-8B-Thinking` | 10（04:10→09:10、06:12→09:12） | — | ~11s |
+      > | `Qwen/Qwen3-Omni-30B-A3B-Instruct` | **5**（整行错位，不可用） | — | ~3s |
+      >
+      > **关键结论（三条，都推翻或收紧了旧假设）：**
+      > 1. **VLM 直读像素确实能读对 OCR 读错的东西**：上一轮 OCR 把温度读成
+      >    `32/34/34/35/36`、投料量读成 `930.0`、时间读成 `02:23/05:12`，
+      >    而 5 个模型**全部读对**了这些。⇒ 视觉第四读**技术可行**，#159 有落地依据。
+      > 2. **但成本优势不存在**：`Qwen3-VL-8B`（12/13、10.8s）与 `32B`（12/13、7.7s）
+      >    **准确率相同、8B 还更慢**（排队效应）。⇒ 没有"小模型够用"的省钱空间，
+      >    选型应按**可得性与稳定性**而非参数量。
+      > 3. **13 个字段里唯一稳定读不出的是中文人名**：7 个模型给出
+      >    `胖东鹏/胖东朋朋/胖乐鹏/薛东鹏/周小英` —— **没有一个读对"眭"**。
+      >    ⇒ **#160 的降级范围应把"姓名"排除出"可由视觉互证裁决"的类别**，
+      >    姓名只能走"标记待人工核对"，不能指望任一模型拍板。这是本轮新增的硬约束。
+      >
+      > ⚠️ 另有一条**非阻塞但必须登记**的发现：`Qwen/Qwen2.5-*` 系列（共 7 个，
+      > 含 Pro/LoRA 变体）**不是 VLM**，API 直接返回
+      > `20041 The model is not a VLM`。设置页若允许用户凭列表任选，会给出运行时才爆的错。
+      >
+      > ⚠️ **工程缺口**：产品链路目前**根本喂不进图像**——`llm/client.py:143`
+      > 的 `user_content` 是 `str`，`llm/adapters/openai_adapter.py:49` 直接
+      > `{"role":"user","content": user_content}`。要做视觉第四读，必须先扩这条签名
+      > （涉及两个 adapter + 审计表）。**这是 #159 的真实工作量所在，不是调提示词。**
+
 - [ ] **#160【P1】把 OCR 不确定性与规则结论绑定。**
       现有 `extraction_uncertain`（`finding_noise.py:219-223`）只在 `kind=time` 且**该页有 OCR 告警**时降级。
       应扩到"数值单元格 OCR 低置信 / 与视觉互证不一致" ⇒ 对应规则 finding 降级为 info + 标注原因。
