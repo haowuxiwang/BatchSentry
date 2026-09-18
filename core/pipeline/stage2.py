@@ -100,8 +100,14 @@ async def _handle_page_failure(
 
 async def _run_stage2_analysis(
     db, job_id: str, pages: list[dict], failed_pages: list[int],
+    children=None,
 ) -> int:
-    """Concurrent per-page LLM analysis; returns stage2_ms. (refactor)"""
+    """Concurrent per-page LLM analysis; returns stage2_ms. (refactor)
+
+    `children`（#140）：派生子任务的登记器（`core.pipeline.locks.ChildTasks`）。
+    传入时页分析任务经它 spawn，父 task 被取消即可级联停掉全部在跑的页；
+    为 None 时内部自建（保持旧调用方/测试可用）。
+    """
     # Runtime resolution — tests patch core.pipeline._is_cancelled.
     from core.pipeline import _is_cancelled as _run_is_cancelled
     # Check cancellation
@@ -144,8 +150,13 @@ async def _run_stage2_analysis(
     config_error: dict = {}
 
     # Run all page analyses concurrently
+    # #140：经 children 登记（而非裸 create_task）—— 父 task 被取消时
+    # 这些页分析协程必须跟着停，否则继续跑 LLM 并写库。
+    if children is None:
+        from core.pipeline.locks import ChildTasks
+        children = ChildTasks(job_id)
     tasks = [
-        asyncio.create_task(
+        children.spawn(
             _analyze_one(db, job_id, pn, pg, sem, failed_pages,
                          state_lock, completed, total_pages,
                          config_error=config_error)

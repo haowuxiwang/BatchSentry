@@ -7,39 +7,26 @@
 > 纪律（见 `CLAUDE.md`「Repo hygiene & release discipline」）：**先定位 → 再解决 → 最后测试**；
 > 结论必须挂证据；**不升版号的边界** = 改动是否进入 PyInstaller 产物。
 >
-> 最后更新：2026-09-18（Round 36：**修掉两个 P0** —— #133 复核页硬编码绿点、
-> #134 列表缺失败字段；均"先补护栏 → 再改代码 → 负例验证"）· 可分发版本 **v1.1.8**
-> （**2 个 P0 已在源码修复，待重建产物后生效**）· 远端 `0ef38b4`（本地领先 `177a6d9`，推送受网络阻塞）
+> 最后更新：2026-09-18（Round 37：**修掉 5 条 P1** —— #135/#136 错误可见性、
+> #140/#141/#142 后端并发与启动失败黑洞；每条均"先定位 → 补护栏 → 改代码 → 负例验证"）·
+> 可分发版本 **v1.1.8**（**7 个 P0/P1 已在源码修复，待重建产物后生效**）·
+> 远端 `0ef38b4`（本地领先 3 个提交，推送受网络阻塞）·
+> **A1 已解除**（用户已手工收敛产物目录，现仅存 `dist/`）
 
 ---
 
 ## A. 需要**用户**动作（我做不到，已在等）
 
-- [ ] **A1（阻塞收敛）完全退出 WorkBuddy 宿主，然后在普通终端跑收敛脚本。**
-      **归因已更正（Round 33 实测，旧处置无效）**：持有者**不是安全软件**，是
-      **WorkBuddy 宿主进程**（Restart Manager 具名：`WorkBuddy.exe` pid=16220 / 14048）。
-      机制：宿主把 `.asar` 当"包"打开后**持久留下未带 `FILE_SHARE_DELETE` 的句柄**
-      ⇒ 含 `app.asar` 的目录既不能改名也不能删除 ⇒ electron-builder 写不进标准输出目录
-      ⇒ 本次 v1.1.8 自愈到 `dist-electron-out-20260917-142437`（已按约定写 `PROVENANCE.txt`）。
-      ⚠️ 因此**"把仓库加入杀软信任区/白名单"对本案无效**（不是杀软）。
-      证据链 + 可复现的控制实验（新建 `.asar` 空闲 → 宿主读一次即持续 `winerror=32`；
-      对照读 `.txt` 仍空闲；同目录 exe 全部空闲）见 `docs/PROJECT_PITFALLS.md` §二十二。
-      **为什么必须由用户做**：宿主就是当前会话的运行环境，我在它里面**杀不掉它自己**。
-      步骤（顺序不能反）：
-      1. 保存工作后**完全退出 WorkBuddy**（确认任务管理器里已无 `WorkBuddy.exe`）；
-      2. 在**普通终端**（cmd / PowerShell）里执行：
-         ```
-         python scripts/clean_dist.py            # dry-run：应显示「待清理: dist-electron」且不再报占用
-         python scripts/clean_dist.py --apply    # 走回收站，可恢复
-         ```
-      3. 预期收敛到 `dist/` + **一个** `dist-electron*`（保留 1.1.8 那份；版本由 asar 内的
-         `package.json` 读出，不靠 mtime 猜）⇒ `dist_variants` 回到 PASS。
-      4. 收敛**不影响已交付产物的正确性**（它只是磁盘/仓库卫生），产物本身已通过全部验收。
-      ⚠️ **不要在占用未解除时手动删 `dist-electron`**：删到被持有的 `app.asar` 会中途失败，
-      把一个完好的 v1.1.7 产物变成**残缺目录**（比不删更糟，且会让"最新产物"判定指向残缺目录）。
-      ⚠️ 现状中 `dist-electron/win-unpacked/resources/__lockscan_probe.asar`（729 B）**是 Round 33 我留下的
-      诊断探针**，它同样被宿主锁住 ⇒ 删不掉，会随该目录一起进回收站，无需单独处理。
-      **在此之前 `dist_variants` 显示 2 属预期，不是回归。**
+- [x] ~~**A1（阻塞收敛）完全退出 WorkBuddy 宿主，然后在普通终端跑收敛脚本。**~~
+      ✅ **2026-09-18 已解除**（用户手工完成）：全部 `dist-electron*` 已清空，
+      现存仅 `dist/`（backend，107 MB）。`python scripts/clean_dist.py` dry-run 输出
+      **「待清理: (无)」**，目录数 == 1 ⇒ 仓库卫生回到约定状态。
+      ⚠️ **新约定（用户明确要求）**：仓库根**只能有一个 `dist-electron*`** ——
+      下次构建应从零一次成型，直接写**标准路径 `dist-electron/`**；若自愈到时间戳目录
+      **必须当轮归位**，不得留着过夜；每次构建后跑一次 dry-run 自证。
+      ⚠️ 注意反面影响：**Electron 产物已不存在** ⇒ 重建时 `tests_coverage` 的
+      `test_distribution_parity` 在 Electron 打包完成**之前**必然 skip/红，
+      这属预期（先后端产物 → 再 Electron 打包 → 再跑门禁）。
 - [ ] **A2 轮换已泄漏的 LLM 凭据（必须厂商侧操作）。**
       `DeepSeek` / `SiliconFlow` 的 key 曾随提交进入 git 历史，**删文件删不掉历史**
       ⇒ 只能在厂商侧吊销并换新（本地已是新 key `sk-vhx…`，但旧 key 在历史里仍可见）。
@@ -212,14 +199,22 @@
       ⚠️ 注意 `None`（"未能给出清单"）与 `[]`（"确认零失败页"）在 GMP 语义下
       **不同**，接口刻意保留该区分（`api/jobs/status.py:_parse_failed_pages` 的注释），
       前端用 `Array.isArray` 容错 —— **不要**为了"接口好看"把它们归一。
-- [ ] **#135【P1】复核页首屏 parse-error 横幅只有通用文案。**
-      `templates/review.html:305` 是静态句；具体 `_error` 只由 `review.js:899-902` 在
-      AJAX/SSE 后写入，而调用点仅 `review.js:805` / `855` —— `DOMContentLoaded` **不触发**。
-      ⇒ 直接打开/刷新终态任务第 1 页，看不到"401 凭据失效"这类全局原因。
-      **修法**：首屏也调一次 `updatePageLevelUI`（数据已在 SSR 的 `structured_json` 里）。
-- [ ] **#136【P1】失败页仍显示"本页无问题"。**
-      `templates/review.html:562` / `review.js:1284-1285` 仅按 findings 数量判断，
-      **未结合 `page_parse_error`** ⇒ 分析失败的页与"确实合规的页"视觉相同。
+- [x] **#135【P1】复核页首屏 parse-error 横幅只有通用文案。** ✅ **2026-09-18 已修**
+      修法：`main.py` 从 `structured_json` 提取 `_error` 注入 SSR 上下文
+      （`page_parse_error_reason`），`review.js` 新增 `applyInitialPageLevelUI()`
+      在 `DOMContentLoaded` 调用 —— 复用**同一个** `updatePageLevelUI`
+      （不另写一套文案，避免与 AJAX 路径漂移）。
+      **验证**：`test_first_paint_shows_specific_reason` 断言首屏 HTML 里能读到
+      `401 Token is invalid` 这类**具体**原因；**负例验证**——移除模板注入 ⇒ 该用例红。
+- [x] **#136【P1】失败页仍显示"本页无问题"。** ✅ **2026-09-18 已修**
+      修法：空态文案抽成 `emptyFindingsNote()`（JS **单一副本**），按
+      「分析失败 / 空页 / 确实无问题」三分支；模板同步按 `page_parse_error` /
+      `page_ocr_empty` 分支。判据读**当前页**标记 `currentPageFlags`
+      （由 `updatePageLevelUI` 每次刷新写入）—— **不能用** `ctx`（首屏注入，翻页后过期）。
+      **验证**：`test_failed_page_does_not_say_no_issues` 断言失败页**不含**"本页无问题"
+      且含"不代表本页无问题"；`test_clean_page_still_says_no_issues` 是**对照组**
+      （防"为修缺陷把三种空态全改告警"→ 告警疲劳也是假阴性）；
+      **负例验证**——把失败页分支退回 ⇒ 该用例红。
 - [ ] **#137【P2】上传页完全不渲染 stall。** 后端已在 SSE 快照提供（`api/jobs/status.py:200`），
       `static/upload.js` **0 处引用** ⇒ 停滞任务在列表上无任何提示。
 - [ ] **#138【P2】设置页协议切换无默认值联动，且可能静默改协议。**
@@ -235,29 +230,43 @@
 
 ### F2. 后端（失败原因链路 / 并发）
 
-- [ ] **#140【P1】外部取消只终止父 task，派生子任务继续跑 LLM 并写库。**
-      `stage2.py:147-154` 一次性 `create_task` 建**全部**页任务且不登记；
-      `watchdog.py:328-331` / `main.py:418-421` 只取消注册的**父** task；父的 `finally`
-      （`engine.py:115-129`）也只 flush 进度 future。⇒ 孤儿继续 `touch_activity`、
-      写 `page_cache`/`findings`，甚至与用户 retry 后新一轮**抢同一页**（`engine.py:536-538` 注释已承认）。
-      **修法**：结构化并发（`TaskGroup` 或显式 `children: set[Task]`），在 `finally` 与
-      `except CancelledError` 里**先级联 cancel 子任务再 transition**；`_pipeline_tasks`
-      值改 `set[Task]`，`_terminate_pipeline_task` 取消集合全体。
-- [ ] **#141【P1】任务注册表按 job_id 单值覆盖 ⇒ 持锁孤儿失去引用 ⇒ 重试被永久挂死。**
-      `engine.py:66` `_pipeline_tasks[job_id] = task` 直接覆盖；`watchdog.py:328`
-      按 job_id 只能取到**新 task（等待者）**；`engine.py:112` `async with lock:` **无超时**。
-      ⇒ 看门狗每轮杀等待者、真凶仍持锁，形成"重试 → 900s 后被杀 → 再重试"的无限循环
-      （`watchdog.py:340-344` 已自述"per-job 锁可能仍被持有，需人工介入"）。
-      **修法**：注册表改 `dict[str, set[Task]]`（或新增前把旧任务移入 `_orphans` 一并取消）；
-      `_terminate_pipeline_task` 取消同 job **全部**未完成 task，并把 `cancelled_ids` 写进审计 detail。
-- [ ] **#142【P1】`pending` + 无注册 task = 无终态黑洞；两处"先写 pending 后 launch"不在 try 内。**
-      `watchdog.py:174-176` 跳过"pending 且无活 task"；启动恢复要求 `created_at < process_started_at`
-      （`state.py:163-165`）⇒ **同进程内**的 pending 孤儿只能等下次重启；期间 SSE 无限等待
-      （`api/jobs/status.py:389` 的 `while True` 只认终态），用户无提示。
-      可达路径：`api/jobs/upload.py:369-375 → :402`、`api/jobs/actions.py:82 → :111`
-      （两处 `launch_pipeline` **都不在 try 内**）。
-      **修法**：launch 调用点包 try/except，失败即转 `error` + 审计；或给看门狗加"pending 且
-      早于本进程启动 且 无活 task → error"的低频规则。
+- [x] **#140【P1】外部取消只终止父 task，派生子任务继续跑 LLM 并写库。** ✅ **2026-09-18 已修**
+      修法：新增 `locks.ChildTasks`（`spawn` 登记 + `cancel_all`/`drain` 级联），
+      `run_pipeline` 的 **`finally` 首要动作**就是 `children.drain(cancel=True)`
+      —— 顺序不可颠倒（子任务会写库，会把刚收敛的终态再改回去）。
+      `stage2._run_stage2_analysis`（含早停/取消分支）与分片路径的
+      `analysis_tasks` / `heal_tasks` 全部改经 `children.spawn`（原先裸 `create_task`）。
+      默认参数 `children=None` 时内部自建 → 保持旧调用方/测试可用。
+      **验证**：`test_cancelling_pipeline_cascades_to_child_page_tasks` 断言
+      "父被取消后子任务**真的停了**"（行为级，不是"代码里调了 cancel"）；
+      另断言注册表与 per-job 锁都干净；**负例验证**——移除 `drain` ⇒ 该用例红。
+- [x] **#141【P1】任务注册表按 job_id 单值覆盖 ⇒ 持锁孤儿失去引用 ⇒ 重试被永久挂死。**
+      ✅ **2026-09-18 已修**
+      修法：`_pipeline_tasks` 改 `dict[str, set[Task]]`（**累积**而非覆盖），
+      新增 `register_pipeline_task` / `unregister_pipeline_task`（幂等，
+      只摘自己、不删整个键）/ `live_tasks_for`；`_terminate_pipeline_task`
+      取消**该 job 全部**未完成 task；`main.py` 关闭端点同步改为双层遍历。
+      ⇒ 取消持锁真凶后它走 `CancelledError` 分支**释放锁**，等待者随之取到锁并
+      因 `status=cancelled` 干净退出 —— 死结解开。
+      **验证**：`test_holder_and_waiter_both_cancelled` 用真实 per-job 锁复现
+      "持锁者 + 子任务 + 等待者"三者共存，断言三者全被取消**且锁已释放**；
+      `test_single_value_registry_would_lose_the_holder` 反向固化"单值 dict 会丢掉真凶"；
+      **负例验证**——把 `_terminate_pipeline_task` 改回只取消第一个 ⇒
+      `assert task_holder.done()` 当场红（"持锁真凶必须被取消"）。
+- [x] **#142【P1】`pending` + 无注册 task = 无终态黑洞；两处"先写 pending 后 launch"不在 try 内。**
+      ✅ **2026-09-18 已修**
+      修法：新增 `api/jobs/__init__.py:mark_launch_failed()`（条件 UPDATE
+      `WHERE status='pending'` + 审计 `launch_failed`，**在 db_lock 之外**写审计避免
+      不可重入死锁）；`upload.py` 与 `actions.py` 两处 launch 均包 try/except，
+      失败即转 `error` 并返回 500（把黑洞变成可见、可重试的失败）。
+      **验证**：`test_retry_launch_failure_marks_error_not_pending`（真调接口 + 断言
+      不停在 `pending`、有 `error_message`、留审计）；
+      `test_mark_launch_failed_is_noop_when_status_moved_on`（并发不误伤）；
+      `test_launch_call_sites_are_wrapped_in_try`（**AST 静态机检**两处调用点都在 try 里，
+      防将来新增第三个调用点又忘包 —— 那正是本缺陷的成因）；
+      **负例验证**——还原裸 launch ⇒ 行为用例与机检**双双变红**。
+      ⚠️ 机检读源码用 `utf-8-sig`（`actions.py` 带 BOM，普通 utf-8 解出 `U+FEFF`
+      会让 `ast.parse` 崩）。
 - [ ] **#143【P2】"不可重试"判据是整段错误串的子串匹配 ⇒ 误判为配置级 + 误导文案。**
       `llm/client.py:32-36` 的关键词表含 `"400"` / `"invalid"`，`:266-269` 用 `kw in err_str`。
       ⇒ `429 Rate limit … Limit 40000` 命中 `"400"`、本地 `ValueError("invalid literal for int()")`
@@ -471,7 +480,10 @@
 
 1. ~~**先修 2 个 P0（#133 / #134）**~~ ✅ **2026-09-18 已完成（`177a6d9`）** ——
    两条都做了负例验证；全量 2651 passed。**下一步转 2。**
-2. **同步修 P1 的错误可见性（#135 / #136）与后端并发（#140 / #141 / #142）** —— 后者是"重试永久挂死"的根因。
+2. ~~**同步修 P1 的错误可见性（#135 / #136）与后端并发（#140 / #141 / #142）**~~
+   ✅ **2026-09-18 已完成（见本轮提交）** —— 5 条全部修完，每条都做了**负例验证**；
+   全量 **2658 passed / 3 skipped**（较上轮 2651 +7 = 2 级联取消护栏 + 3 launch 失败护栏
+   + 4 失败页渲染护栏，其中 2 条合并计数）。**下一步转 3。**
 3. **加 #171 契约机检** —— 先补护栏，再改代码，避免修完又漂。
 4. **#143 负例测试** —— 它现在会把 429/本地错误误报成"请检查 API Key"，误导排障。
 5. 外部解阻后再做 **#151（anthropic 实测）** 与 **#159（视觉第四读原型）**。
@@ -480,9 +492,10 @@
 6. 收尾照旧：**先重建产物 → 再跑门禁 → 推送到干净的 worktree**（`tests_coverage` 含分发一致性，
    升版未重建必然变红，那是**正确信号**）。
 
-> ⚠️ **产物尚未重建** ⇒ #133 / #134 目前只在**源码**里修好，**v1.1.8 产物里仍是坏的**。
-> 要对外分发必须重新构建（见第 6 步）。
+> ⚠️ **产物尚未重建** ⇒ #133–#142 共 **7 条**（2 P0 + 5 P1）目前只在**源码**里修好，
+> **v1.1.8 产物里仍是坏的**。要对外分发必须重新构建（见第 6 步）。
 >
 > ⚠️ **外部阻塞**：
-> **A1**（`dist-electron` 被宿主进程持句柄 ⇒ 需完全退出 WorkBuddy 后 `python scripts/clean_dist.py --apply`）仍在。
-> **A4**（SiliconFlow 余额）**已于 2026-09-18 解除**（key 恢复 200），多轮 e2e 可以跑了。
+> ~~**A1**（`dist-electron` 被宿主进程持句柄）~~ ✅ **2026-09-18 已解除**（用户手工收敛，
+> 现仅存 `dist/`）。**A4**（SiliconFlow 余额）**已于 2026-09-18 解除**（key 恢复 200），
+> 多轮 e2e 可以跑了。

@@ -11,6 +11,8 @@ from config import config
 from db.client import get_db
 from core.pipeline.locks import (
     _pipeline_locks, _pipeline_tasks, _locks_guard, _SLICE_QUEUE_TIMEOUT,
+    live_tasks_for, register_pipeline_task, unregister_pipeline_task,
+    ChildTasks,
 )
 from core.pipeline.ocr_support import _sanitize_ocr_text, assess_ocr_page
 from core.pipeline.state import (
@@ -26,6 +28,11 @@ from core.pipeline.stage3 import _run_stage3_cross_analysis
 from core.security import redact_urls
 
 logger = logging.getLogger(__name__)
+
+# #140 子任务收尾等待上限。取值依据：页分析被取消后走 CancelledError 分支
+# 直接退出（不再等 LLM 返回），故秒级足够；给足余量以免在慢机器上
+# 误判"未退出"而留下日志噪声。**不是**停滞阈值，不参与看门狗判据。
+_CHILD_DRAIN_TIMEOUT_S = 10.0
 def launch_pipeline(job_id: str, pdf_path: str) -> asyncio.Task:
     """启动 pipeline 后台 task 并注册到 _pipeline_tasks。
 
@@ -38,33 +45,39 @@ def launch_pipeline(job_id: str, pdf_path: str) -> asyncio.Task:
         launch_pipeline(job_id, str(pdf_path))
     """
     def _on_done(task: asyncio.Task, jid: str = job_id):
-        # Only pop if this task is still the registered one
-        # (prevents stale callback from deleting a newer task's entry)
-        if _pipeline_tasks.get(jid) is task:
-            removed = _pipeline_tasks.pop(jid, None)
-        else:
-            removed = None
+        # 只从**集合**里摘掉自己（不清空整个键）—— 同 job 可能还有持锁的
+        # 真凶或在排队的等待者，它们仍是"活跃 pipeline"，必须留在注册表里
+        # 以供关闭端点/看门狗取消（#141：单值覆盖会把它们弄丢）。
+        removed = unregister_pipeline_task(jid, task)
         active_after = len(_pipeline_tasks)
         if task.cancelled():
             logger.info(
                 f"[{jid}] Pipeline task cancelled and unregistered "
-                f"(was_registered={removed is not None}, active_after={active_after})"
+                f"(was_registered={removed}, active_after={active_after})"
             )
         elif task.exception():
             logger.error(
                 f"[{jid}] Pipeline task crashed: {task.exception()!r} "
-                f"(was_registered={removed is not None}, active_after={active_after})"
+                f"(was_registered={removed}, active_after={active_after})"
             )
         else:
             logger.info(
                 f"[{jid}] Pipeline task completed and unregistered "
-                f"(was_registered={removed is not None}, active_after={active_after})"
+                f"(was_registered={removed}, active_after={active_after})"
             )
 
     from core.pipeline import run_pipeline as _run_pipeline
     task = asyncio.create_task(_run_pipeline(job_id, pdf_path))
-    _pipeline_tasks[job_id] = task
+    pending_before = len(live_tasks_for(job_id))
+    register_pipeline_task(job_id, task)
     task.add_done_callback(_on_done)
+    if pending_before:
+        # 同一 job 已有未完成 task（持锁者仍在校尾，或等待者排队）——
+        # 这是 retry 的正常路径，但值得留痕：它正是 #141 关注的场景。
+        logger.warning(
+            f"[{job_id}] Launch while {pending_before} task(s) for this job still "
+            f"unfinished — registry now holds {len(_pipeline_tasks.get(job_id, ()))} task(s)"
+        )
     logger.info(
         f"[{job_id}] Pipeline task launched and registered "
         f"(pdf={Path(pdf_path).name}, active={len(_pipeline_tasks)})"
@@ -95,6 +108,12 @@ async def run_pipeline(job_id: str, pdf_path: str):
       setdefault 建新锁而与 B 并行执行同一 job）。
     """
     progress_futures: list = []
+    # #140 结构化并发：本 job 派生的**页分析子任务**登记在这里。
+    # 父 task 一旦被取消（看门狗 / 关闭端点 / retry 的旧轮），子任务必须
+    # 跟着停 —— 否则孤儿协程继续跑 LLM（单页最长 240s）、继续 touch_activity
+    # （把心跳刷成"在动"、掩盖真正的停滞）、继续写 page_cache/findings
+    # （与 retry 后的新一轮抢同一页）。stage2 / 分片路径从本对象 spawn。
+    children = ChildTasks(job_id)
     # Acquire per-job lock — prevents two pipelines on the same job_id.
     # Registry entry = {lock, refs}; refs counts every coroutine that
     # entered run_pipeline (holding or waiting/cancelled) so the entry is
@@ -111,8 +130,16 @@ async def run_pipeline(job_id: str, pdf_path: str):
             logger.info(f"[{job_id}] Per-job lock held by another coroutine, waiting to acquire")
         async with lock:
             logger.info(f"[{job_id}] Per-job lock acquired")
-            await _run_pipeline_impl(job_id, pdf_path, progress_futures)
+            await _run_pipeline_impl(job_id, pdf_path, progress_futures, children)
     finally:
+        # ── #140 级联取消：**先**停子任务，再做任何状态收敛 ──────────
+        # 顺序不可颠倒：子任务会在 transition_status 期间继续写库，
+        # 把"已收敛的终态"再改回去（例如把 error 的心跳刷新）。
+        # 这里**不**受"是否发生异常"影响 —— 正常结束也要 drain（幂等）。
+        try:
+            await children.drain(cancel=True, timeout=_CHILD_DRAIN_TIMEOUT_S)
+        except Exception as e:      # drain 自身已吞异常；兜底防逃逸
+            logger.warning(f"[{job_id}] 子任务收尾异常: {e}")
         # Flush any in-flight progress coroutines before the loop may close
         if progress_futures:
             try:
@@ -147,8 +174,15 @@ async def run_pipeline(job_id: str, pdf_path: str):
         logger.info(f"[{job_id}] Pipeline exited, PDF retained for review: {Path(pdf_path).name}")
 
 
-async def _run_pipeline_impl(job_id: str, pdf_path: str, progress_futures: list):
-    """Pipeline implementation — guarded by per-job lock from run_pipeline."""
+async def _run_pipeline_impl(job_id: str, pdf_path: str, progress_futures: list,
+                             children: "ChildTasks | None" = None):
+    """Pipeline implementation — guarded by per-job lock from run_pipeline.
+
+    `children`（#140）：本 job 派生子任务的登记器。默认 None 时内部自建一个
+    **私有**实例，使直接调用本函数的测试/旧路径仍能级联取消自己的子任务。
+    """
+    if children is None:
+        children = ChildTasks(job_id)
     # Runtime resolution — tests patch core.pipeline.{_is_cancelled,
     # _update_ocr_progress}.
     from core.pipeline import (
@@ -256,7 +290,7 @@ async def _run_pipeline_impl(job_id: str, pdf_path: str, progress_futures: list)
             stage1_ms, stage2_ms, failed_pages, sliced_total = (
                 await _run_sliced_stage1_2(
                     db, job_id, ocr_pdf_path, slice_pages, _ocr_progress_cb,
-                    pdf_diags=sliced_pdf_diags,
+                    pdf_diags=sliced_pdf_diags, children=children,
                 )
             )
             # 0 页兜底：所有片均失败/空
@@ -288,7 +322,7 @@ async def _run_pipeline_impl(job_id: str, pdf_path: str, progress_futures: list)
             pages, used_backend, stage1_ms, failed_pages, dual_diff = stage_out
             # ── Stage 2 (整份路径专属; 切片路径已在 _run_sliced_stage1_2 完成)
             stage2_ms = await _run_stage2_analysis(
-                db, job_id, pages, failed_pages
+                db, job_id, pages, failed_pages, children=children
             )
         # ── Stage 3 (两路径共享) ─────────────────────────────────
         await _run_stage3_cross_analysis(
@@ -403,7 +437,7 @@ async def _run_pipeline_impl(job_id: str, pdf_path: str, progress_futures: list)
 
 async def _run_sliced_stage1_2(
     db, job_id: str, pdf_path: str, slice_pages: int, ocr_progress_cb,
-    pdf_diags: dict | None = None,
+    pdf_diags: dict | None = None, children: "ChildTasks | None" = None,
 ) -> tuple[int, int, list[int], int]:
     """MinerU 分片 OCR + 渐进分析（流式输出核心，问题 2）。
 
@@ -442,6 +476,10 @@ async def _run_sliced_stage1_2(
     state_lock = asyncio.Lock()
     failed_pages: list[int] = []
     completed = {"n": 0}
+    # #140：分片路径的页分析子任务全部经 `children.spawn` 登记 ——
+    # 父 task 被取消时由 run_pipeline 的 finally 级联取消，不再游离。
+    if children is None:
+        children = ChildTasks(job_id)
     analysis_tasks: list[asyncio.Task] = []
 
     stage1_start = time.time()
@@ -525,7 +563,7 @@ async def _run_sliced_stage1_2(
             if page_num in existing or page_num in analyzed:
                 continue
             analysis_tasks.append(
-                asyncio.create_task(
+                children.spawn(
                     _analyze_one(
                         db, job_id, page_num, page, sem, failed_pages,
                         state_lock, completed, total_pages,
@@ -651,7 +689,7 @@ async def _run_sliced_stage1_2(
         for row in await cur.fetchall():
             page_dict = {"markdown": {"text": row["raw_html"] or ""}}
             heal_tasks.append(
-                asyncio.create_task(
+                children.spawn(
                     _analyze_one(
                         db, job_id, row["page"], page_dict, sem,
                         failed_pages, state_lock, completed, total_pages,

@@ -24,6 +24,14 @@
   let pageLoadToken = 0;
   // total_pages=0 表示 OCR 尚未完成（真实页数未知），显示 "?" 而非 1
   let totalPages = ctx.total_pages || 0;
+  // #136：**当前页**的页面级标记（由 updatePageLevelUI 每次刷新时写入）。
+  // 空 findings 的文案依赖它来区分"分析失败 / 空页 / 确实无问题"。
+  // 不能用 ctx：那是首屏 SSR 注入的，翻页后即过期（会把上一页的失败
+  // 标记套到新页上，反之亦然）。
+  let currentPageFlags = {
+    parseError: bool(ctx.page_parse_error),
+    ocrEmpty: bool(ctx.page_ocr_empty),
+  };
   const pageFindingCounts = ctx.page_finding_counts || {};
   // UX P1-4: PDF 预览缩放状态（1.0 = fit-width 原样）。渲染用 CSS width
   // 百分比实现，滚动容器 #pdf-scroll 已有 overflow-auto 承接放大溢出。
@@ -96,6 +104,14 @@
 
   // DOM 就绪后探测 E2E-required 元素，方便快速排查模板渲染问题
   document.addEventListener("DOMContentLoaded", () => {
+    // #135：首屏也应用一次页面级 UI（此前只有 AJAX/SSE 路径会调
+    // updatePageLevelUI，DOMContentLoaded 不触发）⇒ 直接打开或刷新终态
+    // 任务的第一页时，parse-error 横幅只有模板里的**通用文案**，
+    // 复核者看不到"401 凭据失效"这类**全局性**失败原因 ——
+    // 与 #127（后端原因不透传）是同一缺陷的界面侧。
+    // 数据来自 SSR 注入的 ctx（structured_json 已在服务端解析）。
+    applyInitialPageLevelUI();
+
     // 初始渲染当前页 PNG（替代 iframe 原生 PDF viewer —
     // 无浏览器打印/下载/更多操作按钮，缩放 fit-width 可控）
     const pdfImg = document.getElementById("pdf-page-img");
@@ -873,11 +889,50 @@
 
   // 翻页时更新页面级 UI：置信度徽章 / parse-error 横幅 / critical 横幅 / 参数矩阵
   // 之前 AJAX 翻页只更新 OCR + findings，导致用户看到的是上一页的置信度、
+  // 首屏页面级 UI（#135）：只喂模板已经知道的那几项（parse-error 横幅 +
+  // 置信度），不伪造结构化数据。`findings` / `measurements` 传首屏已有的
+  // SSR 值（模板已渲染好，这里只是把"原因文案"补上）。
+  //
+  // 为什么不干脆在模板里直接渲染原因：模板文案与 JS 文案必须有**唯一副本**，
+  // 否则两处必然漂移（updatePageLevelUI 里已缓存 dataset.fallback 正是为此）。
+  // 所以这里复用同一个 updatePageLevelUI，让首屏与翻页走**同一条**代码路径。
+  function applyInitialPageLevelUI() {
+    if (ctx.page_parse_error || ctx.page_confidence || ctx.page_ocr_empty) {
+      updatePageLevelUI(
+        {
+          structured: {
+            _parse_error: bool(ctx.page_parse_error),
+            _ocr_empty: bool(ctx.page_ocr_empty),
+            _error: ctx.page_parse_error_reason || "",
+            overall_confidence: ctx.page_confidence || "",
+          },
+        },
+        [],
+        {},
+      );
+    }
+    // 首屏 findings 是 SSR 渲染的：若为空，按同一判据补上正确文案
+    // （#136 —— 模板已按 page_parse_error 分支渲染，此处只在"清单为空"
+    // 时兜底，避免依赖模板分支是否被正确渲染）。
+    const list = document.getElementById("findings-list");
+    if (list && !list.querySelector('[id^="finding-"]')) {
+      const note = document.getElementById("findings-empty-note");
+      if (note) note.outerHTML = emptyFindingsNote();
+    }
+  }
+
   // critical 计数和参数矩阵，对 GMP 复核构成误导。
   function updatePageLevelUI(pageData, findings, measurementsData) {
     const structured = pageData.structured || {};
     const pageConfidence = structured.overall_confidence || "";
     const pageParseError = bool(structured._parse_error);
+
+    // #136：刷新"当前页标记" —— 空 findings 文案（emptyFindingsNote）依赖它。
+    // 必须在任何提前 return 之前写入，保证翻页后标记与页面同步。
+    currentPageFlags = {
+      parseError: pageParseError,
+      ocrEmpty: bool(structured._ocr_empty),
+    };
 
     // 1. 置信度徽章
     const confEl = document.getElementById("page-confidence-badge");
@@ -1233,6 +1288,29 @@
     if (lEl) lEl.textContent = String(tally.llm);
   }
 
+  // 空 findings 的文案（#136）。**单一副本**：SSR 首屏（模板）与 AJAX 翻页
+  // 走同一判据（分析失败 / 空页 / 确实无问题），否则两套标记必然漂移。
+  // 依据的是**当前页**的结构化标记（`currentPageFlags`，由 updatePageLevelUI
+  // 每次刷新时写入）—— 不能用 ctx（那是首屏注入的，翻页后已过期）。
+  function emptyFindingsNote() {
+    const flags = currentPageFlags || {};
+    const base = "py-8 text-center text-[13px] text-muted-foreground";
+    if (flags.parseError) {
+      return (
+        `<div class="${base}" id="findings-empty-note">本页未能分析（LLM 解析失败），` +
+        `<span class="text-foreground">问题清单为空不代表本页无问题</span>，` +
+        `请以 PDF 原图人工核对</div>`
+      );
+    }
+    if (flags.ocrEmpty) {
+      return (
+        `<div class="${base}" id="findings-empty-note">` +
+        `本页无 OCR 内容（空白页或扫描质量过低），未执行分析</div>`
+      );
+    }
+    return `<div class="${base}" id="findings-empty-note">本页无问题</div>`;
+  }
+
   function renderFindings(findings, hasMore) {
     const list = document.getElementById("findings-list");
     if (!list) return;
@@ -1290,8 +1368,12 @@
         .replace(/'/g, "&#39;");
 
     if (findings.length === 0) {
-      list.innerHTML =
-        '<div class="py-8 text-center text-[13px] text-muted-foreground">本页无问题</div>';
+      // #136：空 findings 的**原因**必须区分，三种情况视觉上不能相同：
+      //   - 分析失败（_parse_error）→ "未能分析，清单为空不代表无问题"
+      //   - 空页（_ocr_empty）      → "无 OCR 内容，未执行分析"
+      //   - 其余                     → "本页无问题"（确实检查过）
+      // 只按 `findings.length === 0` 判断会把失败页伪装成合规页（GMP 假阴性）。
+      list.innerHTML = emptyFindingsNote();
       updateTierCounts(findings);
       return;
     }

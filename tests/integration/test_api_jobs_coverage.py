@@ -1329,3 +1329,116 @@ class TestListJobsProjectsFailureFields:
         r = await c.get("/api/jobs")
         for j in r.json()["jobs"]:
             assert "pdf_path" not in j, "pdf_path 不得出现在列表响应里"
+
+
+class TestLaunchFailureConvergesToError:
+    """#142：launch_pipeline 抛异常时不得留下 `pending` 无终态黑洞。
+
+    背景：`pending` 且注册表无活 task 的 job 不被看门狗监视、不被启动恢复
+    覆盖（只认跨进程孤儿）、SSE 又只认终态 ⇒ 界面无限等待且无任何提示。
+    可达路径 = 两处 launch 调用点此前**都不在 try 内**（upload / retry）。
+    """
+
+    @pytest.mark.asyncio
+    async def test_retry_launch_failure_marks_error_not_pending(self, test_db):
+        """retry 的 launch 抛异常 → job 必须落到 error（可见、可重试），不是 pending。"""
+        import fitz
+        from main import app
+        from config import config as _cfg
+
+        output_dir = Path(_cfg["app"].output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        doc = fitz.open()
+        doc.new_page().insert_text((50, 50), "x")
+        pdf_path = output_dir / "launch-fail.pdf"
+        doc.save(str(pdf_path))
+        doc.close()
+
+        await test_db.execute(
+            "INSERT INTO jobs (id, filename, pdf_path, status) VALUES (?, ?, ?, ?)",
+            ("launch-fail", "x.pdf", str(pdf_path), "error"),
+        )
+        await test_db.commit()
+
+        def _boom(*_a, **_kw):
+            raise RuntimeError("no running event loop")
+
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://127.0.0.1:8000",
+            headers={"Origin": "http://127.0.0.1:8000"},
+        ) as c:
+            with patch("api.jobs.launch_pipeline", side_effect=_boom):
+                r = await c.post("/api/jobs/launch-fail/retry")
+            assert r.status_code == 500, "启动失败必须显式报错，不能假装成功"
+
+            # 关键断言：DB 里不得停在 pending（黑洞），必须落到终态 error
+            cur = await test_db.execute(
+                "SELECT status, error_message FROM jobs WHERE id = ?",
+                ("launch-fail",),
+            )
+            row = await cur.fetchone()
+            assert row["status"] == "error", (
+                f"漏成 pending 黑洞（界面会无限等待且无提示），实得 {row['status']}")
+            assert row["error_message"], "必须给出可见原因（GMP 排障需要）"
+
+            # 审计留痕
+            cur = await test_db.execute(
+                "SELECT COUNT(*) AS n FROM audit_log "
+                "WHERE job_id = ? AND action = 'launch_failed'",
+                ("launch-fail",),
+            )
+            assert (await cur.fetchone())["n"] == 1, "启动失败必须留审计"
+
+    @pytest.mark.asyncio
+    async def test_mark_launch_failed_is_noop_when_status_moved_on(self, test_db):
+        """并发路径已把 job 推进（非 pending）→ 不得把状态打回 error。"""
+        from api.jobs import mark_launch_failed
+
+        await test_db.execute(
+            "INSERT INTO jobs (id, filename, status) VALUES (?, ?, ?)",
+            ("moved-on", "x.pdf", "ocr_running"),
+        )
+        await test_db.commit()
+
+        changed = await mark_launch_failed("moved-on", RuntimeError("boom"))
+        assert changed is False, "条件更新必须拒绝改写已推进的状态"
+        cur = await test_db.execute(
+            "SELECT status FROM jobs WHERE id = ?", ("moved-on",))
+        assert (await cur.fetchone())["status"] == "ocr_running"
+
+    @pytest.mark.asyncio
+    async def test_launch_call_sites_are_wrapped_in_try(self):
+        """**静态机检**：两处 launch 调用点必须都在 try 块里。
+
+        行为级用例只覆盖能触发异常的那条路；这里直接断言源码结构，
+        防止将来新增第三个调用点时又忘了包 —— 那正是 #142 的成因。
+        """
+        import ast
+        from pathlib import Path as _P
+
+        for rel in ("api/jobs/upload.py", "api/jobs/actions.py"):
+            # utf-8-sig：actions.py 带 BOM，普通 utf-8 解出 U+FEFF 会让 ast.parse 崩
+            src = (_P(rel)).read_text(encoding="utf-8-sig")
+            tree = ast.parse(src)
+            guarded: list[int] = []
+            guarded_names: set[str] = set()
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Try):
+                    for inner in ast.walk(node):
+                        if isinstance(inner, ast.Call):
+                            fn = inner.func
+                            name = getattr(fn, "id", None) or getattr(fn, "attr", None)
+                            if name == "launch_pipeline":
+                                guarded.append(inner.lineno)
+                                guarded_names.add(rel)
+            unguarded: list[int] = []
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Call):
+                    fn = node.func
+                    name = getattr(fn, "id", None) or getattr(fn, "attr", None)
+                    if name == "launch_pipeline" and node.lineno not in guarded:
+                        unguarded.append(node.lineno)
+            assert not unguarded, (
+                f"{rel} 中 launch_pipeline 调用未包 try（#142 复发）：行 {unguarded}")
+            assert guarded, f"{rel} 应至少有 1 处受保护的 launch_pipeline 调用"

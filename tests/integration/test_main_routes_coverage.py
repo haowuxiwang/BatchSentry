@@ -446,7 +446,7 @@ class TestShutdownEndpoint:
         mock_task.done.return_value = False
         mock_task.cancel.return_value = True
         _pipeline_tasks.clear()
-        _pipeline_tasks["test-job-1"] = mock_task
+        _pipeline_tasks["test-job-1"] = {mock_task}
 
         # mock asyncio.sleep 避免测试等待 2 秒
         import asyncio as _asyncio_mod

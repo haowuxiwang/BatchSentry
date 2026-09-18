@@ -853,7 +853,10 @@ class TestLaunchPipeline:
             mock_run.return_value = None
             task = launch_pipeline(job_id, "/tmp/test.pdf")
             assert job_id in _pipeline_tasks
-            assert _pipeline_tasks[job_id] is task
+            # #141：注册表值是**集合**（同一 job 允许多个未完成 task），
+            # 断言"包含"而非"等于" —— 集合语义正是为了让持锁者与等待者
+            # 同时被登记、都能被取消。
+            assert task in _pipeline_tasks[job_id]
             # 等待 task 完成以避免 warning
             await task
             # task 完成后从注册表移除
@@ -3566,7 +3569,7 @@ class TestPipelineEngineGuards:
 
         entered = {"n": 0}
 
-        async def fake_impl(job_id, pdf_path, progress_futures):
+        async def fake_impl(job_id, pdf_path, progress_futures, children=None):
             entered["n"] += 1
             await asyncio.sleep(0.1)
 
@@ -3581,8 +3584,64 @@ class TestPipelineEngineGuards:
         assert entered["n"] == 2  # 两个协程都拿到锁，串行执行
 
     @pytest.mark.asyncio
+    async def test_cancelling_pipeline_cascades_to_child_page_tasks(self, pipeline_db, tmp_path):
+        """#140：取消父 pipeline task 必须**级联停掉**页分析子任务。
+
+        这是"取消后孤儿继续跑 LLM 并写库"的正面证明。旧实现里 stage2 用裸
+        `asyncio.create_task` 派生全部页任务且从不登记 ⇒ 取消父 task 后，
+        子协程继续 touch_activity / 写 page_cache / 写 findings，
+        既与 retry 的新一轮抢同一页，又把心跳刷成"在动"掩盖真正停滞。
+
+        断言的是**行为**（子任务真的停了），不是"代码里调了 cancel"。
+        """
+        from core import pipeline as pipeline_mod
+        from core.pipeline.engine import run_pipeline
+
+        job_id = await _insert_job(pipeline_db, status="pending")
+        pdf_path = str(tmp_path / "fake.pdf")
+        Path(pdf_path).write_bytes(b"%PDF-1.4 fake")
+
+        child_started = asyncio.Event()
+        child_finished = {"n": 0}
+
+        async def fake_impl(job_id, pdf_path, progress_futures, children=None):
+            """模拟 stage2：派生一个"无限跑"的页分析子任务后挂起。"""
+            assert children is not None, "run_pipeline 必须把 children 传进来"
+
+            async def _page_task():
+                child_started.set()
+                try:
+                    await asyncio.Event().wait()      # 模拟长跑 LLM
+                finally:
+                    child_finished["n"] += 1
+
+            children.spawn(_page_task())
+            await asyncio.Event().wait()              # 父任务挂起等取消
+
+        with patch("core.pipeline.engine._run_pipeline_impl", side_effect=fake_impl):
+            parent = asyncio.create_task(run_pipeline(job_id, pdf_path))
+            await asyncio.wait_for(child_started.wait(), timeout=5)
+            assert child_finished["n"] == 0, "前置条件：子任务仍在跑"
+
+            parent.cancel()
+            await asyncio.gather(parent, return_exceptions=True)
+
+        assert child_finished["n"] == 1, (
+            "父 task 被取消后派生的页分析子任务必须已停止（级联取消）")
+        # 注册表与锁都必须干净（否则 retry 会挂死）
+        from core.pipeline.locks import _pipeline_tasks, _pipeline_locks
+        assert _pipeline_tasks.get(job_id) is None
+        assert _pipeline_locks.get(job_id) is None
+
+    @pytest.mark.asyncio
     async def test_launch_stale_done_callback_and_crashed_task(self, pipeline_db, tmp_path):
-        """旧 task 的 done 回调不得删除新 task 的注册表条目；崩溃 task 记录日志。"""
+        """旧 task 的 done 回调不得删除新 task 的注册表条目；崩溃 task 记录日志。
+
+        #141 语义：注册表是 `dict[job_id, set[Task]]`，每个 task 的 done 回调
+        只摘掉**自己**。t1 崩溃/完成时 t2 若仍在跑，键必须继续存在且含 t2 ——
+        否则关闭端点与看门狗都会"看不见"那个仍在运行的 task（旧实现单值覆盖，
+        真凶就这样失去引用，重试被永久挂死）。
+        """
         from core.pipeline.locks import _pipeline_tasks
         from core.pipeline import launch_pipeline
 
@@ -3591,18 +3650,27 @@ class TestPipelineEngineGuards:
         Path(pdf_path).write_bytes(b"%PDF-1.4 fake")
 
         call = {"n": 0}
+        release = asyncio.Event()
 
         async def fake_run(job_id, pdf_path):
             call["n"] += 1
-            await asyncio.sleep(0.05)
             if call["n"] == 1:
                 raise RuntimeError("boom")
+            # 第二个 task 一直挂到测试放行 —— 保证"t1 已结束而 t2 仍在跑"
+            # 这个窗口真实存在（否则 AsyncMock/立即完成的协程会让断言落空）
+            await release.wait()
 
         with patch("core.pipeline.run_pipeline", side_effect=fake_run):
             t1 = launch_pipeline(job_id, pdf_path)
             await asyncio.sleep(0.01)
             t2 = launch_pipeline(job_id, pdf_path)
-            await asyncio.gather(t1, t2, return_exceptions=True)
+            await asyncio.wait({t1}, timeout=2)
+            assert t1.done(), "前置条件：t1 已结束（抛 boom）"
+            assert not t2.done(), "前置条件：t2 仍在运行"
+            assert t2 in _pipeline_tasks.get(job_id, set()), (
+                "t1 结束时 t2 仍在注册表里（单值覆盖会让它消失）")
+            release.set()
+            await asyncio.gather(t2, return_exceptions=True)
 
         assert _pipeline_tasks.get(job_id) is None
 

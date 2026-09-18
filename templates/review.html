@@ -562,8 +562,20 @@
                             </div>
                         </div>
                         {% endfor %}
+                    {% elif page_parse_error %}
+                        {# #136：解析失败的页**不得**显示"本页无问题" —— 那会让
+                           "分析失败"与"确实合规"在视觉上完全相同（GMP 假阴性）。
+                           失败页没有产出 finding 的原因是**没分析出来**，
+                           不是"检查过、无异常"。 #}
+                        <div class="py-8 text-center text-[13px] text-muted-foreground" id="findings-empty-note">
+                            本页未能分析（LLM 解析失败），<span class="text-foreground">问题清单为空不代表本页无问题</span>，请以 PDF 原图人工核对
+                        </div>
+                    {% elif page_ocr_empty %}
+                        <div class="py-8 text-center text-[13px] text-muted-foreground" id="findings-empty-note">
+                            本页无 OCR 内容（空白页或扫描质量过低），未执行分析
+                        </div>
                     {% else %}
-                        <div class="py-8 text-center text-[13px] text-muted-foreground">本页无问题</div>
+                        <div class="py-8 text-center text-[13px] text-muted-foreground" id="findings-empty-note">本页无问题</div>
                     {% endif %}
                 </div>
             </div>
@@ -652,6 +664,10 @@
         matrix_shape: [{{ measurements | length }}, {{ matrix_columns | length }}],
         pdf_url: {{ pdf_url | tojson }},
         page_parse_error: {{ page_parse_error | tojson if page_parse_error is boolean else 'false' }},
+        {# #135：首屏横幅的具体失败原因（可为空 → JS 回退到模板里的通用文案）。
+           此前首屏只显示通用文案，DOMContentLoaded 又不调 updatePageLevelUI
+           ⇒ 直接打开终态任务看不到"401 凭据失效"这类全局原因。 #}
+        page_parse_error_reason: {{ page_parse_error_reason | tojson }},
         page_confidence: {{ page_confidence | tojson }},
         {# P0-3：首屏 findings 由 SSR 渲染、不经过 AJAX，锚点必须随 ctx 注入，
            否则首屏的"定位原图"按钮点了没反应（翻页后才生效 = 假缺陷）。 #}

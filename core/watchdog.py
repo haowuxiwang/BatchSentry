@@ -253,10 +253,23 @@ def stall_report(
 
 
 def _live_pipeline_tasks() -> dict:
-    """注册表快照（job_id → 未完成的 task）。运行时解析以便测试替换。"""
+    """注册表快照（job_id → 未完成的 task 集合）。运行时解析以便测试替换。
+
+    ⚠️ 值是**集合**（#141）：同一 job 可同时有"持锁真凶"与"排队等待者"。
+    旧实现返回单个 task（`_pipeline_tasks[jid]` 单值覆盖），看门狗据此只能
+    取消**等待者**，真凶仍持 per-job 锁 ⇒ 重试被永久挂死。
+    """
     from core.pipeline.locks import _pipeline_tasks
 
-    return {jid: t for jid, t in list(_pipeline_tasks.items()) if not t.done()}
+    return {
+        jid: {t for t in tasks if not t.done()}
+        for jid, tasks in list(_pipeline_tasks.items())
+    }
+
+
+def _has_live_task(job_id: str) -> bool:
+    """该 job 是否仍有未完成的 pipeline task（数量无关，语义同旧实现）。"""
+    return bool(_live_pipeline_tasks().get(job_id))
 
 
 def _local_now_str() -> str:
@@ -282,7 +295,7 @@ async def find_stalled_jobs(*, now: datetime | None = None) -> list[dict]:
     stalled: list[dict] = []
     for row in rows:
         status = row["status"]
-        has_live = row["id"] in live
+        has_live = bool(live.get(row["id"]))
         if not is_watched(status, has_live_task=has_live):
             continue
         elapsed = elapsed_seconds(row["last_activity_at"], now)
@@ -325,20 +338,35 @@ async def _terminate_pipeline_task(job_id: str) -> str:
     抛进调用方，而调用方（`watchdog_loop`）绝不能因单个 job 而中断 ——
     看门狗自己挂掉比 job 卡死更糟。
     """
-    task = _live_pipeline_tasks().get(job_id)
-    if task is None:
+    tasks = list(_live_pipeline_tasks().get(job_id, ()))
+    if not tasks:
         return "no-task"
-    task.cancel()
+    # 取消**该 job 的全部**未完成 task，而不只是某一个（#141）：
+    # 同一 job 可能同时存在"持锁的真凶"与"在 async with lock 上排队的等待者"。
+    # 只取消等待者的话，真凶继续持锁 ⇒ 下一次 retry 还是会永久挂死在 pending
+    # （看门狗每 kills 一个等待者就换来一次新的重试，无限循环）。
+    # 取消真凶让它走 CancelledError 分支释放锁，等待者随之得到锁并因
+    # status=cancelled 干净退出（run_pipeline 的注释已描述该路径）。
+    cancelled_n = 0
+    for task in tasks:
+        if not task.done():
+            task.cancel()
+            cancelled_n += 1
     try:
-        await asyncio.wait({task}, timeout=_TERMINATE_TIMEOUT_S)
+        await asyncio.wait(set(tasks), timeout=_TERMINATE_TIMEOUT_S)
     except Exception as e:      # asyncio.wait 理论上不抛；兜底防逃逸
         logger.warning(f"[{job_id}] 等待孤儿 task 收尾异常: {e}")
         return "wait-failed"
-    if task.done():
-        logger.info(f"[{job_id}] Watchdog terminated orphan pipeline task")
+    still_alive = [t for t in tasks if not t.done()]
+    if not still_alive:
+        logger.info(
+            f"[{job_id}] Watchdog terminated {cancelled_n} pipeline task(s) "
+            f"for this job (no live task left)"
+        )
         return "cancelled"
     logger.error(
-        f"[{job_id}] 孤儿 pipeline task 在 {_TERMINATE_TIMEOUT_S:g}s 内未退出 —— "
+        f"[{job_id}] {len(still_alive)}/{len(tasks)} pipeline task(s) 在 "
+        f"{_TERMINATE_TIMEOUT_S:g}s 内未退出 —— "
         f"per-job 锁可能仍被持有，重试会阻塞在 pending（需人工介入）"
     )
     return "not-exited"

@@ -93,9 +93,10 @@ class TestUploadLLMGuard:
         # "Cannot operate on a closed database"（异步竞态，非产品缺陷）。
         import asyncio
         from core import pipeline as pipeline_mod
-        for jid, task in list(pipeline_mod._pipeline_tasks.items()):
-            task.cancel()
-            try:
-                await task
-            except (asyncio.CancelledError, Exception):
-                pass
+        for jid, tasks in list(pipeline_mod._pipeline_tasks.items()):
+            for task in list(tasks):
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass

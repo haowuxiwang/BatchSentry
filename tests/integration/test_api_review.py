@@ -410,3 +410,108 @@ class TestPageExemption:
                 data={"reason": "csrf"},
             )
         assert r.status_code == 403
+
+
+class TestFailedPageIsNotRenderedAsClean:
+    """#135 / #136：**分析失败**的页不得在复核页上呈现为"无问题"。
+
+    #127 的界面侧同源问题：后端已经把失败原因写进 structured_json._error，
+    但首屏（SSR）从不消费它 ⇒ 复核者打开一个 LLM 凭据失效的任务，看到的是
+    "本页无问题" + 通用横幅，与"记录确实合规"无法区分（GMP 假阴性）。
+    """
+
+    @pytest_asyncio.fixture
+    async def parse_error_job(self, test_db):
+        """一个分析失败的页 + 一个分析失败的 job。"""
+        import json
+
+        await test_db.execute(
+            "INSERT INTO jobs (id, filename, pdf_path, status, total_pages, "
+            "error_message) VALUES (?, ?, ?, ?, ?, ?)",
+            ("bad-llm", "test.pdf", "/tmp/test.pdf", "partial_review", 2,
+             "LLM 凭据失效"),
+        )
+        # 第 1 页：分析失败（_parse_error + 具体原因）
+        await test_db.execute(
+            "INSERT INTO page_cache (job_id, page, raw_html, structured_json) "
+            "VALUES (?, ?, ?, ?)",
+            ("bad-llm", 1, "<p>OCR 原文</p>",
+             json.dumps({"_parse_error": True,
+                         "_error": "401 Token is invalid",
+                         "overall_confidence": ""}, ensure_ascii=False)),
+        )
+        # 第 2 页：成功但没有 finding（确实无问题 —— 对照组，文案必须不同）
+        await test_db.execute(
+            "INSERT INTO page_cache (job_id, page, raw_html, structured_json) "
+            "VALUES (?, ?, ?, ?)",
+            ("bad-llm", 2, "<p>OCR 原文</p>",
+             json.dumps({"overall_confidence": "high"}, ensure_ascii=False)),
+        )
+        await test_db.commit()
+        from main import app
+        from httpx import ASGITransport
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://localhost:8000"
+        ) as client:
+            yield client
+
+    @pytest.mark.asyncio
+    async def test_first_paint_shows_specific_reason(self, parse_error_job):
+        """#135：首屏必须带上**具体**失败原因，不只通用文案。"""
+        r = await parse_error_job.get("/jobs/bad-llm/review?page=1")
+        assert r.status_code == 200
+        html = r.text
+        # 原因随 SSR 注入（此前只有 AJAX/SSE 才会写，DOMContentLoaded 不触发）
+        assert "page_parse_error_reason" in html, (
+            "首屏必须注入具体失败原因（否则 DOMContentLoaded 无从显示）")
+        assert "401 Token is invalid" in html, (
+            "具体原因必须出现在 SSR 输出里，而不是只留通用文案")
+
+    @pytest.mark.asyncio
+    async def test_failed_page_does_not_say_no_issues(self, parse_error_job):
+        """#136：失败页不得显示"本页无问题"。"""
+        r = await parse_error_job.get("/jobs/bad-llm/review?page=1")
+        assert r.status_code == 200
+        html = r.text
+        # 失败页的空态文案必须说明"未能分析"且警示"不代表无问题"
+        assert "本页未能分析" in html, "失败页必须给出『未能分析』的明确文案"
+        assert "不代表本页无问题" in html, (
+            "失败页必须警示『清单为空 ≠ 无问题』（GMP 假阴性的核心风险）")
+        assert ">本页无问题<" not in html, (
+            "失败页**不得**出现『本页无问题』（与合规页无法区分）")
+
+    @pytest.mark.asyncio
+    async def test_clean_page_still_says_no_issues(self, parse_error_job):
+        """对照组：确实分析过且无 finding 的页仍显示"本页无问题"。
+
+        防止"为了修 #136 把三种空态全改成告警" —— 那会让正常的合规页
+        也被标黄，复核者很快学会忽略告警（告警疲劳 = 另一种假阴性）。
+        """
+        r = await parse_error_job.get("/jobs/bad-llm/review?page=2")
+        assert r.status_code == 200
+        html = r.text
+        assert ">本页无问题<" in html, "成功的空页仍应显示『本页无问题』"
+        assert "本页未能分析" not in html, "成功的空页不得被标成失败"
+
+    @pytest.mark.asyncio
+    async def test_js_empty_note_distinguishes_three_cases(self):
+        """**静态机检**：AJAX 侧的空态文案必须按三种原因分支。
+
+        行为用例只覆盖 SSR 首屏；翻页走的是 renderFindings（JS），
+        必须同样区分 —— 否则翻到失败页又会显示"本页无问题"。
+        """
+        src = (Path(__file__).resolve().parents[2] / "static" / "review.js").read_text(
+            encoding="utf-8")
+        assert "function emptyFindingsNote" in src, (
+            "AJAX 空态必须走统一文案函数（单一副本）")
+        # 三分支都要存在
+        assert "本页未能分析" in src, "缺少『分析失败』分支"
+        assert "本页无 OCR 内容" in src, "缺少『空页』分支"
+        assert "本页无问题" in src, "缺少『确实无问题』分支"
+        # 判据必须读**当前页**标记，不能读首屏 ctx（翻页后会过期）
+        assert "currentPageFlags" in src, (
+            "空态判据必须用当前页标记（ctx 是首屏注入、翻页后过期）")
+        assert "flags.parseError" in src and "flags.ocrEmpty" in src
+
+
+from pathlib import Path  # noqa: E402  (供上面的静态机检使用)

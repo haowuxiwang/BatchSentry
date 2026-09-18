@@ -17,6 +17,8 @@ from fastapi import APIRouter
 
 from config import UPLOAD_LIMITS
 
+from db.client import get_db
+
 from core.pipeline import (
     InvalidTransitionError,
     db_lock,
@@ -26,6 +28,44 @@ from core.pipeline import (
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
+
+
+async def mark_launch_failed(job_id: str, exc: BaseException) -> bool:
+    """把"已写 pending 但 launch 失败"的 job 收敛为 error（#142）。
+
+    为什么必须有（对抗审查 #142）：`pending` 且**注册表里没有活 task** 的 job
+    是系统的**无终态黑洞** ——
+      - 看门狗不监视它（`is_watched` 只认 `pending` + 有活 task）；
+      - 启动恢复要求 `created_at < process_started_at`，同进程内的孤儿要等下次重启；
+      - SSE 的 `while True` 只认终态 ⇒ 界面无限等待、无任何提示。
+    可达路径 = 两处 `launch_pipeline` 都不在 try 内（upload / retry）。
+
+    返回是否真的改写（False = 并发路径已把它推进，不重复动作）。
+    审计必写 —— GMP 追溯要求"为什么这个任务没跑起来"有据可查。
+    """
+    from core.pipeline.state import _audit_log
+
+    db = await get_db()
+    # 直接 UPDATE 而非 transition_status：本函数的语义是"异常收敛"，
+    # pending → error 虽在状态机里合法，但并发下状态可能已被改写，
+    # 带 status 条件更新可避免把别人的推进打回。
+    async with db_lock:
+        cursor = await db.execute(
+            "UPDATE jobs SET status = 'error', error_message = ?, "
+            "finished_at = datetime('now','localtime') "
+            "WHERE id = ? AND status = 'pending'",
+            (f"流水线启动失败：{type(exc).__name__}（未开始处理，可直接重试）", job_id),
+        )
+        await db.commit()
+        changed = cursor.rowcount
+    if changed:
+        # 审计在 db_lock 之外写（_audit_log 自己取 db_lock，不可重入）
+        try:
+            await _audit_log(db, job_id, "launch_failed",
+                             f"pipeline launch raised {type(exc).__name__}: {exc}")
+        except Exception as audit_err:
+            logger.error(f"[{job_id}] launch_failed 审计写入失败: {audit_err}")
+    return changed > 0
 
 # Re-export builtin open under the module namespace — tests monkeypatch
 # api.jobs.open to force read failures during magic-byte validation.

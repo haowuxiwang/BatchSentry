@@ -399,7 +399,21 @@ async def create_job(
             raise HTTPException(500, "数据库写入失败，请重试")
 
     # Launch async pipeline（注册到 _pipeline_tasks 以便优雅关闭）
-    launch_pipeline(job_id, str(pdf_path))
+    #
+    # #142：launch 必须包在 try 里。`asyncio.create_task` 在"无运行中事件循环"
+    # 时会抛 RuntimeError；此前该异常会从端点逃逸，而 DB 里的 job 已经写成
+    # `pending` —— 于是留下一个**无终态黑洞**：`pending` 且注册表里没有 task，
+    # 看门狗不监视它（`is_watched` 只认 pening+有活 task），启动恢复又要求
+    # `created_at < process_started_at`（同进程内的孤儿要等下次重启），
+    # 期间 SSE 的 `while True` 只认终态 ⇒ 用户界面无限转圈、无任何提示。
+    # 失败即刻转 error（带原因 + 审计），把黑洞变成可重试的明确失败。
+    try:
+        launch_pipeline(job_id, str(pdf_path))
+    except Exception as e:
+        logger.error(f"[{job_id}] launch_pipeline failed: {e!r}", exc_info=True)
+        from api.jobs import mark_launch_failed
+        await mark_launch_failed(job_id, e)
+        raise HTTPException(500, "任务已创建但流水线启动失败，请重试")
     logger.info(f"[{job_id}] Upload complete: {total_bytes} bytes, pipeline launched")
 
     # page_warning：仅超软阈值时非 None —— 前端据此提示"较大文件，预估耗时"

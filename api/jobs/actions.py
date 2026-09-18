@@ -108,7 +108,17 @@ async def retry_job(job_id: str, request: Request = None):
         logger.warning(f"[{job_id}] Retry blocked: {e}")
         raise HTTPException(400, str(e))
 
-    launch_pipeline(job_id, job["pdf_path"])
+    # #142：launch 必须包在 try 里 —— 否则 create_task 失败（无运行中事件循环
+    # 等）会让端点抛异常，而 job 已被写成 `pending` 且注册表无 task ⇒
+    # 无终态黑洞（看门狗不监视"pending 且无活 task"，启动恢复只认跨进程孤儿，
+    # SSE 只认终态）⇒ 界面无限转圈且无提示。失败即刻转 error + 审计。
+    try:
+        launch_pipeline(job_id, job["pdf_path"])
+    except Exception as e:
+        logger.error(f"[{job_id}] launch_pipeline failed on retry: {e!r}", exc_info=True)
+        from api.jobs import mark_launch_failed
+        await mark_launch_failed(job_id, e)
+        raise HTTPException(500, "重试已受理但流水线启动失败，请再次重试")
     return {"ok": True, "status": "pending"}
 
 @router.post("/{job_id}/archive")

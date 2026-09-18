@@ -368,7 +368,7 @@ class TestOrphanTaskTermination:
 
         monkeypatch.setattr("core.notify.notify_job", lambda jid, st: None)
         orphan = asyncio.create_task(asyncio.Event().wait())
-        locks._pipeline_tasks["orphan"] = orphan
+        locks._pipeline_tasks["orphan"] = {orphan}
         try:
             await _insert_job(test_db, "orphan", status="ocr_running",
                               total_pages=4, last_activity_at=_stale(10_000))
@@ -413,7 +413,7 @@ class TestOrphanTaskTermination:
                 entry["refs"] -= 1
 
         task = asyncio.create_task(_hold_lock_then_hang("held"))
-        locks._pipeline_tasks["held"] = task
+        locks._pipeline_tasks["held"] = {task}
         try:
             await asyncio.wait_for(holding.wait(), timeout=5)
             lock = locks._pipeline_locks["held"]["lock"]
@@ -438,6 +438,129 @@ class TestOrphanTaskTermination:
         assert await watchdog._terminate_pipeline_task("never-registered") == "no-task"
 
 
+class TestCascadeCancelHolderPlusWaiter:
+    """#141：同一 job 的"持锁真凶 + 排队等待者"必须**一起**被取消。
+
+    这是"重试被永久挂死"的正面证明。旧实现 `_pipeline_tasks[jid] = task`
+    单值覆盖：新 task（等待者）一注册就把真凶挤出注册表 ⇒
+    `_terminate_pipeline_task` 只能取消等待者，真凶仍持 per-job 锁 ⇒
+    下一次 retry 继续排队、900s 后再被杀 ⇒ 无限循环。
+
+    用例同时覆盖 #140 的同源要求：**级联**（取消父 task 时必须连带子任务），
+    否则孤儿协程继续写 page_cache/findings 并刷新心跳，掩盖真正的停滞。
+    """
+
+    @pytest.mark.asyncio
+    async def test_holder_and_waiter_both_cancelled(self, test_db, monkeypatch):
+        import asyncio
+
+        from core.pipeline import locks
+
+        monkeypatch.setattr("core.notify.notify_job", lambda jid, st: None)
+        job_id = "deadlock"
+        holding = asyncio.Event()
+        child_running = asyncio.Event()
+
+        async def _holder():
+            """持锁者：模拟 run_pipeline —— 持锁 + 派生一个子任务。"""
+            entry = locks._pipeline_locks.setdefault(
+                job_id, {"lock": asyncio.Lock(), "refs": 0})
+            entry["refs"] += 1
+            try:
+                async with entry["lock"]:
+                    holding.set()
+                    await asyncio.Event().wait()
+            finally:
+                entry["refs"] -= 1
+
+        async def _waiter():
+            """等待者：模拟 retry 的 launch —— 卡在 async with lock 上。"""
+            entry = locks._pipeline_locks[job_id]
+            async with entry["lock"]:
+                pass
+
+        async def _orphan_child():
+            """派生子任务：模拟 stage2 的页分析 —— 无人取消就永远跑。"""
+            child_running.set()
+            await asyncio.Event().wait()
+
+        task_holder = asyncio.create_task(_holder())
+        child = asyncio.create_task(_orphan_child())
+        locks._pipeline_tasks[job_id] = {task_holder, child}
+        try:
+            await asyncio.wait_for(holding.wait(), timeout=5)
+            # 注册一个等待者（retry 路径），确认注册表**累积**而非覆盖
+            await asyncio.sleep(0)
+            task_waiter = asyncio.create_task(_waiter())
+            locks._pipeline_tasks[job_id].add(task_waiter)
+            await asyncio.sleep(0.05)
+            assert child_running.is_set(), "前置条件：子任务已在跑"
+            assert len(locks._pipeline_tasks[job_id]) == 3, (
+                "前置条件：持锁者 + 子任务 + 等待者 三者都在注册表里")
+
+            await _insert_job(test_db, job_id, status="ocr_running",
+                              total_pages=4, last_activity_at=_stale(10_000))
+            assert await watchdog.recover_stalled_jobs(now=datetime.now()) == 1
+
+            # 三者都必须被终止 —— 只杀等待者等于什么都没修
+            assert task_holder.done(), "持锁真凶必须被取消"
+            assert child.done(), "派生子任务必须被级联取消（#140）"
+            assert task_waiter.done(), "排队等待者必须被取消"
+            assert not locks._pipeline_locks[job_id]["lock"].locked(), (
+                "锁必须已释放 —— 否则 retry 仍然永久挂死")
+
+            cur = await test_db.execute(
+                "SELECT detail FROM audit_log WHERE job_id = ? AND action = ?",
+                (job_id, watchdog.AUDIT_ACTION))
+            detail = (await cur.fetchone())["detail"]
+            assert "orphan_task=cancelled" in detail, f"审计缺失终止结论: {detail}"
+        finally:
+            for t in (task_holder, child, locals().get("task_waiter")):
+                if t is not None:
+                    t.cancel()
+            await asyncio.gather(
+                *[t for t in (task_holder, child, locals().get("task_waiter"))
+                  if t is not None],
+                return_exceptions=True)
+            locks._pipeline_tasks.pop(job_id, None)
+            locks._pipeline_locks.pop(job_id, None)
+
+    @pytest.mark.asyncio
+    async def test_single_value_registry_would_lose_the_holder(self):
+        """**反向证明**：单值覆盖会丢掉真凶引用（旧实现的核心缺陷）。
+
+        本用例不跑看门狗，只固化"单值 dict 会怎样"这一事实 —— 若有人把注册表
+        改回 `dict[str, Task]`，同一 job 注册第二个 task 后集合里就只剩下它，
+        "取消该 job 全部 task"在结构上不再可能。这解释了为什么值必须是 set。
+        """
+        from core.pipeline.locks import live_tasks_for
+
+        import asyncio
+
+        job_id = "shape"
+        try:
+            async def _noop():
+                await asyncio.Event().wait()
+
+            a = asyncio.create_task(_noop())
+            b = asyncio.create_task(_noop())
+            from core.pipeline.locks import register_pipeline_task
+            register_pipeline_task(job_id, a)
+            register_pipeline_task(job_id, b)
+            live = live_tasks_for(job_id)
+            assert len(live) == 2, "同一 job 的多个未完成 task 必须都能被取到"
+            assert set(live) == {a, b}
+        finally:
+            for t in (locals().get("a"), locals().get("b")):
+                if t is not None:
+                    t.cancel()
+            await asyncio.gather(
+                *[t for t in (locals().get("a"), locals().get("b")) if t is not None],
+                return_exceptions=True)
+            from core.pipeline import locks as _locks
+            _locks._pipeline_tasks.pop(job_id, None)
+
+
 class TestPendingTakeover:
     """pending 的唯一例外：已被 pipeline 接管（注册表里有未完成 task）。
 
@@ -459,7 +582,7 @@ class TestPendingTakeover:
 
         monkeypatch.setattr("core.notify.notify_job", lambda jid, st: None)
         task = asyncio.create_task(asyncio.Event().wait())
-        locks._pipeline_tasks["taken"] = task
+        locks._pipeline_tasks["taken"] = {task}
         try:
             await _insert_job(test_db, "taken", status="pending", total_pages=1,
                               last_activity_at=_stale(999_999))
@@ -486,7 +609,7 @@ class TestPendingTakeover:
         from core.pipeline import locks
 
         task = asyncio.create_task(asyncio.Event().wait())
-        locks._pipeline_tasks["fresh"] = task
+        locks._pipeline_tasks["fresh"] = {task}
         try:
             await _insert_job(test_db, "fresh", status="pending", total_pages=1,
                               last_activity_at=_fresh())

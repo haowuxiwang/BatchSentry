@@ -414,16 +414,21 @@ async def shutdown_endpoint(request: Request):
         raise HTTPException(403, "Shutdown only allowed from local host")
 
     logger.info(f"[shutdown] Requested by Electron. Cancelling {len(_pipeline_tasks)} active pipeline task(s)...")
-    # 取消所有活跃 pipeline task（CancelledError 会被 pipeline 的 except 捕获）
-    for job_id, task in list(_pipeline_tasks.items()):
-        if not task.done():
-            logger.info(f"[shutdown] Cancelling pipeline task for job {job_id}")
-            task.cancel()
+    # 取消所有活跃 pipeline task（CancelledError 会被 pipeline 的 except 捕获）。
+    # 注册表值是**集合**（#141）：同一 job 可能有多个未完成 task（持锁者 +
+    # 等待者），必须逐个取消，不能只取第一个。
+    cancelled_n = 0
+    for job_id, tasks in list(_pipeline_tasks.items()):
+        for task in list(tasks):
+            if not task.done():
+                logger.info(f"[shutdown] Cancelling pipeline task for job {job_id}")
+                task.cancel()
+                cancelled_n += 1
     # 等待 2s 让 task 清理（写 error 状态 + audit_log）
     if _pipeline_tasks:
         await asyncio.sleep(2)
     logger.info("[shutdown] Graceful shutdown preparation complete")
-    return {"status": "shutting_down", "cancelled_tasks": len(_pipeline_tasks)}
+    return {"status": "shutting_down", "cancelled_tasks": cancelled_n}
 
 
 @app.get("/api/health/downstream")
@@ -559,6 +564,12 @@ async def review_page(job_id: str, request: Request, page: int = 1):
         page_llm_truncated = bool(data.get("_truncated_warn"))
         page_schema_warn = data.get("_schema_warn") or []
         page_confidence = data.get("overall_confidence") or ""
+        # #135：把**具体失败原因**随 SSR 注入，让首屏横幅就能显示
+        # "401 凭据失效"这类全局原因，而不只是一句通用文案。
+        # 此前 `_error` 只由 review.js 在 AJAX/SSE 后写入，而
+        # DOMContentLoaded 不触发 updatePageLevelUI ⇒ 直接打开/刷新终态任务
+        # 的第一页，复核者看不到真实原因（#127 假阴性的界面侧同源问题）。
+        page_parse_error_reason = str(data.get("_error") or "")
         col_set: dict[str, None] = {}
         for step in data.get("steps", []) or []:
             for m in step.get("measurements", []) or []:
@@ -581,6 +592,7 @@ async def review_page(job_id: str, request: Request, page: int = 1):
         page_llm_truncated = False
         page_schema_warn = []
         page_confidence = ""
+        page_parse_error_reason = ""
 
     # Count findings by severity (all pages, for status bar)
     cursor = await db.execute(
@@ -672,6 +684,8 @@ async def review_page(job_id: str, request: Request, page: int = 1):
         "page_llm_truncated": page_llm_truncated,
         "page_schema_warn": page_schema_warn,
         "page_confidence": page_confidence,
+        # #135：首屏横幅的具体失败原因（静态文案之外）
+        "page_parse_error_reason": page_parse_error_reason,
         # cr-19: 实际 OCR 后端（failover 后与配置不同 — GMP 复核可见性）
         "ocr_backend_used": job["ocr_backend_used"] if "ocr_backend_used" in job.keys() else None,
         "ocr_backend_display": (
