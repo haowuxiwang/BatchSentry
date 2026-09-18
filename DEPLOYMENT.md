@@ -105,6 +105,30 @@ Remove-Item Env:\PBC_E2E_EXE
 > 2026-09-15 实测：Paddle 上游返回 `10010 任务提交队列已满`，51 页真实文档整轮跑的
 > 其实是 MinerU，而报告里写着 paddle —— 这类结论**不得**作为 Paddle 路径的证据。
 
+### 本分发基线（v1.1.9）的证据边界
+
+> **只看这一节，就能知道哪些结论被验证过、哪些没有。**（生成于 2026-09-18 基线冻结）
+
+**已在**本机**实测（可作为依据）**：
+
+- 产物结构：`dist-electron` 唯一、`scripts/clean_dist.py` 报「待清理: (无)」、状态「完整 · 1.1.9」。
+- 版本四处一致：`main.APP_VERSION` / `package.json` / `package-lock.json`（顶层 + `packages[""]`）
+  / `PORTABLE_README.txt`；`app.asar` 内版本**经子进程**读出 = `1.1.9`。
+- **内嵌服务端实跑过**（不只是逐字节比对）：`/health` → `{"status":"ok","version":"1.1.9"}`；
+  看门狗自述阈值符合不变式；跑在**隔离**数据目录上。
+- 门禁 8 项全绿、覆盖率 95.24%；分发一致性机检（`test_distribution_parity.py`）通过。
+- **产物与 `app.asar` 二进制内不含密钥**：对 3 把历史 `sk-` 值逐一字节搜索 + `sk-[A-Za-z0-9]{32,}`
+  全量正则扫描，**0 命中**。
+
+**未验证（不得当作已通过）**：
+
+- **无他机验证**：未在干净 Windows 机器 / 新用户账户下解压运行；GUI 仅人工双击，无自动化 UI 断言。
+- **未在 v1.1.9 产物上重跑真实文档全链路**（51 页 e2e 最后一次是 v1.1.7 产物）——
+  门禁与烟雾**覆盖不到 LLM 侧的输出质量**。
+- **上游凭据与真机连通性未验**：本机 LLM key 可用性、Anthropic **厂商真机**（仅有本地协议桩）。
+- **无真实标注集** ⇒ 精度/召回**没有可信数字**（`docs/FINDING_GROUND_TRUTH.json` 是合成件，不可外推）。
+- **200 页上传上限是线性外推**，未实跑。
+
 ### 分发方式
 
 1. 先跑 `python scripts/clean_dist.py` 确认只剩一个完整产物（`dist-electron/`），
@@ -273,6 +297,27 @@ failover 到 MinerU 时**流程中途失败**（护栏
    `config.json` 已被 `.gitignore`，但**测试脚本**一度把真实 key 写死并入库
    （2026-09-15 发现于 `tests/e2e_frozen.py` / `e2e_manual.py` / `e2e_quick.py`，
    自 `81964a3` 起在历史中）。**删除文件不能抹掉历史，只能到服务商处作废重发。**
+
+   **暴露面登记（2026-09-18 复验，`scripts/check_leaked_keys.py` ①）**：
+   ⚠️ **本仓库是 public**（`haowuxiwang/BatchSentry`）⇒ 历史里的 key 等同于**已经公开**。
+   历史中曾入库的 `sk-` 形态值共 **3** 把（只记前缀与 sha256 前 8 位，不落全文）：
+
+   | 代号 | 历史出处 | 前缀 / sha8 | 至今仍是**生效值**？ |
+   |---|---|---|---|
+   | K1 | `tests/e2e_frozen.py`·`e2e_manual.py`·`e2e_quick.py`，自 `81964a3` | `sk-vpr` / `5d855143` | 🔴 **是**（开发模式的 `config.json`，见下） |
+   | K2 | `tests/unit/test_config.py`（早期 5 个提交） | `sk-TuK` / `838c00a7` | 否 |
+   | K3 | `spike_test.py`（`8651e3e` 初始骨架） | `sk-evn` / `2608ecd2` | 否 |
+
+   ⚠️ **"生效"取决于运行模式**（`config.py:_config_path()`）：
+   **开发模式读仓库根 `config.json`**（K1 仍在此文件，8-31 起未改）、
+   **冻结/安装版读 `%APPDATA%\PBC\config.json`**（该文件里的值已不是 K1）。
+   ⇒ **K1 对开发模式与任何走仓库配置的 e2e 仍是有效凭据，且已公开暴露，必须作废重发。**
+   ⚠️ 顺带修正一处配置卫生问题：该文件里 `DEEPSEEK_API_KEY` 与 `SILICONFLOW_API_KEY`
+   **同值**（都是 K1）—— 两家厂商共用一把 key，轮换时应分别申请。
+
+   ⚠️ **本工具已知盲区**（对抗审查 Round 41 发现）：`scripts/check_leaked_keys.py:117`
+   只读 `repo/config.json`，**不读 `%APPDATA%\PBC\config.json`** ⇒ 在只按装版使用的
+   机器上它会把"生效值"判成"已不存在"，从而**漏报**。自查时两条路径都要看。
 5. e2e 需要真实 key 时一律走环境变量，不要写进代码：
    ```bash
    PBC_E2E_DEEPSEEK_KEY=<key> python tests/e2e_frozen.py
