@@ -365,10 +365,13 @@ class TestPipelineRun:
         )
         rows = await cursor.fetchall()
         descriptions = {r["description"]: r["status"] for r in rows}
-        assert "新版措辞" in descriptions          # 本次重跑写入
+        # B1-6 收权后：LLM 的 critical 会被降级、并在描述尾部追加复核理由
+        # （理由对复核者可见是本设计的特性，见 test_llm_finding_guard.py）
+        # ⇒ 此处按前缀匹配而非全等。
+        assert any(k.startswith("新版措辞") for k in descriptions)   # 本次重跑写入
         assert "旧版措辞B" in descriptions          # confirmed 保留
         assert descriptions["旧版措辞B"] == "confirmed"
-        assert "旧版措辞A" not in descriptions      # pending 已清理
+        assert not any(k.startswith("旧版措辞A") for k in descriptions)  # pending 已清理
 
     @pytest.mark.asyncio
     async def test_pipeline_records_stage_durations(self, pipeline_db, tmp_path):
@@ -2220,12 +2223,16 @@ class TestSlicedPipeline:
                  for i in (1, 2)]
 
         rule_findings = [
-            {"page": 1, "type": "time_reversal", "severity": "critical",
-             "description": "规则层：工序6 时间倒序", "source": "rule"},
+            {"page": 1, "type": "equipment_state", "severity": "warning",
+             "description": "规则层：设备状态未通过", "source": "rule"},
         ]
+        # ⚠️ 这里刻意用 equipment_state 而不是 time_reversal：B1-6 收权复核
+        # 会在 N1 之前先处理 time_reversal（structured 里无倒序 ⇒ 判定无据 ⇒
+        # 抑制），从而让本测试验证不到 N1 本身。选一个复核器不介入的类型，
+        # 才能测准 N1 这条独立的降噪机制。
         llm_cross = [
-            {"page": 1, "type": "time_reversal", "severity": "warning",
-             "description": "LLM：发现时间倒序（语义重复）",
+            {"page": 1, "type": "equipment_state", "severity": "warning",
+             "description": "LLM：设备状态有问题（语义重复）",
              "source": "llm_cross"},
             {"page": 1, "type": "completeness", "severity": "info",
              "description": "缺少复核签名", "source": "llm_cross"},
@@ -2252,9 +2259,9 @@ class TestSlicedPipeline:
             "SELECT type, source FROM findings WHERE job_id = ? "
             "AND page = 1 ORDER BY source", (job_id,))
         rows = [dict(r) for r in await cur.fetchall()]
-        tr_sources = [r["source"] for r in rows
-                      if r["type"] == "time_reversal"]
-        assert tr_sources == ["rule"], f"overlap not suppressed: {rows}"
+        eq_sources = [r["source"] for r in rows
+                      if r["type"] == "equipment_state"]
+        assert eq_sources == ["rule"], f"overlap not suppressed: {rows}"
         comp = [r for r in rows if r["type"] == "completeness"]
         assert len(comp) == 1 and comp[0]["source"] == "llm_cross"
 
@@ -2263,6 +2270,56 @@ class TestSlicedPipeline:
             "action = 'findings_overlap_suppressed'", (job_id,))
         log = await cur.fetchone()
         assert log is not None and "count=1" in log["detail"]
+
+    async def test_llm_guard_suppresses_unfounded_cross_finding(
+        self, pipeline_db, tmp_path
+    ):
+        """B1-6 收权链路级：跨页 LLM 结论被规则层确定性复核否定 ⇒ 抑制 + 留痕。
+
+        样本取 Round 43 实测形态（p6 的跨字段串位）：LLM 说"结束 13:6 早于
+        开始 09:00"，但该页结构化数据里根本没有倒序 ⇒ 判定无据。
+        断言两件事：① findings 表不再出现该 critical；② 抑制**留痕**
+        （finding_suppressions 有非空 reason，可回退、可抽检）。
+        """
+        job_id = await _insert_job(pipeline_db)
+        pdf_path = str(tmp_path / "fake.pdf")
+        Path(pdf_path).write_bytes(b"%PDF-1.4 fake")
+
+        pages = [{"markdown": {"text": f"page {i} " + "内容" * 50}}
+                 for i in (1, 2)]
+        cross = [{
+            "page": 1, "type": "time_reversal", "severity": "critical",
+            "description": "接收结束时间 13:6 早于接收开始时间 09:00",
+            "source": "llm_cross",
+        }]
+
+        async def fake_cross(page_structures, job_id="", progress_cb=None):
+            return cross
+
+        with patch(
+            "core.pipeline._get_ocr_chain",
+            return_value=[(lambda p, cb: pages, "mineru")],
+        ), patch(
+            "core.pipeline.analyze_page",
+            new=AsyncMock(return_value={
+                "steps": [], "findings": [], "overall_confidence": "high"}),
+        ), patch(
+            "core.pipeline.analyze_cross_page",
+            new=AsyncMock(side_effect=fake_cross),
+        ):
+            await run_pipeline(job_id, pdf_path)
+
+        cur = await pipeline_db.execute(
+            "SELECT severity FROM findings WHERE job_id = ? AND type='time_reversal'",
+            (job_id,))
+        rows = [dict(r) for r in await cur.fetchall()]
+        assert all(r["severity"] != "critical" for r in rows), rows
+
+        cur = await pipeline_db.execute(
+            "SELECT reason FROM finding_suppressions WHERE job_id = ?", (job_id,))
+        sup = [dict(r) for r in await cur.fetchall()]
+        assert sup, "收权抑制未留痕（GMP 要求抑制可抽检/可回退）"
+        assert sup[0]["reason"].strip()
 
 
 # ─── 3. 空页自动重试（Stage 1 抗挫折，MinerU 大文件丢页）───────────

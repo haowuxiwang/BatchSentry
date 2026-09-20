@@ -36,10 +36,14 @@ async def _run_stage3_cross_analysis(
     stage3_start = time.time()
 
     cursor = await db.execute(
-        "SELECT page, structured_json FROM page_cache WHERE job_id = ? ORDER BY page",
+        "SELECT page, structured_json, raw_html FROM page_cache "
+        "WHERE job_id = ? ORDER BY page",
         (job_id,),
     )
     page_structures = []
+    # B1-6：收权复核需要页级结构化数据 + OCR 原文（按页索引）
+    _struct_by_page: dict = {}
+    _raw_by_page: dict = {}
     empty_pages_count = 0
     # M2/T2.4：写入期置信度需要"该页是否带完整性告警"——与 api/review.py
     # 读取期判据共用 core.finding_quality.page_is_flagged（单一来源）。
@@ -49,6 +53,8 @@ async def _run_stage3_cross_analysis(
         if row["structured_json"]:
             try:
                 data = json.loads(row["structured_json"])
+                _struct_by_page[row["page"]] = data
+                _raw_by_page[row["page"]] = row["raw_html"] or ""
                 if page_is_flagged(data):
                     flagged_pages.add(row["page"])
                 # Skip pages with parse errors
@@ -75,6 +81,24 @@ async def _run_stage3_cross_analysis(
     findings = await _run_analyze_cross(
         page_structures, job_id=job_id, progress_cb=_cross_progress_cb
     )
+    # B1-6 收权（Round 43）：跨页 LLM findings（llm_cross / llm_fallback）与
+    # 页级同一把尺子 —— 落库前过确定性复核。两条路径同源同病（同一 LLM、
+    # 同一 prompt 家族）：51 页实测里 llm_cross 贡献了 24 条假 critical，
+    # 与 llm_page 的 25 条机理完全一致（方向反 / 串位 / 凭空数字）。
+    from core.rules.llm_finding_guard import review_llm_findings
+    _g_kept, _g_down, _g_sup = review_llm_findings(
+        findings, structured_by_page=_struct_by_page, raw_by_page=_raw_by_page,
+    )
+    findings = list(_g_kept) + [
+        {**d["finding"], "severity": d["to_severity"],
+         "description": f"{d['finding'].get('description', '')}｜{d['reason']}"}
+        for d in _g_down
+    ]
+    if _g_sup:
+        logger.info(
+            f"[{job_id}] Stage 3: 收权复核抑制 {len(_g_sup)} 条 LLM 跨页结论"
+            f"（判定不成立；明细写 finding_suppressions 台账）"
+        )
     # R1 降噪：自指元噪声（"本页含手写内容"/"整体识别置信度较低"）是**工具可读性**
     # 提示而非记录缺陷，整份文档聚合为一条。先于 completeness 降噪执行 —— 两者
     # 治理对象不重叠（前者按文档属性聚合，后者按结构缺失 kind 细分）。
@@ -238,6 +262,31 @@ async def _run_stage3_cross_analysis(
         f"llm_page skipped + {suppressed_overlap} LLM-overlap suppressed, "
         f"severity={severity_counts})"
     )
+    if _g_sup:
+        # B1-6 收权留痕：抑制 ≠ 删除。复用 finding_suppressions 台账
+        # （reason + evidence + 可回退），与 stage2 的 spec_guard 同一张表、
+        # 同一构造点 —— 复核页可查、可一键回退、可抽检（GMP 可追溯）。
+        from core.rules.spec_guard import (
+            SUPPRESSION_INSERT_SQL,
+            suppression_rows,
+        )
+        _sup_by_page: dict = {}
+        for _s in _g_sup:
+            _sup_by_page.setdefault(_s["finding"].get("page") or 0, []).append(_s)
+        _ledger_rows: list[tuple] = []
+        for _pg, _items in _sup_by_page.items():
+            _ledger_rows.extend(suppression_rows(job_id, _pg, _items))
+        async with db_lock:
+            await db.executemany(SUPPRESSION_INSERT_SQL, _ledger_rows)
+            await db.commit()
+        await _audit_log(
+            db, job_id, "llm_guard_suppressed",
+            f"count={len(_ledger_rows)} — B1-6 收权：跨页 LLM 结论被规则层"
+            f"确定性复核否定（判定不成立），明细入 finding_suppressions 台账",
+        )
+        logger.info(
+            f"[{job_id}] DB: {len(_ledger_rows)} 条收权抑制写入台账（可回退）"
+        )
     if suppressed_overlap:
         # M2/T2.8 抑制可解释：除计数外落明细（哪页/哪类/被谁覆盖），
         # 让"为什么少了一条"在审计里可逐条回看（GMP 可追溯）。

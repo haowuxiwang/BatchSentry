@@ -19,6 +19,30 @@
 > **宿主进程**，不是安全软件）+ 工具报告**具名持有者**。Round 33 同样**不进产物**，
 > **不升版号**。
 
+### Added (Round 44, 2026-09-20 — B1-6「收权」：判定从 LLM 收回规则层)
+
+> ⚠️ **本节改动进入 PyInstaller 产物**（`core/rules/`、`core/pipeline/`）⇒ 工作树
+> **领先于产物**。**当前可分发版本仍为 1.1.9，不含本项** —— 待 v1.2.0 清单主要项
+> （B1-4 / B1-5 / B1-7 / B1-9）完成后**统一升版重建**，避免半新半旧的产物。
+
+- **新增 `core/rules/llm_finding_guard.py`** —— LLM finding 的**收权复核器**。
+  背景：LLM 同时"自己从 OCR 文本挑值"+"自己下判定"，产生五类假阳性（日期方向反 /
+  列串位 / 跨字段串位 / 类型错配 / 凭空数字），根因同一个；再调提示词是治标。
+  四层复核（纯函数、零 LLM 调用、零 IO）：**L1 值形态**（布尔值/日期值/非数值 ⇒
+  抑制；数值但查无此值 ⇒ 降级）、**L2 溯源**（文案长数字须能在 OCR 原文定位）、
+  **L3 判据重算**（复用 `parsing._parse_time_interval`/`_interval_after` 等规则层
+  同源代码）、**L4 severity 封顶**（LLM 独断的 critical 一律降 warning 待人工核对）；
+  另含 **L1' 推测性表述**（「无法识别」不是异常结论）。
+- **接入两条落库路径**：`core/pipeline/stage2.py`（`llm_page`）与
+  `core/pipeline/stage3.py`（`llm_cross`/`llm_fallback`）。抑制**必留痕** —— 复用
+  `spec_guard.suppression_rows` 唯一构造点写 `finding_suppressions` 台账
+  （非空 reason + evidence，可回退、可抽检）；降级理由追加到 description。
+- **真实数据回放验证**（Round 42 的 51 页 real 轮隔离库）：152 条 LLM findings ⇒
+  抑制 26 / 降级 42，**critical 49 → 0**；p2/p6/p17/p39 四条实测假 critical 全部处置。
+  rule 层 6 条 critical **原样保留**（真阳性不误杀）。
+- **护栏**：`tests/unit/test_llm_finding_guard.py` 20 用例（样本取自真实页形态）+
+  `test_pipeline.py` 链路级 1 例。**变异验证 3 个方向全部变红**。
+
 ### Changed (Round 43, 2026-09-20 — 第三轮对抗性审查：清单与文档同步)
 
 - **`docs/ADVERSARIAL_AUDIT.md` 新增 §15**：五路只读审查（前端 / 后端 / 配置与协议 /

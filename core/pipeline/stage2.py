@@ -372,6 +372,34 @@ async def _analyze_one(
                 dict_findings, _suppressed = drop_unfounded_spec_findings(
                     dict_findings, structured
                 )
+                # B1-6 收权（Round 43）：LLM 生成的 findings 在落库前过确定性复核。
+                # 五类假阳性（日期方向反 / 列串位 / 跨字段串位 / 类型错配 /
+                # 凭空数字）根因同一个：LLM 既从 OCR 文本里挑值、又自己下判定。
+                # 此处把"判定"收回规则层：有确定性反证者抑制（留痕可回退），
+                # 弱证据者降级；LLM 独断的 critical 一律不给 critical。
+                # 抑制明细与 spec_guard 同形，共用 suppression_rows 唯一构造点。
+                from core.rules.llm_finding_guard import review_llm_findings
+                for _f in dict_findings:
+                    if isinstance(_f, dict) and not _f.get("source"):
+                        _f["source"] = "llm_page"
+                _g_kept, _g_down, _g_sup = review_llm_findings(
+                    dict_findings,
+                    structured_by_page={page_num: structured},
+                    raw_by_page={page_num: raw_html},
+                )
+                dict_findings = list(_g_kept) + [
+                    {**d["finding"], "severity": d["to_severity"],
+                     "description": (
+                         f"{d['finding'].get('description', '')}｜{d['reason']}"
+                     )}
+                    for d in _g_down
+                ]
+                if _g_sup:
+                    _suppressed = list(_suppressed) + _g_sup
+                    logger.info(
+                        f"[{job_id}] Stage 2: page {page_num} 收权复核抑制 "
+                        f"{len(_g_sup)} 条 LLM 结论（判定不成立 / 降级见台账）"
+                    )
                 _supp_rows = suppression_rows(job_id, page_num, _suppressed)
                 if _supp_rows:
                     logger.info(
