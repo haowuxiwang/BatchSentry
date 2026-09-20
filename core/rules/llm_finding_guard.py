@@ -32,11 +32,27 @@ LLM 同时做了两件它不该单独做的事：**自己从 OCR 文本里挑值
     结果为**三态** —— 可解析工序均无倒序 ⇒ 抑制；确有倒序 ⇒ 保留；
     **一个可解析工序都没有 ⇒ 降级**（判不了）；
   - 文案声明的**先后方向**（`suspicious_date`/`signature_time_anomaly` 等）：
-    参照物含「当前日期/当前年份」⇒ **抑制**（该比较本身无意义）；两侧**都是
-    记录内的日期** ⇒ **降级**（错的只是表述，日期对本身仍需人工核对）。
+    两侧**都是记录内的日期** ⇒ **降级**（错的只是表述，日期对本身仍需人工核对）。
+- **L3 日期语义**（B1-4，Round 48 新增）：把"日期比较"从 LLM 自由裁量收回来。
+  ⚠️ 两条判据都**只否定可证伪的前提、绝不猜真值**（fail-open）：
+  - ① `_check_current_date_reference`：比较的**参照物是「当前日期/当前年份」**
+    ⇒ 该比较不构成异常（过去日期早于现在本是记录常态）⇒ **抑制**。
+    与 Round 46 版的关键差别是**方向无关** —— 旧实现只在"方向反"时抑制，
+    于是方向**恰好对**的条目（实测 23 条里 22 条）全部漏网。
+    **例外**：记录内日期**晚于**自述当前日期 ⇒ 真未来日期 ⇒ 保留。
+  - ② `_check_production_date_premise`：finding 引用「生产日期 X」而 X 恰是
+    **文档级单源**解析出的当前日期 ⇒ 把当前日期当成了生产日期 ⇒ **抑制**。
+    单源由 `_document_current_dates` **一次解析、全页复用**（实测同一次运行里
+    7 页把当前日期当生产日期 ⇒ p28 说"生产日期 2026-09-18"、p38 说"2025年01月20日"
+    自相矛盾）。**只做否定、不做选择**：候选里 `2025-01-25`(7 页) 比
+    `2025-01-20`(6 页) 还多、该记录本是多子批复合体 ⇒ 无唯一真值，猜真值正是
+    本缺陷要根除的失败模式。引用值与**本页**抽取不一致 ⇒ 降级（弱证据）。
 - **L4 severity 封顶**：LLM 独断的 `critical`，若无 L3 确定性背书 ⇒ 降为
   `warning` 并注明"未经规则层复核，待人工核对"。规则层的 `critical`
   （source='rule'）不经过本模块，不受影响。
+  ⚠️ 本封顶是**无条件**的 ⇒ "LLM 源不残留 critical" 这条断言**无判别力**
+  （任何 LLM 输入都不可能有 critical）。验收必须落在"逐条处置是否正确"上，
+  不得只看"0 critical"（见 `devlogs/_replay/verify_b14.py`）。
 
 设计原则（工程约束）
 --------------------
@@ -124,14 +140,24 @@ _DATE_LITERAL_RE = re.compile(
 _CLOCK_RE = re.compile(r"(\d{1,2})\s*[:时]\s*(\d{1,2})")
 
 #: 比较的**参照物**是否为"当前日期/当前年份" —— 这类比较**本身不构成异常**
-#: （过去日期早于现在本是记录常态，B1-4 的根因）。Round 46 用它把"方向反"分成
-#: 两档：参照物是当前日期 ⇒ 抑制；两侧都是记录内日期 ⇒ 只降级（见
-#: :func:`_check_declared_order`）。
-#: ⚠️ 刻意**不引入墙钟**：只用文案里出现的词判定 —— 既避开 B1-7（墙钟基准 ⇒
-#: finding 跨年份不可复现），也避免新增一份必须与规则层同步的阈值表。
+#: （过去日期早于现在本是记录常态，B1-4 的根因）。Round 48 起由
+#: :func:`_check_current_date_reference` **独占**该语义（Round 46 曾把它放在
+#: :func:`_check_declared_order` 里，且只在"方向反"时才抑制 ⇒ 方向**对**的
+#: 条目全部漏网，实测 p3/p5/p49/p51 等 17 条）。
+#: ⚠️ 刻意**不引入墙钟**：只用文案里出现的词与字面量判定 —— 既避开 B1-7
+#: （墙钟基准 ⇒ finding 跨年份不可复现），也避免新增一份必须与规则层同步的
+#: 阈值表。**参照物本身就以字面量写在文案里**（LLM 把它当成"今天是……"的依据），
+#: 所以compare 两侧都取文案字面量即可，无需知道真实的今天。
 _CURRENT_REF_RE = re.compile(
     r"当前日期|当前年份|当前的?日期|当前的?年份|今天|now|current\s+(?:date|year)",
     re.IGNORECASE,
+)
+
+#: finding 里**引用「生产日期」**时紧随其后的日期字面量（B1-4 ②：基准值单源）。
+#: 允许「生产日期」与日期之间夹少量非数字字符（`生产日期：`/`生产日期为`）。
+_CITED_PRODUCTION_DATE_RE = re.compile(
+    r"生产日期[^0-9]{0,6}(\d{4})\s*[.\-/年]\s*(\d{1,2})"
+    r"(?:\s*[.\-/月]\s*(\d{1,2})\s*日?)?"
 )
 
 
@@ -320,26 +346,224 @@ def _parse_date_literal(y: str, mo: str, d: str | None = None) -> tuple[int, int
         return None
 
 
+def _date_literals_with_pos(text: str) -> list[tuple[int, tuple[int, int, int], str]]:
+    """按出现顺序列出 ``(位置, (年,月,日), 原字面量)``。"""
+    out: list[tuple[int, tuple[int, int, int], str]] = []
+    for m in _DATE_LITERAL_RE.finditer(text):
+        v = _parse_date_literal(*m.groups())
+        if v is not None:
+            out.append((m.start(), v, "".join(x for x in m.groups() if x)))
+    return out
+
+
+def _date_in_pool(cited: tuple[int, int, int], pool: set[tuple[int, int, int]]) -> bool:
+    """``cited`` 能否在某池子里找到同粒度或更细的匹配（B1-4 ② 的归一比较）。
+
+    粒度规则（保守，宁可不匹配也不误伤）：
+    - 年必须相等；
+    - ``cited`` 有月份时，池内条目也必须有同一月份（**不做"仅记住年份"的通配**）；
+    - ``cited`` 有日时，池内条目要么同为该日，要么只精确到月（``日=0``）。
+    """
+    cy, cm, cd = cited
+    for ey, em, ed in pool:
+        if cy != ey:
+            continue
+        if cm and em != cm:
+            continue
+        if cd and ed not in (0, cd):
+            continue
+        return True
+    return False
+
+
+#: 紧跟在「当前日期/当前年份」**之后**的那个字面量 —— 允许**只到年**
+#: （「当前年份 2026」实测形态）。`_DATE_LITERAL_RE` 要求"年+月"，
+#: 会把纯年份整个丢掉 ⇒ ① 对 p3/p12/p25/p37 等页失效。
+_REF_SIDE_DATE_RE = re.compile(
+    r"^\s*[:：为]?\s*(\d{4})"
+    r"(?:\s*[.\-/年]\s*(\d{1,2})(?:\s*[.\-/月]\s*(\d{1,2})\s*日?)?)?"
+)
+
+
+def _ref_side_date(text: str, ref: re.Match) -> tuple[int, int, int] | None:
+    """解析「当前日期/当前年份」**紧邻**的那个字面量（月/日缺省记 0）。
+
+    ⚠️ **只取紧邻的那一个**：若扫 ref 之后的*全部*字面量，会把
+    「…当前日期2026.09.18，**且早于生产日期2015.01.20**」里的 2015.01.20
+    也当成"当前日期"，进而把 p3「生产日期 2015.01.20 早于当前年份 2026」
+    以"2015-01-20 是当前日期"这种**错误理由**抑制掉（实测踩过）。
+    """
+    m = _REF_SIDE_DATE_RE.match(text[ref.end():])
+    if not m:
+        return None
+    try:
+        return int(m.group(1)), int(m.group(2) or 0), int(m.group(3) or 0)
+    except (TypeError, ValueError):
+        return None
+
+
+def _not_after(rec: tuple[int, int, int], cur: tuple[int, int, int]) -> bool:
+    """``rec`` **不晚于** ``cur``（粒度不明时保守地返回 True = 视作不晚于）。
+
+    粒度不明（参照物只到年、或记录侧只到年）时无法断言"未来"，按 fail-open
+    的原则**不认定为未来**（否则会把「2026 年内的记录 vs 当前年份 2026」
+    这种噪声当异常留下）。
+    """
+    ry, rm, rd = rec
+    cy, cm, cd = cur
+    if ry != cy:
+        return ry < cy
+    if cm == 0 or rm == 0 or cd == 0 or rd == 0:
+        return True
+    if rm != cm:
+        return rm < cm
+    return rd <= cd
+
+
+def _check_current_date_reference(f: dict) -> str | None:
+    """① B1-4：异常依据是「记录内日期 vs **当前日期/当前年份**」⇒ 判定不成立。
+
+    Round 48 新增（并从 :func:`_check_declared_order` 中**移走**该语义 ——
+    该判据只允许一处实现）。
+
+    为什么"方向无关"：Round 46 的旧实现只在**声明方向与事实相反**时才抑制，
+    于是方向**恰好对**的条目（「生产日期 2025.01.25 早于当前年份 2026.09.18」
+    —— 方向对，但"过去日期早于现在"本来就是记录常态、根本不该报）全部漏网；
+    实测 23 条当前日期类条目里只有 1 条被旧实现收掉。补上后收掉 15 条。
+
+    **唯一的例外是未来日期**：若记录内日期**晚于**文案自述的当前日期
+    （如「2027.01.17 晚于 当前日期 2026.09.18」），那是**真异常**（未来日期
+    被写进记录），必须保留 —— 这是本判据的反向控制，不可省。
+
+    判不了就返回 ``None``（fail-open）：文案里凑不出"当前日期字面量 + 记录内
+    日期字面量"两侧时（如「起草人签名年份与当前年份不符」根本没给年份、
+    「记录发放年份 > 当前年份+1」语序正相反），无从用字面量证伪，一律不干预。
+    """
+    text = str(f.get("description") or "")
+    ref = _CURRENT_REF_RE.search(text)
+    if not ref:
+        return None
+    cur = _ref_side_date(text, ref)
+    if cur is None:
+        return None
+    before = [x for x in _date_literals_with_pos(text) if x[0] < ref.start()]
+    if not before:
+        return None
+    rec = before[-1][1]
+    if not _not_after(rec, cur):
+        return None  # 记录内日期晚于自述当前日期 ⇒ 真未来日期，保留（反向控制）
+    return (
+        f"文案以「当前日期/当前年份」为参照物（记录内日期 {_fmt_date(rec)} "
+        f"不晚于自述的 {_fmt_date(cur)}）—— 过去日期早于现在本是记录常态，"
+        f"该比较不构成异常（依据是墙钟而非记录内部一致性）"
+    )
+
+
+def _document_current_dates(findings: list) -> set[tuple[int, int, int]]:
+    """② B1-4：**文档级单源**地解析出"LLM 自述的当前日期"（一次解析、全页复用）。
+
+    这是 B1-4 ② 要的那个"基准值"：LLM 用它当比较基准（`当前日期/当前年份 XXXXX`）。
+    真实 51 页实测显示，**同一个基准被逐页各解一次** ⇒ 7 页把它错当成**生产日期**
+    （p8/p10/p19/p39/p41/p45/p46 的 `page_info.production_date == '2026-09-18'`），
+    于是同一份文档里 p28 说「生产日期 2026-09-18」、p38 说「生产日期 2025年01月20日」
+    ⇒ **同一次运行内自相矛盾**。改成文档级单源后，这种引用可以被一致地否定。
+
+    ⚠️ **只做否定、不做选择**：本函数**不尝试**判定"真正的生产日期"是哪一个
+    —— 实测候选里 `2025-01-25`（7 页）比 `2025-01-20`（6 页）还多，而这份 51 页
+    记录本身很可能是**多子批复合体**（批号后缀 `-04/-05/-06/-07`），本就没有
+    唯一真值。**猜真值**正是 B1-4 要根除的失败模式；可复现且可证伪的产物只有
+    "哪些值被证明是当前日期"这一集合。
+    """
+    pool: set[tuple[int, int, int]] = set()
+    for f in findings:
+        if not isinstance(f, dict):
+            continue
+        text = str(f.get("description") or "")
+        ref = _CURRENT_REF_RE.search(text)
+        if not ref:
+            continue
+        v = _ref_side_date(text, ref)
+        if v is not None:
+            pool.add(v)
+    return pool
+
+
+def _check_production_date_premise(
+    f: dict,
+    structured: dict | None,
+    current_dates: set[tuple[int, int, int]],
+) -> str | None:
+    """② B1-4：finding 的**前提**引用了不成立的生产日期 ⇒ 判定不成立。
+
+    两级证据：
+
+    - **强证据（抑制）**：引用的生产日期恰是文档级自述的**当前日期** ⇒ 把当前
+      日期当成了生产日期（p28 / p19 实测：「与生产日期 2026-09-18 矛盾」，
+      而当前日期正是 `2026-09-18`）。前提直接被证伪。
+    - **弱证据（降级）**：引用的生产日期与该页 `page_info.production_date`
+      不一致 ⇒ 页内自抽取就自相矛盾（p28 实测：本页基准 `2025.01.25`，
+      却被引用成 `2026-09-18`）。保留给人工（可能是抽取层抖动），只降级。
+
+    返回**抑制理由**；降级理由经 :func:`_check_production_date_mismatch` 另行给出。
+    """
+    cited = _CITED_PRODUCTION_DATE_RE.search(str(f.get("description") or ""))
+    if not cited:
+        return None
+    v = _parse_date_literal(*cited.groups())
+    if v is None or not current_dates:
+        return None
+    if not _date_in_pool(v, current_dates):
+        return None
+    return (
+        f"文案把「{_fmt_date(v)}」当作生产日期，但该值是本文档中 LLM 自述的"
+        f"**当前日期**（跨页单源核对）—— 当前日期不可能是生产日期，前提不成立"
+    )
+
+
+def _check_production_date_mismatch(f: dict, structured: dict | None) -> str | None:
+    """② B1-4 弱证据：引用的生产日期与该页抽取出的 `production_date` 不一致。"""
+    if not structured:
+        return None
+    cited = _CITED_PRODUCTION_DATE_RE.search(str(f.get("description") or ""))
+    if not cited:
+        return None
+    v = _parse_date_literal(*cited.groups())
+    own = _date_literals_with_pos(str((structured.get("page_info") or {}).get("production_date") or ""))
+    if v is None or not own:
+        return None
+    if _date_in_pool(v, {x[1] for x in own}):
+        return None
+    return (
+        f"文案引用的生产日期「{_fmt_date(v)}」与该页抽取出的生产日期"
+        f"「{_fmt_date(own[0][1])}」不一致（页内自相矛盾，疑似抽取抖动），请人工核对"
+    )
+
+
+def _fmt_date(v: tuple[int, int, int]) -> str:
+    """把 ``(年,月,日)`` 渲染成 ``YYYY[-MM[-DD]]``（缺省成分不补零占位）。"""
+    y, m, d = v
+    if not m:
+        return f"{y:04d}"
+    if not d:
+        return f"{y:04d}-{m:02d}"
+    return f"{y:04d}-{m:02d}-{d:02d}"
+
+
 def _check_declared_order(f: dict) -> tuple[str | None, str | None]:
-    """L3：核对文案里声明的先后关系是否与日期事实一致。
+    """L3：文案声明的**先后方向**与日期事实相反 ⇒ 表述有误（**只降级**）。
 
-    返回 ``(抑制理由, 降级理由)`` —— 两者互斥，同为空表示方向自洽或判不了
-    （fail-open）。
+    返回 ``(抑制理由, 降级理由)``；本函数**不再返回抑制理由**（恒为 ``None``），
+    保留二元签名是为了让调用点与 :func:`_check_current_date_reference` 对称。
 
-    **Round 46 对抗性审查修正（旧实现在这里做过了头）**：旧版把"**方向词**
-    与事实相反"直接当作"**整条 finding** 不成立"而**抑制**。二者并不等价 ——
-    被比较的两个日期**本身**可能确实是异常。实测 p38
-    「签名时间 2027.01.17 早于 生产日期 2025年01月20日」：方向词确实错了，
-    但 `2027` 是个**未来日期**、且比生产日期晚 2 年，这正是复核者必须看到的
-    异常；旧版把它连同错误的表述一起丢掉，该页**再无任何条目提及 2027**、
-    规则层也**无兜底** ⇒ 违反本模块自己写下的原则「只对**逻辑不成立**的用抑制」。
+    **Round 46**：旧版把"方向词与事实相反"直接当作"整条 finding 不成立"而抑制，
+    实测丢掉了 p38 的「2027.01.17」这条**未来日期**真线索（该页再无条目提及 2027，
+    规则层也无兜底）。错的只是 LLM 的**表述**，它指出的日期对本身仍需人工核对
+    ⇒ 改为降级并**在理由里纠正方向**。
 
-    故按**参照物**分级：
-
-    - 参照物含「**当前日期 / 当前年份**」⇒ 该比较本身不构成异常（B1-4 型：
-      "审核日期早于今天"是记录常态）⇒ **抑制**（判定在逻辑上不成立）；
-    - 两侧**都是记录内的日期** ⇒ 错的只是 LLM 的**表述**，它指出的日期对
-      本身仍需人工核对 ⇒ **降级**（保留线索，并在理由里**纠正方向**）。
+    **Round 48 划界**：原先本函数还负责"参照物是当前日期 ⇒ 抑制"（按参照物分两档）。
+    该语义已**整体移出**到 :func:`_check_current_date_reference` —— 因为旧实现只在
+    方向**反**时才抑制，方向对的漏网；而"参照物是墙钟"与"方向反"本是两个独立判据，
+    合在一处必然出错。此处现在**只管**"两侧都是记录内日期"的情形。
     """
     text = str(f.get("description") or "")
     m = re.search(
@@ -363,16 +587,13 @@ def _check_declared_order(f: dict) -> tuple[str | None, str | None]:
     actual = "after" if a > b else "before"
     if actual == expected:
         return None, None  # 方向自洽 —— 不干预
+    if _CURRENT_REF_RE.search(text):
+        # 参照物是墙钟 ⇒ 由 _check_current_date_reference 独占处理（此处不重复判定）
+        return None, None
     lit_a = "".join(x for x in left[-1] if x)
     lit_b = "".join(x for x in right[0] if x)
     stated = m.group(0).strip()
     corrected = "晚于" if actual == "after" else "早于"
-    if _CURRENT_REF_RE.search(text):
-        return (
-            f"文案声明「{lit_a} {stated} {lit_b}」，但按日期事实 {lit_a} 应为"
-            f"「{corrected}」{lit_b}；参照物为当前日期，该比较不构成异常"
-            f"（过去日期早于现在本是记录常态）—— 判定不成立"
-        ), None
     return None, (
         f"文案声明「{lit_a} {stated} {lit_b}」，但按日期事实 {lit_a} 应为"
         f"「{corrected}」{lit_b} —— 表述方向有误；其所指的两个日期本身请人工核对"
@@ -429,6 +650,9 @@ def review_llm_findings(
     downgraded: list[dict] = []
     suppressed: list[dict] = []
 
+    # B1-4 ②：**文档级单源**解析一次，全页复用（禁止各页各解 —— 那正是缺陷本身）。
+    current_dates = _document_current_dates(findings)
+
     for f in findings:
         if not isinstance(f, dict):
             kept.append(f)
@@ -443,6 +667,12 @@ def review_llm_findings(
 
         # ── 抑制类（强证据 —— 判定在逻辑上不成立）────────────────────
         reason = _check_spec_value_shape(f, structured)              # L1 形态非法
+        if reason is None:
+            # ① B1-4：异常依据是"记录内日期 vs 当前日期" ⇒ 不构成异常（方向无关）
+            reason = _check_current_date_reference(f)
+        if reason is None:
+            # ② B1-4：前提引用的"生产日期"恰是本文档自述的当前日期 ⇒ 前提不成立
+            reason = _check_production_date_premise(f, structured, current_dates)
         _l3_down = None
         if (
             reason is None
@@ -464,8 +694,8 @@ def review_llm_findings(
                     "（判不了 ⇒ 保留待人工核对，不作抑制）"
                 )
         if reason is None:
-            # L3 方向重算 —— Round 46：参照物是「当前日期」才抑制；两侧都是
-            # 记录内日期时只降级（表述有误，但日期对本身仍需人工核对）。
+            # L3 方向重算 —— Round 48 起只管"两侧都是记录内日期"的情形
+            # （参照物是墙钟的已由 ① 独占处理）。
             _sup2, _down2 = _check_declared_order(f)
             reason = _sup2
             _l3_down = _l3_down or _down2
@@ -488,6 +718,7 @@ def review_llm_findings(
             _check_grounding(f, raw_html)          # L2 溯源（完全凭空）
             or _spec_value_unlocatable(f, structured)   # L1 查无此值（弱证据）
             or _check_speculative(f)               # L1' 推测性表述
+            or _check_production_date_mismatch(f, structured)  # ② 页内基准不一致
             or _l3_down                            # L3 判不了 / 方向反但日期对属记录内
         )
         to_sev = None
@@ -528,7 +759,11 @@ def _layer_of(reason: str) -> str:
         return "L1-value-shape"
     if "时间倒序" in reason:
         return "L3-time-reversal"
-    if "参照物为当前日期" in reason or "方向与事实相反" in reason:
+    if "该值是本文档中 LLM 自述的" in reason:
+        return "L3-date-baseline"
+    if "该比较不构成异常" in reason:
+        return "L3-current-date"
+    if "表述方向有误" in reason:
         return "L3-declared-order"
     return "L?"
 

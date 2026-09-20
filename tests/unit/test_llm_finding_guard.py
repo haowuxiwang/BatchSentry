@@ -209,13 +209,18 @@ class TestL3Recompute:
         assert down, "判不了时应降级保留，而不是静默丢弃"
 
     def test_p2_declared_order_reversed_suppressed(self):
-        """p2：「2025.01.30 晚于 2026.09.18」—— 2025 < 2026，方向与事实相反。"""
+        """p2：「2025.01.30 晚于 2026.09.18」—— 参照物是当前日期 ⇒ 判定不成立。
+
+        Round 48：抑制层级由 ``L3-declared-order`` 改为 **``L3-current-date``**
+        —— 该语义已整体移出 ``_check_declared_order``（后者只管"两侧都是记录内
+        日期"），因为它与"方向反"是两个独立判据，合在一处必然漏掉方向对的条目。
+        """
         _k, _d, sup = _review(
             _f(2, "signature_time_anomaly", "critical",
                "车间负责人审核日期2025.01.30晚于当前日期2026.09.18"),
         )
         assert len(sup) == 1
-        assert sup[0]["evidence"]["guard_layer"] == "L3-declared-order"
+        assert sup[0]["evidence"]["guard_layer"] == "L3-current-date"
 
     def test_p38_declared_order_reversed_downgrades_not_suppresses(self):
         """p38：方向词错（2027 > 2025 却说"早于"），但两侧**都是记录内日期**
@@ -254,6 +259,138 @@ class TestL3Recompute:
                "签名时间 2027.01.17 晚于 生产日期 2025年01月20日"),
         )
         assert sup == []
+
+
+# ── L3 日期语义（B1-4，Round 48）────────────────────────────────────────
+#
+# B1-4 的两条判据都**只否定可证伪的前提、绝不猜真值**（fail-open）：
+#   ① 参照物是「当前日期/当前年份」⇒ 该比较不构成异常（**方向无关**）
+#   ② finding 引用的"生产日期"恰是**文档级单源**解析出的当前日期 ⇒ 前提不成立
+# 每条都配一个**反向控制**（同一形态翻转关键字段后必须不抑制），
+# 否则就是"写完就绿"的空护栏。
+
+class TestL3DateSemanticsB14:
+    # ── ① 参照物 = 当前日期 ⇒ 抑制（方向无关）────────────────────────
+
+    def test_p49_direction_correct_still_suppressed(self):
+        """p49（Round 48 新收）：参照物是当前日期，且**方向本就对**（2025 < 2026）。
+
+        旧实现只在方向**反**时抑制 ⇒ 这类"过去日期早于现在"的记录常态全部漏网
+        （实测 23 条里只收掉 1 条）。这是本条判据的**主要**新增覆盖。
+        """
+        _k, _d, sup = _review(
+            _f(49, "signature_time_anomaly", "critical",
+               "审核人庞明娟的签名日期为2025.02.24，早于当前年份2026.09.18"),
+        )
+        assert len(sup) == 1
+        assert sup[0]["evidence"]["guard_layer"] == "L3-current-date"
+
+    def test_p38_not_equal_to_current_year_suppressed(self):
+        """p38：「生产日期 2025年01月20日 与 当前年份 2026年09月18日 不符」。
+
+        与当前日期"不符"是**必然**（记录不可能总在今天产生）⇒ 不是异常。
+        形态上**没有先后关系词**，只能由本判据（而非 `_check_declared_order`）收掉。
+        """
+        _k, _d, sup = _review(
+            _f(38, "suspicious_date", "critical",
+               "生产日期2025年01月20日与当前年份2026年09月18日不符"),
+        )
+        assert len(sup) == 1
+        assert sup[0]["evidence"]["guard_layer"] == "L3-current-date"
+
+    def test_year_only_reference_still_detected(self):
+        """参照物**只到年**（「当前年份 2026」）也必须认得出 —— 实测形态。
+
+        回归护栏：早期实现用 `_DATE_LITERAL_RE`（要求"年+月"）解析参照物，
+        纯年份会被整个丢掉 ⇒ ① 对 p3/p12/p25/p37 等页静默失效。
+        """
+        _k, _d, sup = _review(
+            _f(3, "suspicious_date", "warning", "生产日期 2015.01.20 早于当前年份 2026"),
+        )
+        assert len(sup) == 1 and sup[0]["evidence"]["guard_layer"] == "L3-current-date"
+
+    def test_future_date_vs_current_date_kept(self):
+        """**反向控制**：记录内日期**晚于**自述当前日期 ⇒ 真未来日期，必须保留。
+
+        没有这条，① 就退化成"凡带当前日期的条目一律抑制"，会连真异常一起收掉。
+        """
+        _k, _d, sup = _review(
+            _f(1, "suspicious_date", "critical", "签名时间 2027.01.17 晚于 当前日期 2026.09.18"),
+        )
+        assert sup == [], "未来日期是真异常，不得抑制"
+
+    def test_literal_less_current_year_claims_fail_open(self):
+        """**fail-open 边界**：文案凑不出"记录内日期字面量"时不得猜测。
+
+        两条实测形态都走这里：
+        - p1「起草人签名年份与当前年份不符」—— 压根没给年份；
+        - p36「记录发放年份 > 当前年份+1」—— 语序与断言方向**正相反**。
+        无从用字面量证伪 ⇒ 不干预（宁可留噪，不可误杀）。
+        """
+        for desc in ("起草人签名年份与当前年份不符", "记录发放年份 > 当前年份+1"):
+            _k, _d, sup = _review(_f(1, "year_contradiction", "warning", desc))
+            assert sup == [], desc
+
+    # ── ② 引用"当前日期"当生产日期 ⇒ 前提不成立 ─────────────────────
+
+    def test_p28_without_cross_page_evidence_fails_open(self):
+        """p28 的**另一半**：只有它自己时（没有别的页声明当前日期）判不了 ⇒ 不抑制。
+
+        p28 的文案里**没有**「当前日期」字样 —— 单靠本页无法证伪"2026-09-18 是
+        生产日期"这个前提。此时按 fail-open 只降级（见 `_check_production_date_mismatch`：
+        引用的值与该页抽取出的 `2025.01.25` 不一致）。
+        """
+        _k, down, sup = _review(
+            _f(28, "year_contradiction", "critical",
+               "步骤8中记录的日期2015-01-23与生产日期2026-09-18矛盾"),
+            {28: {"page_info": {"production_date": "2025.01.25"}}},
+        )
+        assert sup == [], "无跨页证据时不得抑制（fail-open）"
+        assert any("不一致" in d["reason"] for d in down)
+
+    def test_p28_suppressed_when_current_date_declared_elsewhere(self):
+        """**跨页单源**：把 p38 的「当前年份 2026年09月18日」声明一并喂进去，
+        p28 的前提才能被证伪 ⇒ 抑制。
+
+        与上一条成对：单独看 p28 判不了（它自己没写「当前日期」），
+        有了文档级单源才判得出来 —— 这正是 B1-4 ② 要的"一次解析、全页复用"。
+        """
+        kept, down, sup = review_llm_findings(
+            [
+                _f(38, "suspicious_date", "warning",
+                   "生产日期2025年01月20日与当前年份2026年09月18日不符"),
+                _f(28, "year_contradiction", "critical",
+                   "步骤8中记录的日期2015-01-23与生产日期2026-09-18矛盾"),
+            ],
+            structured_by_page={28: {"page_info": {"production_date": "2025.01.25"}}},
+        )
+        p28_sup = [s for s in sup if s["finding"].get("page") == 28]
+        assert len(p28_sup) == 1
+        assert p28_sup[0]["evidence"]["guard_layer"] == "L3-date-baseline"
+
+    def test_p38_correct_production_date_not_suppressed(self):
+        """**反向控制**：p38 引用的是**正确**的生产日期（2025年01月20日）⇒
+        ② 不得误伤；「2027」这条真线索必须留下（只是不再 critical）。
+
+        没有这条，② 就退化成"凡引用生产日期一律抑制"。
+        """
+        _k, down, sup = _review(
+            _f(38, "signature_time_anomaly", "critical",
+               "操作者签名时间 2027.01.17 早于 生产日期 2025年01月20日"),
+            {38: {"page_info": {"production_date": "2025年01月20日"}}},
+        )
+        assert sup == [], "引用正确的生产日期时不得抑制"
+        assert down and down[0]["to_severity"] == "warning"
+
+    def test_cited_date_mismatch_with_own_page_downgrades(self):
+        """② 弱证据：引用的生产日期与该页抽取出的不一致 ⇒ 只降级（保留给人工）。"""
+        _k, down, sup = _review(
+            _f(7, "year_contradiction", "warning",
+               "取样日期 2025.01.29 与生产日期 2015.01.25 年份矛盾"),
+            {7: {"page_info": {"production_date": "2025.01.25"}}},
+        )
+        assert sup == []
+        assert any("不一致" in d["reason"] for d in down)
 
 
 # ── L4 severity 封顶（收权的核心不变式）────────────────────────────────
