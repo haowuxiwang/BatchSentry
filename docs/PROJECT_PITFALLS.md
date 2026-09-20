@@ -939,3 +939,33 @@ dist-electron/win-unpacked/resources/app.asar → WorkBuddy.exe(pid=16220)
 用不到），否则会得到一个"看起来对"的圈套。与 §十九（夹具"空"会让断言不可达）
 同型。
 
+## 二十四、程序化改写源码必须走**字节**，否则静默加 BOM / 改行尾（2026-09-20 实测）
+
+**背景**：为 B3-4 写变异验证脚本，需要"临时把源码改坏 → 跑护栏 → 还原"。
+首版用 ``Path.read_text(encoding="utf-8-sig")`` + ``write_text(..., newline="")``
+读写源码，**全程不报任何错**，却留下两个静默副作用：
+
+1. ``utf-8-sig`` 写回时**给本来没有 BOM 的文件加上了 BOM**（实测
+   ``core/pipeline/stage2.py``、``core/rules/llm_finding_guard.py``；二者 HEAD 版本均无 BOM）。
+   ⚠️ **BOM 是"内容"、不是"编码元数据"** —— ``core.autocrlf=true`` 会把**行尾**差异吃掉，
+   但 **BOM 会实打实进提交**。
+2. ``read_text`` 走**通用换行**（CRLF→LF），``newline=""`` 写回后**行尾被整体改写**
+   ⇒ 与"被改的那几行"无关的**全文件**都变了。
+
+**为什么危险**：这两个副作用在 ``git diff --numstat`` 里**几乎不可见**
+（行尾被 autocrlf 归一；BOM 只是首行多 3 个**不可见**字节）⇒ 逐行读 diff 也发现不了。
+属"工具回执骗人"（§十八.4 / §二十二.d）的同一条族。
+
+**规矩**：
+
+- 凡**程序化改写源码**（变异验证、批量重写、codemod）一律 ``read_bytes`` / ``write_bytes``：
+  按**目标文件实际换行符**编码待替换片段，再 ``bytes.replace``。
+  **不要**经过 ``read_text``/``write_text`` 的编码 + 换行翻译层。
+- 脚本必须**自校验**：``finally`` 还原后断言 ``read_bytes() == 原始字节``，不等即报错退出。
+- **独立复核**：跑完再 ``cmp <file> <运行前备份>``（或与 ``git show HEAD:<file>`` 逐字节比对）
+  —— **不要**只信脚本自己打印的"已还原"。
+- 补充判据：``git show HEAD:<file>`` 的首 3 字节是否 BOM，可与工作树直接对照（一行 Python 即可）。
+
+**踩坑痕迹**：``devlogs/_lint/mutate_b34.py``（已改字节级 + 自校验，见文件头注释）。
+
+

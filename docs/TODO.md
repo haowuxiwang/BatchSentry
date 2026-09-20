@@ -1198,18 +1198,63 @@
   （真倒序 critical / 仅重叠 warning），单一 `severity` 字段本身已不足以表达。
   验收：机检能抓住"声明与实现不一致"（构造一处漂移 ⇒ 护栏红）。
 
-- [ ] **B3-4 `apply_review` 是死代码，且三份重复实现已开始漂移**（P2，Round 46 发现）
-  现象：`core/rules/llm_finding_guard.py` 的 `apply_review`（`:465`）**零生产消费点** ——
-  `grep -rn "apply_review" --include=*.py .` 只有定义本体与测试引用；
-  而两个真正的调用方各自手写了同一段"重建 findings + 追加降级理由"逻辑
-  （`core/pipeline/stage2.py:390-396`、`core/pipeline/stage3.py:92-96`），
-  且与 `apply_review:484` **已经漂移**（后者对 description 做了 `.rstrip()`，两处调用方没有）。
-  影响：**(a)** 公开 API 无人用 ⇒ 后来者会误以为它是唯一入口；**(b)** 同一段逻辑三份，
-  改进只落一处即产生不一致 —— 与 `_get_analyzed_pages`（#131）、
-  `is_congestion_error`（#120）踩过的"两份实现迟早漂移"同型。
-  动作：二选一 —— ① 删除 `apply_review`（连同其 3 条测试）；② 或让 stage2/stage3
-  **改用**它，使重建逻辑**只有一个实现点**（推荐；顺带消除已发生的漂移）。
-  ⚠️ 与 B3-3 同属"写了但没人消费"一类 —— 建议一并排查还有多少此类死接口。
+- [x] **B3-4 写路径单一实现点 + 全仓生产死接口清零**（P2 → **已修**，2026-09-20）
+  **① 定位（先定位再动手）**：写全仓 AST 扫描 `devlogs/_lint/deadscan.py`（判据 = 定义在库代码里
+  + **生产侧零引用**；带装饰器的跳过；`tests/` 只算消费方），一次把"还有多少此类死接口"问清 ⇒
+  共 **7 个**（5 个「仅测试引用」+ 2 个「彻底无引用」）。
+  ⚠️ 首版扫描器太粗（把 pytest fixture、FastAPI 路由处理器都算进来，误报 268 个）⇒
+  判据必须与 B3-4 对 `apply_review` 的**原判定同口径**。
+
+  **② 逐项处置（关键：先判"是重复"还是"纯负债"，再决定"接线"还是"删除"）**
+  1. `llm_finding_guard.apply_review` —— 死代码，**且 stage2/stage3 各抄一份并已漂移**（`.rstrip()`）
+     ⇒ ✅ **接线**：两处改用它，重建逻辑只剩一个实现点。
+  2. `kb.store.source_version` —— 死，但 `kb_version()` **内联同一取值** `srcs[sid]['_version']`
+     ⇒ ✅ **统一**：`kb_version()` 改用它。
+  3. `kb.store.entries_by_source` —— 死，但 `entries()` 无参分支**内联同一并集**
+     ⇒ ✅ **统一**：`entries()` 改用它。
+  4. `finding_quality.is_canonical` —— 死，但 `normalize_finding_type()` **内联同一判定**
+     ⇒ ✅ **统一**：改用 `is_canonical()`。
+  5. `rules.registry.rule_by_type` —— **纯死**（与 `rule_coverage` 的 `by_type` **语义不同**：
+     前者含被禁用规则、后者只含启用）⇒ ❌ 删除 + 删其**直接单测**。
+  6. `pipeline.locks.begin_children` —— **冗余第二构造入口**（`ChildTasks(job_id)` 已被
+     `engine.py` / `stage2.py` 直接用）⇒ ❌ 删除 + 修正那条**推荐使用它**的用法注释。
+  7. `rules.year_vote.vote_report` —— **纯死**，docstring 却称"落日志 / audit"
+     ⇒ ❌ 删除 + 登记缺口 **B3-5**。
+
+  ⚠️ **两个关键判断**（避开"一刀切删死代码"的错）：
+  - **#5 不能统一**：`rule_by_type`（全表）与 `rule_coverage` 的 `by_type`（仅启用）**过滤集合不同**，
+    强行合并会改变语义 ⇒ 只能删，不能并。
+  - **#2/#3 不能直接删**：它们在测试里是**独立判据（oracle）**——`test_kb_version_is_combined_and_
+    content_derived` 用各源版本**重算**组合版本、`test_entries_default_is_union_of_sources`
+    用各源并集**重算** `entries()`。删掉函数会**削弱测试判别力** ⇒ 正解是让**生产侧用它们**，
+    既消灭重复又保住对照。
+
+  **③ 护栏**：`tests/unit/test_llm_guard_single_impl.py`（6 例）
+  - (a) 正向：stage2/stage3 必须以 AST 形式调用 `apply_review`；
+  - (b) 反向：`core/pipeline/` 不得直接调底层引擎 `review_llm_findings`（= 绕过唯一入口）；
+  - (c) 反向：物化降级的标记 token `to_severity` 不得出现在 `core/pipeline/`；
+  - **正向对照**：token 必须确实存在于唯一实现点，否则 (c) 是**空断言**（"扫不到"≠"没问题"）；
+  - 断言走 `ast.Constant` **精确等值**而非文本搜索 —— pipeline 里 `｜` 另有合法用途（错误文案），
+    文本搜索会假红。
+
+  **④ 变异验证**：`devlogs/_lint/mutate_b34.py` ——
+  M1 把重建逻辑抄回 stage2 ⇒ (a)(b)(c) **三条全红**；M2 改掉标记 token ⇒ **正向对照红**
+  （证明 (c) 非空断言）；还原后全绿，并做**逐字节还原自校验**。
+  ⚠️ 变异脚本首版用文本模式改源码，**踩到两个静默副作用**：`utf-8-sig` 写回给无 BOM 的文件
+  **加了 BOM**（BOM 是**内容**、会进提交）、通用换行把 CRLF 折成 LF。已改**字节级**并加自校验
+  （记入 `docs/PROJECT_PITFALLS.md` §二十四）。
+
+  **⑤ 验收**：全量 `tests/unit + tests/integration` 通过（基线 2771）；`deadscan` 重跑 =
+  **死接口 0 + 仅测试引用 0**。
+
+- [ ] **B3-5 年投票（YearVote）的归一结论未落审计**（P3，2026-09-20 **由 B3-4 清理暴露**）
+  `core/rules/year_vote.py::vote_report`（自述"投票结果的可审计摘要"）**从未被调用** ⇒
+  把 `2027` 归一成 `2025` 这类**跨页年份投票**的结论，除规则产出的那条 finding 外**没有独立台账**，
+  出问题时无法回答"为什么把 2027 判成 2025、各年支持页数多少、归一理由是什么"。
+  已做的一半：删掉那个"看起来已实现审计"的死函数（它的存在本身在**误导**后来者）。
+  待办：若要可审计，把 `vote.resolve(y)` 的逐票理由落 `audit_log`（至少 `logger.info`）。
+  ⚠️ 这是**功能增强**（会改变输出），需与产品口径确认后再做，**不要顺手接上**。
+
 
 ### B4 体验 / 健壮性
 

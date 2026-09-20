@@ -378,22 +378,20 @@ async def _analyze_one(
                 # 此处把"判定"收回规则层：有确定性反证者抑制（留痕可回退），
                 # 弱证据者降级；LLM 独断的 critical 一律不给 critical。
                 # 抑制明细与 spec_guard 同形，共用 suppression_rows 唯一构造点。
-                from core.rules.llm_finding_guard import review_llm_findings
+                # ⚠️ B3-4：重建 findings + 物化降级 severity **只能**在 apply_review
+                # 一处实现。此前 stage2/stage3 各自手抄一份同一段逻辑，且已与
+                # apply_review 漂移（后者对 description 做了 .rstrip()，两处调用方
+                # 没有）⇒ "改进只落一处"就产生不一致。机检
+                # tests/unit/test_llm_guard_single_impl.py 钉住这个不变式。
+                from core.rules.llm_finding_guard import apply_review
                 for _f in dict_findings:
                     if isinstance(_f, dict) and not _f.get("source"):
                         _f["source"] = "llm_page"
-                _g_kept, _g_down, _g_sup = review_llm_findings(
+                dict_findings, _g_sup = apply_review(
                     dict_findings,
                     structured_by_page={page_num: structured},
                     raw_by_page={page_num: raw_html},
                 )
-                dict_findings = list(_g_kept) + [
-                    {**d["finding"], "severity": d["to_severity"],
-                     "description": (
-                         f"{d['finding'].get('description', '')}｜{d['reason']}"
-                     )}
-                    for d in _g_down
-                ]
                 if _g_sup:
                     _suppressed = list(_suppressed) + _g_sup
                     logger.info(

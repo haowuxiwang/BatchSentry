@@ -61,7 +61,7 @@ def live_tasks_for(job_id: str) -> list[asyncio.Task]:
 #   # 退出 with 时自动等待/取消（见 ChildTasks.__exit__）
 #
 # `async with` 不可用时（同步建任务循环）用显式 API：
-#   children = begin_children(job_id); children.spawn(...); await children.drain()
+#   children = ChildTasks(job_id); children.spawn(...); await children.drain()
 class ChildTasks:
     """一组派生子任务的登记与级联取消。"""
 
@@ -119,10 +119,6 @@ class ChildTasks:
         self.cancel_all()
         return False
 
-
-def begin_children(job_id: str) -> ChildTasks:
-    """创建一组派生子任务的登记器（#140）。"""
-    return ChildTasks(job_id)
 
 # Module-level lock serializing all DB writes on the shared aiosqlite
 # connection (single connection does NOT support concurrent execute).

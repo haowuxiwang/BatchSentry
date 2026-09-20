@@ -169,11 +169,6 @@ def rule_ids() -> list[str]:
     return [s.id for s in RULE_REGISTRY]
 
 
-def rule_by_type(ftype: str) -> list[RuleSpec]:
-    """产出该 type 的规则（可能多条，如 completeness 有多条）。"""
-    return [s for s in RULE_REGISTRY if s.type == ftype]
-
-
 def disabled_rule_ids() -> set[str]:
     """读取被关闭的规则 id（config.json `rules.disabled`）。读取失败=不关闭。"""
     try:

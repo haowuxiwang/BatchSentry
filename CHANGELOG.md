@@ -19,6 +19,37 @@
 > **宿主进程**，不是安全软件）+ 工具报告**具名持有者**。Round 33 同样**不进产物**，
 > **不升版号**。
 
+### Changed (Round 47, 2026-09-20 — B3-4：写路径单一实现点 + 全仓生产死接口清零)
+
+> ⚠️ **本轮改动进入 PyInstaller 产物**（`core/rules/`、`core/pipeline/`、`core/kb/`、
+> `core/finding_quality.py`）⇒ 工作树继续**领先于产物**。**不单独升版**，随 v1.2.0 统一升版重建。
+
+- **B3-4 修复**：`core/rules/llm_finding_guard.py::apply_review` 原为**生产死代码**（零消费点），
+  而 `stage2.py` / `stage3.py` 各自手抄了同一段「重建 findings + 物化降级 severity」逻辑，
+  且**已漂移**（`apply_review` 对 description 做了 `.rstrip()`，两处调用方没有）。
+  ⇒ 两处改为统一调用 `apply_review`，**重建逻辑只剩一个实现点**，漂移随之消除。
+- **同型重复一并统一**（本轮全仓扫描新发现，形态均为"函数是死的、但生产侧内联了同一逻辑"）：
+  - `kb.store.kb_version()` 原内联 `srcs[sid]['_version']` ⇒ 改走 `source_version(sid)`；
+  - `kb.store.entries()` 无参分支原内联"各源并集" ⇒ 改走 `entries_by_source()`；
+  - `finding_quality.normalize_finding_type()` 原内联 `t in CANONICAL_TYPES` ⇒ 改走 `is_canonical()`。
+- **纯死接口删除**（零消费、且**无可统一的重复**）：
+  - `core/rules/registry.py::rule_by_type` —— ⚠️ 与 `rule_coverage` 的 `by_type` **语义不同**
+    （前者含被禁用规则、后者只含启用）⇒ **不可合并，只能删**；连同其直接单测一并移除；
+  - `core/pipeline/locks.py::begin_children` —— **冗余第二构造入口**（`ChildTasks(job_id)`
+    已被 `engine.py` / `stage2.py` 直接用）；并修正那条**推荐使用它**的用法注释；
+  - `core/rules/year_vote.py::vote_report` —— docstring 称"可审计摘要（落日志 / audit）"
+    却**从未被调用** ⇒ 它的存在本身在**误导**"跨页年份投票已可审计"。缺口另登记 **B3-5**。
+- **护栏（防再复制）**：`tests/unit/test_llm_guard_single_impl.py`（6 例）——
+  正向断言 stage2/stage3 必须调用 `apply_review`；反向断言 `core/pipeline/` 不得直接调
+  底层引擎 `review_llm_findings`、不得出现物化 token `to_severity`；并带**正向对照**
+  （token 必须确实存在于唯一实现点，否则反向断言是**空断言**）。
+  断言走 AST `ast.Constant` **精确等值** —— pipeline 里 `｜` 另有合法用途（错误文案），
+  文本搜索会假红。
+- **变异验证**：把重建逻辑抄回 stage2 ⇒ **三条断言全红**；改掉标记 token ⇒ **正向对照红**；
+  还原后全绿，且**逐字节还原自校验**通过（脚本改递归字节级，见 `PROJECT_PITFALLS.md` §二十四）。
+- **验收**：全量 `tests/unit + tests/integration` = **2776 passed / 0 failed**
+  （基线 2771 + 新增护栏 6 − 删除的直接单测 1）；全仓死接口扫描重跑 = **生产死接口 0**。
+
 ### Added (Round 44, 2026-09-20 — B1-6「收权」：判定从 LLM 收回规则层)
 
 > ⚠️ **本节改动进入 PyInstaller 产物**（`core/rules/`、`core/pipeline/`）⇒ 工作树

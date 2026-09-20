@@ -170,7 +170,9 @@ def normalize_finding_type(raw: str | None) -> str:
     if not raw:
         return UNCATEGORIZED
     t = str(raw).strip().lower()
-    if t in CANONICAL_TYPES:
+    # ⚠️ "是否已在白名单内"只在这里判一次（B3-4）：此前内联 `t in CANONICAL_TYPES`，
+    # 与 is_canonical() 是同一判定的两份实现。
+    if is_canonical(raw):
         return t
     if t in TYPE_SYNONYMS:
         return TYPE_SYNONYMS[t]
@@ -181,7 +183,11 @@ def normalize_finding_type(raw: str | None) -> str:
 
 
 def is_canonical(raw: str | None) -> bool:
-    """原始 type 是否已在白名单内（无需归一）。"""
+    """原始 type 是否已在白名单内（无需归一）。
+
+    ⚠️ 这是"是否规范类型"的**唯一判定点**（B3-4）：`normalize_finding_type`
+    的第一步必须经由这里，不要在调用方内联 ``x in CANONICAL_TYPES``。
+    """
     return bool(raw) and str(raw).strip().lower() in CANONICAL_TYPES
 
 

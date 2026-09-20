@@ -539,10 +539,17 @@ def apply_review(
     structured_by_page: dict | None = None,
     raw_by_page: dict | None = None,
 ) -> tuple[list, list[dict]]:
-    """便捷封装：落库前的最终 findings 列表 + 抑制明细。
+    """**落库（写路径）唯一入口**：复核 + 物化降级，返回 ``(final, suppressed)``。
 
-    返回 ``(final_findings, suppressed)`` —— ``final_findings`` 已应用降级后的
-    severity（不改动入参 dict，返回新副本）。
+    ``final`` = 保留项 + 已把 ``to_severity`` 写回 ``severity`` 的降级项
+    （**不改动入参 dict**，返回新副本）；降级理由以 ``｜理由`` 追加到 description
+    供复核者阅读（GMP：结论变更须可解释）。``suppressed`` 与
+    ``spec_guard.suppression_rows`` 同形，可直接写 ``finding_suppressions`` 台账。
+
+    ⚠️ **不要在调用方重写这段"重建 + 降级物化"逻辑** —— stage2/stage3 曾各自
+    手抄一份，且与这里**已经漂移**（本函数对 description 做了 ``.rstrip()``，
+    两处调用方没有），属 B3-4 登记的可维护性缺陷；机检
+    ``tests/unit/test_llm_guard_single_impl.py`` 会抓住再复制。
     """
     kept, downgraded, suppressed = review_llm_findings(
         findings, structured_by_page=structured_by_page, raw_by_page=raw_by_page,

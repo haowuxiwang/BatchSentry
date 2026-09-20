@@ -87,15 +87,25 @@ def _reset_for_tests() -> None:
 
 # ── 版本 ────────────────────────────────────────────────────────────
 def kb_version() -> str:
-    """Combined corpus version: hash over every per-source version."""
+    """Combined corpus version: hash over every per-source version.
+
+    ⚠️ 取值一律走 :func:`source_version`（B3-4）：此前这里内联
+    ``srcs[sid]['_version']``，与 ``source_version`` 是同一取值的两份实现
+    —— 改一处就会漂移。
+    """
     srcs = _load_all()
     if not srcs:
         return ""
-    joined = "|".join(f"{sid}@{srcs[sid]['_version']}" for sid in sorted(srcs))
+    joined = "|".join(f"{sid}@{source_version(sid)}" for sid in sorted(srcs))
     return hashlib.sha256(joined.encode("utf-8")).hexdigest()[:12]
 
 
 def source_version(source_id: str) -> str:
+    """单个源的内容版本（12 位哈希）。
+
+    ⚠️ 这是"每源版本"的**唯一实现点**：``kb_version()`` 组合版本必须由此派生
+    （B3-4），不要再在调用方内联 ``_load_all()[sid]['_version']``。
+    """
     return str(_load_all().get(source_id, {}).get("_version", ""))
 
 
@@ -137,17 +147,22 @@ def source_ids() -> list[str]:
 
 # ── 条目 ────────────────────────────────────────────────────────────
 def entries(source_id: str | None = None) -> list[dict]:
-    """All entries, or the entries of one source (stable order)."""
-    srcs = _load_all()
+    """All entries, or the entries of one source (stable order).
+
+    ⚠️ 无参分支一律走 :func:`entries_by_source`（B3-4）：此前内联了同一段
+    "按源并集"逻辑，两份实现改一处即漂移。
+    """
     if source_id is not None:
-        return list(srcs.get(source_id, {}).get("entries", []))
+        return list(_load_all().get(source_id, {}).get("entries", []))
+    by_src = entries_by_source()
     out: list[dict] = []
-    for sid in sorted(srcs):
-        out.extend(srcs[sid].get("entries", []))
+    for sid in sorted(by_src):
+        out.extend(by_src[sid])
     return out
 
 
 def entries_by_source() -> dict[str, list[dict]]:
+    """每个源的条目（键按 source_id 升序）—— `entries()` 无参分支的**唯一**来源。"""
     srcs = _load_all()
     return {sid: list(srcs[sid].get("entries", [])) for sid in sorted(srcs)}
 

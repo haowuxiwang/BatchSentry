@@ -194,18 +194,3 @@ def build_year_vote(pages: list[dict]) -> YearVote:
         majority=majority,
         batch_years=tuple(sorted(batch_years)),
     )
-
-
-def vote_report(vote: YearVote) -> dict:
-    """投票结果的可审计摘要（落日志 / audit）。"""
-    rows = []
-    for y, n in sorted(vote.support.items(), key=lambda kv: (-kv[1], kv[0])):
-        _, reason = vote.resolve(y)
-        rows.append({"year": y, "pages": n, "normalized_to": vote.majority if reason else None,
-                     "reason": reason})
-    return {
-        "majority": vote.majority,
-        "batch_years": list(vote.batch_years),
-        "years": rows,
-        "normalized": [r for r in rows if r["reason"]],
-    }

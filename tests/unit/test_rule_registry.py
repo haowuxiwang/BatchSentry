@@ -14,7 +14,6 @@ from core.rules import registry
 from core.rules.registry import (
     RULE_REGISTRY,
     enabled_rule_specs,
-    rule_by_type,
     rule_ids,
 )
 
@@ -51,12 +50,6 @@ class TestRegistryStructure:
     def test_m4_rules_registered(self):
         ids = set(rule_ids())
         assert {"R11", "R12", "R13", "R14", "R15", "R16", "R17"} <= ids
-
-    def test_rule_by_type(self):
-        types = {s.type for s in rule_by_type("completeness")}
-        assert types == {"completeness"}
-        assert rule_by_type("completeness")  # 多条
-        assert rule_by_type("nonexistent") == []
 
 
 class TestEnabledRuleSpecs:

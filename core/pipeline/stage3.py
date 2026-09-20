@@ -85,15 +85,12 @@ async def _run_stage3_cross_analysis(
     # 页级同一把尺子 —— 落库前过确定性复核。两条路径同源同病（同一 LLM、
     # 同一 prompt 家族）：51 页实测里 llm_cross 贡献了 24 条假 critical，
     # 与 llm_page 的 25 条机理完全一致（方向反 / 串位 / 凭空数字）。
-    from core.rules.llm_finding_guard import review_llm_findings
-    _g_kept, _g_down, _g_sup = review_llm_findings(
+    # ⚠️ B3-4：与 stage2 共用**同一个**实现点（重建 + 降级物化只在
+    # apply_review 里）。此前两处各自手抄，且已与之漂移。
+    from core.rules.llm_finding_guard import apply_review
+    findings, _g_sup = apply_review(
         findings, structured_by_page=_struct_by_page, raw_by_page=_raw_by_page,
     )
-    findings = list(_g_kept) + [
-        {**d["finding"], "severity": d["to_severity"],
-         "description": f"{d['finding'].get('description', '')}｜{d['reason']}"}
-        for d in _g_down
-    ]
     if _g_sup:
         logger.info(
             f"[{job_id}] Stage 3: 收权复核抑制 {len(_g_sup)} 条 LLM 跨页结论"
