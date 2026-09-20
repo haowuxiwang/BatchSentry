@@ -61,6 +61,51 @@ class TestGetSettings:
         assert "siliconflow" in data["llm"]
 
     @pytest.mark.asyncio
+    async def test_llm_exposes_auto_activated_notice(self, settings_client):
+        """🔴 B4-4 ②：provider 自动改写的事实必须**回传到界面**。
+
+        契约：`llm.auto_activated` 存在，且**确实取自** `config.AUTO_ACTIVATE_NOTICE`
+        （不是恒 None 的装饰字段）—— 两个取值都验：
+        先验"未发生 ⇒ None"，再 monkeypatch 成"已切换"验它透传。
+        """
+        import config as cfg_mod
+
+        saved = cfg_mod.AUTO_ACTIVATE_NOTICE
+        try:
+            cfg_mod.AUTO_ACTIVATE_NOTICE = None
+            data = (await settings_client.get("/api/settings")).json()
+            assert "auto_activated" in data["llm"]
+            assert data["llm"]["auto_activated"] is None
+
+            cfg_mod.AUTO_ACTIVATE_NOTICE = {
+                "applied": True, "from": "deepseek", "to": "siliconflow",
+                "reason": "deepseek 未配置 API Key，已自动切换到 siliconflow。",
+            }
+            data = (await settings_client.get("/api/settings")).json()
+            assert data["llm"]["auto_activated"]["applied"] is True
+            assert data["llm"]["auto_activated"]["to"] == "siliconflow"
+        finally:
+            cfg_mod.AUTO_ACTIVATE_NOTICE = saved
+
+    @pytest.mark.asyncio
+    async def test_placeholder_substring_key_reported_as_configured(self, settings_client):
+        """🔴 B4-4 验收 ②：真实 key 含 `placeholder` 子串 ⇒ `configured` 必须为 True。
+
+        旧实现（子串匹配）会把它报成 False ⇒ 界面说"未配置"（误导），
+        且启动期据此**换掉 provider**。
+        """
+        import config as cfg_mod
+        prov = cfg_mod.config["providers"]["deepseek"]
+        saved = prov.api_key
+        try:
+            prov.api_key = "sk-abc-placeholder-xyz-1234567890"
+            data = (await settings_client.get("/api/settings")).json()
+            row = next(p for p in data["llm"]["providers"] if p["name"] == "deepseek")
+            assert row["configured"] is True
+        finally:
+            prov.api_key = saved
+
+    @pytest.mark.asyncio
     async def test_ocr_has_backend_and_both_backends(self, settings_client):
         r = await settings_client.get("/api/settings")
         data = r.json()

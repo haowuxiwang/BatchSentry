@@ -50,6 +50,50 @@
 - **验收**：全量 `tests/unit + tests/integration` = **2776 passed / 0 failed**
   （基线 2771 + 新增护栏 6 − 删除的直接单测 1）；全仓死接口扫描重跑 = **生产死接口 0**。
 
+### Fixed (Round 48, 2026-09-20 — B4-4：provider 自动改写收权 + 界面可见)
+
+> ⚠️ **本节改动进入 PyInstaller 产物**（`config.py`、`api/settings/`、
+> `static/settings.js`）⇒ 工作树继续**领先于产物**。**不单独升版**，随 v1.2.0 统一升版重建。
+
+- **定位（比原记录更收敛）**：auto-activate 实际有**两份实现** —— 后端
+  `config.load_config()`（import 期切换 + 落盘）与前端 `settings.js.load()`。
+  后端先切完 ⇒ 前端条件恒不成立 ⇒ **那条唯一带提示的路径（`autoReason`）被绕过**
+  ⇒ "界面零提示"的真实机制是**第二实现点屏蔽了第一实现点的提示**。
+- **单一实现点**：新增 `config._resolve_active_provider()`；**删除前端那份本地切换**
+  （连带 `opts.autoReason` / `firstConfigured`），前端改为
+  `showAutoActivateNotice(current.llm.auto_activated)` —— **只呈现、不决策**。
+- **回退条件收紧**：仅在「用户**未显式选择**（配置里无 `LLM_PROVIDER`）
+  **且** active 的 Key **字面为空** **且** 另有 provider 的 Key 字面非空」时回退；
+  用户**显式选过**则**绝不改写**（只上报，由界面提示）。
+- **`_is_real_key` 改精确校验**：子串 → 「精确值 + 模板前缀（**前缀后必须是非字母**）」；
+  统一 `api/settings/read.py` 里**手抄的副本** `_is_real_api_key`；
+  删除**零消费**的旧名 `TEST_KEY_PATTERNS`。
+- **界面可见**：`GET /api/settings` 新增 `llm.auto_activated`
+  （`{applied, from, to, reason}` 或 `None`），前端渲染到 provider 徽标与消息区。
+  ⚠️ 必须**调用期**读 `AUTO_ACTIVATE_NOTICE`（`from config import ...` 是导入期取值，
+  状态变化读不到 —— 被集成测试当场抓住）。
+- **有意保留的取舍**：切换判定**不再**使用启发式 ⇒ 带**占位 key** 的 provider
+  也会成为回退候选。刻意如此：占位 key **响亮失败**（401，可追溯），
+  启发式误判是**无声**的。启发式保留在显示层（`configured`）。
+- **自踩并当场修掉的两个同类错误**（由新护栏抓出）：`sk-ant-test` 作前缀会命中真实 key
+  `sk-ant-testing-...`（**修缺陷时又犯同一类缺陷**）⇒ 改为"前缀后接非字母"；
+  `sk-your-api-key` 是词模板 ⇒ 移到精确值表。
+- **验收**：`test_config_internals.py` 4 个决策用例（含"持久化即失败"的反向断言）+
+  `TestIsRealKeyExactMatch` 6 例；新增 `test_settings_auto_activate.py`（单一实现点 +
+  界面可见性机检，**AST 判"被调用名字"** + **正向对照**）；
+  `test_api_settings.py` 新增 2 例（`auto_activated` 契约两个取值都验）。
+- **变异验证**：`devlogs/_replay/mutate_b44.py` **5/5 通过**（改回启发式 / 去掉显式选择闸门 /
+  不记录决策事实 / 删前端渲染调用点 / `_is_real_key` 改回子串 ⇒ 各自打红对应用例），
+  逐字节还原自校验通过。
+- **提交前复核追加（徽标"隐形契约"）**：`#llm-provider-badge` 的**加载期写入点**原本在
+  `fillOcrForm()` 内，而 `showAutoActivateNotice()` 排其后 ⇒ 徽标文案取决于**两函数的
+  调用顺序**这一隐形契约（重排即静默退回纯名称，且既有断言全绿）。
+  现已把加载期写入**收敛到 `showAutoActivateNotice()` 一处**（无通知时也写回纯名称）。
+  ⚠️ 该护栏**首版 3 个变异漏过 2 个**：`display(activeProvider)` 被**三元表达式另一分支**
+  满足（空断言）、函数开头插 `return;` 使写入成**运行期死代码**。
+  判据改为**结构化**（写入前不得有 `return`；写入所在 `if` 的条件不得依赖 `info`）后
+  **3/3 全拦**（`devlogs/_lint/mutate_b44b.py`）。详见 PITFALLS §二十八。
+
 ### Fixed (Round 48, 2026-09-20 — B1-4 / B1-5：日期语义收权 + 形态闸门补齐变异证明)
 
 > ⚠️ **本轮改动进入 PyInstaller 产物**（`core/rules/llm_finding_guard.py`）⇒ 工作树继续

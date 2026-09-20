@@ -1389,7 +1389,7 @@
   验收：护栏可离线断言"自查工具会读两条路径"（造两个临时 config，断言都被读到）；
   `DEPLOYMENT.md` 已写明该风险（✅ 本轮已加）。
 
-- [ ] **B4-4 【P1】provider 被启动逻辑自动改写并持久化（界面零提示）**（Round 43 确证）
+- [x] **B4-4 【P1】provider 被启动逻辑自动改写并持久化（界面零提示）**（Round 43 确证）
   ⚠️ 本条即上一轮 §14.4 列为「**未复核**」的那一项，**本轮已确证**（不再是"疑似"）。
   现象：启动时若 active provider 的 key 未通过 `_is_real_key`，则**自动切到第一个
   "有真 key"的 provider**，改写 `os.environ["LLM_PROVIDER"]` **并写回配置文件**。
@@ -1406,6 +1406,75 @@
   验收：① 造"active 无 key + 另一家有名 key"→ 有提示且**不改写用户显式选择**（若用户已显式选过）；
   ② 造"active 的 key 含 `placeholder` 子串但格式合法" ⇒ **不得**触发切换；
   变异验证：去掉提示 ⇒ 护栏红。
+
+  **✅ Round 48（2026-09-20）修复记录**
+
+  **定位（比 Round 43 的转述更收敛）—— 实际有**两份**实现，且互相掩盖**：
+  - 后端 `config.py::load_config()`（**import 期**执行）切换 + `_persist_env_to_config` 落盘；
+  - 前端 `static/settings.js::load()` 又自己切一次（`POST /set_active_provider`）。
+  后端先切完 ⇒ 前端条件 `!activeProv.configured` 恒不成立 ⇒
+  **那条唯一带提示的路径（`autoReason`）被绕过** ⇒ 用户看到的就是"provider 被静默换掉"。
+  ⇒ "界面零提示"的真实机制是**第二实现点把第一实现点的提示屏蔽了**，不只是"没写提示"。
+
+  **处置（三处，全部收敛到单一实现点）**：
+  1. **新增 `config._resolve_active_provider()` —— 决策的唯一实现点**。
+     回退**只允许**在：用户**未显式选择**（配置里没有 `LLM_PROVIDER`）
+     **且** active 的 Key **字面为空** **且** 另有 provider 的 Key 字面非空。
+  2. **删除前端那份本地切换**（连带 `opts.autoReason` 与 `firstConfigured`），
+     改为 `showAutoActivateNotice(current.llm.auto_activated)` —— **只呈现、不决策**。
+  3. **`_is_real_key` 改精确校验**（子串 → 「精确值 + 模板前缀」，并统一
+     `api/settings/read.py` 里**手抄的副本** `_is_real_api_key`）；
+     零消费的旧名 `TEST_KEY_PATTERNS` 一并删除。
+
+  **⚠️ 有意保留的取舍（已写进代码注释）**：切换判定**不再**使用占位启发式
+  ⇒ 一个带**占位 key** 的 provider 也会被当作"已配置"而成为回退候选。
+  这是刻意的：占位 key 会**响亮失败**（401/403，可追溯），
+  而"启发式误判 ⇒ 静默换模型"是**无声**的（GMP 硬伤）。
+  启发式保留在**显示层**（`configured` 标志），且新的提示会把它们串起来：
+  「已自动切换到 X」+ X 显示"未配置" ⇒ 用户立刻可行动。
+
+  **⚠️ 本轮自踩并当场修掉的两个同类错误**（都由新护栏抓出，记入 PITFALLS §二十七）：
+  - 首版前缀表含 `sk-ant-test` ⇒ 朴素 `startswith` 把**真实 key**
+    `sk-ant-testing-real-key-...` 判成占位 —— 正是本次要修的同一类错误。
+    改为"**前缀后必须是非字母**"；
+  - `sk-your-api-key` 是**词模板**（后接字母），前缀规则无法与真实 key 区分
+    ⇒ 从前缀表移到**精确值**表。
+
+  **验收（全部有真实执行证据）**：
+  - `tests/unit/test_config_internals.py`：4 个决策用例（未显式⇒切换+持久化+提示；
+    显式⇒**绝不改写**（并把"持久化即失败"写成断言）；含 `placeholder` 子串的真实 key
+    ⇒ 不切换；全空 ⇒ 不切换）+ `TestIsRealKeyExactMatch` 6 例；
+  - `tests/unit/test_settings_auto_activate.py`（新）：**单一实现点 + 界面可见性**机检 ——
+    判据走 **AST 的"被调用名字"**（不查字面量，否则 docstring 里提到 `_is_real_key`
+    就假红），并带**正向对照**（`setActiveProvider` 必须仍在，防"把功能删光也能过"）；
+  - `tests/integration/test_api_settings.py`：`llm.auto_activated` 契约（两个取值都验，
+    证明它不是恒 `None` 的装饰字段）+ 含子串 key 的 `configured` 必须为 True。
+  - **变异验证（`devlogs/_replay/mutate_b44.py`）5/5 通过**（逐字节还原自校验通过）：
+    改回启发式 ⇒ 红；去掉"显式选择"闸门 ⇒ 红；不再记录决策事实 ⇒ 红；
+    删掉前端渲染**调用点** ⇒ 红；`_is_real_key` 改回子串 ⇒ 红。
+  - ⚠️ 过程中被测试抓出的**实现缺陷**：`read.py` 原用 `from config import AUTO_ACTIVATE_NOTICE`
+    = **导入期取值** ⇒ 状态变化读不到（也不可测）。改为**调用期读属性**
+    （模块名与那个 dict 同名，须 `import config as _config_module` 别名导入）。
+  - ⚠️ **跨测试污染**：`test_api_settings.py` 会注册带 key 的自定义 provider
+    `anthropictest` ⇒ 合并跑时抢走回退候选。已在测试夹具里清 `LLM_PROVIDERS` 使其自洽。
+
+  **✅ Round 48 追加（提交前复核，2026-09-20）—— 「提示渲染」自身的一处隐形契约**
+
+  复核前端时发现：徽标 `#llm-provider-badge`（定义在 `templates/settings.html:127`）
+  的**加载期写入点原本在 `fillOcrForm()` 里**，而 `showAutoActivateNotice()` 排在其**后**
+  ⇒ 徽标文案（`（已自动从 X 切换）`）正确与否，取决于**两个函数的调用顺序**这一
+  **隐形契约**：一旦重排，提示会被静默覆盖回纯名称，而**所有既有断言仍然全绿**。
+  - 处置：把加载期写入**收敛到 `showAutoActivateNotice()` 一处**
+    （无通知时也写回纯名称，否则徽标无人渲染）；`fillOcrForm()` 不再碰徽标。
+    用户显式切换的乐观更新仍留在 `setActiveProvider()`（另一条流程，写入点共 2 个）。
+  - ⚠️ **首版护栏 3 个变异漏过 2 个**（都是"文本断言"的固有盲区）：
+    M2 把写入条件改成 `if (badgeEl && info && …)` ⇒ 无通知时徽标不再渲染，
+    而"函数体含 `display(activeProvider)`"仍被**三元表达式的另一分支**满足（**空断言**）；
+    M3 在函数开头插 `return;` ⇒ 写入成为**运行期死代码**，文本断言完全看不见。
+  - 处置：判据改为**结构化** —— 看写入语句**之前**有没有 `return`、
+    以及它所在 `if` 的**条件表达式**里有没有 `info`。改后 **3/3 全拦**
+    （`devlogs/_lint/mutate_b44b.py`，逐字节还原自校验通过）。
+  - 记录：`tests/unit/test_settings_auto_activate.py::test_badge_write_is_unconditional_and_reachable`。
 
 - [ ] **B4-5 KB 条目数口径虚高 + 文档两套数字并存**（P2，Round 43 新发现）
   实测（本轮亲自跑，可复现）：`scripts/release_gate.count_kb_entries('core/kb/data')` = **477**，
@@ -1458,4 +1527,41 @@
   理由：目前**只有一份真实批记录**（丝裂霉素），泛化未验证；规则/阈值可能过拟合。
   动作：跑完整链路，记录：轮次、误报、漏检、耗时；与第 1 份对比。
   验收：产出一份对比报告；若发现过拟合 ⇒ 立刻登记缺陷。
+
+### B7 测试与静态检查的基础设施（Round 48 提交前复核新发现）
+
+- [ ] **B7-1 全量测试在单次工具调用里会撞沙箱「每轮删除预算」⇒ 顺序性 flake**（P2）
+  **实测（可复现）**：`pytest tests/unit tests/integration` 一次跑完 ⇒
+  `1 failed, 2800 passed`，失败点 `tests/integration/test_main_routes.py::TestServePdf
+  ::test_pdf_non_local_host_returns_403` 的 `finally: pdf_path.unlink(...)`，
+  抛的是沙箱 shim 的 `SystemExit(1)`：
+  `[safe-delete][SAFE_DELETE_BULK_CONFIRM_REQUIRED] {"count":847,"threshold":50,"scope":"turn"}`。
+  **定位（不是猜）**：守卫实现在 `cli/vendor/shim/safe-delete-bulk-guard.cjs`，
+  阈值旋钮 = 环境变量 **`CODEBUDDY_SAFE_DELETE_BULK_THRESHOLD`**（默认 20，
+  本次宿主给 50），作用域 `turn`；shim 侧 `_check_bulk_delete_guard()` 只在
+  `CODEBUDDY_TOOL_CALL_ID` 存在时才检查 ⇒ **是本机沙箱策略，不是应用缺陷**。
+  **决定性验证**：同一份代码、仅加 `CODEBUDDY_SAFE_DELETE_ENABLED=0` ⇒
+  **`2801 passed / 0 failed`**（总数与失败轮一致）⇒ 结论成立：环境性，非回归。
+  动作：① 全量跑法固化为
+  `CODEBUDDY_SAFE_DELETE_ENABLED=0 "$PY" -m pytest tests/unit tests/integration -o addopts="" -q -p no:cacheprovider`；
+  ② 或改 `CODEBUDDY_SAFE_DELETE_BULK_THRESHOLD=<大>`（更保守，不清安全网）。
+  ⚠️ **别把这个 flake 当回归修** —— 更别去改 `test_pdf_non_local_host_returns_403`
+  （它的 cleanup 是正确的）。判据：失败点是否是 `SystemExit` 且带 `BULK_CONFIRM_REQUIRED`。
+  ⚠️ **纠正一处旧记录**：既有文档/记忆里写的构建变量名 `BULK_THRESHOLD` **不是真变量名**
+  （实际生效的是并排设置的 `CODEBUDDY_SAFE_DELETE_ENABLED=0`）；按真名记录，避免误导。
+
+- [ ] **B7-2 全仓 ruff 105 条既存欠账（lint 未进门禁 ⇒ 真缺陷会被噪声淹没）**（P3）
+  实测：`ruff check .` = **105**（F401 未用导入 100 + F841 未用变量 5），
+  分布高度集中：`core/pipeline/__init__.py` 38、`core/rules/__init__.py` 15、
+  `tests/unit/test_pipeline.py` 11、`api/jobs/__init__.py` 4 ……
+  **58/105 在 `__init__.py` 里，而那是刻意的再导出**（该文件 docstring 明说
+  "Public API is re-exported here so `from core.pipeline import X` keeps working"，
+  且 `import asyncio  # noqa: F401` 只标了 1 行）。
+  ⇒ 与 `pyproject.toml` 的自我声明（"F-class = real defects"）**相互矛盾**：
+  105 条噪声的基线意味着**新增一个真缺陷没人看得见**。
+  动作：① `__init__.py` 类走 `[tool.ruff.lint.per-file-ignores]`（或在文件里补 `__all__`）
+  —— **不要删那些导入**（它们就是公开 API）；② 其余 `--fix` 处理（42 条可自动修）。
+  🔴 **禁止无脑 `ruff --fix` 全仓**：`tests/` 里有用字符串 `patch("mod.name")`
+  的导入，对 ruff 是"未使用"，删掉会**改掉 patch 目标是否存在** ⇒ 静默破坏测试。
+  验收：`ruff check .` 归零且全量测试数**不下降**；变异验证：恢复一条真未用导入 ⇒ 必须红。
 

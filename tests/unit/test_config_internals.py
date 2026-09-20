@@ -239,6 +239,24 @@ class TestEnvInt:
 
 
 class TestLoadConfigProviderSelection:
+    @pytest.fixture(autouse=True)
+    def _restore_notice(self, monkeypatch):
+        """`load_config()` 会改写模块级 `AUTO_ACTIVATE_NOTICE`（供 settings API 读）。
+
+        它是**全局单源** ⇒ 测试必须还原，否则会把"某个测试想定的启动事实"
+        泄漏给后续用例 / 集成测试的 GET /api/settings 断言。
+
+        同时清掉 `LLM_PROVIDERS`：别的测试会注册自定义 provider（如
+        `test_api_settings.py` 的 `anthropictest`，且其 key 非空），
+        不清就会**跨测试污染**这里的候选集（实测：本组用例单独跑绿、
+        合并跑红）。
+        """
+        import config as _c
+        saved = _c.AUTO_ACTIVATE_NOTICE
+        monkeypatch.delenv("LLM_PROVIDERS", raising=False)
+        yield
+        _c.AUTO_ACTIVATE_NOTICE = saved
+
     def test_unknown_provider_falls_back_to_deepseek(self, monkeypatch):
         """LLM_PROVIDER 不在注册表 → 回退 deepseek（544）。"""
         monkeypatch.setenv("LLM_PROVIDER", "totally-unknown-xyz")
@@ -246,24 +264,147 @@ class TestLoadConfigProviderSelection:
         cfg = load_config()
         assert cfg["app"].llm_provider == "deepseek"
 
-    def test_auto_activates_configured_provider(self, monkeypatch):
-        """active provider 无 Key 但另一 provider 有 → 自动切换并持久化（559-566）。"""
-        monkeypatch.setenv("LLM_PROVIDER", "deepseek")
+    def test_auto_activates_when_not_explicitly_chosen(self, monkeypatch):
+        """**未显式选择** + active 无 Key + 另一家有 Key ⇒ 自动切换 + 持久化 + 提示。
+
+        🔴 B4-4：触发条件里**不再**包含 `_is_real_key`（占位启发式），
+        只看 **Key 字面为空**。故本用例把 `LLM_PROVIDER` **删掉**
+        （= 用户从未选过，用的是默认值）——
+        旧版正是靠 setenv("LLM_PROVIDER","deepseek") 来"模拟默认"，
+        在新规则下那已经是**显式选择**了（见下一个用例）。
+        """
+        import config as _c
+        monkeypatch.delenv("LLM_PROVIDER", raising=False)
         monkeypatch.setenv("DEEPSEEK_API_KEY", "")
         monkeypatch.setenv("SILICONFLOW_API_KEY", "sk-real-siliconflow-value-123456")
         persisted = {}
 
-        def fake_persist(k, v):
-            persisted[k] = v
+        with patch("config._persist_env_to_config", side_effect=lambda k, v: persisted.__setitem__(k, v)):
+            cfg = _c.load_config()
 
-        with patch("config._persist_env_to_config", side_effect=fake_persist):
-            from config import load_config
-            cfg = load_config()
         assert cfg["app"].llm_provider == "siliconflow"
         assert persisted.get("LLM_PROVIDER") == "siliconflow"
-        # 清理进程镜像，避免污染后续测试
+        # 界面可见性：决策事实必须被记录（否则就是"静默换 provider"）
+        assert _c.AUTO_ACTIVATE_NOTICE == {
+            "applied": True, "from": "deepseek", "to": "siliconflow",
+            "reason": "deepseek 未配置 API Key，已自动切换到 siliconflow。",
+        }
         monkeypatch.delenv("LLM_PROVIDER", raising=False)
         monkeypatch.delenv("SILICONFLOW_API_KEY", raising=False)
+
+    def test_explicit_choice_not_overridden(self, monkeypatch):
+        """**验收 ①**：用户**显式选过**（`LLM_PROVIDER` 已设置）⇒ 绝不改写。
+
+        即便 active 无 Key、另一家有 Key，也只**如实上报**（applied=False），
+        由界面提示用户去填 Key 或手动切换 —— 不得覆盖用户的显式选择。
+        """
+        import config as _c
+        monkeypatch.setenv("LLM_PROVIDER", "deepseek")
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "")
+        monkeypatch.setenv("SILICONFLOW_API_KEY", "sk-real-siliconflow-value-123456")
+
+        def _must_not_persist(k, v):   # pragma: no cover - 触发即失败
+            raise AssertionError(f"不得改写用户显式选择，却持久化了 {k}={v!r}")
+
+        with patch("config._persist_env_to_config", side_effect=_must_not_persist):
+            cfg = _c.load_config()
+
+        assert cfg["app"].llm_provider == "deepseek", "显式选择必须被尊重"
+        assert _c.AUTO_ACTIVATE_NOTICE is not None
+        assert _c.AUTO_ACTIVATE_NOTICE["applied"] is False
+        assert _c.AUTO_ACTIVATE_NOTICE["from"] == "deepseek"
+        monkeypatch.delenv("LLM_PROVIDER", raising=False)
+        monkeypatch.delenv("SILICONFLOW_API_KEY", raising=False)
+
+    def test_placeholder_substring_key_does_not_trigger_switch(self, monkeypatch):
+        """**验收 ②**：active 的 Key 含 `placeholder` 子串但**格式合法**
+        ⇒ **不得**触发切换。
+
+        这正是旧版的生产事故：`_is_real_key` 用子串匹配 ⇒ 把真实 key 判成
+        "未配置" ⇒ 启动时静默换到别的 provider（**你以为的模型 ≠ 实际跑的模型**）。
+        """
+        import config as _c
+        monkeypatch.delenv("LLM_PROVIDER", raising=False)
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-abc-placeholder-xyz-1234567890")
+        monkeypatch.setenv("SILICONFLOW_API_KEY", "sk-real-siliconflow-value-123456")
+
+        def _must_not_persist(k, v):   # pragma: no cover - 触发即失败
+            raise AssertionError(f"含 placeholder 子串的真实 key 不得触发切换：{k}={v!r}")
+
+        with patch("config._persist_env_to_config", side_effect=_must_not_persist):
+            cfg = _c.load_config()
+
+        assert cfg["app"].llm_provider == "deepseek"
+        assert _c.AUTO_ACTIVATE_NOTICE is None, "没有发生任何需要提示的事"
+        monkeypatch.delenv("SILICONFLOW_API_KEY", raising=False)
+
+    def test_no_key_anywhere_leaves_choice_alone(self, monkeypatch):
+        """**一个 Key 都没配** ⇒ 无处可回退，保持现状 + 不提示。"""
+        import config as _c
+        monkeypatch.delenv("LLM_PROVIDER", raising=False)
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "")
+        monkeypatch.setenv("SILICONFLOW_API_KEY", "")
+        with patch("config._persist_env_to_config", side_effect=AssertionError("不应持久化")):
+            cfg = _c.load_config()
+        assert cfg["app"].llm_provider == "deepseek"
+        assert _c.AUTO_ACTIVATE_NOTICE is None
+
+
+class TestIsRealKeyExactMatch:
+    """🔴 B4-4 ③：`_is_real_key` 必须是**精确格式校验**，不得子串匹配。"""
+
+    def test_real_key_containing_placeholder_substring_is_real(self):
+        """真实 key 恰好含占位词的**子串** ⇒ 仍必须是"真"（旧实现的致命误判）。"""
+        from config import _is_real_key
+        for key in (
+            "sk-abc-placeholder-xyz-1234567890",
+            "sk-xxxxxlivekey0123456789",
+            "sk-ant-testing-real-key-abcdef",
+            "sk-changeme-but-actually-real-123",
+        ):
+            assert _is_real_key(key) is True, key
+
+    def test_exact_placeholder_values_rejected(self):
+        from config import _is_real_key
+        for key in ("placeholder", "PLACEHOLDER", "changeme", "xxxxx", "your-api-key-here"):
+            assert _is_real_key(key) is False, key
+
+    def test_template_prefixes_rejected(self):
+        from config import _is_real_key
+        for key in ("sk-test", "sk-test-1234", "sk-glm-test",
+                    "sk-example-123", "test-key", "sk-placeholder-abc"):
+            assert _is_real_key(key) is False, key
+        # 词模板走精确值（后接字母，无法用前缀边界区分）
+        for key in ("sk-your-api-key", "your-api-key-here", "your_api_key"):
+            assert _is_real_key(key) is False, key
+
+    def test_prefix_must_end_at_non_letter(self):
+        """前缀边界：`sk-test` 是占位，但 `sk-testing-...` 是**真实 key**。
+
+        朴素 `startswith("sk-ant-test")` 会把 `sk-ant-testing-real-key-abcdef`
+        判成占位 ⇒ 又是一次"真实 key 被误判"（与 B4-4 要修的是同一个错）。
+        本用例由护栏当场抓出过该写法，钉住边界语义。
+        """
+        from config import _is_real_key
+        assert _is_real_key("sk-testing-real-key-abcdef") is True
+        assert _is_real_key("sk-ant-testing-real-key-abcdef") is True
+        assert _is_real_key("test-keying-something-real") is True
+        assert _is_real_key("sk-test-1234") is False
+        assert _is_real_key("sk-ant-test") is False
+
+    def test_empty_and_whitespace_rejected(self):
+        from config import _is_real_key
+        assert _is_real_key("") is False
+        assert _is_real_key("   ") is False
+        assert _is_real_key(" sk-real-key-123456 ") is False, "首尾空白一定是粘贴事故"
+
+    def test_single_implementation_point(self):
+        """`api/settings/read.py` 不得再手抄一份（B3-4 同族：单一实现点）。"""
+        from pathlib import Path
+        src = (Path(__file__).resolve().parents[2] / "api" / "settings" / "read.py").read_text(
+            encoding="utf-8")
+        assert "_is_real_key" in src
+        assert "def _is_real_api_key" not in src, "不得保留手抄副本"
 
 
 # ─── update_config 剩余分支 ────────────────────────────────────

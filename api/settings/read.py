@@ -6,7 +6,8 @@ from pathlib import Path
 
 from fastapi import HTTPException, Request
 
-from config import config, load_feishu_config, TEST_KEY_PATTERNS
+from config import _is_real_key, config, load_feishu_config
+import config as _config_module
 from core.security import is_local_request
 from api.settings import router
 
@@ -37,7 +38,7 @@ def _providers_payload() -> list[dict]:
     """
     payload = []
     for name, prov in config["providers"].items():
-        is_real_key = _is_real_api_key(prov.api_key)
+        is_real_key = _is_real_key(prov.api_key)
         payload.append({
             "name": prov.name,
             "protocol": prov.protocol,
@@ -51,28 +52,11 @@ def _providers_payload() -> list[dict]:
     return payload
 
 
-_TEST_KEY_PATTERNS = TEST_KEY_PATTERNS
-
-
-def _is_real_api_key(key: str) -> bool:
-    """Return True only if the key looks like a real API key (not a test value).
-
-    判定逻辑（业界做法 - 参考 OpenAI/Anthropic）：
-      1. 非空（已配置就应被识别，不靠长度猜测）
-      2. 不匹配明显的测试/占位模式（sk-test, placeholder 等）
-
-    旧版用 len(key) >= 20 启发式判断"是否真实"，但这会误判
-    PaddleOCR token（32 字符）和短测试 key（如 sk-test-new，11 字符），
-    导致 UI 显示"未配置"但后端实际有 key 能调用 API，状态矛盾。
-    现在只检查"非空 + 非明显测试模式"。
-    """
-    if not key:
-        return False
-    key_lower = key.lower()
-    for pattern in _TEST_KEY_PATTERNS:
-        if pattern in key_lower:
-            return False
-    return True
+# 🔴 B4-4：`_is_real_api_key` 原是 `config._is_real_key` 的**手抄副本**（同样子串
+# 匹配）⇒ 两处会各自漂移，且"UI 的 configured 标志"与"启动期的切换判定"口径不一。
+# 现已统一为 `config._is_real_key`（唯一实现点，精确校验）。
+# ⚠️ 保留本别名仅为兼容可能残留的引用；**新代码请直接用 `_is_real_key`**。
+_is_real_api_key = _is_real_key
 
 
 @router.get("/api/settings")
@@ -96,6 +80,14 @@ async def get_settings(request: Request):
             "provider": cfg["app"].llm_provider,
             # S3: 新增 active_provider 别名（明确语义，与 provider 字段保持一致）
             "active_provider": cfg["app"].llm_provider,
+            # 🔴 B4-4 ②：启动期若发生过 provider 自动改写（或被规则**拒绝**改写），
+            # 把事实回传给前端显示 —— 否则用户看到的就是"provider 被静默换掉"。
+            # 形如 {"applied": bool, "from": str, "to": str|None, "reason": str}；
+            # None = 本次启动无事发生。**决策本身只发生在 config 一处**。
+            # ⚠️ 必须**调用期**读属性（`_config_module.AUTO_ACTIVATE_NOTICE`），
+            # 不能用 `from config import AUTO_ACTIVATE_NOTICE` —— 那是**导入期取值**，
+            # 进程内该状态后续变化时此处读到的仍是旧值（实测被集成测试抓住）。
+            "auto_activated": _config_module.AUTO_ACTIVATE_NOTICE,
             # 动态 provider 注册表（前端按 list 渲染表单）
             "providers": _providers_payload(),
             # 向后兼容字段（旧前端仍可读取，但应迁移到 providers）

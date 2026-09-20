@@ -252,7 +252,9 @@
   // ============================================================
   // S1: setActiveProvider — 立即保存到后端 (业界做法)
   // opts.silent: 不显示自己的 "已切换" 消息（由调用方负责提示）
-  // opts.autoReason: auto-activated 时的文案后缀
+  // ⚠️ 本函数只服务"**用户显式切换**"这一条路径。自动改写的提示由
+  //    showAutoActivateNotice 直接呈现后端事实（B4-4 ②），
+  //    所以不再有"自动切换文案后缀"这个选项。
   // ============================================================
   async function setActiveProvider(name, opts = {}) {
     log("switching active provider", { from: activeProvider, to: name });
@@ -273,8 +275,7 @@
           current.llm.providers = data.providers;
         }
         if (!opts.silent) {
-          const suffix = opts.autoReason ? `（${opts.autoReason}）` : "（立即生效）";
-          showMsg(`✓ 已切换到 ${display(name)}${suffix}`, "info");
+          showMsg(`✓ 已切换到 ${display(name)}（立即生效）`, "info");
         }
         // 重新渲染列表: active 排首位
         renderProviders(current.llm.providers || [], activeProvider);
@@ -888,50 +889,45 @@
 
     activeProvider = current.llm.active_provider || current.llm.provider;
 
-    // Auto-activate 迁移（修复存量配置的死亡陷阱）：
-    // 若当前 active provider 未配置 Key，但另一个 provider 已配置 Key，
-    // 自动切换到第一个已配置的 provider（持久化 + 热更新）。
-    // 场景：用户之前保存了 SiliconFlow Key，但 active 仍是默认 deepseek（无 Key），
-    // 导致测试连接报 "API key not configured"。此处静默修复，无需用户手动操作。
+    // 🔴 B4-4：provider 自动改写的**唯一决策点在后端**
+    // （`config._resolve_active_provider`，在 import 期就执行完了）。
+    //
+    // 前端此前**也**自己切一次（改用"占位判定"的结果 `p.configured` 当触发条件，
+    // 再 POST /set_active_provider 落盘）—— 两份实现，且：
+    //   ① 后端先切完 ⇒ 前端条件恒不成立 ⇒ 那条**唯一有提示**的路径被绕过
+    //      ⇒ 用户看到的就是"provider 被静默换掉"；
+    //   ② 前端那份的判断依据是启发式（见 `_is_real_key` 注释），
+    //      真实 key 含 `placeholder` 子串时会在**生产环境换模型**。
+    // 现改为：只呈现后端回传的事实（`current.llm.auto_activated`）。
     const providers = current.llm.providers || [];
-    const activeProv = providers.find((p) => p.name === activeProvider);
-    if (activeProv && !activeProv.configured) {
-      const firstConfigured = providers.find(
-        (p) => p.configured && p.name !== activeProvider,
-      );
-      if (firstConfigured) {
-        log(
-          "auto-activating first configured provider (active is unconfigured)",
-          { from: activeProvider, to: firstConfigured.name },
-        );
-        // 先渲染，再静默切换（切换会重新渲染）
-        renderProviders(providers, activeProvider);
-        await setActiveProvider(firstConfigured.name, {
-          silent: false,
-          autoReason: `${display(activeProvider)} 未配置，已自动切换`,
-        });
-        // setActiveProvider 已重新渲染 + 更新 badge，跳过下面的重复渲染
-        // 但仍需填充 OCR 表单
-        fillOcrForm();
-        fillFeishuForm();
-        await loadRules();
-        initSectionNav();
-        return;
-      }
-    }
-
     renderProviders(providers, activeProvider);
     fillOcrForm();
     fillFeishuForm();
     await loadRules();
     initSectionNav();
+    showAutoActivateNotice(current.llm.auto_activated);
   }
 
-  // OCR 表单填充（从 load() 抽出，auto-activate 路径也复用）
-  function fillOcrForm() {
+  // 呈现「当前 provider 徽标」+ 后端回传的「provider 自动改写」事实（B4-4 ②）。
+  // `info` = {applied, from, to, reason} 或 null（本次启动无事发生）。
+  // ⚠️ **本函数只显示，不切换** —— 决策在后端，避免第二实现点。
+  // ❗**加载期徽标的唯一写入点**：无通知时也要写回纯名称，否则徽标无人渲染。
+  //    （曾放在 fillOcrForm 里 ⇒ 徽标文案依赖"两个函数的调用顺序"这一隐形契约）
+  function showAutoActivateNotice(info) {
     const badgeEl = document.getElementById("llm-provider-badge");
-    if (badgeEl) badgeEl.textContent = display(activeProvider);
+    if (badgeEl) {
+      badgeEl.textContent =
+        info && info.applied && info.to
+          ? `${display(activeProvider)}（已自动从 ${display(info.from)} 切换）`
+          : display(activeProvider);
+    }
+    if (!info || !info.from) return;
+    log("auto-activate notice", info);
+    showMsg(info.reason, "warn");
+  }
 
+  // OCR / 飞书表单填充（从 load() 抽出，便于分序与单测定位）
+  function fillOcrForm() {
     // OCR
     setSeg("ocr-backend-seg", current.ocr.backend);
     showBackendForm(current.ocr.backend);

@@ -640,33 +640,182 @@ def check_upload_page_limits(
     return None, None
 
 
-# 测试/占位 Key 模式 — 单一来源（T2.4：settings API 的 configured 标志
-# 与启动时的 auto-activate 判定共用此常量，加新模式只改一处）
-TEST_KEY_PATTERNS = (
+# 测试/占位 Key —— **单一来源**（settings API 的 configured 标志与此共用）。
+#
+# 🔴 B4-4：**不得用子串匹配**。旧实现是
+#     `not any(p in key.lower() for p in TEST_KEY_PATTERNS)`
+# 于是**真实 key 只要恰好含 `placeholder` / `xxxxx` / `test-key` 等子串**
+# 就会被判成"未配置"，进而触发启动期的 provider 自动改写
+# （`load_config` 的 auto-activate）⇒ **生产环境静默换模型**：
+# 「你以为的模型 ≠ 实际跑的模型」，且事后难追溯（GMP 硬伤）。
+#
+# 改为**精确校验**：
+#   1. `_PLACEHOLDER_VALUES` —— 与占位值**整串相等**（大小写无关）；
+#   2. `_PLACEHOLDER_PREFIXES` —— **模板前缀**（`sk-your-...` / `sk-test...` 这类
+#      前缀只可能来自 `.env.example`，真实 key 不会以它开头）。
+# ⚠️ 刻意**不**加"长度阈值"：`api/settings/read.py` 的历史注释已记录过
+#   `len(key) >= 20` 的教训 —— 它把真实但较短的 token 判成"未配置"，
+#   造成"界面说未配置、后端实际能调通"的状态矛盾。同理也**不**要求 `sk-` 前缀
+#   （自建网关 / OCR token 未必是 OpenAI 形态）。
+_PLACEHOLDER_VALUES = frozenset({
+    "",
+    "placeholder",
+    "changeme",
+    "change-me",
+    "xxxxx",
+    "xxxx",
+    "your-api-key",
+    "your-api-key-here",
+    "your_api_key",
+    # `sk-your-...` 是**词模板**（后接字母，如 `sk-your-api-key`），
+    # 与真实 key 无法用"前缀后接非字母"区分 ⇒ 只能列成**精确值**，
+    # 不能放进 `_PLACEHOLDER_PREFIXES`（否则 `sk-yourkey-real-123` 会被误杀）。
+    "sk-your-api-key",
+    "sk-your-api-key-here",
+    "sk-your-key",
+    "sk-your-token",
+    "none",
+    "null",
+})
+
+#: 模板前缀 —— **必须后接非字母**（串尾 / `-` / `_` / `.`）才判定为占位。
+#: 只收"前缀之后一定是分隔符"的形态；词模板（`sk-your-<words>`）请走精确值。
+_PLACEHOLDER_PREFIXES = (
     "sk-test",
     "sk-glm-test",
     "sk-ant-test",
     "sk-example",
     "sk-placeholder",
-    "sk-your-",
     "test-key",
-    "placeholder",
-    "changeme",
-    "xxxxx",
+    "placeholder-",
 )
+
+#: 向后兼容别名**已移除**（B4-4）：旧名 `TEST_KEY_PATTERNS` 的子串语义本身就是
+#: 缺陷来源，且改名后**零消费点**（`api/settings/read.py` 已改为共用
+#: `_is_real_key`）⇒ 按"零消费的公开 API 即负债"删除，避免有人再拿去写子串匹配。
 
 
 def _is_real_key(key: str) -> bool:
-    """Return True only if the key looks like a real API key (not a test value).
+    """**精确格式校验**：key 是否像一个真实凭据（而非占位值）。
 
-    判定逻辑（业界做法 - 参考 OpenAI/Anthropic）：
-      1. 非空（已配置就应被识别，不靠长度猜测）
-      2. 不匹配明显的测试/占位模式（sk-test, placeholder 等）
+    🔴 B4-4：**唯一实现点** —— `api/settings/read.py` 曾手抄一份同逻辑
+    （`_is_real_api_key`，同样子串匹配）；两处必须共用本函数，否则
+    "UI 的 configured 标志"与"启动期的切换判定"会各自漂移。
+
+    判定（全部为精确/锚定比较，**不含任何子串包含判断**）：
+      1. 非空，且**首尾无空白**（含空白的值一定是粘贴事故）；
+      2. 不**整串等于** `_PLACEHOLDER_VALUES` 里的占位值；
+      3. 不以 `_PLACEHOLDER_PREFIXES` 里的模板前缀开头。
+
+    ⇒ 「真实 key 含 `placeholder` 子串但格式合法」必须返回 ``True``
+    （否则会触发生产环境静默换 provider，见 B4-4 的验收 ②）。
+
+    ⚠️ **前缀必须后接"非字母"**（串尾 / `-` / `_` / `.`）——
+    这是本函数**唯一**容易再犯一次同类错误的地方：朴素 `startswith("sk-ant-test")`
+    会把真实 key `sk-ant-testing-...` 判成占位（实测被护栏当场抓住）。
+    `.env.example` 里的占位值是 `sk-test` / `sk-test-1234` / `sk-your-api-key`
+    这类形态，前缀之后必是分隔符或串尾；真实 key 则继续是字母。
+    判不准时**偏保守地当作"真"** —— 误判为"真"只是少提示一次，
+    误判为"假"却会在生产环境换掉模型。
     """
     if not key:
         return False
-    kl = key.lower()
-    return not any(p in kl for p in TEST_KEY_PATTERNS)
+    k = key.strip()
+    if not k or k != key:
+        return False
+    kl = k.lower()
+    if kl in _PLACEHOLDER_VALUES:
+        return False
+    for p in _PLACEHOLDER_PREFIXES:
+        if kl == p:
+            return False
+        if kl.startswith(p) and not kl[len(p)].isalpha():
+            return False
+    return True
+
+
+#: 最近一次 `load_config()` 的「provider 自动改写」事实 —— **界面可见性的唯一来源**。
+#:
+#: 🔴 B4-4 ②：切换发生在 **import 期**（`load_config()` → `config = load_config()`），
+#: 比前端加载**更早**，所以前端"自己再切一次并提示"的那条路径会被**绕过**
+#: （后端已把 provider 换成有 Key 的那个 ⇒ 前端条件不再成立 ⇒ 冒泡不出任何提示）
+#: ⇒ 用户看到的就是"provider 被静默换掉"。
+#: 解决办法：把这次决策**记在这里**，由 `GET /api/settings` 回传给前端显示。
+#: `None` = 本次启动没有发生需要提示的事。
+AUTO_ACTIVATE_NOTICE: dict | None = None
+
+
+def _resolve_active_provider(providers: dict) -> tuple[str, dict | None]:
+    """决定 active provider；必要时回退，并返回 ``(name, notice)``。
+
+    🔴 B4-4：本函数是 "provider 自动改写" 的**唯一实现点**。
+    （前端 `static/settings.js` 曾**也**做一遍同样的切换 —— 两份实现，
+    且前端那份用的是"占位判定"结果 ⇒ 两处都可能改用户的选择。现已移除前端那份。）
+
+    **回退只允许在一种情况下发生**（B4-4 ①）：
+
+    - 用户**没有显式选择**过 provider（`LLM_PROVIDER` 在配置里不存在 ⇒ 用的是默认值），
+    - **且** active provider 的 Key **字面为空**（不是"看起来像占位值"），
+    - **且** 另有 provider 的 Key **字面非空**。
+
+    ⚠️ **不得用"测试/占位判定"（`_is_real_key`）做生产切换**：
+    启发式一旦误判（真实 key 含 `placeholder` 子串等），就会在**生产环境静默换模型**。
+    这里只做**字面空/非空**判断 —— 那是可证伪、可复现的；启发式不是。
+    `_is_real_key` 现在只服务于 UI 的 `configured` 标志（显示层）。
+
+    Returns:
+        ``(provider 名, notice)``。``notice`` 为 ``None`` = 无事发生；
+        否则形如 ``{"applied": bool, "from": str, "to": str | None, "reason": str}``，
+        其中 ``applied=False`` 表示"**本可以回退但按规则没有回退**"（需提示用户）。
+    """
+    raw = (os.getenv("LLM_PROVIDER") or "").strip()
+    explicit = bool(raw)          # 配置里写了 LLM_PROVIDER ⇒ 用户显式选过
+    llm_provider = raw.lower() or "deepseek"
+    if llm_provider not in providers:   # 拼写错误 / 未注册 ⇒ 回退默认
+        llm_provider = "deepseek"
+
+    active = providers.get(llm_provider)
+    if active is None or (active.api_key or "").strip():
+        return llm_provider, None          # 已配置（或无处可判）⇒ 不干预
+
+    if explicit:
+        # 用户**显式选过** ⇒ 绝不改写（B4-4 验收 ①）。只如实上报，由界面提示。
+        logger.warning(
+            "Provider %r has no API key configured, but LLM_PROVIDER was set "
+            "explicitly — NOT auto-switching (respecting the explicit choice).",
+            llm_provider,
+        )
+        return llm_provider, {
+            "applied": False,
+            "from": llm_provider,
+            "to": None,
+            "reason": (
+                f"{llm_provider} 未配置 API Key；因其为显式选择，系统不会自动改为"
+                f"其它 provider —— 请在设置页填写 Key 或手动切换。"
+            ),
+        }
+
+    candidate = next(
+        ((n, c) for n, c in providers.items()
+         if n != llm_provider and (c.api_key or "").strip()),
+        None,
+    )
+    if candidate is None:
+        return llm_provider, None          # 一个 Key 都没配 ⇒ 无处可回退
+
+    name = candidate[0]
+    logger.warning(
+        "Auto-activating provider %r (active %r has no API key configured, "
+        "and LLM_PROVIDER was not explicitly set)", name, llm_provider,
+    )
+    os.environ["LLM_PROVIDER"] = name
+    _persist_env_to_config("LLM_PROVIDER", name)
+    return name, {
+        "applied": True,
+        "from": llm_provider,
+        "to": name,
+        "reason": f"{llm_provider} 未配置 API Key，已自动切换到 {name}。",
+    }
 
 
 def load_config():
@@ -697,33 +846,8 @@ def load_config():
         output_dir = os.getenv("OUTPUT_DIR", "output")
 
     providers = _load_all_providers()
-    llm_provider = os.getenv("LLM_PROVIDER", "deepseek").lower()
-    # If the configured LLM_PROVIDER is not in the registry (e.g. typo or
-    # the provider's API key was never set), fall back to deepseek.
-    if llm_provider not in providers:
-        llm_provider = "deepseek"
-
-    # Auto-activate migration (修复存量配置的死亡陷阱):
-    # 若当前 active provider 未配置 Key，但另一个 provider 已配置 Key，
-    # 自动切换到第一个已配置的 provider 并持久化。
-    # 场景：用户配置了 SiliconFlow Key 但 active 仍是默认 deepseek（无 Key），
-    # 导致所有 LLM 调用和 health probe 报 "API key not configured"。
-
-    # 判定函数 _is_real_key / TEST_KEY_PATTERNS 见模块级定义（T2.4 单一来源）
-
-    active_cfg = providers.get(llm_provider)
-    if active_cfg and not _is_real_key(active_cfg.api_key):
-        # active provider 未配置 — 找第一个已配置的 provider
-        for name, cfg in providers.items():
-            if name != llm_provider and _is_real_key(cfg.api_key):
-                logger.warning(
-                    f"Auto-activating provider {name!r} (active {llm_provider!r} "
-                    f"has no API key configured)"
-                )
-                llm_provider = name
-                os.environ["LLM_PROVIDER"] = name
-                _persist_env_to_config("LLM_PROVIDER", name)
-                break
+    global AUTO_ACTIVATE_NOTICE
+    llm_provider, AUTO_ACTIVATE_NOTICE = _resolve_active_provider(providers)
 
     return {
         # Backward-compatible top-level entries (singletons of the same dataclass)
