@@ -890,6 +890,11 @@ class TestStreamJobProgress:
                     break
         assert '"type": "error"' in body
         assert '"message": "任务不存在"' in body
+        # B2-10 ①：终态帧必须显式标注 terminal=true —— 这是前端"该不该关流"的
+        # **唯一判据**（禁止按 message 文案推断：文案属展示层）。
+        assert '"terminal": true' in body, (
+            "终态错误帧必须带 terminal=true（前端据此关流，避免无限重连）"
+        )
         # 不得使用保留类型 event: error（浏览器强制断连语义）
         assert "event: error" not in body
 

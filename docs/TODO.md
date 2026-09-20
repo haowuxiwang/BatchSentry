@@ -1281,7 +1281,55 @@
   验收：① 注入一次 DB 写失败 ⇒ 日志出现 error 级且指标可见；② 造一个停滞 job
   ⇒ `/api/health/watchdog` 直接给出该 job id 与已停滞秒数。
 
-- [ ] **B2-10 前端「过渡期与口径」4 处**（P2×2 + P3×2，Round 43 新发现）
+- [x] **B2-10 前端「过渡期与口径」4 处**（P2×2 + P3×2，Round 43 新发现）
+  ✅ **2026-09-20 Round 50 处置完毕**（4 处全修；机检新增 16 条；**变异 9/9** 全被捕获）。
+
+  **① 两类 error 帧不分（P2）—— 定位（实证）**：`api/jobs/status.py` 确有两类
+  `type=error` 帧，语义相反：`:407` 的 `'进度查询失败'` 发帧后 **`continue`**
+  （设计上应重试、连接不关），`:419` 的 `'任务不存在'` 发帧后 **`return`**（终态）。
+  而 `static/review.js:298` 只判 `d.type === "error"` 就把两者混为一谈
+  ⇒ **一次 DB 抖动被谎报成"任务已被删除"，同时进度流永久断开**（丢实时更新 + 理由说谎）。
+  **处置：判据改由服务端下发** —— 两类帧各带显式 `terminal`（`False`/`True`），
+  前端经 `PbcStatus.sseErrorAction(d)` 分支：仅 `terminal` 关流；瞬态只把文案换成
+  「进度查询异常，重试中…」并**保持长连**（不 close / 不清轮询定时器）。
+  ⚠️ **不按 `message` 文案判定**：文案属展示层，改文案会静默改变控制流（与"理由说谎"
+  同族）。字段缺失按**瞬态** fail-safe（宁可多留连接，也不谎报任务被删）；服务端
+  **必带该字段**由集成用例锁定，故不会长期缺失。
+
+  **② 终态文案漏中文映射（P2）**：`else` 分支改调 `PbcStatus.statusZh(d.status)`，
+  不再落**裸英文 token**（此前 `review` / `partial_review` / `done` 都显示英文，
+  而同页徽章是中文 ⇒ 同页两处不一致）。
+
+  **③ error 转态期不显示原因（P3）**：新增 `showJobErrorBanner()` —— 按需创建/更新
+  SSR 的**同一条**横幅 `#job-error-banner`（幂等；文案与 SSR 逐字一致；原因走
+  `textContent` 防注入）。终态帧取 `d.message`，普通帧取 `d.error_message`
+  ⇒ **转态即刻可见原因**，不必等 1.5s 自动刷新后由 SSR 给出。
+
+  **④ 状态中文映射第 3 份副本（P3）**：删除 `review.js` 内联 `statusZh`，徽章与进度
+  文案统一走 `PbcStatus.statusZh`（此前**文字与颜色不同源**：颜色早已走共享件）。
+  注：同页另有**合法**的两份映射（finding 状态 / finding 类型）⇒ 机检以"**job 专属键**"
+  精确定位（`ocr_running`/`analyzing`/`partial_review`…），并按 §二十八 做
+  花括号配对的结构化提取，不误伤、不误报。
+
+  **护栏（`tests/unit/test_status_js.py` 新增 4 类共 16 条）**：
+  `sseErrorAction` 纯函数**行为**判据（node 实跑）＋ 错误分支「**包围条件 + 相对位置**」
+  结构化判据（`es.close()` 必须晚于 `terminal` 判定、瞬态分支内不得出现 close/clearInterval）
+  ＋ 提取器**正向对照** `test_detector_is_not_vacuous`（防空断言）＋ 键集覆盖
+  （`JOB_STATUS_ZH` 每个键 JS 侧都必须有）。集成侧：两类帧**各带** `terminal` 字段。
+  **变异验证 9/9**（`devlogs/_verify/mutate_b210.py`，逐字节还原自校验）：瞬态分支短路 /
+  按文案判定 / 恒终态 / 文案退回裸英文 / `statusZh` 原样返回 / 徽章重新内联映射 /
+  不再消费 `error_message` / 两类帧各缺 `terminal` ⇒ **各自打红对应用例**。
+
+  ⚠️ **过程中修掉一个自己写的空断言**：③ 初版判据是 `"d.error_message" in src`。
+  变异 M6（把调用改成 `showJobErrorBanner(undefined)`）**照旧全绿** —— 因为**条件行**
+  `if (d.status === "error" && d.error_message)` 里还有一处同名标识，`in src` 被
+  "另一处提及"满足。已改成钉**消费点本身**（完整调用表达式 + 其包围条件）。教训固化进
+  `docs/PROJECT_PITFALLS.md` **§三十**（连同"验证脚本必须带超时，否则挂起会**留下源码
+  处于变异态**"）。
+
+  ---
+
+  **原始记录（问题陈述，保留备查）**
   ① **`type:error` 两类帧不分**（P2）：`static/review.js:259-268` 只判 `d.type === "error"`
   就关流并写「任务不存在或已被删除」；而后端 `api/jobs/status.py:402` 的
   `'进度查询失败'` 是**设计上应重试**的（发帧后 `continue`），只有 `:411` 的
@@ -1338,6 +1386,25 @@
   动作：L2 的溯源对象应**排除系统注入值**（当前日期/当前年份），或让这类条目改走
   B1-4 的"与当前日期比较本就无意义"分支 —— 不要扣"凭空捏造"的帽子。
   验收：回放中"当前年份"型降级不再出现"疑似提取幻觉"字样；变异验证：放宽排除 ⇒ 红。
+
+- [ ] **B2-13 SSR(Python) 与 SSE(JS) 的 job 状态**中文措辞不一致**（P3，Round 50 新发现）
+  现象：同一个 job 状态，**首屏**（Jinja 走 `core/zh_map.py::JOB_STATUS_ZH`）与
+  **SSE 实时更新后**（走 `static/status.js::STATUS_ZH`）显示的中文**不同**：
+
+  | 状态 | SSR(Python) | SSE(JS) |
+  |---|---|---|
+  | `ocr_running` | OCR 解析中 | 识别中 |
+  | `review` | 待复核 | 可复核 |
+  | `partial_review` | 部分完成待复核 | 部分可复核 |
+  | `error` | 失败 | 出错 |
+
+  ⇒ 同一页面**刷新前后文案会变**（用户会以为是不同状态）。B2-10 的 ② / ④ 消除了
+  "英文 vs 中文"的不一致，但**没有**消除"两套中文"的不一致。
+  为何本轮不动：统一措辞 = 改变用户可见文案，需先定"以哪一侧为准"（SSR 侧更贴近
+  `db/schema.sql` 的语义、JS 侧更短），且可能影响既有文案断言（`e2e_*` / 模板测试）。
+  动作（待定）：① 定基准侧；② 让另一侧**派生**（而不是各自维护）；③ 机检两侧
+  **逐值等价**（现只锁颜色 `statusDotClass` 与**键集**，未锁措辞）。
+  验收：同一状态在 SSR 与 SSE 下文案逐字相同；变异验证：改任一侧措辞 ⇒ 红。
 
 ### B3 可维护性
 

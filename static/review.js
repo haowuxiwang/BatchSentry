@@ -217,6 +217,38 @@
         }
         el.classList.remove("hidden");
       };
+      // B2-10 ③：SSR 的错误横幅（#job-error-banner，见 templates/review.html）
+      // 只在**首屏** status=error 时渲染；而 SSE 把状态切到 error 时页面不会
+      // 重渲染 ⇒ 用户只看到"出错"，要等 1.5s 自动刷新后才知道原因。
+      // 这里按需创建/更新同一条横幅（幂等），让转态期即刻可见原因。
+      // 文案与 SSR 保持逐字一致；原因一律 textContent 注入（后端/LLM 文本不可信）。
+      const showJobErrorBanner = (reason) => {
+        if (!reason) return;
+        let banner = document.getElementById("job-error-banner");
+        if (!banner) {
+          banner = document.createElement("div");
+          banner.id = "job-error-banner";
+          banner.className =
+            "job-error-banner sticky top-0 z-20 rounded-md border-l-2 border-destructive bg-card px-3 py-3 flex items-start gap-2";
+          banner.innerHTML =
+            '<span class="w-1.5 h-1.5 rounded-full bg-destructive shrink-0 mt-1.5"></span>' +
+            '<div class="flex-1 min-w-0">' +
+            '<div class="text-[12px] font-semibold text-foreground mb-1">任务处理失败</div>' +
+            '<p class="text-[12px] text-muted-foreground leading-relaxed break-words"></p>' +
+            '<p class="text-[11px] text-muted-foreground mt-1.5">可点击右上角"重试"重新提交任务；如反复失败，请检查设置页面 LLM/OCR 配置或日志。</p>' +
+            "</div>";
+          // 与 SSR 同位置：右侧栏顶部、severity-summary 之前
+          const host = document.querySelector(".severity-summary");
+          if (host && host.parentElement) {
+            host.parentElement.insertBefore(banner, host);
+          } else {
+            document.body.appendChild(banner);
+          }
+        }
+        const p = banner.querySelector("p");
+        if (p) p.textContent = reason;
+        banner.classList.remove("hidden");
+      };
       const elapsedTimer = setInterval(() => {
         if (typeof PbcEta === "undefined" || !phaseState) return;
         phaseState = PbcEta.tickPhase(phaseState, phaseState.phase);
@@ -254,17 +286,36 @@
           try {
             const d = JSON.parse(e.data);
             // 应用级错误帧（服务端发 type=error 的 message 帧 — 见
-            // jobs.py stream_job_progress）：job 不存在/已被删除是终态，
-            // 停止重试并提示，而不是像网络抖动那样无限重连。
+            // api/jobs/status.py stream_job_progress）。**两类帧语义不同**，
+            // 处置必须分开（B2-10 ①）：
+            //   - terminal=true 「任务不存在」→ 终态，关流。不关的话
+            //     EventSource 会按 SSE 语义无限重连一个已不存在的 job。
+            //   - terminal=false「进度查询失败」→ 瞬态 DB 抖动，服务端发完
+            //     仍会 continue 推帧 ⇒ **保持长连**、只提示不切终态。
+            // 旧实现只判 d.type === "error" ⇒ 一次抖动就永久断流，并把
+            // 瞬态谎报成"任务不存在或已被删除"（理由说谎 + 丢实时更新）。
+            // 判据由服务端 terminal 字段下发，禁止按 message 文案推断。
             if (d.type === "error") {
               log.err("SSE job error", d);
+              const action = window.PbcStatus
+                ? PbcStatus.sseErrorAction(d)
+                : (d.terminal === true ? "terminal" : "transient");
+              if (action !== "terminal") {
+                // 瞬态：不 close es / 不清 pollTimer / 不停计时器 ——
+                // 只把进度文案换成如实提示，下一帧正常数据会自动还原。
+                labelEditable = false;
+                txt.textContent = "进度查询异常，重试中…";
+                return;
+              }
               es.close();
               if (pollTimer) clearInterval(pollTimer);
               labelEditable = false;
               stopElapsedTimer();
-              txt.textContent = "任务不存在或已被删除";
+              const reason = d.message || "任务不存在或已被删除";
+              txt.textContent = reason;
               const barEl = document.getElementById("progress-bar-container");
               if (barEl) barEl.classList.add("opacity-60");
+              showJobErrorBanner(reason); // B2-10 ③：终态即刻给出原因
               return;
             }
             const total = d.total_pages || 0;
@@ -375,23 +426,30 @@
               pct = 0;
               label = "出错";
             } else {
-              label = d.status; // 未知状态兜底显示原始值
+              // B2-10 ②：未知状态兜底此前显示**裸英文 token**（review /
+              // partial_review / done 都会落到这里），与同页中文徽章
+              // 自相矛盾（同一状态、同页两处文案不一致）。改走共享件
+              // static/status.js（状态中文的单一真值）。
+              label =
+                (window.PbcStatus ? PbcStatus.statusZh(d.status) : "") ||
+                d.status;
             }
 
             // cr-19：头栏状态徽章/取消按钮随 SSE 实时更新 — 旧实现是 SSR
             // 一次性渲染：阶段切换（ocr_running→analyzing）徽章不变化；
             // 终态后 done 事件与 1.5s reload 之间取消按钮仍可点（后端
-            // 400 Invalid transition）。job 状态中文映射与 upload.js STATUS_ZH 一致。
-            const statusZh = {
-              pending: "待处理", queued: "排队中", processing: "处理中",
-              ocr_running: "识别中", ocr_done: "识别完成", analyzing: "分析中",
-              review: "可复核", partial_review: "部分可复核", error: "出错",
-              cancelled: "已取消", cancelling: "取消中", done: "已完成", archived: "已归档",
-            };
+            // 400 Invalid transition）。
+            // B2-10 ④：此处曾自带第 3 份状态中文映射（status.js / upload.js
+            // 之外），而状态点颜色却又走共享件 PbcStatus.statusDotClass ⇒
+            // **文字与颜色不同源**（改一处改不动另一处）。统一走共享件。
             const badgeEl = document.getElementById("status-badge");
             // 修复：旧代码 `|| 未知()` 引用未定义函数，ReferenceError 被外层
             // catch 吞掉 → 整个 SSE 帧更新中断；与上方 label 兜底逻辑对齐
-            if (badgeEl) badgeEl.textContent = statusZh[d.status] || d.status;
+            if (badgeEl) {
+              badgeEl.textContent =
+                (window.PbcStatus ? PbcStatus.statusZh(d.status) : "") ||
+                d.status;
+            }
             // #133(P0)：状态点颜色必须跟着状态走。旧实现只改 textContent，
             // 点保持模板里硬编码的 bg-success ⇒ error/partial_review 显示
             // "绿点 + 出错"，与"记录确实无异常"不可区分（GMP 假阴性）。
@@ -428,6 +486,12 @@
             labelEditable = true;
             renderProgressText();
             renderStall(d);
+            // B2-10 ③：status 切到 error 的帧本身带 error_message（见
+            // api/jobs/status.py 的进度快照负载）⇒ 转态期即可显示原因，
+            // 不必等 1.5s 自动刷新后由 SSR 横幅给出。
+            if (d.status === "error" && d.error_message) {
+              showJobErrorBanner(d.error_message);
+            }
             log("SSE progress", { status: d.status, pct, label, phase });
           } catch (err) {
             log.warn("SSE parse error", err);

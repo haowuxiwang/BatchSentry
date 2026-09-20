@@ -83,5 +83,11 @@ class TestStreamQueryFailure:
                 if "event: done" in body:
                     break
         assert "进度查询失败" in body
+        # B2-10 ①：瞬态帧必须显式标注 terminal=false —— 前端据此**保持长连**
+        # （若该字段缺失，前端按 fail-safe 也保持连接，但服务端契约会退化，
+        #  故在这里钉死）。本用例同时证明发帧后流**继续**（能收到 done）。
+        assert '"terminal": false' in body, (
+            "瞬态错误帧必须带 terminal=false（前端据此不关流）"
+        )
         assert "event: done" in body
         assert calls["n"] >= 2

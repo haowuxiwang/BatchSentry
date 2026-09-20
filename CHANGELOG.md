@@ -19,6 +19,41 @@
 > **宿主进程**，不是安全软件）+ 工具报告**具名持有者**。Round 33 同样**不进产物**，
 > **不升版号**。
 
+### Fixed (Round 50, 2026-09-20 — P2 批次②：B2-10 前端「过渡期与口径」4 处)
+
+> ⚠️ **本批改动进入产物**（`api/jobs/`、`static/`）⇒ 工作树继续**领先于产物**，
+> **不单独升版**，随 v1.2.0 统一升版重建。
+
+- **① `type=error` 两类帧被混为一谈（P2）**（`api/jobs/status.py` + `static/review.js`
+  + `static/status.js`）：服务端本就发两类**语义相反**的 error 帧 ——「进度查询失败」
+  发完 `continue`（瞬态、应重试）与「任务不存在」发完 `return`（终态）—— 而复核页只判
+  `d.type === "error"` ⇒ **一次 DB 抖动被谎报成"任务已被删除"，且进度流永久断开**
+  （既丢实时更新，又理由说谎）。改为**由服务端下发显式判据**：两类帧各带 `terminal`
+  （`False`/`True`），前端经 `PbcStatus.sseErrorAction(d)`（`static/status.js` 新增纯函数）
+  分支 —— 只有 `terminal` 关流；瞬态改为提示「进度查询异常，重试中…」并**保持长连**。
+  ⚠️ **判据不得按 `message` 文案**（文案属展示层，改文案会静默改变控制流）；
+  字段缺失按**瞬态** fail-safe，服务端必带该字段由集成用例锁定。
+- **② 终态过渡期文案漏中文映射（P2）**：`review.js` 的 `else` 分支此前落**裸英文
+  token**（`review`/`partial_review`/`done`），与同页中文徽章自相矛盾 ⇒ 改走
+  `PbcStatus.statusZh(d.status)`。
+- **③ error 转态期不显示原因（P3）**：新增 `showJobErrorBanner()`，按需创建/更新 SSR
+  的**同一条**横幅 `#job-error-banner`（幂等；文案与 SSR 逐字一致；原因走 `textContent`）；
+  终态帧用 `d.message`、普通帧用 `d.error_message` ⇒ **转态即刻可见原因**，不必等
+  1.5s 自动刷新后由 SSR 给出。
+- **④ 状态中文映射第 3 份副本（P3）**：删除 `review.js` 内联 `statusZh`，徽章与进度文案
+  统一走共享件（此前**文字与颜色不同源**：颜色早已走 `PbcStatus.statusDotClass`）。
+
+护栏：`tests/unit/test_status_js.py` 新增 4 类共 **16 条** —— `sseErrorAction` 行为判据
+（node 实跑，可被变异打红）、错误分支「**包围条件 + 相对位置**」结构化判据
+（`es.close()` 必须晚于 `terminal` 判定）、提取器的**正向对照**（防空断言）、
+Python/JS 状态**键集**覆盖；集成侧锁定两类帧**必带** `terminal`。
+**变异验证 9/9**（`devlogs/_verify/mutate_b210.py`，逐个逐字节还原自校验）。
+过程中还修掉一个**自己写的空断言**（只查"标识符出现过"⇒ 被条件行满足），
+教训固化进 `docs/PROJECT_PITFALLS.md` **§三十**。
+另记 **B2-13**（本轮新发现）：SSR(Python) 与 SSE(JS) 的 job 状态**中文措辞不一致**
+（`识别中` vs `OCR 解析中`、`可复核` vs `待复核` 等）—— 本轮只锁**键集**，
+**未统一措辞**（会改变用户可见文案，需单独评估）。
+
 ### Fixed (Round 49, 2026-09-20 — P2 批次①：日志/理由说谎、静默失败、fail-safe)
 
 > ⚠️ **本批改动进入 PyInstaller 产物**（`core/pipeline/`、`core/rules/`）⇒ 工作树

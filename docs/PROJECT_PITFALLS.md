@@ -1140,3 +1140,39 @@ Python 那边可以用真 AST（见 §二十六 / 二十七），但仓库里的
 ``devlogs/_verify/verify_b44_live.py``（绕过加载器的纯函数级对照）。
 
 
+## 三十、变异/验证脚本自身的两个"静默失败"：断言落在**同名标识的别处**、脚本挂起后**留下源码处于变异态**（B2-10，2026-09-20 实测）
+
+**A. 断言落在"标识符出现过"而非"消费点"—— §二十八盲区 1 的变体**
+
+B2-10 ③ 的护栏初版写成 ``assert "d.error_message" in src``（要求"帧内原因被消费"）。
+变异 M6 把**真正的消费点** ``showJobErrorBanner(d.error_message);`` 改成
+``showJobErrorBanner(undefined);`` —— **用例照旧全绿**：因为**条件行**
+``if (d.status === "error" && d.error_message)`` 里还有一处同名标识，
+`in src` 被"另一处提及"满足（既不是另一条代码路径，也不是注释，而是**同一表达式的条件部分**）。
+⇒ **规则：断言必须钉在消费点本身**。本轮的判据 = 完整调用表达式
+``showJobErrorBanner(d.error_message)`` ＋其包围条件
+``if (d.status === "error" && d.error_message)``；"出现过"只能当辅助信标，不能当判据。
+
+**B. 脚本挂起 ⇒ 源码留在变异态（比假绿更危险）**
+
+本环境存在**间歇性挂起**（同一天实测：``git push`` 卡满 180s、``git credential fill``
+卡满 25s、``pytest tests/unit/test_status_js.py::TestReviewJsSurfacesErrorReason``
+卡满 **14 分钟** —— 同一命令在此前一轮只用 1.8s 就跑完）。
+原变异脚本用 ``subprocess.run(..., timeout=900)`` ⇒ 一次挂起让整轮**无输出卡死 14 分钟**
+（且因为管道 ``| tail`` 会缓冲到进程结束，期间看不到进行到哪）；
+更糟的是**强杀父进程后 ``finally`` 不执行** ⇒ 被测文件**留在变异态**
+（本轮实测 ``static/review.js:493`` 残留 ``showJobErrorBanner(undefined);``，
+若没复核就会被后续全量测试当成"真源码"）。
+
+⇒ **规则**：① 每次子进程调用**必须有短超时**（本轮改 150s），并把超时**单独编码**
+（``rc=-1``），与"用例失败"**严格区分**，否则工具报错会被误读成"护栏生效"；
+② 脚本**逐步 flush 进度日志**并**写文件**（不要只靠管道），卡住时能看到停在哪一项；
+③ **任何中断后先 ``git status`` / ``git diff --stat`` 确认没有文件处于变异态**，再继续。
+
+**C. 顺带（本机工具坑）**：Git Bash 里 ``taskkill //F //PID n`` 会被 MSYS 参数转换吃掉
+（报"无效参数/选项 - '//F'"）⇒ 用 ``MSYS_NO_PATHCONV=1 taskkill /F /PID n``。
+
+**踩坑痕迹**：``devlogs/_verify/mutate_b210.py``（9 项变异 + 超时/进度/逐字节还原自校验）、
+``tests/unit/test_status_js.py::TestReviewJsSurfacesErrorReason``。
+
+

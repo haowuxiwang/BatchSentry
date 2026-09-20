@@ -170,3 +170,275 @@ class TestTemplateHasNoHardcodedDot:
         assert "function statusDotClass(st) {\n    if (" not in src, (
             "upload.js 又出现了私有 statusDotClass 实现（应走 PbcStatus）"
         )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# B2-10 前端「过渡期与口径」四处的机检
+#
+#   ① `type=error` 两类帧不分：瞬态「进度查询失败」（服务端发完 continue）被
+#      当成终态「任务不存在」（服务端发完 return）⇒ **关流 + 文案说谎**；
+#   ② 终态过渡期文案显示**裸英文 token**，与同页中文徽章自相矛盾；
+#   ③ error 转态期不显示原因（要等 1.5s 自动刷新后由 SSR 横幅给出）；
+#   ④ 状态中文映射在页面内多存了一份副本 ⇒ **文字与颜色不同源**。
+#
+# 判据取向（§二十八）：不查"文本里有没有某个字符串"，而查
+#   - 纯函数的**行为**（node 实跑，可被变异打红）；
+#   - 源码的**包围条件与相对位置**（花括号配对提取后再判先后）；
+#   - 且每个"找不到"都配一个**正向对照**证明提取器没坏（防空断言）。
+# ─────────────────────────────────────────────────────────────────────────────
+
+# job 状态**专属**键 —— 与 finding.status（pending/confirmed/rejected/corrected）
+# 及 finding.type 的键集不相交，用它才能在源码里精确定位"又冒出一份 job 状态
+# 中文映射"，而不会误伤本页另外两份**合法**的映射（finding 状态/类型）。
+JOB_ONLY_STATUS_KEYS = (
+    "ocr_running", "ocr_done", "analyzing", "partial_review",
+    "queued", "processing", "cancelling", "archived",
+)
+
+
+def _run_in_node(probe_body: str):
+    """跑 `static/status.js` + 探针，返回探针最后一行 JSON。"""
+    if shutil.which("node") is None:
+        pytest.skip("node not on PATH")
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "status_probe.js"
+        p.write_text(
+            STATUS_JS.read_text(encoding="utf-8") + "\n" + probe_body,
+            encoding="utf-8",
+        )
+        r = subprocess.run(["node", str(p)], capture_output=True, text=True,
+                           timeout=30)
+    assert r.returncode == 0, f"node failed: {r.stderr}"
+    return json.loads(r.stdout.strip().splitlines()[-1])
+
+
+def _sse_error_action(frame: dict):
+    return _run_in_node(
+        "console.log(JSON.stringify(PbcStatus.sseErrorAction(%s)));"
+        % json.dumps(frame, ensure_ascii=False)
+    )
+
+
+def _zh_map(statuses) -> dict:
+    return _run_in_node(
+        "const o = {};\nfor (const s of %s) o[s] = PbcStatus.statusZh(s);\n"
+        "console.log(JSON.stringify(o));" % json.dumps(list(statuses))
+    )
+
+
+def _braced_block_at(src: str, open_idx: int) -> str | None:
+    """从 `{` 开始做花括号配对，返回**内部**文本（不含最外层括号）。"""
+    depth = 0
+    for j in range(open_idx, len(src)):
+        if src[j] == "{":
+            depth += 1
+        elif src[j] == "}":
+            depth -= 1
+            if depth == 0:
+                return src[open_idx + 1:j]
+    return None
+
+
+def _job_status_map_literals(src: str) -> list[str]:
+    """找出把 job 状态枚举当**对象键**写死的字面量块。
+
+    做法：先命中 job 专属键，再向左找最近的对象字面量 `{`（且中间不得跨语句），
+    配对后统计该块里 job 专属键的数量 —— ≥3 才认定为"又一份 job 状态映射"。
+    """
+    out: list[str] = []
+    seen: set[int] = set()
+    key_pat = re.compile(r"\b(%s)\s*:" % "|".join(JOB_ONLY_STATUS_KEYS))
+    for m in key_pat.finditer(src):
+        open_idx = src.rfind("{", 0, m.start())
+        if open_idx == -1 or open_idx in seen:
+            continue
+        between = src[open_idx:m.start()]
+        if ";" in between or "=>" in between or "\n\n" in between:
+            continue  # 跨语句/跨函数，不是同一个字面量
+        seen.add(open_idx)
+        blk = _braced_block_at(src, open_idx)
+        if blk is None:
+            continue
+        keys = set(re.findall(r"(?:^|[{,\s])([a-z_]+)\s*:", blk))
+        if len(keys & set(JOB_ONLY_STATUS_KEYS)) >= 3:
+            out.append(" ".join(blk.split())[:120])
+    return out
+
+
+def _review_error_branch_block() -> str:
+    """抠出 review.js 里 `if (d.type === "error") { ... }` 的**完整块**。
+
+    只查"全文有没有 es.close()"是盲的（它同时出现在 done/onerror 分支）
+    —— 必须落在**包围条件**上，故这里做配对提取后再判相对位置。
+    """
+    src = REVIEW_JS.read_text(encoding="utf-8")
+    anchor = 'if (d.type === "error")'
+    assert anchor in src, "review.js 里找不到错误帧分支（被改名/删除了？）"
+    i = src.index(anchor)
+    blk = _braced_block_at(src, src.index("{", i))
+    assert blk is not None, "错误帧分支花括号未配平（解析失败）"
+    return blk
+
+
+class TestSseErrorFrameAdjudication:
+    """B2-10 ①：两类 error 帧的处置判定。
+
+    服务端（api/jobs/status.py）会发两类 `type=error` 帧：
+    「进度查询失败」(terminal=false，发完 `continue`) 与
+    「任务不存在」(terminal=true，发完 `return`)。复核页曾只判
+    `d.type === "error"` 就把两者都当终态 ⇒ **一次 DB 抖动被谎报成
+    "任务被删"，且进度流永久断开**（既丢实时更新，又理由说谎）。
+    """
+
+    def test_transient_frame_keeps_stream(self):
+        assert _sse_error_action(
+            {"type": "error", "terminal": False, "message": "进度查询失败"}
+        ) == "transient"
+
+    def test_terminal_frame_closes_stream(self):
+        assert _sse_error_action(
+            {"type": "error", "terminal": True, "message": "任务不存在"}
+        ) == "terminal"
+
+    def test_non_error_frame_is_ignored(self):
+        """正常进度帧（哪怕带 terminal 字段）不得被当成错误帧。"""
+        assert _sse_error_action({"status": "analyzing", "terminal": True}) is None
+        assert _sse_error_action({"status": "review"}) is None
+
+    def test_judgement_does_not_depend_on_message_text(self):
+        """反向控制：**没有** terminal 字段时不得凭 message 文案判定。
+
+        否则"改文案"会静默改变控制流 —— 这正是本缺陷的成因形态，
+        也是"日志/理由说谎"一类的复发通道（B2-6/B2-12 同族）。
+        """
+        for msg in ("任务不存在", "进度查询失败"):
+            assert _sse_error_action({"type": "error", "message": msg}) == "transient"
+
+    def test_missing_terminal_is_fail_safe_toward_keeping_stream(self):
+        """字段缺失 ⇒ 取"瞬态"（宁可多留一会儿连接，也不谎报任务被删）。
+
+        另一侧由集成用例锁定服务端两类帧必带该字段，故不会长期缺失。
+        """
+        assert _sse_error_action({"type": "error"}) == "transient"
+
+
+class TestSharedStatusZhIsSingleSource:
+    """B2-10 ②：SSE 用的中文映射必须是共享件且覆盖终态。"""
+
+    def test_live_terminal_statuses_are_chinese_not_raw_tokens(self):
+        zh = _zh_map(["review", "partial_review", "done"])
+        assert zh["review"] == "可复核"
+        assert zh["partial_review"] == "部分可复核"
+        assert zh["done"] == "已完成"
+        for k, v in zh.items():
+            assert not re.search(r"[a-z_]{4,}", v), f"{k} 仍输出裸英文 token：{v!r}"
+
+    def test_unknown_status_is_flagged(self):
+        """未知状态兜底要能看出"这是我没见过的状态"，而不是以为界面坏了。"""
+        assert _zh_map(["brand_new_status"])["brand_new_status"] == (
+            "未知(brand_new_status)"
+        )
+
+    def test_js_covers_every_python_job_status(self):
+        """键集必须互相覆盖 —— 后端新增状态而前端漏改就会被抓到。
+
+        ⚠️ 只锁**键集**，不锁**措辞**：SSR(Python) 与 SSE(JS) 的中文措辞目前
+        确有差异（ocr_running「OCR 解析中」vs「识别中」、error「失败」vs
+        「出错」等，见 docs/TODO.md B2-10 附注），统一措辞会改变用户可见文案，
+        须单独评估，不在本护栏范围内。
+        """
+        js_keys = set(_run_in_node(
+            "console.log(JSON.stringify(Object.keys(PbcStatus.STATUS_ZH)));"
+        ))
+        missing = sorted(set(JOB_STATUS_ZH) - js_keys)
+        assert not missing, f"status.js 缺少这些 job 状态的中文映射：{missing}"
+
+
+class TestReviewJsHasNoSecondStatusTruth:
+    """B2-10 ④：复核页不得再自带一份 job 状态中文映射（文字与颜色同源）。"""
+
+    def test_no_job_status_map_literal_in_review_js(self):
+        src = REVIEW_JS.read_text(encoding="utf-8")
+        found = _job_status_map_literals(src)
+        assert not found, (
+            "review.js 又出现了 job 状态中文映射副本 —— 状态点颜色走共享件、"
+            f"文字却各持一份，改一处改不动另一处：\n{found}"
+        )
+
+    def test_detector_is_not_vacuous(self):
+        """正向对照：同一个提取器在**真值文件**上必须找得到映射。
+
+        否则上面的"找不到"可能只是提取器坏了（空断言）—— 这才是最常见
+        的假绿来源。
+        """
+        found = _job_status_map_literals(STATUS_JS.read_text(encoding="utf-8"))
+        assert found, "提取器在单一真值文件上也找不到映射 ⇒ 本护栏是空断言"
+
+    def test_review_js_consumes_shared_zh_for_badge_and_label(self):
+        """② 与 ④ 的共同落点：徽章与进度文案都走共享件（不再是本地副本）。"""
+        src = REVIEW_JS.read_text(encoding="utf-8")
+        assert src.count("PbcStatus.statusZh") >= 2, (
+            "review.js 应至少有两处消费共享中文映射（状态徽章 + 进度文案兜底）"
+        )
+        assert "label = d.status; // 未知状态兜底显示原始值" not in src, (
+            "进度文案兜底又直接显示原始英文 token 了（② 回归）"
+        )
+
+
+class TestReviewJsErrorBranchGuardsStreamClose:
+    """B2-10 ①：`es.close()` 必须被 terminal 判定**包围**，不得裸调。
+
+    判据落在"包围条件 + 相对位置"（§二十八：文本在 ≠ 运行期可达）：
+    单看"全文含 es.close()"区分不出它到底在终态分支还是瞬态分支。
+    """
+
+    def test_close_happens_after_terminal_decision(self):
+        blk = _review_error_branch_block()
+        assert "sseErrorAction" in blk, "错误帧分支未使用共享判定函数"
+        assert "es.close()" in blk
+        assert blk.index("terminal") < blk.index("es.close()"), (
+            "es.close() 出现在 terminal 判定**之前** ⇒ 瞬态抖动仍会断流"
+        )
+        assert 'if (action !== "terminal")' in blk, (
+            "缺少显式的瞬态分支（瞬态必须保持长连）"
+        )
+
+    def test_transient_branch_does_not_close_stream(self):
+        blk = _review_error_branch_block()
+        head = blk[: blk.index("es.close()")]
+        transient = head[head.index('if (action !== "terminal")'):]
+        assert "es.close()" not in transient
+        assert "clearInterval(pollTimer)" not in transient, (
+            "瞬态分支不得清掉轮询兜底定时器"
+        )
+
+    def test_branch_does_not_match_on_message_text(self):
+        """反向断言：错误帧分支里不得出现服务端的 message 文案字面量。"""
+        blk = _review_error_branch_block()
+        assert "进度查询失败" not in blk, (
+            "错误帧分支按 message 文案判定 ⇒ 改文案会静默改变控制流"
+        )
+
+
+class TestReviewJsSurfacesErrorReason:
+    """B2-10 ③：error 转态期就要能看到原因（不必等 1.5s 自动刷新）。"""
+
+    def test_reason_is_rendered_from_frame_payload(self):
+        src = REVIEW_JS.read_text(encoding="utf-8")
+        assert "showJobErrorBanner" in src, "缺少按需渲染错误横幅的辅助函数"
+        # ⚠️ 断言必须落在**消费点**上，不能只要求"某标识符出现过"：
+        # 变异验证暴露过一次 —— 把调用改成 `showJobErrorBanner(undefined)` 时，
+        # 因为**条件行** `if (d.status === "error" && d.error_message)` 里还有
+        # 一处 `d.error_message`，只查"出现过"的断言仍然全绿（§二十八：
+        # 文本在 ≠ 运行期可达）。
+        assert "showJobErrorBanner(d.error_message)" in src, (
+            "转态期原因未真正传给横幅（error_message 是服务端进度快照已带字段）"
+        )
+        assert 'if (d.status === "error" && d.error_message)' in src, (
+            "应以 status=error 为条件，避免把无关帧的同名字段当原因渲染"
+        )
+
+    def test_banner_id_matches_ssr_template(self):
+        """JS 复用 SSR 的横幅 ⇒ 两侧 id 必须一致，否则复用落空、横幅永不出现。"""
+        assert 'id="job-error-banner"' in REVIEW_HTML.read_text(encoding="utf-8")
+        assert '"job-error-banner"' in REVIEW_JS.read_text(encoding="utf-8")

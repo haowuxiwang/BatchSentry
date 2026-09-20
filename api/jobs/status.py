@@ -398,8 +398,13 @@ async def stream_job_progress(job_id: str, request: Request = None):
                     # 让前端走重连逻辑。
                     logger.error(f"[{job_id}] SSE progress query failed: {e!r}")
                     seq += 1
+                    # `terminal` 由服务端下发，是「前端该不该关流」的**唯一判据**：
+                    # 本帧是**瞬态**故障，发完继续轮询（下方 continue，连接不关），
+                    # 故 terminal=False。前端据此保持长连、只提示不切终态。
+                    # 历史缺陷（B2-10 ①）：前端只判 type=error 就关流并把瞬态
+                    # 谎报成"任务不存在或已被删除" ⇒ 一次 DB 抖动即永久断流。
                     yield (f"id: {seq}\n"
-                           f"data: {json.dumps({'type': 'error', 'message': '进度查询失败'}, ensure_ascii=False)}\n\n")
+                           f"data: {json.dumps({'type': 'error', 'terminal': False, 'message': '进度查询失败'}, ensure_ascii=False)}\n\n")
                     await asyncio.sleep(_SSE_POLL_SECONDS)
                     continue
                 if progress is None:
@@ -407,8 +412,11 @@ async def stream_job_progress(job_id: str, request: Request = None):
                     # 注意：不能用 `event: error` 帧 — SSE 规范中 error 是保留事件
                     # 类型，浏览器收到后立即断开连接且不暴露 data，前端无法区分
                     # "job 不存在" 与网络抖动。改用普通 message 帧携带 type 字段。
+                    # terminal=True：**终态**（job 已不存在），发完 return。
+                    # ⚠️ 判据必须是这个显式字段，不能靠 message 文案推断 ——
+                    # 文案属展示层，改文案会静默改变控制流。
                     yield (f"id: {seq}\n"
-                           f"data: {json.dumps({'type': 'error', 'message': '任务不存在'}, ensure_ascii=False)}\n\n")
+                           f"data: {json.dumps({'type': 'error', 'terminal': True, 'message': '任务不存在'}, ensure_ascii=False)}\n\n")
                     return
 
                 payload = json.dumps(progress, ensure_ascii=False)

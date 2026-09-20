@@ -82,11 +82,34 @@
     return ACTIVE_STATUSES.indexOf(st) !== -1;
   }
 
+  /* SSE `type: "error"` 帧的处置判定 —— 「要不要关流」的**单一真值**。
+   *
+   * 服务端（`api/jobs/status.py` 单任务流）会发两类语义完全不同的 error 帧：
+   *   - `terminal: false`「进度查询失败」= 瞬态 DB 抖动，服务端发完 `continue`
+   *     继续推帧 ⇒ 前端必须**保持**长连。关流会永久丢失实时更新；
+   *   - `terminal: true`「任务不存在」= 终态，服务端发完 `return` ⇒ 前端关流，
+   *     否则 EventSource 会按 SSE 语义无限重连一个已不存在的 job。
+   *
+   * 历史缺陷（B2-10 ①）：复核页只判 `d.type === "error"` 就把两类混为一谈，
+   * 于是**一次 DB 抖动被谎报成"任务不存在或已被删除"**，同时进度流永久断开。
+   *
+   * ⚠️ 判据只认 `terminal` 字段，**不得**按 `message` 文本判断：文案属展示层，
+   * 改文案会静默改变控制流（且会让"理由说谎"类缺陷重新出现）。
+   * 字段缺失时按"瞬态"处理 —— fail-safe 方向取"宁可多留一会儿连接，也不把
+   * 可恢复的抖动谎报成任务被删"。服务端一侧由集成用例锁定两类帧必带该字段，
+   * 故不会长期缺失（见 tests/integration/test_api_job_status_coverage.py）。
+   */
+  function sseErrorAction(d) {
+    if (!d || d.type !== "error") return null;
+    return d.terminal === true ? "terminal" : "transient";
+  }
+
   global.PbcStatus = {
     STATUS_ZH: STATUS_ZH,
     statusZh: statusZh,
     statusDotClass: statusDotClass,
     ACTIVE_STATUSES: ACTIVE_STATUSES,
     isActiveStatus: isActiveStatus,
+    sseErrorAction: sseErrorAction,
   };
 })(typeof window !== "undefined" ? window : globalThis);
