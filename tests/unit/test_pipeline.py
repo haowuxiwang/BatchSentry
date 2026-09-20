@@ -2302,7 +2302,19 @@ class TestSlicedPipeline:
         ), patch(
             "core.pipeline.analyze_page",
             new=AsyncMock(return_value={
-                "steps": [], "findings": [], "overall_confidence": "high"}),
+                # Round 46：该页必须**有可解析的工序时刻**，收权重算才是
+                # 「有样本且确无倒序」（强证据 ⇒ 抑制）。若留成 `steps: []`，
+                # 规则层是「判不了」⇒ 按新语义只降级、**不写**抑制台账
+                # （见下一个用例 `test_llm_guard_downgrades_when_unable_to_adjudicate`）。
+                # ⚠️ `page_info.production_date` **不可省**：纯时刻（`09:00`）
+                # 必须有 fallback 日期才解析得出（`_parse_time_interval` 实测
+                # 无 fallback ⇒ None）—— 夹具少这一项会让"有样本"静默退化成
+                # "判不了"，从而**偷偷改变收权档位**（本轮就踩到：测试红了但
+                # 原因不是被测逻辑，而是夹具不自洽）。
+                "page_info": {"production_date": "2025-01-20"},
+                "steps": [{"step_no": "3", "start_time": "09:00",
+                           "end_time": "09:52"}],
+                "findings": [], "overall_confidence": "high"}),
         ), patch(
             "core.pipeline.analyze_cross_page",
             new=AsyncMock(side_effect=fake_cross),
@@ -2320,6 +2332,63 @@ class TestSlicedPipeline:
         sup = [dict(r) for r in await cur.fetchall()]
         assert sup, "收权抑制未留痕（GMP 要求抑制可抽检/可回退）"
         assert sup[0]["reason"].strip()
+
+    async def test_llm_guard_downgrades_when_unable_to_adjudicate(
+        self, pipeline_db, tmp_path
+    ):
+        """Round 46 反向用例：该页**无任何可解析工序** ⇒ 规则层**判不了**
+        ⇒ **只降级，不抑制、不写抑制台账**（判不了 ≠ 判据确凿）。
+
+        与上一个用例成**一对**：同一条 LLM 结论，只因 structured 里有没有
+        可解析样本，处置档位就应不同 —— 这正是本轮修复的核心不变式。
+        ⚠️ 旧实现在这里会**误抑制**（`_recompute_time_reversal` 返 bool，
+        把"无样本"归入 False）⇒ 实测冤枉抑制了 p43×4 / p46 的真倒序线索。
+        """
+        job_id = await _insert_job(pipeline_db)
+        pdf_path = str(tmp_path / "fake.pdf")
+        Path(pdf_path).write_bytes(b"%PDF-1.4 fake")
+
+        pages = [{"markdown": {"text": f"page {i} " + "内容" * 50}}
+                 for i in (1, 2)]
+        cross = [{
+            "page": 1, "type": "time_reversal", "severity": "critical",
+            "description": "接收结束时间 13:6 早于接收开始时间 09:00",
+            "source": "llm_cross",
+        }]
+
+        async def fake_cross(page_structures, job_id="", progress_cb=None):
+            return cross
+
+        with patch(
+            "core.pipeline._get_ocr_chain",
+            return_value=[(lambda p, cb: pages, "mineru")],
+        ), patch(
+            "core.pipeline.analyze_page",
+            new=AsyncMock(return_value={
+                # 工序时刻一个都解析不出 ⇒ 规则层无从复核
+                # （`page_info` 照给，以证明"判不了"确系**时刻缺失**所致，
+                #  而不是靠"缺 fallback 日期"凑出来的同一个结果。）
+                "page_info": {"production_date": "2025-01-20"},
+                "steps": [{"step_no": "3", "start_time": "", "end_time": "—"}],
+                "findings": [], "overall_confidence": "high"}),
+        ), patch(
+            "core.pipeline.analyze_cross_page",
+            new=AsyncMock(side_effect=fake_cross),
+        ):
+            await run_pipeline(job_id, pdf_path)
+
+        cur = await pipeline_db.execute(
+            "SELECT severity, description FROM findings "
+            "WHERE job_id = ? AND type='time_reversal'", (job_id,))
+        rows = [dict(r) for r in await cur.fetchall()]
+        assert rows, "判不了时应**保留**（降级），而不是丢弃（漏检代价 > 误报代价）"
+        assert all(r["severity"] != "critical" for r in rows), rows
+        assert any("无法复核" in (r["description"] or "") for r in rows), rows
+
+        cur = await pipeline_db.execute(
+            "SELECT reason FROM finding_suppressions WHERE job_id = ?", (job_id,))
+        sup = [dict(r) for r in await cur.fetchall()]
+        assert not sup, "判不了不得写抑制台账（否则会被读成『已确证不成立』）"
 
 
 # ─── 3. 空页自动重试（Stage 1 抗挫折，MinerU 大文件丢页）───────────

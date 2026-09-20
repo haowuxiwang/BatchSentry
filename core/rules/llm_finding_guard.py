@@ -24,10 +24,16 @@ LLM 同时做了两件它不该单独做的事：**自己从 OCR 文本里挑值
 - **L2 溯源可判性**：finding 文案里的长数字必须能在 OCR 原文中定位（复用
   `page_analyzer._value_grounded` 同源实现）。不可定位 ⇒ **降级**
   （疑似幻觉，保留给人工看，但不给 critical）。
-- **L3 判据重算**：对有确定性判据的类型，用规则层**同一套代码**重算：
-  `time_reversal` 用 `parsing._parse_time_interval`/`_interval_after` 重算；
-  `suspicious_date`/`signature_time_anomaly` 核对话里声明的先后方向。
-  重算不出该结论（或无据）⇒ **抑制**；重算证实 ⇒ 标记 `corroborated`。
+- **L3 判据重算**：对有确定性判据的类型，用规则层**同一套代码**重算。
+  ⚠️ **Round 46 修正**：两条 L3 路径的结论都**不能把"判不了"当成"判据确凿"**
+  （旧版正是这样做的，实测冤枉抑制了 p43/p46 五条文案**明写**「开始时间晚于
+  结束时间」的条目）：
+  - `time_reversal` 用 `parsing._parse_time_interval`/`_interval_after` 重算，
+    结果为**三态** —— 可解析工序均无倒序 ⇒ 抑制；确有倒序 ⇒ 保留；
+    **一个可解析工序都没有 ⇒ 降级**（判不了）；
+  - 文案声明的**先后方向**（`suspicious_date`/`signature_time_anomaly` 等）：
+    参照物含「当前日期/当前年份」⇒ **抑制**（该比较本身无意义）；两侧**都是
+    记录内的日期** ⇒ **降级**（错的只是表述，日期对本身仍需人工核对）。
 - **L4 severity 封顶**：LLM 独断的 `critical`，若无 L3 确定性背书 ⇒ 降为
   `warning` 并注明"未经规则层复核，待人工核对"。规则层的 `critical`
   （source='rule'）不经过本模块，不受影响。
@@ -116,6 +122,17 @@ _DATE_LITERAL_RE = re.compile(
 )
 # 时刻字面量 HH:MM（用于 time_reversal 的文案复核）
 _CLOCK_RE = re.compile(r"(\d{1,2})\s*[:时]\s*(\d{1,2})")
+
+#: 比较的**参照物**是否为"当前日期/当前年份" —— 这类比较**本身不构成异常**
+#: （过去日期早于现在本是记录常态，B1-4 的根因）。Round 46 用它把"方向反"分成
+#: 两档：参照物是当前日期 ⇒ 抑制；两侧都是记录内日期 ⇒ 只降级（见
+#: :func:`_check_declared_order`）。
+#: ⚠️ 刻意**不引入墙钟**：只用文案里出现的词判定 —— 既避开 B1-7（墙钟基准 ⇒
+#: finding 跨年份不可复现），也避免新增一份必须与规则层同步的阈值表。
+_CURRENT_REF_RE = re.compile(
+    r"当前日期|当前年份|当前的?日期|当前的?年份|今天|now|current\s+(?:date|year)",
+    re.IGNORECASE,
+)
 
 
 def _finding_text(f: dict) -> str:
@@ -262,19 +279,37 @@ def _check_grounding(f: dict, raw_html: str) -> str | None:
 
 # ── L3：判据重算 ───────────────────────────────────────────────────────
 
-def _recompute_time_reversal(structured: dict | None) -> bool:
-    """规则层同源判据：结构化数据里是否真的存在"开始晚于结束"。"""
+def _recompute_time_reversal(structured: dict | None) -> bool | None:
+    """规则层同源判据：结构化数据里是否真的存在"开始晚于结束"。
+
+    返回**三态**（Round 46 对抗性审查修正 —— 旧版只返 ``bool``，把
+    「判不了」与「确无倒序」混为一谈）：
+
+    - ``True``  — 有可解析样本，且其中确有倒序 ⇒ LLM 结论成立（不抑制）；
+    - ``False`` — 有可解析样本，且样本**全部**无倒序 ⇒ **强证据**（可抑制）；
+    - ``None``  — **一个可解析样本都没有**（structured 缺失，或该页工序的
+      start/end 字段全部解析不出）⇒ **判不了**，fail-open。
+
+    ⚠️ 旧版把 ``None`` 的情形归入 ``False``，于是"该页工序时间一个都读不出"
+    被当成"判据确凿地无倒序"而**抑制**。实测 p43（4 条）/p46（1 条）文案
+    **明写「开始时间晚于结束时间」**、p38 的串位幻觉条目也走同一条路径 ——
+    前者是**真倒序被冤枉抑制**，后者虽结论碰巧正确但**机制是蒙对的**。
+    """
     if not structured:
-        return False
+        return None
     fb_date = (structured.get("page_info") or {}).get("production_date")
+    samples = 0
     for step in structured.get("steps") or []:
         if not isinstance(step, dict):
             continue
         iv_start = _parse_time_interval(step.get("start_time"), fb_date)
         iv_end = _parse_time_interval(step.get("end_time"), fb_date)
-        if iv_start and iv_end and _interval_after(iv_start, iv_end):
+        if not (iv_start and iv_end):
+            continue          # 该工序读不出 ⇒ 不构成样本（既不计入、也不作反证）
+        samples += 1
+        if _interval_after(iv_start, iv_end):
             return True
-    return False
+    return False if samples else None
 
 
 def _parse_date_literal(y: str, mo: str, d: str | None = None) -> tuple[int, int, int] | None:
@@ -285,12 +320,26 @@ def _parse_date_literal(y: str, mo: str, d: str | None = None) -> tuple[int, int
         return None
 
 
-def _check_declared_order(f: dict) -> str | None:
+def _check_declared_order(f: dict) -> tuple[str | None, str | None]:
     """L3：核对文案里声明的先后关系是否与日期事实一致。
 
-    典型反例 p2「2025.01.30 晚于 2026.09.18」—— 2025 < 2026，声明方向与
-    事实相反；p38「2027.01.17 早于 2025年01月20日」同理。返回抑制理由；
-    ``None`` 表示方向自洽或无法判定（fail-open）。
+    返回 ``(抑制理由, 降级理由)`` —— 两者互斥，同为空表示方向自洽或判不了
+    （fail-open）。
+
+    **Round 46 对抗性审查修正（旧实现在这里做过了头）**：旧版把"**方向词**
+    与事实相反"直接当作"**整条 finding** 不成立"而**抑制**。二者并不等价 ——
+    被比较的两个日期**本身**可能确实是异常。实测 p38
+    「签名时间 2027.01.17 早于 生产日期 2025年01月20日」：方向词确实错了，
+    但 `2027` 是个**未来日期**、且比生产日期晚 2 年，这正是复核者必须看到的
+    异常；旧版把它连同错误的表述一起丢掉，该页**再无任何条目提及 2027**、
+    规则层也**无兜底** ⇒ 违反本模块自己写下的原则「只对**逻辑不成立**的用抑制」。
+
+    故按**参照物**分级：
+
+    - 参照物含「**当前日期 / 当前年份**」⇒ 该比较本身不构成异常（B1-4 型：
+      "审核日期早于今天"是记录常态）⇒ **抑制**（判定在逻辑上不成立）；
+    - 两侧**都是记录内的日期** ⇒ 错的只是 LLM 的**表述**，它指出的日期对
+      本身仍需人工核对 ⇒ **降级**（保留线索，并在理由里**纠正方向**）。
     """
     text = str(f.get("description") or "")
     m = re.search(
@@ -298,28 +347,35 @@ def _check_declared_order(f: dict) -> str | None:
         text, re.IGNORECASE,
     )
     if not m:
-        return None
+        return None, None
     word = re.sub(r"\s+", " ", m.group(0).strip().lower())
     expected = _ORDER_WORDS.get(word)
     if expected is None:
-        return None
+        return None, None
     left = _DATE_LITERAL_RE.findall(text[: m.start()])
     right = _DATE_LITERAL_RE.findall(text[m.end():])
     if not left or not right:
-        return None
+        return None, None
     a = _parse_date_literal(*left[-1])   # 关系词**左侧最近**的日期
     b = _parse_date_literal(*right[0])   # 关系词**右侧最近**的日期
     if a is None or b is None or a == b:
-        return None
+        return None, None
     actual = "after" if a > b else "before"
     if actual == expected:
-        return None  # 方向自洽 —— 不干预
+        return None, None  # 方向自洽 —— 不干预
     lit_a = "".join(x for x in left[-1] if x)
     lit_b = "".join(x for x in right[0] if x)
-    return (
-        f"文案声明「{lit_a} {m.group(0).strip()} {lit_b}」，"
-        f"但按日期事实 {lit_a} 应为「{'晚于' if actual == 'after' else '早于'}」{lit_b}"
-        f" —— 判据方向与事实相反"
+    stated = m.group(0).strip()
+    corrected = "晚于" if actual == "after" else "早于"
+    if _CURRENT_REF_RE.search(text):
+        return (
+            f"文案声明「{lit_a} {stated} {lit_b}」，但按日期事实 {lit_a} 应为"
+            f"「{corrected}」{lit_b}；参照物为当前日期，该比较不构成异常"
+            f"（过去日期早于现在本是记录常态）—— 判定不成立"
+        ), None
+    return None, (
+        f"文案声明「{lit_a} {stated} {lit_b}」，但按日期事实 {lit_a} 应为"
+        f"「{corrected}」{lit_b} —— 表述方向有误；其所指的两个日期本身请人工核对"
     )
 
 
@@ -359,8 +415,9 @@ def review_llm_findings(
     Returns:
         ``(kept, downgraded, suppressed)``
 
-        - ``kept``: 原样保留的 finding（含被 L3 证实者，附
-          ``_guard_corroborated=True`` 标记，仅供调用方观察，不入库）。
+        - ``kept``: 原样保留的 finding（含被 L3 证实者与未经本模块判定者）。
+          ⚠️ 旧 docstring 提到的 ``_guard_corroborated`` 标记**从未实现** ——
+          Round 46 删除该描述，以免文档承诺一个不存在的字段。
         - ``downgraded``: ``[{"finding", "from_severity", "to_severity",
           "reason", "rule"}]`` —— 保留但 severity 降低。
         - ``suppressed``: ``[{"finding", "reason", "evidence"}]`` ——
@@ -386,19 +443,32 @@ def review_llm_findings(
 
         # ── 抑制类（强证据 —— 判定在逻辑上不成立）────────────────────
         reason = _check_spec_value_shape(f, structured)              # L1 形态非法
+        _l3_down = None
         if (
             reason is None
             and str(f.get("type") or "") == "time_reversal"
             and _REVERSAL_TEXT_RE.search(_finding_text(f))           # 仅当确实在断言倒序
-            and structured
-            and not _recompute_time_reversal(structured)             # L3 同源重算
         ):
-            reason = (
-                "规则层用同源判据复核该页结构化数据，未发现时间倒序"
-                "（LLM 结论无据，疑似跨行/跨字段串位）"
-            )
+            _rec = _recompute_time_reversal(structured)              # L3 同源重算（三态）
+            if _rec is False:
+                reason = (
+                    "规则层用同源判据复核该页结构化数据（可解析工序均无倒序），"
+                    "未发现时间倒序（LLM 结论无据，疑似跨行/跨字段串位）"
+                )
+            elif _rec is None:
+                # Round 46：**判不了 ≠ 判据确凿**。旧版把"一个工序都解析不出"
+                # 当成"确无倒序"而抑制，实测 p43×4 / p46 的文案**明写**
+                # 「开始时间晚于结束时间」却被冤枉抑制。
+                _l3_down = (
+                    "该页结构化数据中没有可解析的工序时间，规则层无法复核该结论"
+                    "（判不了 ⇒ 保留待人工核对，不作抑制）"
+                )
         if reason is None:
-            reason = _check_declared_order(f)                        # L3 方向重算
+            # L3 方向重算 —— Round 46：参照物是「当前日期」才抑制；两侧都是
+            # 记录内日期时只降级（表述有误，但日期对本身仍需人工核对）。
+            _sup2, _down2 = _check_declared_order(f)
+            reason = _sup2
+            _l3_down = _l3_down or _down2
         if reason is not None:
             suppressed.append({
                 "finding": f,
@@ -418,6 +488,7 @@ def review_llm_findings(
             _check_grounding(f, raw_html)          # L2 溯源（完全凭空）
             or _spec_value_unlocatable(f, structured)   # L1 查无此值（弱证据）
             or _check_speculative(f)               # L1' 推测性表述
+            or _l3_down                            # L3 判不了 / 方向反但日期对属记录内
         )
         to_sev = None
         downgrade_reason = weak
@@ -457,7 +528,7 @@ def _layer_of(reason: str) -> str:
         return "L1-value-shape"
     if "时间倒序" in reason:
         return "L3-time-reversal"
-    if "方向与事实相反" in reason:
+    if "参照物为当前日期" in reason or "方向与事实相反" in reason:
         return "L3-declared-order"
     return "L?"
 

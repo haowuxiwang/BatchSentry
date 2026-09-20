@@ -48,6 +48,16 @@ STRUCT_REAL_REVERSAL = {
     "steps": [{"step_no": "1", "start_time": "19:15", "end_time": "18:30"}],
 }
 
+# p43 / p46 实测形态：该页**有** steps，但时刻字段一个都解析不出
+# （空串 / 占位符）⇒ 规则层无从复核，"判不了"不得当成"判据确凿"。
+STRUCT_UNPARSEABLE_TIMES = {
+    "page_info": {"production_date": "2025-09-25"},
+    "steps": [
+        {"step_no": "1", "start_time": "", "end_time": "—"},
+        {"step_no": "2", "start_time": "见附表", "end_time": ""},
+    ],
+}
+
 
 def _f(page, ftype, sev, desc, source="llm_page", **kw):
     return {"page": page, "type": ftype, "severity": sev,
@@ -174,6 +184,30 @@ class TestL3Recompute:
         )
         assert sup == []
 
+    def test_p43_unparseable_page_downgrades_not_suppresses(self):
+        """p43：文案**明写**「开始时间晚于结束时间」（真倒序的形态），但该页
+        工序时刻**一个都解析不出** ⇒ 规则层**判不了** ⇒ 只降级、**不得抑制**。
+
+        Round 46 对抗性审查修正（原为 P1）：旧 `_recompute_time_reversal` 返
+        `bool`，把"无样本"归入 `False` ⇒ 实测冤枉抑制了 p43×4 / p46 的真倒序
+        线索（`probe_audit2.py`【4】：8 条 L3 抑制里 **6 条**该页可解析样本 = 0）。
+        """
+        _k, down, sup = _review(
+            _f(43, "time_reversal", "critical", "V2109浸泡开始时间晚于结束时间"),
+            {43: STRUCT_UNPARSEABLE_TIMES},
+        )
+        assert sup == [], "判不了时不得抑制（漏检代价 > 误报代价）"
+        assert down and down[0]["to_severity"] == "warning"
+        assert "无法复核" in down[0]["reason"]
+
+    def test_time_reversal_without_structured_downgrades(self):
+        """structured 缺失（json 坏页 / 未抽取）⇒ 同样判不了 ⇒ 不抑制。"""
+        _k, down, sup = _review(
+            _f(46, "time_reversal", "critical", "V2116 浸泡开始时间晚于 V2116 浸泡结束时间"),
+        )
+        assert sup == []
+        assert down, "判不了时应降级保留，而不是静默丢弃"
+
     def test_p2_declared_order_reversed_suppressed(self):
         """p2：「2025.01.30 晚于 2026.09.18」—— 2025 < 2026，方向与事实相反。"""
         _k, _d, sup = _review(
@@ -183,13 +217,35 @@ class TestL3Recompute:
         assert len(sup) == 1
         assert sup[0]["evidence"]["guard_layer"] == "L3-declared-order"
 
-    def test_p38_declared_order_reversed_suppressed(self):
-        """p38：「2027.01.17 早于 2025.01.20」—— 2027 > 2025，方向相反。"""
-        _k, _d, sup = _review(
+    def test_p38_declared_order_reversed_downgrades_not_suppresses(self):
+        """p38：方向词错（2027 > 2025 却说"早于"），但两侧**都是记录内日期**
+        ⇒ 只降级、**不抑制**。
+
+        Round 46 对抗性审查修正（原为 P1）：旧实现把"方向词反"当成"整条 finding
+        不成立"而抑制，实测导致「2027」这个**未来日期**从该页结果里完全消失
+        （该页仅剩 `[rule] self_review`，规则层**无兜底**）⇒ 丢失真线索。
+        错的只是 LLM 的**表述**，日期对本身必须留给复核者。
+        """
+        _k, down, sup = _review(
             _f(38, "signature_time_anomaly", "critical",
                "操作者签名时间 2027.01.17 早于 生产日期 2025年01月20日"),
         )
-        assert len(sup) == 1
+        assert sup == [], "两侧均为记录内日期时不得抑制（会丢掉真线索）"
+        assert len(down) == 1
+        assert down[0]["to_severity"] == "warning"
+        assert "应为「晚于」" in down[0]["reason"]
+
+    def test_p27_declared_order_reversed_downgrades_not_suppresses(self):
+        """p27：两侧日期相差 **10 年**（2025.01.29 vs 2015.01.25）⇒ 年份误读
+        线索必须留下（该页只是**碰巧**另有一条 `year_contradiction` 兜底，
+        不得依赖巧合）。"""
+        _k, down, sup = _review(
+            _f(27, "signature_time_anomaly", "warning",
+               "复核者签名时间 2025.01.29 早于操作者签名时间 2015.01.25"),
+        )
+        assert sup == []
+        assert len(down) == 1
+        assert "应为「晚于」" in down[0]["reason"]
 
     def test_correct_direction_not_suppressed(self):
         """方向自洽 ⇒ 不干预（如真有未来日期：2027 晚于 2025 是事实）。"""
