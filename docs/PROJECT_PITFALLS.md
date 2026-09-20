@@ -233,6 +233,18 @@
     正常约 20–40s）→ 据此估算剩余时间，而不是怀疑卡死。
   - **不要**用 `ocr_progress.done` 或 `status` 单独判"是否卡死"（会误判为永久停滞）。
 
+### 五之二、直接跑 exe 冒烟：环境变量名陷阱 + 预算公式（2026-09-18 实测）
+
+- ⚠️ **端口要传 `PORT`**（`server.py` 读它，默认 **58765**）；传 `APP_PORT` **无效** ——
+  服务照常启动，只是监听 58765，探针在别端口**空等超时**。**隔离数据目录要覆盖 `APPDATA`**
+  （`config.py:41`）；传 `PBC_APPDATA` **无效** ⇒ 会**静默读写真实 `%APPDATA%\PBC`**。
+  ⇒ 手动冒烟跑完必须核 `data.db` 的 `mtime` 自证未污染。
+  （`tests/e2e_run.py` **本身不受影响**：它已用 `PBC_E2E_PORT` + `APPDATA` 自隔离。）
+- 超时预算公式 = `poll_timeout_for_pages(n)` = **1800 + 120×n**（env 可覆盖）；
+  机检 `tests/unit/test_e2e_round_budget.py`。曾被写死的 600/1200/60s **误判失败三次**。
+- 占用探测入口 = `scripts/clean_dist.who_holds()`（Restart Manager 封装）；
+  asar 版本核验 = `clean_dist.asar_version(<asar 文件>)` —— ⚠️ 传**文件**不是目录，传错**静默返 `None`**。
+
 ## 六、产物目录 / 删除通道 / OCR 后端
 
 - ⚠️ **外部句柄占 `resources/app.asar` → 整个目录动不了**：单文件"**可写但不可改名**"
