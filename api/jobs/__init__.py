@@ -111,6 +111,23 @@ except (TypeError, ValueError):
 _ACTIVE_STATUSES = ("pending", "ocr_running", "ocr_done", "analyzing", "cancelling")
 _TERMINAL_STATUSES = ("review", "partial_review", "error", "cancelled", "archived")
 
+
+async def _count_active_jobs(db, active_statuses) -> int:
+    """统计"占着并发额度"的 job 数。
+
+    ⚠️ **结论只在持 `db_lock` 期间有效**：调用方必须已持锁，否则拿到的是
+    过期快照 —— B2-7 的 TOCTOU 就是这么来的（在锁内查一次、很久之后才写）。
+    单一实现点：upload（前后两道检查）与 retry 共用同一段 SQL
+    （此前两处各写一份，改上限语义时容易漏改一处）。
+    """
+    cursor = await db.execute(
+        "SELECT COUNT(*) FROM jobs WHERE status IN ("
+        + ",".join("?" * len(active_statuses))
+        + ")",
+        active_statuses,
+    )
+    return (await cursor.fetchone())[0]
+
 # S1（M6/T6.1）：SSE 轮询间隔（秒）—— 单一来源。
 # 前后端三处必须一致，否则出现"客户端重连比服务端推送更快"的空转：
 #   - `retry: <ms>` 帧（EventSource 重连退避）

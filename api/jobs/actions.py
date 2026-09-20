@@ -45,6 +45,7 @@ async def retry_job(job_id: str, request: Request = None):
         _ACTIVE_STATUSES,
         _MAX_CONCURRENT_JOBS,
         InvalidTransitionError,
+        _count_active_jobs,
         db_lock,
         launch_pipeline,
         transition_status,
@@ -64,11 +65,7 @@ async def retry_job(job_id: str, request: Request = None):
     # defeating the memory protection (OCR results held in RAM per job).
     db_active = await get_db()
     async with db_lock:
-        cursor = await db_active.execute(
-            f"SELECT COUNT(*) FROM jobs WHERE status IN ({','.join('?' * len(_ACTIVE_STATUSES))})",
-            _ACTIVE_STATUSES,
-        )
-        active_count = (await cursor.fetchone())[0]
+        active_count = await _count_active_jobs(db_active, _ACTIVE_STATUSES)
         if active_count >= _MAX_CONCURRENT_JOBS:
             raise HTTPException(
                 409,

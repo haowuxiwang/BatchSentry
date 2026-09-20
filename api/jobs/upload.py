@@ -46,6 +46,7 @@ async def create_job(
         _ACTIVE_STATUSES,
         _MAX_CONCURRENT_JOBS,
         _MAX_IMAGE_PIXELS,
+        _count_active_jobs,
         db_lock,
         launch_pipeline,
         open as _open,
@@ -90,26 +91,24 @@ async def create_job(
             "尚未配置 LLM 服务商，无法进行结构化分析。请先前往「设置」完成配置后再上传。",
         )
 
-    # Concurrency guard: count active jobs before accepting new work.
-    # 性能优化：COUNT 检查在 db_lock 内（保证读一致性），但 PDF 写盘移到锁外，
-    # 避免大文件上传期间阻塞所有 DB 操作（cancel/retry/transition_status）。
-    # COUNT 与 INSERT 之间有间隙，但 MAX_CONCURRENT_JOBS 是软限制，
-    # 偶尔多一个 job 不会导致系统崩溃（pipeline 内部有 per-job lock 保护）。
+    # ── 并发额度：**两道检查**（B2-7 修 TOCTOU）──────────────────────────
+    # ① 这里是**尽力而为的前置快检**：目的只是别让用户白传一个 200MB 的文件，
+    #    **不是**授权依据 —— COUNT 与最终 INSERT 之间隔着写盘 + 解析（大文件
+    #    可达分钟级），期间其他上传会陆续通过这里。
+    # ② 真正的授权在下方 **INSERT 的同一把 db_lock 内**（检查与写入之间不释放
+    #    锁、无 await 让出点，对其他上传而言是原子的）。那才是"绝不超额"的保证。
+    # 性能：锁内只有一次 COUNT，PDF 写盘仍在锁外，不阻塞其他 DB 操作。
     db = await get_db()
     async with db_lock:
-        cursor = await db.execute(
-            f"SELECT COUNT(*) FROM jobs WHERE status IN ({','.join('?' * len(_ACTIVE_STATUSES))})",
-            _ACTIVE_STATUSES,
+        early_active = await _count_active_jobs(db, _ACTIVE_STATUSES)
+    if early_active >= _MAX_CONCURRENT_JOBS:
+        logger.warning(
+            f"Upload rejected (early check): {early_active} active >= limit {_MAX_CONCURRENT_JOBS}"
         )
-        active_count = (await cursor.fetchone())[0]
-        if active_count >= _MAX_CONCURRENT_JOBS:
-            logger.warning(
-                f"Upload rejected: {active_count} active jobs >= limit {_MAX_CONCURRENT_JOBS}"
-            )
-            raise HTTPException(
-                409,
-                f"已有 {active_count} 个任务在处理中，上限为 {_MAX_CONCURRENT_JOBS}。请等待完成或取消后再试。",
-            )
+        raise HTTPException(
+            409,
+            f"已有 {early_active} 个任务在处理中，上限为 {_MAX_CONCURRENT_JOBS}。请等待完成或取消后再试。",
+        )
 
     # PDF 写盘 + 校验在 db_lock 外执行，不阻塞其他 DB 操作
     job_id = str(uuid.uuid4())[:12]
@@ -347,6 +346,24 @@ async def create_job(
     # 重复 job（重复全流程 OCR/LLM 是纯浪费）。force=1 绕过（同一批记录在
     # 规则/SOP 变更后重新分析的合法场景）。
     async with db_lock:
+        # B2-7：**授权式配额检查** —— 与下面的 INSERT 在同一把 db_lock 内，
+        # 中间既不释放锁、也无 await 让出点 ⇒ "查过没过"与"写下这一行"对其他
+        # 上传而言是原子的。此前只在函数开头查一次，则并发上传会**全部**通过
+        # 那道检查再各自 INSERT ⇒ 活跃数可远超 MAX_CONCURRENT_JOBS（上限形同
+        # 虚设；pipeline 的 per-job lock 并不限制**这个**上限）。
+        # 注：db_lock 是**进程内**的 asyncio.Lock（单进程 uvicorn + aiosqlite
+        # 单连接），原子性以"单进程"为前提 —— 与本模块其余配额语义一致。
+        late_active = await _count_active_jobs(db, _ACTIVE_STATUSES)
+        if late_active >= _MAX_CONCURRENT_JOBS:
+            logger.warning(
+                f"[{job_id}] Upload rejected (atomic quota check): "
+                f"{late_active} active >= limit {_MAX_CONCURRENT_JOBS}"
+            )
+            shutil.rmtree(job_dir, ignore_errors=True)
+            raise HTTPException(
+                409,
+                f"已有 {late_active} 个任务在处理中，上限为 {_MAX_CONCURRENT_JOBS}。请等待完成或取消后再试。",
+            )
         try:
             cursor = await db.execute(
                 "SELECT id, filename, status, created_at FROM jobs "

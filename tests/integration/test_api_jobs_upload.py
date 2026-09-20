@@ -631,3 +631,169 @@ class TestGuardUnifiedReadDelete:
             r = await c.get("/api/jobs/rep-evil/report.md")
         assert r.status_code == 403
         assert "non-local" in r.text
+
+
+class _GatedUpload:
+    """最小的 UploadFile 替身 —— 把"首次读盘"变成**闸门**。
+
+    `create_job` 在**前置快检之后**才第一次 `await file.read()`，所以在这里等待
+    等价于"已通过前置快检、尚未走到授权式检查" —— 正是 B2-7 那个 TOCTOU 窗口的
+    入口。用它才能**确定性**地复现竞态，而不是靠并发运气。
+    """
+
+    def __init__(self, data: bytes, filename: str, gate, arrived, counter, total):
+        self._data = data
+        self._pos = 0
+        self.filename = filename
+        self._gate = gate
+        self._arrived = arrived
+        self._counter = counter
+        self._total = total
+        self._waited = False
+
+    async def read(self, n: int = -1):
+        if not self._waited:
+            self._waited = True
+            self._counter.append(1)
+            if len(self._counter) >= self._total:
+                self._arrived.set()
+            await self._gate.wait()
+        if self._pos >= len(self._data):
+            return b""
+        end = len(self._data) if n is None or n < 0 else self._pos + n
+        chunk = self._data[self._pos:end]
+        self._pos = end
+        return chunk
+
+
+def _unique_pdfs(tmp_path, n: int):
+    """n 份**内容各不相同**的 PDF（避免撞上 md5 去重 409，混淆配额 409）。"""
+    import fitz
+
+    out = []
+    for i in range(n):
+        doc = fitz.open()
+        doc.new_page().insert_text((50, 50), f"Unique batch record #{i}")
+        p = tmp_path / f"quota_{i}.pdf"
+        doc.save(str(p))
+        doc.close()
+        out.append((p.name, p.read_bytes()))
+    return out
+
+
+class TestUploadQuotaIsAtomic:
+    """B2-7：并发上传不得突破 `MAX_CONCURRENT_JOBS`。
+
+    背景：配额检查在函数开头、INSERT 在其后，两者之间隔着**写盘 + PDF 解析**
+    （大文件可达分钟级）。若只在开头查一次，多个并发上传会**全部**通过那道检查
+    再各自写入 ⇒ 实际活跃数可远超上限，`MAX_CONCURRENT_JOBS` 形同虚设
+    （pipeline 的 per-job lock 并不限制**这个**上限）。
+
+    修法：把授权式检查放进 **INSERT 的同一把 db_lock 内**（中间不释放锁、无
+    await 让出点）⇒ "查过没过"与"写下这一行"对其他上传是原子的。
+
+    ⚠️ 用例自带**反空断言**：先证明 N 个请求确实都进到了窗口（否则前置快检就
+    把它们挡了，本用例会靠"什么都没发生"而假绿）。
+    """
+
+    @pytest.mark.asyncio
+    async def test_concurrent_uploads_stop_at_the_limit(self, test_db, tmp_path):
+        import asyncio
+
+        from fastapi import HTTPException
+
+        from api.jobs import _ACTIVE_STATUSES, create_job
+
+        n = 4
+        gate = asyncio.Event()
+        arrived = asyncio.Event()
+        counter: list[int] = []
+        payloads = _unique_pdfs(tmp_path, n)
+
+        uploads = [
+            _GatedUpload(data, name, gate, arrived, counter, n)
+            for name, data in payloads
+        ]
+
+        with patch("api.jobs._MAX_CONCURRENT_JOBS", 1), \
+                patch("api.jobs.launch_pipeline"):
+            tasks = [
+                asyncio.create_task(create_job(file=u, force=False, request=None))
+                for u in uploads
+            ]
+            # 等 N 个请求**全部**越过前置快检（即都卡在同一窗口里）
+            await asyncio.wait_for(arrived.wait(), timeout=20)
+            gate.set()
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # ── 反空断言：窗口确实被打开（否则本用例毫无判别力）──
+        assert len(counter) == n, (
+            f"只有 {len(counter)}/{n} 个请求到达闸门 ⇒ 窗口未复现，本用例是空断言"
+        )
+
+        ok = [r for r in results if not isinstance(r, BaseException)]
+        rejected = [r for r in results if isinstance(r, HTTPException)]
+        assert len(ok) == 1, f"MAX=1 时应恰好 1 个成功，实际 {len(ok)}（{results}）"
+        assert len(rejected) == n - 1
+        for e in rejected:
+            assert e.status_code == 409, e
+            assert "上限" in str(e.detail), e
+
+        cursor = await test_db.execute(
+            "SELECT COUNT(*) FROM jobs WHERE status IN ("
+            + ",".join("?" * len(_ACTIVE_STATUSES))
+            + ")",
+            _ACTIVE_STATUSES,
+        )
+        active = (await cursor.fetchone())[0]
+        assert active == 1, (
+            f"并发上传突破了上限：活跃 job={active}（MAX=1）"
+            f" —— 配额检查与 INSERT 必须在同一把锁内"
+        )
+
+    @pytest.mark.asyncio
+    async def test_gate_window_is_reachable_only_after_early_check(
+        self, test_db, tmp_path
+    ):
+        """正向对照：**已有活跃 job 占满额度**时，请求应在**前置快检**就被挡下。
+
+        说明"两道检查"的分工：窗口只有在额度过得去时才会走到，
+        所以上面那条用例测的确实是**授权式**检查，而不是快检。
+        """
+        import asyncio
+
+        from fastapi import HTTPException
+
+        from api.jobs import create_job
+
+        await test_db.execute(
+            "INSERT INTO jobs (id, filename, pdf_path, status) VALUES (?, ?, ?, ?)",
+            ("already-active", "a.pdf", "/tmp/a.pdf", "pending"),
+        )
+        await test_db.commit()
+
+        gate = asyncio.Event()
+        counter: list[int] = []
+        name, data = _unique_pdfs(tmp_path, 1)[0]
+
+        with patch("api.jobs._MAX_CONCURRENT_JOBS", 1), \
+                patch("api.jobs.launch_pipeline"):
+            # wait_for：若前置快检被删掉，这里会**超时污染**而不是挂死
+            # —— 挂死不算红灯，必须让它可断言地失败。
+            with pytest.raises(HTTPException) as ei:
+                await asyncio.wait_for(
+                    create_job(
+                        file=_GatedUpload(
+                            data, name, gate, asyncio.Event(), counter, 1
+                        ),
+                        force=False,
+                        request=None,
+                    ),
+                    timeout=15,
+                )
+
+        assert ei.value.status_code == 409
+        assert counter == [], (
+            "额度已满时不应走到读盘闸门（应立即在前置快检被拒）—— "
+            "否则大文件会被白传一遍"
+        )

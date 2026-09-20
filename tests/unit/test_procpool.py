@@ -122,8 +122,9 @@ class TestCpuTaskTimeout:
     3600s），唯独此处原本无上限 —— 它是"job 永久停在非终态、SSE 无限等待"
     的唯一真实入口。
 
-    超时后**必须回收进程池**：``max_workers=1`` 的池里，一个挂死的 worker
-    永久占住唯一槽位，会把"某个 job 卡住"扩散成"整个应用不再处理新任务"。
+    超时后**必须回收进程池**：池的 worker 数很少（`_POOL_MAX_WORKERS`，实测标定为
+    2 —— 见 core/procpool.py 顶部数据表），一个挂死的 worker 会占住一个槽位；
+    worker 数为 1 时会直接把"某个 job 卡住"扩散成"整个应用不再处理新任务"。
     """
 
     def test_default_timeout_is_generous(self):
@@ -237,3 +238,59 @@ class TestSpawnIsolationSubprocess:
         )
         assert r.returncode == 0, f"stderr: {r.stderr[-500:]}"
         assert "ISOLATED=True" in r.stdout
+
+
+class TestPoolConcurrencyIsCalibrated:
+    """B3-2：池的并发度是**实测标定**的，不是一个可以随手改大的字面量。
+
+    背景：原实现 `max_workers=1` 并附注"多 worker 只会增加内存而无吞吐收益"。
+    实测（`devlogs/_verify/bench_procpool.py`，走真实 run_cpu 路径）表明该结论
+    **只对单 job 成立**：3 并发 job 下 1→2 worker 让墙钟 1.41s→0.85s（1.64x），
+    而每个 worker 约 60MB。故标定为 2（数据表见 core/procpool.py 顶部）。
+
+    本护栏钉两件事：
+      ① 标定值未被无声改动（改它必须先有新的测量 —— 数据表与断言一起改）；
+      ② 并发度由常量**单点**决定，源码里不得再出现内联的 `max_workers=<数字>`
+         （否则"改了常量却不生效"是一种看不见的假修）。
+    """
+
+    def test_calibrated_value_and_bounds(self):
+        from core import procpool
+
+        assert procpool._POOL_MAX_WORKERS == 2, (
+            "标定值被改动：请先跑 devlogs/_verify/bench_procpool.py 取得新数据，"
+            "同步 core/procpool.py 顶部的实测表与本断言"
+        )
+        # 上界有据：每 worker ≈60MB 且独立加载 fitz；worker 数超过并发 job 上限
+        # （MAX_CONCURRENT_JOBS 默认 3）只是白占内存。
+        assert 1 <= procpool._POOL_MAX_WORKERS <= 4
+
+    def test_pool_size_comes_from_the_single_constant(self):
+        """用 **AST** 判据，不用文本匹配。
+
+        §二十八 的教训：文本断言会被**注释里的示例**满足/污染 —— 本用例的首版
+        用正则查 `max_workers=<数字>`，结果被 core/procpool.py 顶部**实测数据表的
+        注释**（`# max_workers=2 —— ...`）打红。Python 侧一律走 AST。
+        """
+        import ast
+
+        src = (PROJECT_ROOT / "core" / "procpool.py").read_text(encoding="utf-8")
+        tree = ast.parse(src)
+        calls = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and any(kw.arg == "max_workers" for kw in node.keywords)
+        ]
+        # 反空断言：提取器必须真的找到调用点，否则下面的"全部合规"毫无意义
+        assert calls, (
+            "core/procpool.py 里找不到任何带 max_workers 的调用 —— 提取器失效"
+        )
+        for call in calls:
+            kw = next(k for k in call.keywords if k.arg == "max_workers")
+            assert isinstance(kw.value, ast.Name) and kw.value.id == (
+                "_POOL_MAX_WORKERS"
+            ), (
+                "并发度必须由 _POOL_MAX_WORKERS 单点决定，"
+                f"实际传入：{ast.dump(kw.value)}"
+            )

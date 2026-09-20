@@ -19,6 +19,38 @@
 > **宿主进程**，不是安全软件）+ 工具报告**具名持有者**。Round 33 同样**不进产物**，
 > **不升版号**。
 
+### Fixed (Round 51, 2026-09-20 — P2 批次③：并发与配额 B2-7 / B3-2)
+
+> ⚠️ **本批改动进入产物**（`api/jobs/`、`core/`）⇒ 工作树继续**领先于产物**，
+> **不单独升版**，随 v1.2.0 统一升版重建。
+
+- **B2-7 并发上限存在 TOCTOU（P2）**（`api/jobs/upload.py`、`api/jobs/actions.py`、
+  `api/jobs/__init__.py`）：配额 `COUNT` 在函数开头、`INSERT` 在其后，中间隔着
+  **写盘 + PDF 解析**（大文件可达分钟级）。实测（4 个上传同时卡在两道检查之间、
+  `MAX_CONCURRENT_JOBS=1`）**4 个全部成功** ⇒ 上限形同虚设。修法：把**授权式**检查
+  放进 `INSERT` 的**同一把 `db_lock`**（中间不释放锁、无 await 让出点）⇒ 对外原子；
+  开头那道检查**明确降级为"尽力而为的前置快检"**（只为避免让用户白传大文件）。
+  抽出 `_count_active_jobs()` 作**单一实现点**，upload（两道）与 retry 共用。
+  **未采用"占位 INSERT"**：占位行需要在**每条失败路径**上删除，漏一条就留下
+  `pending` 且无 task 的**幽灵任务**（永久占额度、看门狗不收敛）。写盘仍在锁外
+  ⇒ 性能未退化（锁内只多一次 COUNT）。
+- **B3-2 procpool 并发度 1 → 2（P2，实测标定）**（`core/procpool.py`）：实测单 worker 下
+  "1 个 job"与"3 个 job"墙钟**相同**（1.40s vs 1.41s ⇒ 并发被完全串行化），而 3 并发
+  job 时 1→2 worker 让墙钟 **1.41s → 0.85s（1.64x）**，每 worker ≈60MB；提到 3 的增量
+  只有 1.21x 而再 +65MB ⇒ 取 **2**。另有与负载无关的理由：worker 极少时一个挂死的
+  worker 会占住槽位（worker=1 时即占满 ⇒ 故障从"某个 job 卡住"扩散成"整个应用不再
+  处理新任务"），取 2 使爆炸半径减半。同时**更正一处文档说谎**：原注释称"多 worker
+  只会增加内存而无吞吐收益"，实测**只对单 job 成立**，已按数据更正。
+
+护栏：`tests/integration/test_api_jobs_upload.py::TestUploadQuotaIsAtomic`（闸门**确定性**
+复现 TOCTOU 窗口 + **反空断言** + 正向对照）与
+`tests/unit/test_procpool.py::TestPoolConcurrencyIsCalibrated`（标定值 + **AST** 单点判据）。
+**变异 4/4**（`devlogs/_verify/mutate_b27.py`、`mutate_b32.py`，逐字节还原自校验），
+其中 B2-7 的红灯原因已人工核对（正是"4 个全成功"）。
+另记 **B2-14**（同族未修）：`retry` 的守卫与状态迁移之间同样有 TOCTOU —— 因
+`transition_status` 自取**非重入**的 `db_lock`，不能"持锁再调它"（会死锁），
+需改用 `_transition_status_unlocked`，故单独处理。
+
 ### Fixed (Round 50, 2026-09-20 — P2 批次②：B2-10 前端「过渡期与口径」4 处)
 
 > ⚠️ **本批改动进入产物**（`api/jobs/`、`static/`）⇒ 工作树继续**领先于产物**，

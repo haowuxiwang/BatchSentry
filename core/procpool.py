@@ -26,11 +26,32 @@ from functools import partial
 logger = logging.getLogger(__name__)
 
 # 懒初始化单例：spawn 子进程启动有秒级成本（frozen exe 全量引导），
-# 只在首次真正需要时创建；worker 常驻复用。max_workers=1 —
-# 规范化是串行批处理，多 worker 只会增加内存峰值（每个子进程
-# 独立加载 fitz）而无吞吐收益。
+# 只在首次真正需要时创建；worker 常驻复用。
+#
+# max_workers=2 —— **实测标定**（B3-2，2026-09-20，走真实 run_cpu 路径：
+# `devlogs/_verify/bench_procpool.py`；12 个 CPU 任务/场景，14 核机）：
+#
+#   worker×jobs   墙钟(s)   单任务(s)   子进程 RSS
+#      1 × 1        1.40      0.116       59 MB
+#      1 × 3        1.41      0.117       59 MB  ← 单 worker 下并发 job **零收益**
+#      2 × 3        0.85      0.071      125 MB  ← 3 并发 job 加速 **1.64x**
+#      3 × 3        0.71      0.059      190 MB  ← 再提到 3 只多 1.21x、+65MB
+#      2 × 1        1.42      0.118      119 MB  ← 单 job 时**无吞吐收益**
+#
+# 为什么取 2：
+#   ① `MAX_CONCURRENT_JOBS` 默认 3 ⇒ 并发 job 是**设计内**场景，那里 Stage 0
+#      墙钟 1.41s → 0.85s；而 Stage 0 正是大扫描件的主耗时段，用户直接感知。
+#   ② **可靠性**（与负载无关）：worker 数很少时，一个挂死的 worker 会占住槽位
+#      —— 1 个 worker 时即占满，故障从"某个 job 卡住"扩散成"整个应用不再处理
+#      新任务"（见 `_recycle_pool`）。2 把爆炸半径减半。
+#   ③ 代价可控：每 worker ≈60MB（各自独立加载 fitz）；+60MB 相对本项目已记录的
+#      "3×200MB PDF 最坏 ~2GB"约 3%。
+# 为什么不取 3：增量仅 1.21x 而再 +65MB，且单 job 时纯属浪费。
+# ⚠️ 旧注释写的是"多 worker 只会增加内存而无吞吐收益" —— 实测**只对单 job 成立**，
+# 并发 job 下不成立，已按实测更正（避免文档说谎误导后续决策）。
 _pool: ProcessPoolExecutor | None = None
 _pool_broken = False
+_POOL_MAX_WORKERS = 2
 
 
 def _pool_worker_init() -> None:  # pragma: no cover - 仅 spawn worker 子进程内执行
@@ -94,9 +115,12 @@ def _get_pool() -> ProcessPoolExecutor | None:
     try:
         ctx = multiprocessing.get_context("spawn")
         _pool = ProcessPoolExecutor(
-            max_workers=1, mp_context=ctx, initializer=_pool_worker_init
+            max_workers=_POOL_MAX_WORKERS, mp_context=ctx,
+            initializer=_pool_worker_init,
         )
-        logger.info("CPU process pool ready (spawn, max_workers=1)")
+        logger.info(
+            f"CPU process pool ready (spawn, max_workers={_POOL_MAX_WORKERS})"
+        )
         return _pool
     except Exception as e:  # pragma: no cover - 环境相关
         _pool_broken = True
@@ -139,9 +163,9 @@ def cpu_task_timeout_seconds() -> float:
 def _recycle_pool(reason: str) -> None:
     """丢弃当前进程池并尽力终止其 worker（超时路径专用）。
 
-    为什么必须回收而不能只超时返回：``max_workers=1`` 的池里，一个挂死的
-    worker 会**永久占住唯一槽位** —— 后续所有 job 的 Stage 0 提交都会排队，
-    表现从"某个 job 卡住"扩散成"整个应用不再处理新任务"。仅让调用方不再
+    为什么必须回收而不能只超时返回：池的 worker 数很少（现为 2），一个挂死的
+    worker 会**占住一个槽位** —— 只剩 1 个时并发吞吐直接减半，若 worker 数为 1
+    则表现为故障从"某个 job 卡住"扩散成"整个应用不再处理新任务"。仅让调用方不再
     等待（future.cancel）**不会**释放槽位，故必须重建池。
 
     ``shutdown(wait=False)`` 默认不杀在跑的 worker（且被 cancel 的 future
