@@ -642,6 +642,42 @@ async def _report_heal_progress(db, job_id: str, done: int, total: int, pages: l
     await _run_update(job_id, main_done, main_total, done, total, pages)
 
 
+async def _load_prior_diagnostics(db, job_id: str, pages: list[int]) -> dict[int, dict]:
+    """B2-2：读取自愈目标页的**既往**页级诊断（软失败，失败不阻断自愈）。
+
+    为什么必须留痕：恢复写库时以 ``prior_diagnostics`` 保留旧值（不置 NULL），
+    旧实现两处 ``except: pass`` 让"诊断**读不出来**"与"这页**本来就没有**诊断"
+    不可区分 —— GMP 追溯链需要的恰恰是这个区分。
+    解析不了的页不放进结果（调用方按"无既往诊断"处理），但会记一条 warning。
+    """
+    out: dict[int, dict] = {}
+    if not pages:
+        return out
+    try:
+        ph = ",".join("?" * len(pages))
+        cursor = await db.execute(
+            f"SELECT page, ocr_diagnostics FROM page_cache "
+            f"WHERE job_id = ? AND page IN ({ph})",
+            [job_id, *pages],
+        )
+        for r in await cursor.fetchall():
+            if not r["ocr_diagnostics"]:
+                continue
+            try:
+                out[int(r["page"])] = json.loads(r["ocr_diagnostics"])
+            except json.JSONDecodeError as exc:
+                logger.warning(
+                    f"[{job_id}] self-heal: 页 {r['page']} 的既往 ocr_diagnostics "
+                    f"无法解析（软失败，该页既往诊断将无法保留）: {exc}"
+                )
+    except Exception as exc:
+        logger.warning(
+            f"[{job_id}] self-heal: 读取既往 ocr_diagnostics 失败"
+            f"（软失败，自愈继续）: {type(exc).__name__}: {exc}"
+        )
+    return out
+
+
 async def _self_heal_empty_pages(
     db, job_id: str, pdf_path: str, pages: list[dict], backend: str,
     skip_pages: set[int] | None = None,
@@ -709,23 +745,9 @@ async def _self_heal_empty_pages(
             # 时 LLM 仍收到自愈前的空文本，恢复白做）。
             pages_by_num = {i + 1: p for i, p in enumerate(pages)}
             # 门禁 1：自愈前快照各目标页的原始诊断，恢复写库时以
-            # prior_diagnostics 保留（不置 NULL）。
-            prior_diags: dict[int, dict] = {}
-            try:
-                ph = ",".join("?" * len(retry_targets))
-                cursor2 = await db.execute(
-                    f"SELECT page, ocr_diagnostics FROM page_cache "
-                    f"WHERE job_id = ? AND page IN ({ph})",
-                    [job_id, *retry_targets],
-                )
-                for r2 in await cursor2.fetchall():
-                    if r2["ocr_diagnostics"]:
-                        try:
-                            prior_diags[int(r2["page"])] = json.loads(r2["ocr_diagnostics"])
-                        except json.JSONDecodeError:
-                            pass
-            except Exception:
-                pass
+            # prior_diagnostics 保留（不置 NULL）。B2-2 起读取走**单一实现点**
+            # （可单测；两处静默失败已补 warning）。
+            prior_diags = await _load_prior_diagnostics(db, job_id, list(retry_targets))
             try:
                 if backend == "mineru":
                     from core.mineru_client import run_ocr_pages

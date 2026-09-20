@@ -317,11 +317,18 @@ async def _analyze_one(
 
             payload = json.dumps(structured, ensure_ascii=False)
             confidence = structured.get("overall_confidence", "unknown")
-            measurements_count = len(structured.get("measurements", []))
+            # B2-6：`measurements` **嵌在 steps[] 内部**（顶层没有这个键），
+            # 旧写法读顶层 ⇒ 该日志在任何页上恒为 0，把排障引向一个**不存在的**
+            # "LLM 完全没提取到测量值"故障（实测 48 个已完成页全部 0）。
+            # 两个口径都打出来，避免下次再被单一数字误导。
+            _steps = [s for s in (structured.get("steps") or []) if isinstance(s, dict)]
+            steps_count = len(_steps)
+            measurements_count = sum(len(s.get("measurements") or []) for s in _steps)
             page_findings = structured.get("findings", []) or []
             logger.info(
                 f"[{job_id}] Stage 2: Page {page_num}/{total_pages} LLM done in {page_ms}ms "
-                f"(confidence={confidence}, measurements={measurements_count}, "
+                f"(confidence={confidence}, steps={steps_count}, "
+                f"measurements={measurements_count}, "
                 f"findings={len(page_findings)}, payload={len(payload)} bytes)"
             )
             async with db_lock:
@@ -514,11 +521,20 @@ async def _get_analyzed_pages(db, job_id: str) -> set[int]:
         if '"_parse_error"' in sj and "true" in sj:
             # 精确校验：json_extract 在 SQLite 3.38+ 可用，回退到 Python parse
             try:
-                import json as _json
-                data = _json.loads(sj)
+                data = json.loads(sj)
                 if data.get("_parse_error"):
                     continue  # 跳过解析失败的页，retry 时重新分析
-            except Exception:
-                pass
+            except Exception as exc:
+                # B2-1：**解析不了 ≠ 已分析**。旧实现在这里 `pass`，紧接着照样
+                # `analyzed.add(page)` ⇒ 损坏（截断/半写）的 structured_json 使该页
+                # 被**永久**当作"已分析"，retry 不再重跑，而且**零日志** ——
+                # 用户点重试后毫无变化、日志里也没有任何线索。
+                # 视为**未分析**（retry 可重跑）并留痕；软失败语义不变。
+                logger.warning(
+                    f"[{job_id}] _get_analyzed_pages: page {row['page']} 的 "
+                    f"structured_json 无法解析 ⇒ 视为**未分析**（retry 会重跑）: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+                continue
         analyzed.add(row["page"])
     return analyzed

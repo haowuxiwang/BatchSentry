@@ -519,6 +519,9 @@ async def _run_sliced_stage1_2(
         # P1-3 修复：落库 + commit 整体持 db_lock — 否则与 _analyze_one 的
         # rollback() 竞争：分析失败回滚会撤销本循环尚未提交的 INSERT，
         # 随后本循环的 commit 提交空事务 → 该片 raw_html 永久丢失。
+        # B2-8：本片新增页数**必须单独计数** —— 旧实现只打印跨片累计值
+        # `new_pages`，于是第 2 片起的日志显示的不是"本片落了几页"（日志说谎）。
+        slice_new = 0
         async with db_lock:
             for i, page in enumerate(pages):
                 page_num = start_page + i
@@ -546,6 +549,7 @@ async def _run_sliced_stage1_2(
                 # 清洗+警告版而非原始文本。
                 page["markdown"]["text"] = raw_html
                 new_pages += 1
+                slice_new += 1
             await db.execute(
                 # 对抗审查 P1-1 关联：必须用 split_pdf 的权威总数 total_pages，
                 # 不能用 seen_max — 中间片失败时 seen_max < 真实页数，会把
@@ -554,9 +558,10 @@ async def _run_sliced_stage1_2(
             )
             await db.commit()
             logger.info(
-            f"[{job_id}] Stage 1 (sliced): slice start={start_page} pages={len(pages)} "
-            f"persisted ({new_pages} new)"
-        )
+                f"[{job_id}] Stage 1 (sliced): slice start={start_page} "
+                f"pages={len(pages)} persisted ({slice_new} this slice, "
+                f"{new_pages} total)"
+            )
         # 立即启动该片页面分析（跳过已分析页）
         for i, page in enumerate(pages):
             page_num = start_page + i

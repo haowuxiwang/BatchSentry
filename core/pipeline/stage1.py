@@ -176,8 +176,14 @@ async def _run_stage1_full(
     pdf_diags = {}
     try:
         pdf_diags = await asyncio.to_thread(_pdf_page_diagnostics, ocr_pdf_path)
-    except Exception:
-        pass
+    except Exception as exc:
+        # B2-2：诊断是**软失败**（不影响主流程），但**不许静默** ——
+        # 否则"页级诊断全空"与"这份 PDF 真的没有异常页"不可区分，
+        # 排障时会把一个失败当成长正常态（用户明确关注项：日志要方便定位）。
+        logger.warning(
+            f"[{job_id}] Stage 1: 页级诊断扫描失败（软失败，主流程继续）"
+            f" file={ocr_pdf_path!r}: {type(exc).__name__}: {exc}"
+        )
     if normalized_pages:
         try:
             orig_diags = await asyncio.to_thread(_pdf_page_diagnostics, pdf_path)
@@ -185,8 +191,13 @@ async def _run_stage1_full(
                 db, job_id, "ocr_input_normalized_diag",
                 f"original_pdf_diags={json.dumps(orig_diags, ensure_ascii=False)[:1500]}",
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            # 同上：这条失败会让「输入已规范化」的**审计行缺失**，
+            # 事后无法回答"此件为何被规范化" ⇒ 必须留痕。
+            logger.warning(
+                f"[{job_id}] Stage 1: 原件诊断/审计行写入失败（软失败）"
+                f" file={pdf_path!r}: {type(exc).__name__}: {exc}"
+            )
     new_pages = 0
     for i, page in enumerate(pages):
         page_num = i + 1

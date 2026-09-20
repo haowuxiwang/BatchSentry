@@ -3979,3 +3979,281 @@ class TestConfigErrorVisibility:
         # 非配置级的部分失败没有 job 级原因 → 不得凭空造一条
         assert not row["error_message"]
 
+
+# ─── P2（Round 49）日志必须说真话：B2-6 / B2-8 ─────────────────────
+class TestLogTruthfulness:
+    """两条都是**日志说谎**类缺陷（用户明确关注项）：
+
+    - B2-6：`measurements=` 恒为 0 —— 把排障引向一个**不存在**的
+      "LLM 完全没提取到测量值"故障；
+    - B2-8：分片日志把**跨片累计**当成**本片新增** —— 按日志核对
+      "本片落几页"会被误导。
+
+    两条断言都直接打在**日志文本的数字**上（不是打在辅助函数上），
+    所以"改回旧写法"必然红 —— 这正是 B2-6/B2-8 各自的验收要求。
+    """
+
+    @pytest.mark.asyncio
+    async def test_stage2_log_counts_measurements_from_steps(
+        self, pipeline_db, caplog
+    ):
+        """B2-6：`measurements` **嵌在 steps[] 内** ⇒ 日志必须从 steps 汇总。
+
+        真实文档（Round 42 real 轮 51 页）的 `structured_json` **顶层没有**
+        `measurements` 键，值都挂在 `steps[].measurements[].values` 下
+        ⇒ 旧写法读顶层，48 个已完成页**全部**打印 `measurements=0`。
+        """
+        import logging
+
+        from core import pipeline as pipeline_mod
+
+        pipeline_mod.db_lock = asyncio.Lock()
+        db = pipeline_db
+        job_id = "b26-log-measurements"
+        await _insert_job(pipeline_db, job_id=job_id)
+
+        # 形态取自真实 p17/p8：顶层无 measurements，steps 内才有；
+        # 且 steps 数与测量值条数**不相等**（2 vs 4）—— 若日志只打了一个
+        # 数字，就无法区分"读错键"与"读对了但凑巧相同"。
+        structured = {
+            "page_info": {"production_date": "2025-01-20"},
+            "overall_confidence": "high",
+            "findings": [],
+            "steps": [
+                {
+                    "step_no": "1",
+                    "start_time": "13:18",
+                    "end_time": "14:02",
+                    "measurements": [
+                        {"time": "13:18", "values": {"P3": {"actual": "0"}}},
+                        {"time": "13:28", "values": {"P3": {"actual": "0"}}},
+                        {"time": "13:38", "values": {"P3": {"actual": "1"}}},
+                    ],
+                },
+                {
+                    "step_no": "2",
+                    "start_time": "14:10",
+                    "end_time": "14:40",
+                    "measurements": [
+                        {"time": "14:10", "values": {"F3": {"actual": "2578"}}},
+                    ],
+                },
+            ],
+        }
+
+        async def fake_page(html, page_num, *, job_id="", cancel_check=None):
+            return structured
+
+        with patch(
+            "core.pipeline._is_cancelled", new=AsyncMock(return_value=False)
+        ), patch(
+            "core.pipeline.analyze_page", new=AsyncMock(side_effect=fake_page)
+        ):
+            with caplog.at_level(logging.INFO, logger="core.pipeline.stage2"):
+                await _analyze_one(
+                    db, job_id, 1, {"markdown": {"text": "page content"}},
+                    asyncio.Semaphore(1), [], asyncio.Lock(), {"n": 0},
+                    total_pages=1,
+                )
+
+        lines = [ln for ln in caplog.text.splitlines() if "LLM done in" in ln]
+        assert len(lines) == 1, f"应恰好一条 Stage 2 完成日志：{caplog.text!r}"
+        log = lines[0]
+        assert "steps=2" in log, f"日志应同时给出 steps 数：{log}"
+        assert "measurements=4" in log, (
+            f"measurements 必须**从 steps 汇总**（旧写法读顶层恒为 0）：{log}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_sliced_log_reports_per_slice_new_pages(
+        self, pipeline_db, tmp_path, caplog
+    ):
+        """B2-8：第 2 片日志必须是**本片**新增页数，而不是跨片累计。
+
+        两片规模**刻意不同**（1 页 / 2 页）：旧实现会把第 2 片打成
+        `(3 new)`（累计），与实际本片 2 页不符。
+        """
+        import logging
+
+        from core import pipeline as pipeline_mod
+
+        pipeline_mod.db_lock = asyncio.Lock()
+        job_id = await _insert_job(pipeline_db, status="pending")
+        pdf_path = str(tmp_path / "fake.pdf")
+        Path(pdf_path).write_bytes(b"%PDF-1.4 fake")
+
+        slice1 = [{"markdown": {"text": "page 1"}, "page_count": 1}]
+        slice2 = [
+            {"markdown": {"text": "page 2"}, "page_count": 2},
+            {"markdown": {"text": "page 3"}, "page_count": 3},
+        ]
+
+        def fake_run_sliced(pdf_path, slice_pages, on_batch, progress_cb, job_id=None):
+            on_batch(1, slice1, 3)
+            on_batch(2, slice2, 3)
+            return [(1, slice1), (2, slice2)]
+
+        async def fake_page(*args, **kwargs):
+            return {"steps": [], "findings": [], "overall_confidence": "high"}
+
+        orig_backend = pipeline_mod.config["app"].ocr_backend
+        orig_slices = pipeline_mod.config["app"].ocr_slices
+        orig_timeout = pipeline_mod._SLICE_QUEUE_TIMEOUT
+        pipeline_mod.config["app"].ocr_backend = "mineru"
+        pipeline_mod.config["app"].ocr_slices = 2
+        pipeline_mod._SLICE_QUEUE_TIMEOUT = 0.05
+        try:
+            with patch(
+                "core.mineru_client.run_ocr_sliced", side_effect=fake_run_sliced
+            ), patch(
+                "core.pipeline.analyze_page", new=AsyncMock(side_effect=fake_page)
+            ), patch(
+                "core.pipeline.analyze_cross_page", new=AsyncMock(return_value=[])
+            ):
+                with caplog.at_level(logging.INFO, logger="core.pipeline.engine"):
+                    await run_pipeline(job_id, pdf_path)
+        finally:
+            pipeline_mod.config["app"].ocr_backend = orig_backend
+            pipeline_mod.config["app"].ocr_slices = orig_slices
+            pipeline_mod._SLICE_QUEUE_TIMEOUT = orig_timeout
+
+        lines = [ln for ln in caplog.text.splitlines() if "persisted (" in ln]
+        assert len(lines) == 2, f"应两片各一条落库日志：{caplog.text!r}"
+        assert "slice start=1" in lines[0] and "1 this slice, 1 total" in lines[0], (
+            f"第 1 片：应为 (1 this slice, 1 total) —— {lines[0]}"
+        )
+        assert "slice start=2" in lines[1] and "2 this slice, 3 total" in lines[1], (
+            f"第 2 片：应为 (2 this slice, 3 total)，而不是累计值 (3 new) —— {lines[1]}"
+        )
+
+
+# ─── P2（Round 49）静默失败补日志：B2-1 / B2-2 ──────────────────────
+class TestSilentFailureLogging:
+    """B2-1/B2-2：软失败**可以不改控制流**，但**不许静默**。
+
+    两者共同后果都是"**把失败伪装成正常**"：B2-1 让损坏的页被当成
+    已分析（retry 不重跑）且零日志；B2-2 让诊断全空与"本来就没有诊断"
+    不可区分。GMP 追溯链要的恰恰是这个区分。
+    """
+
+    @pytest.mark.asyncio
+    async def test_corrupt_structured_json_is_not_treated_as_analyzed(
+        self, pipeline_db, caplog
+    ):
+        """B2-1：`structured_json` 损坏 ⇒ 视为**未分析**（retry 可重跑）+ 留痕。
+
+        旧实现在 `json.loads` 失败后 `pass`，紧接着照样 `analyzed.add(page)`
+        ⇒ 该页被**永久**当作已分析，用户点重试毫无变化、日志里也无任何线索。
+        """
+        import logging
+
+        from core.pipeline.stage2 import _get_analyzed_pages
+
+        job_id = "b21-corrupt-json"
+        await _insert_job(pipeline_db, job_id=job_id)
+        rows = [
+            # 页 1：合法 JSON 且带失败标记 ⇒ 未分析（既有行为，作为正向对照）
+            (1, '{"_parse_error": true, "overall_confidence": "low"}'),
+            # 页 2：**损坏**（截断）⇒ B2-1 起也算未分析
+            (2, '{"_parse_error": true, "broken'),
+            # 页 3：正常结果 ⇒ 已分析（反向控制：修复不得把正常页也算成未分析）
+            (3, '{"overall_confidence": "high", "steps": []}'),
+        ]
+        for page, sj in rows:
+            await pipeline_db.execute(
+                "INSERT INTO page_cache (job_id, page, raw_html, structured_json, "
+                "analyzed_at) VALUES (?, ?, ?, ?, datetime('now','localtime'))",
+                (job_id, page, "text", sj),
+            )
+        await pipeline_db.commit()
+
+        with caplog.at_level(logging.WARNING, logger="core.pipeline.stage2"):
+            analyzed = await _get_analyzed_pages(pipeline_db, job_id)
+
+        assert analyzed == {3}, (
+            f"损坏的页 2 绝不能被当成已分析（否则 retry 永不重跑）：{analyzed}"
+        )
+        assert "无法解析" in caplog.text, (
+            f"损坏的 structured_json 必须留痕（旧实现零日志）：{caplog.text!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_page_diagnostics_failure_is_logged_and_soft(
+        self, pipeline_db, tmp_path, caplog
+    ):
+        """B2-2：`_pdf_page_diagnostics` 抛异常 ⇒ 有 warning，且**整单不失败**。"""
+        import logging
+
+        from core import pipeline as pipeline_mod
+
+        pipeline_mod.db_lock = asyncio.Lock()
+        job_id = await _insert_job(pipeline_db, status="pending")
+        pdf_path = str(tmp_path / "fake.pdf")
+        Path(pdf_path).write_bytes(b"%PDF-1.4 fake")
+        pages = [{"markdown": {"text": "page 1"}}]
+
+        def boom(_pdf_path):
+            raise RuntimeError("fitz exploded")
+
+        async def ok_page(*args, **kwargs):
+            return {"steps": [], "findings": [], "overall_confidence": "high"}
+
+        with patch(
+            "core.pipeline._get_ocr_backend", return_value=lambda p, cb: pages
+        ), patch(
+            "core.pipeline.stage1._pdf_page_diagnostics", side_effect=boom
+        ), patch(
+            "core.pipeline.analyze_page", new=AsyncMock(side_effect=ok_page)
+        ), patch(
+            "core.pipeline.analyze_cross_page", new=AsyncMock(return_value=[])
+        ):
+            with caplog.at_level(logging.WARNING, logger="core.pipeline.stage1"):
+                await run_pipeline(job_id, pdf_path)
+
+        assert "页级诊断扫描失败" in caplog.text, (
+            f"诊断软失败必须留痕，否则与「真的没有异常页」不可区分：{caplog.text!r}"
+        )
+        cursor = await pipeline_db.execute(
+            "SELECT status FROM jobs WHERE id = ?", (job_id,)
+        )
+        status = (await cursor.fetchone())["status"]
+        assert status != "error", f"诊断是软失败，不得让整单失败（实际 {status}）"
+
+    @pytest.mark.asyncio
+    async def test_load_prior_diagnostics_logs_corrupt_and_db_error(
+        self, pipeline_db, caplog
+    ):
+        """B2-2：既往诊断读取——损坏与 DB 失败**都要留痕**，且都是软失败。"""
+        import logging
+        import sqlite3
+
+        from core.pipeline.self_heal import _load_prior_diagnostics
+
+        job_id = "b22-prior-diags"
+        await _insert_job(pipeline_db, job_id=job_id)
+        await pipeline_db.execute(
+            "INSERT INTO page_cache (job_id, page, ocr_diagnostics) VALUES (?, ?, ?)",
+            (job_id, 1, '{"aspect_ratio": 1.4}'),
+        )
+        await pipeline_db.execute(
+            "INSERT INTO page_cache (job_id, page, ocr_diagnostics) VALUES (?, ?, ?)",
+            (job_id, 2, '{"aspect_ratio": 1.4'),
+        )
+        await pipeline_db.commit()
+
+        with caplog.at_level(logging.WARNING, logger="core.pipeline.self_heal"):
+            out = await _load_prior_diagnostics(pipeline_db, job_id, [1, 2])
+        assert out == {1: {"aspect_ratio": 1.4}}, f"损坏的那页不得进结果：{out}"
+        assert "无法解析" in caplog.text, "损坏的既往诊断必须留痕（旧实现静默）"
+
+        caplog.clear()
+
+        class _BoomDb:
+            async def execute(self, *args, **kwargs):
+                raise sqlite3.OperationalError("db gone")
+
+        with caplog.at_level(logging.WARNING, logger="core.pipeline.self_heal"):
+            out2 = await _load_prior_diagnostics(_BoomDb(), job_id, [1])
+        assert out2 == {}, "DB 失败必须软失败（返回空而不是抛出）"
+        assert "读取既往 ocr_diagnostics 失败" in caplog.text, "DB 失败也必须留痕"
+

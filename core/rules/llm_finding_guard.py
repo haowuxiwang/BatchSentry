@@ -286,16 +286,39 @@ def _spec_value_unlocatable(f: dict, structured: dict | None) -> str | None:
 _LONG_NUM_RE = re.compile(r"\d{4,}(?:\.\d+)?")
 
 
-def _check_grounding(f: dict, raw_html: str) -> str | None:
+def _check_grounding(
+    f: dict,
+    raw_html: str,
+    exclude_dates: set[tuple[int, int, int]] | None = None,
+) -> str | None:
     """L2：文案里的长数字必须能在 OCR 原文中定位。
 
     返回降级理由；``None`` 表示通过。
+
+    ⚠️ **B2-12：系统注入的值不算"凭空"**。``exclude_dates`` 传文档级自述的
+    「当前日期/当前年份」池（:func:`_document_current_dates`）—— 那类值来自
+    **系统提示词注入的当天日期**（如 `2026-09-18`），**本来就不该出现在 OCR
+    原文里**。旧实现对它们照样扣「疑似提取幻觉」的帽子 ⇒ **降级理由说谎**
+    （Round 46 实测 19 条 L2 降级里 14 条属此类）。
+
+    为什么按**年份**排除而不是整条日期：字面量粒度不一（文案常只写
+    `当前年份 2026`，池里存的是 `(2026,0,0)`；也可能写 `2026.09.18`，池里是
+    `(2026,9,18)`）。只比对年份是**保守方向**的取舍：宁可少扣一次"幻觉"，
+    也不要把系统注入值说成编造 —— 这类条目仍会经 L4 封顶留在人工可见档。
+
+    ⚠️ 顺序上有 B1-4 ① 先挡（`_check_current_date_reference` 会**抑制**这类
+    条目），故本参数是**防御性**的第二道：一旦 ① 因凑不出两侧字面量而
+    fail-open，理由也不会变成假话。回归护栏见
+    ``tests/unit/test_llm_finding_guard.py::TestL2GroundingExcludesSystemDates``。
     """
     if not raw_html:
         return None  # 无原文可比 ⇒ fail-open
+    pool_years = {"%04d" % v[0] for v in (exclude_dates or set())}
     text = f"{f.get('description') or ''} {f.get('ocr_text') or ''}"
     ungrounded = [
-        tok for tok in _LONG_NUM_RE.findall(text) if not _value_is_grounded(raw_html, tok)
+        tok
+        for tok in _LONG_NUM_RE.findall(text)
+        if not _value_is_grounded(raw_html, tok) and tok[:4] not in pool_years
     ]
     if not ungrounded:
         return None
@@ -715,7 +738,9 @@ def review_llm_findings(
         # ── 降级类（弱证据 —— 保留给人工，但不给高严重度）────────────
         sev = str(f.get("severity") or "info")
         weak = (
-            _check_grounding(f, raw_html)          # L2 溯源（完全凭空）
+            _check_grounding(                      # L2 溯源（完全凭空）
+                f, raw_html, exclude_dates=current_dates
+            )
             or _spec_value_unlocatable(f, structured)   # L1 查无此值（弱证据）
             or _check_speculative(f)               # L1' 推测性表述
             or _check_production_date_mismatch(f, structured)  # ② 页内基准不一致

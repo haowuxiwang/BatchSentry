@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 from core.rules.llm_finding_guard import (
+    _check_grounding,
     apply_review,
     review_llm_findings,
 )
@@ -453,3 +454,60 @@ class TestContract:
         """user_rule/未知 source 原样通过（本模块只复核 LLM 生成项）。"""
         kept, _d, _s = _review(_f(1, "completeness", "critical", "x", source="user_rule"))
         assert len(kept) == 1
+
+
+# ── B2-12：L2 溯源不得把「系统注入的当前日期/当前年份」说成幻觉 ──────────
+class TestL2GroundingExcludesSystemDates:
+    """B2-12：`_check_grounding` 的**理由**必须说真话。
+
+    这类值来自**系统提示词注入的当天日期**（如 `2026-09-18`），本来就不该出现在
+    OCR 原文里 ⇒ 对它扣「疑似提取幻觉」的帽子是**理由说谎**
+    （Round 46 实测 19 条 L2 降级里 14 条属此类）。
+
+    B1-4 ①（`_check_current_date_reference`）上线后这些条目已被**抑制**，
+    实测残留 = 0 条。所以本组守的是**第二道**：一旦 ① 因凑不出两侧字面量而
+    fail-open，L2 的理由也不能变成假话。
+    """
+
+    RAW = "复核记录 缺"          # OCR 原文里**必然没有** 2026
+    DESC = "当前年份 2026年09月18日 与记录年份不符"
+
+    def test_system_year_is_not_reported_as_hallucination(self):
+        """系统注入的年份不产生「疑似提取幻觉」降级。"""
+        f = _f(1, "suspicious_date", "warning", self.DESC, ocr_text=self.RAW)
+        kept, down, sup = _review(f, raws={1: self.RAW})
+        assert not sup, "参照物在句首（无前置日期）⇒ ① 判不了，不应抑制"
+        assert not [d for d in down if "幻觉" in d["reason"]], (
+            f"2026 是系统注入的当天日期，扣「幻觉」帽子是理由说谎：{down}"
+        )
+        assert len(kept) == 1, "无其它弱证据 ⇒ 应原样保留可见"
+
+    def test_exclusion_is_load_bearing(self):
+        """**正向对照**：去掉排除集，同一输入就真的会被扣「幻觉」帽子。
+
+        没有这一条，上面的断言可能因为别的原因（如根本没走到 L2）而恒绿。
+        """
+        f = {"description": self.DESC, "ocr_text": self.RAW}
+        without = _check_grounding(f, self.RAW)
+        assert without is not None and "幻觉" in without, (
+            f"对照失败：不传排除集时应当命中 L2，否则本组用例是空断言：{without}"
+        )
+        assert _check_grounding(f, self.RAW, exclude_dates={(2026, 9, 18)}) is None
+
+    def test_genuinely_fabricated_number_still_flagged(self):
+        """**反向控制**：真·凭空数字仍必须被标出（排除集不得把 L2 打哑）。"""
+        f = {"description": "体积 9876 超出规格", "ocr_text": "体积 无数据记录"}
+        reason = _check_grounding(f, f["ocr_text"], exclude_dates={(2026, 9, 18)})
+        assert reason is not None and "幻觉" in reason, (
+            f"9876 与池内日期无关，必须照旧判为无法定位：{reason}"
+        )
+
+    def test_exclusion_tolerates_mixed_literal_granularity(self):
+        """池只到年、文案写到月日时也要排除；池外年份不得被误排除。"""
+        f = {"description": "当前日期 2026.09 与当前年份 2026 不符", "ocr_text": self.RAW}
+        assert _check_grounding(f, self.RAW, exclude_dates={(2026, 0, 0)}) is None, (
+            "池里只到年（(2026,0,0)）时，文案写的 2026.09 / 2026 都应被排除"
+        )
+        g = {"description": "记录年份 2027 与当前日期 2026.09 不符", "ocr_text": self.RAW}
+        r = _check_grounding(g, self.RAW, exclude_dates={(2026, 9, 18)})
+        assert r is not None and "2027" in r, f"2027 不在池内，必须仍被标出：{r}"

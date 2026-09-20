@@ -1136,13 +1136,40 @@
 
 ### B2 正确性与可观测性
 
-- [ ] **B2-1 `_get_analyzed_pages` 改 fail-safe**（P2，本轮新发现）
+- [x] **B2-1 `_get_analyzed_pages` 改 fail-safe**（P2，本轮新发现）
+  ✅ **2026-09-20 Round 49 已修**。`core/pipeline/stage2.py:_get_analyzed_pages`
+  的 `except Exception: pass` 改为：**视为未分析 + `logger.warning`（带 job_id/page/
+  异常摘要）+ `continue`**。旧行为下**损坏（截断/半写）的 `structured_json`** 会
+  落到 `analyzed.add(page)` ⇒ 该页被**永久**当作"已分析"，retry 不再重跑且**零日志**
+  （用户点重试毫无变化、日志里也无任何线索）。
+  ⚠️ 注意与既有行为的边界：`_parse_error` **合法 JSON** 分支早已 `continue`（旧注释
+  已描述），本条修的是它**下面的**那条静默路径 —— 两者不可混为一谈。
+  护栏 `tests/unit/test_pipeline.py::TestSilentFailureLogging::
+  test_corrupt_structured_json_is_not_treated_as_analyzed`（三类输入：合法+标记 / **损坏** /
+  正常 ⇒ 断言 `analyzed == {3}` 且 caplog 含"无法解析"）；反向控制 = 正常页**必须**
+  仍被判为已分析（修复不得把正常页也算成未分析）。
+  变异验证：改回 `except: pass` ⇒ **红**。
   现象：`structured_json` 解析失败 ⇒ `except: pass` ⇒ 该页被算作"已分析"⇒ **retry 不重跑 + 零日志**。
   证据：`core/pipeline/stage2.py:488-497`。
   动作：解析失败 ⇒ **视为未分析**（可被 retry 重跑）+ 记一条 warning（含 page 与异常摘要）。
   验收：构造损坏 `structured_json` ⇒ retry 能重新分析该页且有日志；变异验证：改回 `pass` ⇒ 护栏红。
 
-- [ ] **B2-2 诊断类静默失败补日志**（P2）
+- [x] **B2-2 诊断类静默失败补日志**（P2）
+  ✅ **2026-09-20 Round 49 已修**。三处静默补 `logger.warning`，**控制流一律不变**
+  （保持软失败语义）：
+  ① `core/pipeline/stage1.py` `_pdf_page_diagnostics(ocr_pdf_path)` 失败；
+  ② 同文件「原件诊断 + `ocr_input_normalized_diag` 审计行」失败（这条会让
+     "此件为何被规范化"的**审计行缺失**，必须留痕）；
+  ③ `core/pipeline/self_heal.py` 既往 `ocr_diagnostics` 读取 —— **顺手抽成单一
+     实现点 `_load_prior_diagnostics(db, job_id, pages)`**（原本是内联的 14 行
+     双 `except: pass`，不可单测；抽出后既可测也消除了重复）。
+  为什么必须留痕：这两类失败都会**把失败伪装成正常** —— ① 让"页级诊断全空"与
+  "这份 PDF 真的没有异常页"不可区分；③ 让"既往诊断**读不出来**"与"这页**本来
+  就没有**诊断"不可区分，而 GMP 追溯链要的恰恰是这个区分。
+  护栏 `TestSilentFailureLogging::{test_page_diagnostics_failure_is_logged_and_soft,
+  test_load_prior_diagnostics_logs_corrupt_and_db_error}`；后半条同时断言
+  **DB 失败仍返回空 dict（软失败）而不是抛出**。
+  变异验证：逐处改回静默 ⇒ **4/4 各自打红**（含 DB 失败那处）。
   证据：`core/pipeline/stage1.py:179`（`_pdf_page_diagnostics`）、
   `core/pipeline/self_heal.py:727`（`ocr_diagnostics` 解析）。
   动作：失败时 `logger.warning`（带 job_id/page/原因），**不改变控制流**。
@@ -1176,7 +1203,20 @@
   动作：类型化异常透传 + 早停 + job 级信号 + **非绿点** + 机检护栏。
   验收：把 key 改成无效 ⇒ 界面**明确失败**且给出原因；变异验证：去掉 job 级信号 ⇒ 护栏红。
 
-- [ ] **B2-6 `Stage 2` 日志的 `measurements=` 恒为 0（P2，Round 42 实测新发现）**
+- [x] **B2-6 `Stage 2` 日志的 `measurements=` 恒为 0（P2，Round 42 实测新发现）**
+  ✅ **2026-09-20 Round 49 已修**。`core/pipeline/stage2.py:_analyze_one` 改为
+  **从 steps 汇总**并**同时打印两个口径**：`steps_count` 与
+  `measurements_count = sum(len(s.get("measurements") or []) for s in steps)`，
+  日志形如 `(confidence=high, steps=2, measurements=4, findings=0, payload=… bytes)`。
+  定位复核（先实证，非推断）：真实 51 页回放库逐页实测，`structured_json`
+  **顶层确无** `measurements` 键（顶层键为 page_info/event_year_groups/steps/
+  findings/time_anomalies/ocr_noise/overall_confidence），值全在
+  `steps[].measurements[].values` ⇒ 旧写法在任何页上都恒为 0。
+  护栏 `tests/unit/test_pipeline.py::TestLogTruthfulness::
+  test_stage2_log_counts_measurements_from_steps`：断言**直接打在日志文本的数字上**，
+  且 fixture 刻意让 `steps=2` 与 `measurements=4` **不相等** —— 否则无法区分
+  "读错键"与"读对了但凑巧相同"。
+  变异验证：把该行改回 `len(structured.get("measurements", []))` ⇒ **红**。
   现象：逐页日志形如
   `Stage 2: Page 42/51 LLM done in ...ms (confidence=low, measurements=0, findings=4, ...)`，
   其中 `measurements` **在任何页上都是 0**，无论实际提取到多少测量值。
@@ -1209,7 +1249,16 @@
   动作：把"配额检查 + 占位 INSERT"放进**同一事务**（或引入占位态）。
   验收：并发上传脚本能稳定卡在 `MAX_CONCURRENT_JOBS`；变异验证：改回两段 ⇒ 护栏红。
 
-- [ ] **B2-8 分片路径逐片日志把"累计新增"当成"本片新增"**（P2，Round 43 新发现）
+- [x] **B2-8 分片路径逐片日志把"累计新增"当成"本片新增"（P2，Round 43 新发现）**
+  ✅ **2026-09-20 Round 49 已修**。`core/pipeline/engine.py` 片循环内新增
+  `slice_new`（**片内**计数），日志改为
+  `persisted ({slice_new} this slice, {new_pages} total)` —— 两个口径同时可见，
+  既不丢"共落多少页"也不再说谎。
+  ⚠️ `:611` 的最终汇总 `{new_pages} new pages` 仍用累计值（**那是对的**，未改动）。
+  护栏 `TestLogTruthfulness::test_sliced_log_reports_per_slice_new_pages`：两片规模
+  刻意不同（**1 页 / 2 页**）⇒ 断言 `(1 this slice, 1 total)` / `(2 this slice, 3 total)`；
+  旧写法会打 `(3 new)`（累计），与"本片 2 页"不符 ⇒ 断言必红。
+  变异验证：日志改回 `({new_pages} new)` ⇒ **红**。
   现象：分片 OCR 的第 2 片起，日志 `Stage 1 (sliced): slice start=N pages=10 persisted (X new)`
   里的 `X` 是**跨片累计值**，不是本片新增页数。
   证据：`core/pipeline/engine.py:488` `new_pages = 0`（片循环**外**）→ `:548` `new_pages += 1`
@@ -1259,7 +1308,27 @@
   动作：与单任务流对齐 —— 异常期也发一帧（带 `type` 字段的普通 message 帧，**不得**用 `event: error`）。
   验收：注入 DB 异常 ⇒ `/live` 仍每 2s 有帧。
 
-- [ ] **B2-12 `_check_grounding` 把「当前年份」当幻觉数字 ⇒ 降级理由说谎**（P2，Round 46 发现）
+- [x] **B2-12 `_check_grounding` 把「当前年份」当幻觉数字 ⇒ 降级理由说谎**（P2，Round 46 发现）
+  ✅ **2026-09-20 Round 49 处置（含一处结论更新，勿再按旧描述报）**。
+  ① **定位结论（先实证，非推断）**：Round 46 记录的现象**已被 B1-4 ① 顺带消除**。
+  51 页真实回放实测：采用「当前日期/当前年份」参照物的条目共 **21 条** ——
+  **15 条被 ① 正确抑制**（理由="依据是墙钟而非记录内部一致性"）、**6 条 fail-open 保留**
+  （如「操作者签名日期早于当前日期」「记录发放年份 > 当前年份+1」凑不出两侧字面量，
+  本就没有被 L2 扣帽子）；**L2 降级中 token 命中「文档自述当前日期」池的残留 = 0 条**
+  （原记录为 14/19）。⇒ 旧现象不再出现，但**护栏缺失**：判据顺序一旦调整
+  （① 提前 fail-open），现象会**静默回归**且无人看得见。
+  ② **处置**：`_check_grounding` 新增 `exclude_dates` 参数，按**年份**排除文档级
+  自述当前日期（`_document_current_dates`），调用点传入 `current_dates`。
+  这样即使 ① fail-open，L2 的理由也不会变成假话 —— "2026" 本就来自系统提示词
+  注入的当天日期，**不该出现在 OCR 原文里**，因此"无法定位"不能等于"幻觉"。
+  ⚠️ 按年份而非整条日期排除：字面量粒度不一（`当前年份 2026` vs `2026.09.18`），
+  取**保守方向**（宁可少扣一次"幻觉"，也不把系统注入值说成编造）。
+  护栏 `tests/unit/test_llm_finding_guard.py::TestL2GroundingExcludesSystemDates`
+  （4 例）**含双向对照**：`test_exclusion_is_load_bearing` 证明"去掉排除集就真会被
+  扣幻觉帽子"（防空断言）、`test_genuinely_fabricated_number_still_flagged` 证明
+  真·凭空数字仍被标出（防把 L2 打哑）、`test_exclusion_tolerates_mixed_literal_granularity`
+  覆盖粒度混合与"池外年份不得被误排除"。
+  变异验证：① 调用点不传排除集、② 去掉内部过滤 ⇒ **各自打红对应用例**。
   现象：实测 **19 条 grounding 降级里 14 条**是 `suspicious_date` 的"当前年份 2026"，
   例如「生产日期 2025年01月20日 与 当前年份 2026年09月18日 不符」被降级的理由是
   "数字（2026）在 OCR 原文中无法定位，疑似提取幻觉"。
@@ -1564,4 +1633,39 @@
   🔴 **禁止无脑 `ruff --fix` 全仓**：`tests/` 里有用字符串 `patch("mod.name")`
   的导入，对 ruff 是"未使用"，删掉会**改掉 patch 目标是否存在** ⇒ 静默破坏测试。
   验收：`ruff check .` 归零且全量测试数**不下降**；变异验证：恢复一条真未用导入 ⇒ 必须红。
+
+- [ ] **B7-3 门禁无法发现「产物陈旧」 —— 护栏缺口**（P2，2026-09-20 实测）
+  **实测铁证（字节级，非推断）**：源码 `static/settings.js`（09-20 16:11，
+  含 B4-4 引入的 `showAutoActivateNotice`/`auto_activated`）与产物内同名文件
+  （`dist/pbc-server/_internal/static/settings.js`、以及 electron 内嵌那份，
+  均 09-18 11:18，**仍含早已删除的 `firstConfigured`/`autoReason`**）
+  **字节不一致**（77547 B vs 77231 B）；而 `release_gate.py --skip-tests`
+  照样 **7/7 全绿**。
+  **机制（三层叠加）**：① `pytest.ini` 为 `testpaths=tests` +
+  `python_files=test_*.py` ⇒ `tests/e2e_*.py` **不被收集**；
+  ② 唯一依赖产物的 `tests/integration/test_frozen_smoke.py` 只有 3 条断言
+  （`/health` 200、上传页含"上传"、`/static/app.css` 200），**都不检查版本或内容**；
+  ③ 含版本断言的 `tests/e2e_frozen.py:50-58`（要求产物版本 == `main.APP_VERSION`）
+  恰在收集范围之外。
+  ⇒ **「改了进产物的模块却没重建」可静默通过全部 8 项门禁**。
+  ⚠️ **纠正一处旧记录**：既有记忆/文档所写「`tests_coverage` 含分发一致性，
+  升版未重建必红」**不成立** —— 门禁里没有任何产物新鲜度判据；那条"红"
+  来自**人手工跑 `e2e_frozen.py`**，是人的纪律，不是门禁的护栏。
+  ⚠️ **危险放大**：当版本号恰好一致（都 1.1.9）时，连"人眼扫一眼版本号"
+  这条兜底都失效 —— 本轮就撞上了这个情形。
+  动作：① 门禁新增 `check_artifact_freshness` —— 既比对版本
+  （`main.APP_VERSION` vs 产物内 `package.json`），也比对**内容**
+  （把进产物的源码 `static/`、`templates/`、`core/`、`api/`、`config.py`、
+  `main.py` 与产物内副本做字节比对；读法现成：`clean_dist.asar_version` 的
+  子进程 seek 模式，`_internal/` 可直接读）；② 或把 `e2e_frozen.py` 的版本
+  断言收进 `test_*.py` 收集范围。
+  验收（必须能失败）：故意让产物落后一个提交 ⇒ 门禁红；产物与源码同步 ⇒ 绿。
+
+- [ ] **B7-4 打 tag/发版流程缺「产物新鲜度」前置闸**（P2，由 B7-3 派生）
+  理由：B7-3 说明"版本号一致"根本不蕴含"产物是新构建的"。而分发/打 tag
+  面向的是**产物**，不是源码树。当前打 tag 只需工作树干净，**不要求产物
+  由当前 HEAD 构建**。
+  动作：在发版脚本/检查表里固化一条前置：**产物内 N 个进包文件的 sha256
+  必须等于 HEAD 对应文件的 sha256**（复用一个清单文件，构建时生成）。
+  验收：清单与产物不符 ⇒ 发版闸拒绝。
 

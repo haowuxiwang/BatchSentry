@@ -19,6 +19,38 @@
 > **宿主进程**，不是安全软件）+ 工具报告**具名持有者**。Round 33 同样**不进产物**，
 > **不升版号**。
 
+### Fixed (Round 49, 2026-09-20 — P2 批次①：日志/理由说谎、静默失败、fail-safe)
+
+> ⚠️ **本批改动进入 PyInstaller 产物**（`core/pipeline/`、`core/rules/`）⇒ 工作树
+> 继续**领先于产物**。**不单独升版**，随 v1.2.0 统一升版重建。
+
+- **B2-6 `measurements=` 恒为 0**（`core/pipeline/stage2.py`）：该字段**嵌在
+  `steps[]` 内部**（顶层根本没有这个键），旧写法读顶层 ⇒ 逐页日志恒为 0，
+  把排障引向一个**不存在**的"LLM 完全没提取到测量值"故障。改为从 steps 汇总，
+  并**同时打印 `steps=` 与 `measurements=`** 两个口径（避免下次再被单一数字误导）。
+- **B2-8 分片逐片日志把"跨片累计"当"本片新增"**（`core/pipeline/engine.py`）：
+  片内新增 `slice_new`，日志改为 `persisted (N this slice, M total)`；`:611` 的最终
+  汇总仍用累计值（那是对的，未改）。
+- **B2-12 L2 溯源把系统注入的「当前年份」当幻觉数字**（`core/rules/llm_finding_guard.py`）：
+  `_check_grounding` 新增 `exclude_dates`，按**年份**排除文档级自述当前日期。
+  **定位结论更新（勿再按旧描述报）**：Round 46 记录的现象**已被 B1-4 ① 顺带消除** ——
+  51 页真实回放实测 21 条「当前日期/当前年份」条目中 15 条被正确抑制、6 条 fail-open，
+  L2 降级中命中该日期池的**残留 = 0 条**（原为 14/19）。本参数是**防御性第二道**：
+  ① 一旦因凑不出两侧字面量而 fail-open，L2 的理由也不会变成假话。
+- **B2-1 损坏的 `structured_json` 被当成"已分析"**（`core/pipeline/stage2.py`）：
+  `json.loads` 失败后 `except: pass` 紧接着落到 `analyzed.add(page)` ⇒ 该页被**永久**
+  当作已分析，retry 不再重跑且**零日志**。改为视为**未分析**（retry 可重跑）+ warning。
+- **B2-2 三处诊断静默失败补日志**（`core/pipeline/stage1.py` ×2、`self_heal.py`）：
+  控制流一律不变（软失败语义保持）；`self_heal` 的既往诊断读取**顺手抽成单一实现点**
+  `_load_prior_diagnostics()`（原为内联 14 行双 `except: pass`，不可单测）。
+
+**测试**：新增 **9 例**护栏（`TestLogTruthfulness` 2 + `TestSilentFailureLogging` 3 +
+`TestL2GroundingExcludesSystemDates` 4）。断言直接打在**日志文本里的数字**与
+**排除集是否真的生效**上，并成对给出**正向对照 / 反向控制**（既防"空断言"，也防
+"把判据打哑"）。**变异验证 8/8 全被拦住**（`devlogs/_verify/mutate_b2_logs.py` 4 +
+`mutate_b2_silent.py` 4；逐字节还原 + `finally` 自校验）。
+受影响测试文件 **163 passed**（test_pipeline / test_llm_finding_guard / test_config_error_visibility）。
+
 ### Changed (Round 47, 2026-09-20 — B3-4：写路径单一实现点 + 全仓生产死接口清零)
 
 > ⚠️ **本轮改动进入 PyInstaller 产物**（`core/rules/`、`core/pipeline/`、`core/kb/`、
