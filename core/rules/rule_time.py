@@ -5,6 +5,9 @@ import re
 from datetime import datetime
 
 from core.rules.parsing import (
+    _CN_DATE_RE,
+    _DATE_RE,
+    _MD_TIME_RE,
     _extract_year,
     _interval_after,
     _interval_before,
@@ -14,6 +17,79 @@ from core.rules.parsing import (
 from core.rules.year_vote import YearVote, build_year_vote
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# 判据证据分级（R1a / R1b 共用）
+#
+# 背景（B1-9，2026-09-20 视觉复核 p48）：规则层对手写体时刻直接给了 critical，
+# 而项目自身约定是「手写体字段应标 confidence=low，**规则不直接判定**」。
+# 更一般地：**不确定来源不给最高严重度** —— 与 B1-6 的 L4 同源思想。
+# 时序类判据的两个"证据不足"来源：
+#   ① 所依据的时刻为手写填写；
+#   ② 时刻字面量缺日期成分 ⇒ 比较所用的日期系由该页 production_date 推定，
+#      **不是记录里写的事实**（实测 p46 的 fallback 甚至是当天日期 2026-09-18）。
+# ---------------------------------------------------------------------------
+
+#: 从时刻字面量里取 HH:MM（兼容 `03:12` 与 `03时12分`，允许分隔符旁有空白）。
+#: ⚠️ 必须在**原字面量**上匹配，不能先去掉空白 —— `2025-09-25 03:36` 去空白后
+#: 变成 `2025-09-2503:36`，日期的末位数字与时刻粘连，`(?<!\d)` 会挡住匹配
+#: （实测：曾因此让手写封顶整条失效）。
+_HM_RE = re.compile(r"(?<!\d)(\d{1,2})\s*[:时]\s*(\d{2})")
+
+
+def _literal_has_date(lit) -> bool:
+    """时刻字面量是否自带日期成分。
+
+    `_parse_time` 对"只有时刻"的输入（`11:04`）以及"无年份"的输入
+    （`07-17 14:30`）都会用 `fallback_date` 补全。补出来的日期**不是记录里
+    写的事实** ⇒ 跨日/跨页判序不成立。只认可从字面量里读到的年-月-日
+    （`_DATE_RE` / `_CN_DATE_RE`）或月-日（`_MD_TIME_RE`）。
+    """
+    if not lit or not isinstance(lit, str):
+        return False
+    return bool(
+        _DATE_RE.search(lit)
+        or _CN_DATE_RE.search(lit)
+        or _MD_TIME_RE.search(lit)
+    )
+
+
+def _time_is_handwritten(hw_tokens, lit) -> bool:
+    """该时刻字面量是否来自手写填写（依据 step 的 ``handwritten`` 标注）。
+
+    ``handwritten`` 是 **LLM 标注（模型猜测）**，因此只用于**下调**严重度，
+    绝不用于升级 —— 方向保守，与 `core.hw_signal` 的既定原则一致。
+    匹配方式：整个字面量命中，或"时:分"部分命中（手写值常写作
+    `25日03时12分`，而结构化字段已归一为 `2025-09-25 03:12`）。
+    """
+    if not lit or not isinstance(lit, str):
+        return False
+    if not isinstance(hw_tokens, (list, tuple)) or not hw_tokens:
+        return False
+    m = _HM_RE.search(lit)
+    hm_cn = f"{int(m.group(1)):02d}时{m.group(2)}分" if m else None
+    hm_ascii = f"{int(m.group(1)):02d}:{m.group(2)}" if m else None
+    norm = lit.replace(" ", "")
+    for tok in hw_tokens:
+        t = str(tok).replace(" ", "")
+        if not t:
+            continue
+        if norm in t:
+            return True
+        if hm_cn and (hm_cn in t or (hm_ascii and hm_ascii in t)):
+            return True
+    return False
+
+
+def _evidence_notes(hw_prev, lit_prev, hw_curr, lit_curr) -> list[str]:
+    """收集"证据不足"说明；非空 ⇒ 该时序判定不得给 critical。"""
+    notes: list[str] = []
+    if _time_is_handwritten(hw_prev, lit_prev) or _time_is_handwritten(hw_curr, lit_curr):
+        notes.append("所依据的时刻为手写填写，按项目约定手写体不直接判定")
+    if not _literal_has_date(lit_prev) or not _literal_has_date(lit_curr):
+        notes.append("时刻字面量缺日期成分，比较所用日期系由该页生产日期推定")
+    return notes
 
 
 def _year_resolved(vote: YearVote, *years: int | None) -> str | None:
@@ -48,14 +124,21 @@ def _check_time_reversal_in_page(pages: list[dict]) -> list[dict]:
             iv_start = _parse_time_interval(step.get("start_time"), fb_date)
             iv_end = _parse_time_interval(step.get("end_time"), fb_date)
             if iv_start and iv_end and _interval_after(iv_start, iv_end):
+                # B1-9：同一工序"结束早于开始"在逻辑上确属不可能，故基准为
+                # critical；但若所依据的时刻是手写填写、或日期系由该页生产
+                # 日期推定，则该结论依赖的输入不可靠 ⇒ 封顶为 warning。
+                notes = _evidence_notes(
+                    step.get("handwritten"), step.get("end_time"),
+                    step.get("handwritten"), step.get("start_time"),
+                )
                 findings.append({
                     "page": pno,
                     "type": "time_reversal",
-                    "severity": "critical",
+                    "severity": "warning" if notes else "critical",
                     "description": (
                         f"第{pno}页 工序{step.get('step_no','?')} "
                         f"开始时间({step.get('start_time')}) 晚于结束时间({step.get('end_time')})"
-                    ),
+                    ) + (f"（{'；'.join(notes)}，故不作为确定性结论）" if notes else ""),
                     "ocr_text": f"{step.get('start_time')} → {step.get('end_time')}",
                     "operator": step.get("operator") or "",
                     "source": "rule",
@@ -80,6 +163,17 @@ def _check_time_reversal_cross_page(pages: list[dict]) -> list[dict]:
     3. When start and end differ by >2 years on what should be the same batch,
        flag as extraction_error (warning) instead of time_reversal (critical):
        the LLM/OCR likely leaked the production_date year (e.g. 2015 vs 2025).
+    4. [B1-9] Separate "true inversion" from "mere overlap" and cap severity on
+       weak evidence:
+       - true inversion (curr.start < prev.start) — step numbering contradicts
+         the recorded instants ⇒ critical (unless evidence is weak, see below);
+       - mere overlap (prev.start <= curr.start < prev.end) — different
+         equipment/materials may legitimately be cleaned in parallel ⇒ warning,
+         worded as overlap rather than reversal;
+       - weak evidence (the time literal is handwritten, or carries no date so
+         the comparison date was back-filled from the page production_date) ⇒
+         never critical (same idea as B1-6's severity ceiling: an uncertain
+         source does not get the highest severity).
     """
     findings = []
     ordered = []
@@ -118,6 +212,7 @@ def _check_time_reversal_cross_page(pages: list[dict]) -> list[dict]:
                     "iv_start": _parse_time_interval(step.get("start_time"), fb_date),
                     "iv_end": _parse_time_interval(step.get("end_time"), fb_date),
                     "operator": step.get("operator") or "",
+                    "hw": step.get("handwritten"),
                 })
     for i in range(1, len(ordered)):
         prev, curr = ordered[i - 1], ordered[i]
@@ -156,19 +251,43 @@ def _check_time_reversal_cross_page(pages: list[dict]) -> list[dict]:
                 "operator": curr["operator"],
                 "source": "rule",
             })
+            continue
+
+        # ── B1-9：判据分级 ───────────────────────────────────────────
+        # 进入本分支只说明 curr.start < prev.end —— 即两个工序的**时间区间
+        # 重叠**。重叠本身不是"倒序"：编号是否被违反，要看**开始时刻**。
+        # 实测 p48（视觉复核）：D2101/D2102 箱体清洗 03:12→03:36 与
+        # 烘盘/盘罩/勺子清洗 03:34→04:12 是**不同设备的两道并行清洗**，
+        # 重叠属正常，old 实现却按 `time_reversal` 给了 critical。
+        is_inversion = curr["t_start"] < prev["t_start"]
+        notes = _evidence_notes(
+            prev["hw"], prev["end_time"], curr["hw"], curr["start_time"],
+        )
+        if is_inversion:
+            desc = (
+                f"第{curr['page']}页 工序{curr['step_no']} 开始({curr['start_time']}) "
+                f"早于第{prev['page']}页 工序{prev['step_no']} 开始({prev['start_time']})，"
+                f"工序编号顺序与开始时刻矛盾（时间倒序）"
+            )
+            ocr_ref = f"{curr['start_time']} < {prev['start_time']} (开始时刻倒序)"
         else:
-            findings.append({
-                "page": curr["page"],
-                "type": "time_reversal",
-                "severity": "critical",
-                "description": (
-                    f"第{curr['page']}页 工序{curr['step_no']} 开始({curr['start_time']}) "
-                    f"早于第{prev['page']}页 工序{prev['step_no']} 结束({prev['end_time']})"
-                ),
-                "ocr_text": f"{curr['start_time']} < {prev['end_time']}",
-                "operator": curr["operator"],
-                "source": "rule",
-            })
+            desc = (
+                f"第{curr['page']}页 工序{curr['step_no']} 开始({curr['start_time']}) "
+                f"早于第{prev['page']}页 工序{prev['step_no']} 结束({prev['end_time']})，"
+                f"两工序时间重叠（若为不同设备/物料的并行操作则属正常，请核对）"
+            )
+            ocr_ref = f"{curr['start_time']} < {prev['end_time']} (区间重叠)"
+        if notes:
+            desc += f"（{'；'.join(notes)}，故不作为确定性结论）"
+        findings.append({
+            "page": curr["page"],
+            "type": "time_reversal",
+            "severity": "critical" if (is_inversion and not notes) else "warning",
+            "description": desc,
+            "ocr_text": ocr_ref,
+            "operator": curr["operator"],
+            "source": "rule",
+        })
     # Flag unparseable time strings for human review (OCR quality issue)
     for pno, step_no, op, raw in unparseable_times:
         findings.append({
