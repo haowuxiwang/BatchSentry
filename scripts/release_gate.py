@@ -57,6 +57,7 @@ import xml.etree.ElementTree as ET
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import NamedTuple
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RULES_DIR = REPO_ROOT / "core" / "rules"
@@ -353,33 +354,68 @@ def check_rules_wired(min_rules: int = 14, rules_dir: Path | None = None) -> Che
                        f"{n} 个 _check_* 规则函数（下限 {min_rules}）", _ms() - t0)
 
 
-def count_kb_entries(kb_dir: Path = KB_DATA_DIR) -> int:
-    """统计知识库语料条目数（兼容 list 与 {entries|items: [...]} 两种形态）。"""
-    total = 0
+class KbCounts(NamedTuple):
+    """知识库语料的**两个不可混算的口径**（B4-5）。
+
+    此前 `count_kb_entries` 把 ``chapters`` 一并累加 ⇒ 门禁报 **477**，
+    而检索器 `core.kb.store.entries()` 只有 **441**（差 36）。
+    ``chapters`` 是**纯章节标题元数据**（无正文、无 ``entry_id``，检索器根本不索引），
+    把它算进"语料条目数"会让指标**虚高 8%**，且文档据此夸大知识库规模。
+    ⇒ 分开报，别相加。
+    """
+    entries: int    # 可检索条目 —— **权威口径**，须与 store.entries() 一致
+    chapters: int   # 章节标题元数据 —— 仅供透明，**不计入**语料规模
+
+    def __str__(self) -> str:
+        if not self.chapters:
+            return f"{self.entries} 条"
+        return (f"{self.entries} 条（另有章节标题元数据 {self.chapters} 条，"
+                f"无正文且检索器不索引，不计入）")
+
+
+def count_kb_corpus(kb_dir: Path = KB_DATA_DIR) -> KbCounts:
+    """统计知识库：**可检索条目**与**章节元数据**分别计数，绝不相加。
+
+    兼容 ``list``（整份即条目）与 ``{entries|items: [...]}``（``chapters`` 另计）。
+    """
+    entries = chapters = 0
     for js in sorted(kb_dir.glob("*.json")):
         try:
             data = json.loads(js.read_text(encoding="utf-8-sig"))
         except (json.JSONDecodeError, OSError):
             continue
         if isinstance(data, list):
-            total += len(data)
+            entries += len(data)
         elif isinstance(data, dict):
-            for key in ("entries", "items", "chapters"):
+            for key in ("entries", "items"):
                 v = data.get(key)
                 if isinstance(v, list):
-                    total += len(v)
-    return total
+                    entries += len(v)
+            ch = data.get("chapters")
+            if isinstance(ch, list):
+                chapters += len(ch)
+    return KbCounts(entries, chapters)
+
+
+def count_kb_entries(kb_dir: Path = KB_DATA_DIR) -> int:
+    """**仅可检索条目数**（== `core.kb.store.entries()` 的口径）。
+
+    ⚠️ 刻意**不含** ``chapters`` —— 见 :class:`KbCounts`。
+    返回 int 是为了让"下限比较"这类调用点保持简单；需要两个口径时用
+    :func:`count_kb_corpus`。
+    """
+    return count_kb_corpus(kb_dir).entries
 
 
 def check_kb_corpus(min_entries: int = 200, kb_dir: Path | None = None) -> CheckResult:
-    """知识库语料可用性。"""
+    """知识库语料可用性（下限只对**可检索条目**生效）。"""
     t0 = _ms()
-    n = count_kb_entries(kb_dir or KB_DATA_DIR)
-    if n < min_entries:
+    counts = count_kb_corpus(kb_dir or KB_DATA_DIR)
+    detail = f"知识库 {counts}（下限 {min_entries}）"
+    if counts.entries < min_entries:
         return CheckResult("kb_corpus", FAIL,
-                           f"知识库仅 {n} 条（下限 {min_entries}）", _ms() - t0)
-    return CheckResult("kb_corpus", PASS,
-                       f"知识库 {n} 条（下限 {min_entries}）", _ms() - t0)
+                           f"知识库仅 {counts.entries} 条（下限 {min_entries}）", _ms() - t0)
+    return CheckResult("kb_corpus", PASS, detail, _ms() - t0)
 
 
 _KB_SPEC_GLOB_RE = re.compile(

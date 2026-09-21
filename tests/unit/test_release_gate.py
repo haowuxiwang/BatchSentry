@@ -92,10 +92,46 @@ class TestStructuralChecks:
         assert rg.count_kb_entries(tmp_path) == 3
 
     def test_count_kb_entries_dict_form(self, tmp_path):
+        """`chapters` **不得**计入条目数（B4-5）。
+
+        ⚠️ 本用例曾断言 `== 7`（5 entries + 2 chapters）—— 那是在**锁死缺陷**：
+        chapters 是无正文、检索器不索引的**章节标题元数据**，算进语料会让
+        门禁数字虚高（实测 477 vs 真值 441）。现改为断言两个口径**分列**。
+        """
         (tmp_path / "kb.json").write_text(
             json.dumps({"entries": [{}] * 5, "chapters": [{}] * 2}), encoding="utf-8"
         )
-        assert rg.count_kb_entries(tmp_path) == 7
+        counts = rg.count_kb_corpus(tmp_path)
+        assert counts.entries == 5 and counts.chapters == 2
+        assert rg.count_kb_entries(tmp_path) == 5      # 仅可检索条目
+        assert rg.count_kb_entries(tmp_path) != 7      # 反向：绝不是相加
+
+    def test_kb_corpus_reports_both_numbers(self, tmp_path):
+        """门禁 detail 必须**同时**给出两个数字（否则口径失真无法察觉）。"""
+        (tmp_path / "kb.json").write_text(
+            json.dumps({"entries": [{}] * 10, "chapters": [{}] * 3}), encoding="utf-8"
+        )
+        r = rg.check_kb_corpus(min_entries=5, kb_dir=tmp_path)
+        assert r.status == rg.PASS
+        assert "10 条" in r.detail and "3 条" in r.detail
+
+    def test_kb_floor_uses_entries_not_chapters(self, tmp_path):
+        """下限只对**可检索条目**生效 —— 章节再多也不能把语料"凑够"。"""
+        (tmp_path / "kb.json").write_text(
+            json.dumps({"entries": [{}] * 2, "chapters": [{}] * 50}), encoding="utf-8"
+        )
+        assert rg.check_kb_corpus(min_entries=10, kb_dir=tmp_path).status == rg.FAIL
+
+    def test_gate_count_equals_retriever_count(self):
+        """**最强不变式**：门禁报的数字必须 == 检索器真正能取到的条目数。
+
+        这是**派生**断言（不手写 441）—— 语料扩/缩时它自动跟随，
+        而"又把 chapters 加回去"会让它立刻变红。两端都是**真实**实现：
+        门禁侧 :func:`count_kb_entries`，检索侧 `core.kb.store.entries()`。
+        """
+        from core.kb import store
+
+        assert rg.count_kb_entries() == len(store.entries())
 
     def test_count_kb_entries_bad_json_skipped(self, tmp_path):
         (tmp_path / "kb.json").write_text("{not json", encoding="utf-8")

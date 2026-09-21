@@ -321,6 +321,11 @@
   **OVERALL: pass**（5 PASS + 1 WARN 沙箱 allowlist），coverage **95.22%**，1845 passed，
   `kb_corpus` 477 条 / `kb_packaging` 6 源自动入包。
 
+  ⚠️ **口径更正（B4-5，2026-09-21）**：这里的 **477 是当时的门禁数字，含 36 条
+  `chapters` 章节标题元数据**（无正文、无 `entry_id`、检索器不索引）。
+  **可检索语料真值 = 441 条**。`count_kb_entries` 已修正为只计 `entries`，
+  门禁 `kb_corpus` 现同时报出两个数字。本条保留原数字以存史，**对外引用一律用 441**。
+
 ---
 
 ### M6 —— SSE 优化 + 对标能力落地
