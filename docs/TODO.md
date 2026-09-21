@@ -2219,6 +2219,17 @@
      ⚠️ 这条同时暴露一个**流程缺口**：Round 53 有 3/10 个提交**未回填 TODO**
      （另有 8/10 未写 CHANGELOG，见第 1 条）⇒ **"提交即回填"目前靠自觉，没有机检**。
      后续可考虑把"提交信息里点名的条目号必须在 TODO 里有对应完成标记"做成机检（另立条目）。
+  7. 🔴 **顺序硬约束：升版 + CHANGELOG 必须"先提交"，再重建**（2026-09-21 实测确认）。
+     理由：`scripts/bundle_manifest.py` 会把 **`git_head` + `git_dirty`**
+     写进 `dist/pbc-server/build_manifest.json`（`_git(root,"status","--porcelain")`）。
+     若带着未提交的升版去打包，发布产物的清单会写着 **`dirty=True`**
+     ⇒ **产物无法自证"由哪个干净提交构建"**，B7-3/B7-4 那套新鲜度判据的价值被掏空。
+     ⚠️ **由此产生的预期红灯（不是回归，别当 flaky 去"修"）**：
+     升版提交后、重建之前，`tests/unit/test_distribution_parity.py::
+     test_packaged_app_version_matches_app_version` **必然 FAIL** ——
+     实测报 `app.asar 内版本 '1.1.9' != main.APP_VERSION '1.2.0'`。
+     这正是"产物必须与源码同源"的**设计护栏**在起作用；重建后自动转绿。
+     ⇒ 顺序：**升版 4 处 → CHANGELOG → 提交 → 重建 → 门禁 9 项 → 产物 e2e → 提交清单/tag**。
 
   **验收**：`grep -c "B1-10\|B5-4\|B4-3\|B4-5\|B1-16" CHANGELOG.md` ≥ 5；
   且 `[1.2.0]` 段里能逐条找到上列 11 个条目号；
