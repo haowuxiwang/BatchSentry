@@ -1256,3 +1256,57 @@ asar 头部实测（本机 ``app.asar``）：``[0:4]=4``、``[4:8]=headerSize``�
 ``devlogs/_verify/probe_artifact.py``（产物事实探针）。
 
 
+## 三十二、"文件被占用"的归因陷阱与正解（2026-09-21 实测）
+
+### A) 改名报的 `WinError 32` 里混着 **shim 假象**
+
+本环境所有 `unlink` 都走 **safe-delete shim**（`rm`/`unlink` 被重定向到"送回收站"代理）。
+于是 ``pathlib.Path.unlink()`` 对 `app.asar` 报的是：
+
+```
+[safe-delete][SAFE_DELETE_FAIL_CLOSED] {"reason": "trash-failed",
+ "detail": "... Error during a `trash` operation: Unknown { description: \"Some operations were aborted\" }"}
+```
+
+**`Some operations were aborted` 不能推出"文件被独占"** —— 回收站操作被中止有多种原因。
+⇒ 判"锁"必须绕过 shim：用 ``ctypes`` 直调 ``CreateFileW`` / ``MoveFileExW``。
+
+### B) `dwShareMode` 不对称 ⇒ 单点探测会自相矛盾
+
+同一个真被持有的文件实测：
+
+```
+CreateFileW(dwShareMode=0)  -> 拒 err=32     # 有人持有
+CreateFileW(dwShareMode=1)  -> OK           # 对方只请求 SHARE_READ
+CreateFileW(dwShareMode=7)  -> OK           # 连 DELETE 都共享
+MoveFileExW(改名)            -> 拒 err=32     # 但改名仍不行
+```
+
+⇒ **要同时跑三个共享标志 + 一次 `MoveFileEx`**，才拼得出完整图像。
+**"改不了名" ≠ "删不掉"**（改名要独占，持有者可能只取共享读）。
+
+### C) 正解：Restart Manager API 直接问出 PID（且可做阴性对照）
+
+`rstrtmgr.dll` 能回答"谁持有这个文件"，**没人持有时返回 `rc=0, count=0`** ⇒ 判据有判别力。
+⚠️ `RmGetList` 缓冲区不够会返回 **`234` (`ERROR_MORE_DATA`)** 并只填 `need`
+—— **必须按 `need` 重试**，否则拿到 `count=0` 就**误判成"没人持有"**（本轮踩过）。
+脚本：``devlogs/_verify/who_holds.py``（**每目标独立子进程**：ctypes 参数不匹配会
+**segfault**，一个目标崩掉不该带走整轮）。结果：**PID 18096 `WorkBuddy.exe`**。
+
+### D) 长时间存活的 sidecar **不随"重启应用"消失**
+
+该进程启动时间实测 **2026-09-20 08:40:39**（存活 24h），而用户当天"重启了 WorkBuddy"
+—— **它根本没被重启**。⇒ **别假设"重启应用就解锁"**：先查持有者启动时间
+（`GetProcessTimes` → `CreationTime`，FILETIME）；再查有没有**可见顶层窗口**
+（`EnumWindows`+`GetWindowThreadProcessId`）来判断它是不是主 UI。
+本轮实测 0 个可见窗口 ⇒ 是无窗口辅助进程（`daemon-app-server-entry --stdio`），
+`taskkill /F` 安全 ⇒ 复查 `count: 0` + 独占打开 OK + `MoveFileEx` OK，**重建路径畅通**。
+
+**规则**：处置后**必须复验**（RM `count==0` + 独占打开 + `MoveFileEx` 各一次），
+否则你不知道到底解决了没有。这套方法已固化为用户级 skill ``windows-locked-file-forensics``。
+
+**踩坑痕迹**：``devlogs/_verify/who_holds.py``、``devlogs/_verify/_rm_owner.txt``、
+``~/.workbuddy/skills/windows-locked-file-forensics/``。
+
+
+
