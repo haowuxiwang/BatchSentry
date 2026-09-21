@@ -3,15 +3,16 @@ from __future__ import annotations
 import logging
 
 from core.rules.parsing import (
-    _edit_distance_le1,
     _interval_after,
     _normalize_batch_no,
     _parse_time,
     _parse_time_interval,
+    batch_keys_compatible,
 )
 
-# R2 投票阈值：多数批号核心串须覆盖的有批号页比例。低于此值视为"投票不决定性"
-# → 不做近邻吸收，按原样全报（保守；绝不把真实混批吃掉）。
+# 投票阈值：结构归一后的基准簇须覆盖的有批号页比例。低于此值视为"不决定性"
+# → 不做任何吸收（连 Tier 1 结构归一也不落地），按原样全报
+# （保守；绝不把真实混批吃掉）。
 _BATCH_VOTE_MIN_SHARE = 0.6
 
 logger = logging.getLogger(__name__)
@@ -170,14 +171,23 @@ def _check_batch_consistency(pages: list[dict]) -> list[dict]:
 
     OCR variants of the SAME batch number are grouped before comparison:
     separators ("·"/spaces/"°"), symbol noise ("^*"/"/"), full-width glyphs,
-    digit confusions ("25010i" → "250101") and sheet-suffix numbers
-    ("1127011N250101-04") all collapse onto one core. Prefix-truncated
-    extractions (LLM cut the batch no short) merge into the longer group.
-    Finally a **vote** (R2): when the majority core covers ≥
-    `_BATCH_VOTE_MIN_SHARE` of the pages carrying a batch no, other cores
-    within edit distance ≤1 of it are absorbed as variants. Only groups that
-    survive normalization **and** the vote are reported as a real
-    inconsistency — the absorbed count is disclosed in the description."""
+    digit confusions ("25010i" → "250101"), sheet-suffix numbers
+    ("1127011N250101-04") and prefix-truncated extractions (`112701` — the
+    LLM dropped the tail) all collapse onto one group.
+
+    Grouping is **structure-first and order-independent** (B1-10). Each
+    normalized core is decomposed into `(prefix, date6)`; two cores may be
+    the same batch only when their date segments match exactly. Tiers:
+
+    * **Tier 1 (structural)** — prefix containment / tail truncation. The
+      relation is decidable, so it needs no vote.
+    * **Tier 2 (weak)** — a single-character prefix difference (`N`↔`1`).
+      Only absorbed when the Tier-1 cluster already forms a majority.
+
+    A **vote** covers the whole cluster: unless it reaches
+    `_BATCH_VOTE_MIN_SHARE` of the pages carrying a batch no, *nothing* is
+    absorbed and every core is reported as-is (fail-open — 宁可多报，不可把
+    真实混批吃掉). The absorbed aliases are disclosed in the description."""
     findings = []
     # normalized core (before "-suffix") -> {raw batch_no: [page numbers]}
     cores: dict[str, dict[str, list[int]]] = {}
@@ -194,83 +204,88 @@ def _check_batch_consistency(pages: list[dict]) -> list[dict]:
         raw_map = cores.setdefault(norm.split("-")[0], {})
         raw_map.setdefault(bno, []).append(pno)
 
-    # Merge prefix-truncated cores into the longer group they extend
-    merged: dict[str, dict[str, list[int]]] = {}
-    for core, raw_map in sorted(cores.items(), key=lambda kv: -len(kv[0])):
-        host = next(
-            (g for c, g in merged.items() if core.startswith(c) or c.startswith(core)),
-            None,
-        )
-        if host is None:
-            merged[core] = raw_map
-        else:
-            for raw, pages_ in raw_map.items():
-                host.setdefault(raw, [])
-                host[raw].extend(pages_)
-
-    if len(merged) <= 1:
+    if len(cores) <= 1:
         return findings  # all same (or none) — consistent
 
-    # ── R2（投票归一）：多数读法 + 单字符近邻吸收 ──────────────────────────
-    # 定位依据（真实轮次实测）：归一后仍报"5 组不同批号"，但逐组看是
-    # `1127011N250101` / `1127011N^*250101` / `11270111/250101` 等**同一批号的
-    # OCR 写法**。差异要么是纯符号（`^*`、`/`），要么是单字符（`N`↔`1`）。
-    #
-    # 判据：多数核心串须覆盖 ≥ `_BATCH_VOTE_MIN_SHARE` 的有批号页（投票**决定性**），
-    # 此时把与之**编辑距离 ≤1** 的其他核心串吸收为变体；不决定性时按原样全报
-    # （保守：宁可多报，不可把真实的混批吃掉）。吸收数量在描述里**明示**。
-    page_counts = {c: sum(len(v) for v in m.values()) for c, m in merged.items()}
-    total_pages = sum(page_counts.values())
-    items = sorted(merged.items(), key=lambda kv: (-page_counts[kv[0]], kv[0]))
-    main_core, main_map = items[0]
-    decisive = total_pages > 0 and page_counts[main_core] >= (
+    counts = {c: sum(len(v) for v in m.values()) for c, m in cores.items()}
+    total_pages = sum(counts.values())
+    # 锚 = 页数最多的核心串（**不再按长度** —— 旧实现让噪声最重的那串当 host，
+    # 组标签因此变成 `1127011N4250101` 这种 OCR 噪声）。
+    ranked = sorted(cores, key=lambda c: (-counts[c], c))
+    anchor = ranked[0]
+
+    # ── Tier 1：结构归一（对称、无顺序依赖、关系可判定）──────────────────
+    # 前缀包含 / 尾段截断属**结构性**证据：一方是另一方的严格前缀时只能是截断读法
+    # （实测 14 页只读出 `112701`，完整读法是 `1127011N250101`）；两侧日期段相等
+    # 时前缀互相包含同理。
+    tier1 = [c for c in ranked[1:]
+             if batch_keys_compatible(c, anchor, allow_edit_distance=False)]
+    tier2 = [c for c in ranked[1:]
+             if c not in tier1
+             and batch_keys_compatible(c, anchor, allow_edit_distance=True)]
+
+    # ── 投票闸：Tier 1 簇须构成多数，否则**一条都不吸收**（fail-open）────────
+    # 保守性红线：宁可多报，不可把真实混批吃掉。`B202201` vs `B202202`（各 1 页）
+    # 既不结构兼容、也不成多数 ⇒ 照原样全报。
+    cluster_pages = counts[anchor] + sum(counts[c] for c in tier1)
+    decisive = total_pages > 0 and cluster_pages >= (
         _BATCH_VOTE_MIN_SHARE * total_pages
     )
-    survivors: list[tuple[str, dict[str, list[int]]]] = [(main_core, main_map)]
+
     absorbed: list[str] = []
-    for core, raw_map in items[1:]:
-        if decisive and _edit_distance_le1(core, main_core):
-            absorbed.append(core)
-        else:
-            survivors.append((core, raw_map))
-    if len(survivors) <= 1:
+    survivors: list[str] = []
+    if decisive:
+        absorbed = list(tier1) + list(tier2)
+        survivors = [c for c in ranked[1:] if c not in absorbed]
+        grouped: list[tuple[str, dict[str, list[int]]]] = [
+            (anchor, cores[anchor]),
+            *((c, cores[c]) for c in survivors),
+        ]
+    else:
+        grouped = [(c, cores[c]) for c in ranked]
+
+    if len(grouped) <= 1:
         logger.info(
-            f"R7 batch vote: 单一批号（多数核心 {main_core} 覆盖 "
-            f"{page_counts[main_core]}/{total_pages} 页；吸收 {len(absorbed)} 个"
-            f"单字符/符号变体 {absorbed}）"
+            f"R7 batch vote: 单一批号（基准 {anchor} 覆盖 "
+            f"{cluster_pages}/{total_pages} 页；吸收 {len(absorbed)} 个变体 "
+            f"{absorbed}）"
         )
         return findings
 
-    # Report: main group + surviving suspicious groups, noting merged variants
+    # Report: 基准组 + 存活的可疑组，并明示被归并的变体
     summary_parts = []
-    for core, raw_map in survivors:
+    for core, raw_map in grouped:
         pns = sorted(p for pages_ in raw_map.values() for p in pages_)
         summary_parts.append(f"{core}(第{','.join(str(p) for p in pns)}页)")
-    n_variants = sum(len(m) for m in merged.values()) - len(merged)
-    all_raw = [raw for m in merged.values() for raw in m]
+    all_raw = [raw for m in cores.values() for raw in m]
+    n_variants = len(all_raw) - len(grouped)
     vote_note = (
-        f"，另按多数读法归并 {len(absorbed)} 个单字符/符号近邻变体"
+        f"，其中 {len(absorbed)} 个读法按「末尾日期段相同/尾段截断」的结构证据"
+        f"并入基准（如 {'、'.join(absorbed[:3])}）"
         if absorbed else ""
     )
     findings.append({
-        "page": min(min(v) for v in main_map.values()),
+        "page": min(min(v) for v in grouped[0][1].values()),
         "type": "batch_inconsistency",
         "severity": "critical",
         "description": (
-            f"跨页批号不一致：检测到 {len(survivors)} 组不同批号 — "
+            f"跨页批号不一致：检测到 {len(grouped)} 组不同批号 — "
             f"{'；'.join(summary_parts[:3])}"
             f"{'…' if len(summary_parts) > 3 else ''}"
-            f"（已归并 {n_variants} 个空格/分隔符/工序后缀等 OCR 变体"
+            f"（已归并 {n_variants} 个空格/分隔符/角标/工序后缀/尾段截断等 OCR 变体"
             f"{vote_note}），"
             f"请核对是否装订错误或混批"
         ),
-        "ocr_text": f"batch_nos={all_raw}",
+        "ocr_text": (
+            f"batch_nos={all_raw}"
+            + (f"；merged_aliases={sorted(absorbed)}" if absorbed else "")
+        ),
         "operator": "",
         "source": "rule",
     })
     logger.warning(
-        f"R7 batch inconsistency: {len(survivors)} distinct batch groups "
-        f"({len(all_raw)} raw variants, {n_variants} merged, {len(absorbed)} voted)"
+        f"R7 batch inconsistency: {len(grouped)} distinct batch groups "
+        f"({len(all_raw)} raw variants, {n_variants} merged, {len(absorbed)} clustered)"
     )
     return findings
 

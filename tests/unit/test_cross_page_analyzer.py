@@ -1992,17 +1992,22 @@ class TestBatchConsistency:
         assert "检测到 2 组不同批号" in findings[0]["description"]
 
     def test_vote_absorption_is_disclosed(self):
-        """被投票吸收的变体数量必须**明示**在描述里（不静默归一）。"""
+        """被归一吸收的变体数量与被吸收的**别名读法**必须**明示**在描述里
+        （不静默归一）。"""
         variants = (
             ["1127011N250101"] * 10
-            + ["11270111250101"] * 2      # 单字符近邻 → 被投票吸收
+            + ["11270111250101"] * 2      # 单字符近邻（N→1）→ 被吸收
             + ["2245DP20260115"] * 2      # 真实不同批号 → 存活
         )
         pages = [{"page": i + 1, "page_info": {"batch_no": v}}
                  for i, v in enumerate(variants)]
         findings = _check_batch_consistency(pages)
         assert len(findings) == 1
-        assert "另按多数读法归并 1 个单字符/符号近邻变体" in findings[0]["description"]
+        desc = findings[0]["description"]
+        assert "已归并 1 个" in desc
+        # 别名必须点名，复核员才知道哪个读法被并掉了
+        assert "11270111250101" in desc
+        assert "并入基准" in desc
         assert "2245DP20260115" in findings[0]["ocr_text"]
 
 

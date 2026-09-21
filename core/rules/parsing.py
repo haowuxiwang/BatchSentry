@@ -231,6 +231,104 @@ def _edit_distance_le1(a: str, b: str) -> bool:
     return True
 
 
+# ---------------------------------------------------------------------------
+# Batch-number **identity** — `<product prefix><YYMMDD>` decomposition.
+#
+# 现场批号普遍形如 `<产品/工序前缀><YYMMDD>`（实测 `1127011N250101`、
+# `1071011N260501`、`B2024001`）。把归一化串拆成 (前缀, 日期段) 后，日期段成了
+# **独立佐证**：两串日期段不同（实测 p50 `241203` vs 其余页 `250101`）就不可能是
+# 同一批号；反过来日期段相同而前缀只差一个字符（`N`↔`1`）则几乎必然是 OCR 误读。
+#
+# 这解决了旧实现的**顺序依赖**缺陷：旧代码把核心串按长度降序、用"前缀包含"互相
+# 吸收，于是噪声最重的那串（`1127011N4250101`，`^4` 角标被读成数字）成了 host，
+# 把 14 页干净的截断读法（`112701`）挂在它名下 —— 组标签本身就是噪声。
+# ---------------------------------------------------------------------------
+
+_BATCH_DATE6_LEN = 6
+# 前缀短于此长度就不做"前缀包含"匹配，避免 `1127` 之类残串吞掉一切。
+_BATCH_MIN_PREFIX_LEN = 6
+_BATCH_TRAILING_DIGITS_RE = re.compile(r"(\d+)$")
+
+
+def parse_batch_key(base: str) -> tuple[str, Optional[str]]:
+    """把归一化批号 ``base`` 拆成 ``(prefix, date6)``。
+
+    ``date6`` 取**末尾 6 位连续数字**且能解释为合法 YYMMDD（月 1–12、日 1–31）
+    时的那 6 位，否则为 ``None``（此时 ``prefix == base``）。
+
+    先扫出末尾**整段**数字再取后 6 位，因为 OCR 会把角标/批注数字粘进批号
+    （实测 `1127011N^4 250101` 归一成 `1127011N4250101`，末尾数字段是 `4250101`，
+    后 6 位才是日期段 `250101`）。
+    """
+    base = str(base or "")
+    m = _BATCH_TRAILING_DIGITS_RE.search(base)
+    if not m:
+        return base, None
+    digits = m.group(1)
+    if len(digits) < _BATCH_DATE6_LEN:
+        return base, None
+    tail = digits[-_BATCH_DATE6_LEN:]
+    try:
+        month, day = int(tail[2:4]), int(tail[4:6])
+    except ValueError:  # pragma: no cover - 正则已保证是数字
+        return base, None
+    if not (1 <= month <= 12 and 1 <= day <= 31):
+        return base, None
+    return base[: len(base) - _BATCH_DATE6_LEN], tail
+
+
+def _batch_prefixes_compatible(
+    a: str, b: str, *, allow_edit_distance: bool
+) -> bool:
+    """两侧**都有日期段**时，前缀是否可能是同一产品的不同读法。
+
+    ``allow_edit_distance=False`` 只认**结构关系**（相等 / 一方是另一方前缀），
+    用在"证据可判定"的那一档；``True`` 额外认单字符近邻（`N`↔`1`），属**弱证据**，
+    调用方必须再加投票闸。
+    """
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    if a.startswith(b) or b.startswith(a):
+        return min(len(a), len(b)) >= _BATCH_MIN_PREFIX_LEN
+    if not allow_edit_distance:
+        return False
+    if len(a) < _BATCH_MIN_PREFIX_LEN or len(b) < _BATCH_MIN_PREFIX_LEN:
+        return False
+    return _edit_distance_le1(a, b)
+
+
+def batch_keys_compatible(
+    a: str, b: str, *, allow_edit_distance: bool = True
+) -> bool:
+    """两串**归一化**批号是否可能是同一批号的不同读法（对称、无顺序依赖）。
+
+    1. **双方都有日期段**：日期段必须**完全相等**（最强独立佐证 —— 两串日期段
+       不同，如实测 p50 的 `241203` vs 其余页 `250101`，就绝不可能是同一批号），
+       且前缀相等 / 一方是另一方前缀 /（仅当 ``allow_edit_distance``）编辑距离 ≤1。
+    2. **一方无日期段**（LLM/OCR 丢了尾段，实测 14 页只读出 `112701`）：无日期
+       一方必须是**有日期一方前缀的前缀**（或与之相等）。反向不成立 —— 残串不能
+       反过来吞掉完整串。
+    3. **双方都无日期段**：只认前缀包含关系，**从不认编辑距离** —— 否则
+       `B202201`/`B202202` 这种"真实混批、各 1 页"会被静默并掉。
+    """
+    pa, da = parse_batch_key(a)
+    pb, db = parse_batch_key(b)
+    if da and db:
+        return da == db and _batch_prefixes_compatible(
+            pa, pb, allow_edit_distance=allow_edit_distance
+        )
+    if da or db:
+        dated_prefix, bare = (pa, pb) if da else (pb, pa)
+        if len(bare) < _BATCH_MIN_PREFIX_LEN:
+            return False
+        return dated_prefix.startswith(bare)
+    if len(pa) < _BATCH_MIN_PREFIX_LEN or len(pb) < _BATCH_MIN_PREFIX_LEN:
+        return pa == pb
+    return pa == pb or pa.startswith(pb) or pb.startswith(pa)
+
+
 def _parse_time_interval(
     s: Optional[str], fallback_date: Optional[str] = None
 ) -> Optional[tuple[datetime, datetime, bool]]:
