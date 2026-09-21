@@ -108,6 +108,20 @@ _NOT_A_VALUE = (
     "不符合操作指导", "未在规格",
 )
 
+#: **布尔/勾选类主张**的统一形态识别（B1-12）。
+#:
+#: 处置档位**不得由措辞决定**：旧实现只经 `_declared_spec_value`（认「…值为 X」/
+#: 引号）取值，于是「参数值为否」(p39/p46) 走 L1 抑制、「勾选了否」(p45) 取不到值
+#: ⇒ fail-open ⇒ 只降级 —— 同一件事两种档位，差别只是**用了哪个动词**。
+#: 下面两侧分别覆盖「动词 + 了/为 + 是/否」与「值位置 + 是/否」两族写法。
+#: ⚠️ `(?![一-龥])` 排除疑问词「是否」本身，避免任何含"是否…"的文案被误判。
+_BOOLEAN_CLAIM_RE = re.compile(
+    r"(?:勾选|选择|选中|标记|填写|判定|判断)\s*(?:了|为|是|作|的)?\s*"
+    r"['\"“”‘’]?\s*([是否])(?![一-龥])"
+    r"|(?:实际值|参数值|记录值|实测值|测定值|值)\s*[为是:：]?\s*"
+    r"['\"“”‘’]?\s*([是否])(?![一-龥])"
+)
+
 #: time_reversal 的**倒序语义**词表 —— 只有文案确实在断言"结束早于开始"时，
 #: 才用规则层的倒序判据重算。否则（如"时间重复"）是另一类主张，不得借倒序
 #: 判据否定它（p22 实测误杀）。
@@ -213,11 +227,41 @@ def _declared_spec_value(f: dict) -> str | None:
     return value
 
 
+def _declared_boolean_literal(f: dict) -> str | None:
+    """文案是否在断言一个**布尔/勾选结果**；是则返回字面量（``"是"``/``"否"``）。
+
+    这是布尔类的**统一类型闸门**（B1-12）：判据是"文案断言了勾选结果"这一**性质**，
+    与它用哪个动词无关。
+
+    ⚠️ 为什么不能只靠 :func:`_declared_spec_value`：它认「…值为 X」与引号形态，
+    于是「参数值为否」(p39/p46) 能取到值 ⇒ L1 抑制，而「**勾选了否**」(p45)
+    取不到值 ⇒ fail-open ⇒ 只降级。**同一件事两种档位，差别只是措辞用了哪个动词。**
+    Round 53 已渲染原页核实：p39/p45/p46 三页的「是」框才是有 √ 的那个，
+    三处的"否"主张**全是 LLM 读反**（假阳性）⇒ 本就该得到同一种处置。
+
+    ⚠️ 负向预查 ``(?![一-龥])`` 用于排除疑问词「**是否**」本身
+    （「是否将柱内甲醇压干」）—— 否则任何含"是否…"的文案都会被误判成布尔主张。
+    """
+    text = _finding_text(f)
+    m = _BOOLEAN_CLAIM_RE.search(text)
+    if not m:
+        return None
+    return m.group(1) or m.group(2)
+
+
+def _boolean_type_mismatch_reason(literal: str) -> str:
+    """布尔类类型错配的**唯一**文案（`_layer_of` 依赖「勾选/布尔形态」这个子串）。"""
+    return (
+        f"声明的实测值「{literal}」为勾选/布尔形态，不构成数值超差"
+        f"（疑似类型错配：应归 completeness/equipment_state 而非 param_out_of_spec）"
+    )
+
+
 def _check_spec_value_shape(f: dict, structured: dict | None) -> str | None:
     """L1（强证据 · 抑制）：`param_out_of_spec` 声明的实测值**形态非法**。
 
     形态非法 = 判定在逻辑上不成立：
-    - 勾选/布尔值（"否"）不是数值 ⇒ 不构成"超出规格范围"（p39 类型错配）
+    - 勾选/布尔值（"否"）不是数值 ⇒ 不构成"超出规格范围"（p39/p45/p46 类型错配）
     - 日期值（``2025.01.21``）出现在数值列 ⇒ 列串位（p17）
     - 无任何数字的字面量 ⇒ 不是数值
 
@@ -228,16 +272,18 @@ def _check_spec_value_shape(f: dict, structured: dict | None) -> str | None:
     """
     if str(f.get("type") or "") not in _SPEC_TYPES:
         return None
+    # ④ 类型错配：布尔/选项值不构成"超出规格范围"。
+    # **统一类型闸门（B1-12）必须先于"取值"判定** —— 否则档位由措辞决定（见
+    # `_declared_boolean_literal` 的说明）。
+    boolean_literal = _declared_boolean_literal(f)
+    if boolean_literal is not None:
+        return _boolean_type_mismatch_reason(boolean_literal)
     value = _declared_spec_value(f)
     if not value:
         return None  # 取不到值 ⇒ 判不了 ⇒ fail-open
     low = value.strip().lower()
-    # ④ 类型错配：布尔/选项值不构成"超出规格范围"
     if low in _BOOLEANISH:
-        return (
-            f"声明的实测值「{value}」为勾选/布尔形态，不构成数值超差"
-            f"（疑似类型错配：应归 completeness/equipment_state 而非 param_out_of_spec）"
-        )
+        return _boolean_type_mismatch_reason(value)
     # ② 列串位：日期形态出现在"实测值"位置
     if _DATEISH_RE.search(value):
         return (
