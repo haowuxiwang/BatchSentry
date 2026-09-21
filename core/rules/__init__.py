@@ -175,6 +175,25 @@ async def analyze_cross_page(
             pass
     llm_findings = await _llm_based_check(summary, job_id=job_id, user_rules=user_rules)
 
+    # B1-1 同根因聚合（降噪）：单个 OCR 误读会在每个时间点各产 1 条 finding
+    # （真实 p08「进料压力」7 个时间点 7 条同根因）。聚合**只对**携带派生键
+    # （`finding_aggregate.AGG_KEY`，由判定点 `make_oos_finding` 挂上）的条目生效，
+    # 其余逐字节原样通过。合并留痕：明细而非计数（见 aggregate_by_root_cause）。
+    from core.rules.finding_aggregate import aggregate_by_root_cause
+    n_before = len(rule_findings)
+    rule_findings, merged_rows = aggregate_by_root_cause(rule_findings)
+    if merged_rows:
+        for row in merged_rows:
+            logger.info(
+                f"[{job_id}] B1-1 aggregated {row['count']} same-root-cause findings "
+                f"→ 1: p{row['page']} {row['type']} {row['subject']} "
+                f"(cause={row['cause']}, severities={row['severities']})"
+            )
+        logger.info(
+            f"[{job_id}] B1-1 root-cause aggregation: {n_before} → {len(rule_findings)} "
+            f"rule-layer findings ({len(merged_rows)} groups merged)"
+        )
+
     all_findings = rule_findings + llm_findings
     if progress_cb:
         try:

@@ -71,3 +71,50 @@ class TestAnalyzeCrossPageEntry:
         }]
         result = await analyze_cross_page([page], job_id="t")
         assert isinstance(result, list)
+
+
+class TestEntryPointAggregationWiring:
+    """B1-1：同根因聚合必须**真的接在主入口上**（否则机制存在但从不生效）。
+
+    这层护栏专门覆盖"接线被漏掉/被回退"——单测里直接调
+    ``aggregate_by_root_cause`` 全绿而入口未接线是**最易发生的假绿**。
+    """
+
+    @pytest.mark.asyncio
+    async def test_p8_fanout_is_aggregated_at_entry_point(self):
+        """入口产出里，同一列 7 个时间点的同根因越界必须**只剩 1 条**。"""
+        times = ("10:38", "11:34", "12:37", "13:36", "14:39", "15:34", "16:22")
+        page = _page(8)
+        page["data"]["steps"] = [{
+            "step_no": 3,
+            "measurements": [
+                {"time": t, "values": {"进料压力": {
+                    "spec": "3.0-5.0bar", "actual": "46",
+                    "unit": "bar", "value_source": "handwritten"}}}
+                for t in times
+            ],
+        }]
+        result = await analyze_cross_page([page], job_id="t")
+        oos = [f for f in result if f.get("type") == "param_out_of_spec"]
+        assert len(oos) == 1, f"入口未聚合，得到 {len(oos)} 条"
+        assert "在 7 个时间点（10:38、11:34、12:37、13:36、14:39、15:34、16:22）" \
+            in oos[0]["description"]
+        # 留痕：成员明细仍在 ocr_text 里
+        assert oos[0]["ocr_text"].count("actual=46") == 7
+
+    @pytest.mark.asyncio
+    async def test_distinct_values_still_yield_multiple_findings(self):
+        """反向对照：取值不同 ⇒ 入口不得把它们并成一条。"""
+        page = _page(8)
+        page["data"]["steps"] = [{
+            "step_no": 3,
+            "measurements": [
+                {"time": "10:38", "values": {"进料压力": {
+                    "spec": "3.0-5.0bar", "actual": "46", "unit": "bar"}}},
+                {"time": "11:34", "values": {"进料压力": {
+                    "spec": "3.0-5.0bar", "actual": "47", "unit": "bar"}}},
+            ],
+        }]
+        result = await analyze_cross_page([page], job_id="t")
+        oos = [f for f in result if f.get("type") == "param_out_of_spec"]
+        assert len(oos) == 2
