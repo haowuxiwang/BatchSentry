@@ -51,14 +51,34 @@ if __name__ == "__main__":
     # 一个"看不见退出原因"的崩溃窗口。捕获后打印可操作信息再退出
     # (退出码 1, Electron 端 waitForServer 会超时报错并弹窗)。
     try:
-        uvicorn.run(
-            "main:app",
-            host=host,
-            port=port,
-            log_level="info",
-            reload=False,
-            workers=1,
+        # 为什么不用 `uvicorn.run(...)`：它在内部自建 `Server` 且**不返回引用**，
+        # 于是 `/api/shutdown` 永远拿不到 Server ⇒ 没有"请求进程优雅退出"的通路，
+        # 关停只能靠 Electron 强杀（Windows 上 = TerminateProcess，Python 侧一行
+        # 不跑，`close_db()` 永不执行）。显式建 Config/Server 并注入回调，
+        # 语义与 `uvicorn.run` 完全等价（它做的正是"建 Config → 建 Server → run"）。
+        import main as app_module
+
+        server = uvicorn.Server(
+            uvicorn.Config(
+                app_module.app,
+                host=host,
+                port=port,
+                log_level="info",
+                reload=False,
+                workers=1,
+            )
         )
+
+        def _request_should_exit() -> None:
+            """请求 uvicorn 优雅关停（其公开契约：`should_exit = True`）。
+
+            与直接杀进程的区别：uvicorn 会先停止收新连接、等 in-flight 响应写完，
+            再执行 lifespan 的 yield 后部分 —— `close_db()` 因此得以运行。
+            """
+            server.should_exit = True
+
+        app_module.bind_shutdown_trigger(_request_should_exit)
+        server.run()
     except OSError as e:
         message = str(e)
         print(

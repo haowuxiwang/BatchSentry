@@ -12,7 +12,7 @@
  *   2. pre-flight port check (58765 must be free or owned by us)
  *   3. spawn pbc-server.exe + poll /health until ready (up to 30s)
  *   4. splash → main window, load the app URL
- *   5. on quit: POST /api/shutdown → wait 2s → SIGTERM → taskkill /T /F fallback
+ *   5. on quit: POST /api/shutdown (后端自行优雅退出) → 等端口释放 → 超时才 taskkill /T /F
  */
 
 const { app, BrowserWindow, shell, dialog, Menu } = require("electron");
@@ -67,7 +67,18 @@ function bootLog(line) {
     // 日志尽力而为，绝不阻断启动流程
   }
 }
-const SHUTDOWN_GRACE_MS = 2500; // wait for /api/shutdown to complete
+// 优雅关闭的时间预算（v1.2.0 重写）。
+// 旧实现 = "发 /api/shutdown → 固定 sleep 2.5s → SIGTERM →（疑似）taskkill 兜底"，
+// 两个已实证的缺陷：
+//   ① Windows 上 Node 的 SIGTERM 等价于 TerminateProcess，**不执行任何 Python 代码**
+//      ⇒ uvicorn 的 lifespan 收尾从不运行、`close_db()` 不执行、SQLite -wal/-shm 残留
+//      （实测 devlogs/_verify/probe_shutdown_semantics.py）；
+//   ② 兜底条件写的是 `!pythonProcess.killed`，而 Node 的 `killed` 在**信号发出时**
+//      就置真（语义是"已发送信号"，不是"已退出"）⇒ 条件恒假 ⇒ `taskkill /T /F`
+//      是**死代码**；复用孤儿路径（pythonProcess 为 null）更是整体跳过终止。
+// 现在：请求优雅退出 → 按**可观测的端口释放**等待 → 超时才升级强杀。
+const SHUTDOWN_EXIT_WAIT_MS = 6000; // 等后端自行（优雅）退出的上限
+const SHUTDOWN_KILL_WAIT_MS = 3000; // 强杀后再等端口释放的上限
 
 // robustness-G1: 看门狗 — 后端运行中自崩/僵死时自动重启。
 // 探测间隔 15s，连续失败 3 次（约 45s 无响应）判定崩溃。
@@ -305,16 +316,11 @@ function startWatchdog() {
     watchdogRestarting = true;
     console.error("[BatchSentry] Watchdog: backend unhealthy, restarting...");
     try {
-      if (pythonProcess && !pythonProcess.killed) {
-        try {
-          if (process.platform === "win32") {
-            execSync(`taskkill /pid ${pythonProcess.pid} /T /F`, { stdio: "ignore" });
-          } else {
-            pythonProcess.kill("SIGKILL");
-          }
-        } catch {
-          // 进程可能已自行退出
-        }
+      // 存活判据必须是 exitCode/signalCode（见 childAlive）；这里旧写法用了
+      // `!pythonProcess.killed`，与 gracefulShutdown 里那处同源错误 —— 已收敛到
+      // `childAlive` + `killProcessTree`，taskkill 逻辑全仓只剩一处实现。
+      if (childAlive(pythonProcess)) {
+        killProcessTree(pythonProcess.pid);
       }
       pythonProcess = null;
       await new Promise((r) => setTimeout(r, WATCHDOG_RETRY_DELAY_MS));
@@ -681,88 +687,158 @@ app.on("activate", () => {
 // ── Graceful shutdown ────────────────────────────────────────────────────
 
 /**
- * 优雅关闭流程：
- *   1. POST /api/shutdown — 让后端取消所有运行中的 pipeline task，写 error 状态
- *   2. 等待 2.5s 让后端完成清理
- *   3. SIGTERM 软终止（让 uvicorn lifespan 执行 close_db）
- *   4. 如果 3s 后进程仍存活，taskkill /T /F 强杀（兜底）
+ * 优雅关闭流程（v1.2.0 重写，与实测对齐）：
+ *   1. POST /api/shutdown —— 后端取消在飞 pipeline task（写 error + audit_log），
+ *      并在响应写回后**请求自己的 uvicorn 优雅关停**（响应体里的 exit_requested）。
+ *   2. 按**端口释放**等待后端自行退出（上限 SHUTDOWN_EXIT_WAIT_MS）。
+ *      "优雅"的判据是后端跑完了 lifespan 收尾（close_db），不是"我们发过什么信号"。
+ *   3. 超时未退 ⇒ `taskkill /pid <pid> /T /F`（本实例子进程与**复用孤儿**一视同仁），
+ *      再等端口释放；仍不放就明确报错，不假装成功。
  *
- * 这样可以保证：
- * - 正在运行的 job 被标记为 error（而不是永远卡在 ocr_running）
- * - 数据库连接正常关闭（避免 SQLite WAL 残留）
- * - audit_log 中有完整的关闭记录
+ * 旧实现声称的三条保证**都不成立**（2026-09-21 实测，见下），故连同注释一起重写：
+ *   - "数据库连接正常关闭"：旧 Step 3 的 SIGTERM 在 Windows 上就是 TerminateProcess，
+ *     不执行任何 Python 代码 ⇒ `close_db()` 从不运行、-wal/-shm 原样残留。
+ *   - Step 4 的强杀兜底是**死代码**：条件 `!pythonProcess.killed` 恒假（Node 的
+ *     `killed` 表示"信号已发出"，与"已退出"无关）；复用孤儿路径
+ *     （pythonProcess 为 null）更是整体跳过终止。
+ *   - "audit_log 中有完整的关闭记录"：该表 `job_id` 是 NOT NULL，纯关闭事件本身
+ *     无处落库 —— 只有被取消的**在飞任务**才会留下记录。
  */
 async function gracefulShutdown() {
   if (isShuttingDown) return;
   isShuttingDown = true;
 
-  // Step 1: 请求后端优雅关闭
-  // 对抗审查 P2-K：目标进程 = 本实例 spawn 的 pythonProcess 或复用的
-  // 孤儿后端（reusedPid）。原实现以 `if (pythonProcess)` 为入口，
-  // reused 路径（pythonProcess 保持 null）完全跳过清理 → 孤儿永不关闭，
-  // 每次"强杀后重启"累积一个常驻 pbc-server.exe。
+  // 目标进程 = 本实例 spawn 的 pythonProcess，或复用的孤儿后端（reusedPid）。
   const targetPid = pythonProcess ? pythonProcess.pid : reusedPid;
-  if (targetPid) {
-    console.log(`[BatchSentry] Requesting backend graceful shutdown (pid=${targetPid})...`);
-    try {
-      await new Promise((resolve) => {
-        const req = http.request(
-          {
-            hostname: SERVER_HOST,
-            port: SERVER_PORT,
-            path: "/api/shutdown",
-            method: "POST",
-            timeout: 3000,
-          },
-          (res) => {
-            res.resume();
-            res.on("end", resolve);
-          },
-        );
-        req.on("error", () => resolve());
-        req.on("timeout", () => {
-          req.destroy();
-          resolve();
-        });
-        req.end();
-      });
-    } catch (err) {
-      console.warn("[BatchSentry] /api/shutdown failed:", err.message);
-    }
-
-    // Step 2: 等待后端清理（取消 task + 写 audit_log）
-    await new Promise((r) => setTimeout(r, SHUTDOWN_GRACE_MS));
-
-    // Step 3: SIGTERM 软终止（让 uvicorn 执行 lifespan 的 yield 后部分）
-    if (pythonProcess && !pythonProcess.killed) {
-      console.log("[BatchSentry] Sending SIGTERM to server...");
-      try {
-        // Windows 上 SIGTERM 等同于 TerminateProcess，但先尝试让进程自行退出
-        pythonProcess.kill("SIGTERM");
-      } catch {
-        // ignore
-      }
-
-      // Step 4: 等待 2s，如果仍存活则 taskkill /T /F 强杀
-      await new Promise((r) => setTimeout(r, 2000));
-      if (pythonProcess && !pythonProcess.killed) {
-        console.log("[BatchSentry] Force-killing server process tree...");
-        try {
-          if (process.platform === "win32") {
-            execSync(`taskkill /pid ${pythonProcess.pid} /T /F`, {
-              stdio: "ignore",
-            });
-          } else {
-            pythonProcess.kill("SIGKILL");
-          }
-        } catch {
-          // 进程可能已退出
-        }
-      }
-    }
+  if (!targetPid) {
     pythonProcess = null;
+    reusedPid = null;
+    return;
   }
+
+  console.log(`[BatchSentry] Requesting backend graceful shutdown (pid=${targetPid})...`);
+  const res = await requestBackendShutdown();
+  if (!res.exitRequested) {
+    // 后端没确认退出通道（旧产物，或后端被换成了不认识 exit_requested 的版本）。
+    // 必须**说出来**：否则"没有通道"会被读成"已经优雅退出了"。
+    console.warn(
+      "[BatchSentry] 后端未确认优雅退出通道 (exit_requested=false," +
+        ` status=${res.statusCode}) — 将依赖强杀兜底，close_db() 可能未执行。`,
+    );
+  }
+
+  if (await waitBackendGone(SHUTDOWN_EXIT_WAIT_MS, pythonProcess)) {
+    console.log("[BatchSentry] Backend exited gracefully (port released).");
+  } else {
+    console.warn(
+      `[BatchSentry] Backend still alive after ${SHUTDOWN_EXIT_WAIT_MS}ms; ` +
+        `force-killing process tree pid=${targetPid}...`,
+    );
+    killProcessTree(targetPid);
+    if (await waitBackendGone(SHUTDOWN_KILL_WAIT_MS, pythonProcess)) {
+      console.log("[BatchSentry] Backend killed; port released.");
+    } else {
+      console.error(
+        "[BatchSentry] Backend STILL alive after force-kill — port may remain occupied.",
+      );
+    }
+  }
+  pythonProcess = null;
   reusedPid = null;
+}
+
+/**
+ * `POST /api/shutdown`，并把"后端是否确认有优雅退出通道"带回来。
+ *
+ * 旧实现用 `res.resume()` 把响应体丢掉了，于是**没法知道**后端到底照做没有 ——
+ * 只能假定它优雅了。现在读响应体的 `exit_requested` 作为判据。
+ */
+function requestBackendShutdown() {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (v) => {
+      if (!settled) {
+        settled = true;
+        resolve(v);
+      }
+    };
+    const req = http.request(
+      {
+        hostname: SERVER_HOST,
+        port: SERVER_PORT,
+        path: "/api/shutdown",
+        method: "POST",
+        timeout: 5000,
+      },
+      (res) => {
+        let body = "";
+        res.setEncoding("utf8");
+        res.on("data", (c) => {
+          body += c;
+        });
+        res.on("end", () => {
+          let exitRequested = false;
+          try {
+            exitRequested = JSON.parse(body).exit_requested === true;
+          } catch {
+            // 响应不是 JSON（旧版本/异常）⇒ 保持 false，由调用方告警
+          }
+          finish({
+            ok: res.statusCode === 200,
+            statusCode: res.statusCode,
+            exitRequested,
+          });
+        });
+      },
+    );
+    req.on("error", (err) => {
+      console.warn("[BatchSentry] /api/shutdown failed:", err.message);
+      finish({ ok: false, statusCode: null, exitRequested: false });
+    });
+    req.on("timeout", () => {
+      req.destroy(); // 触发 error → finish
+    });
+    req.end();
+  });
+}
+
+/**
+ * 子进程是否**仍在运行**。
+ *
+ * ⚠️ 不要用 `!child.killed`：Node 的 `child.kill()` 在信号**发出后立刻**把 `killed`
+ * 置真（官方语义是"已成功发出信号"）。旧代码拿它当"还活着"的判据 ⇒ 条件恒假 ⇒
+ * `taskkill` 兜底成了死代码。权威判据是 `exitCode` / `signalCode`。
+ */
+function childAlive(child) {
+  return !!child && child.exitCode === null && child.signalCode === null;
+}
+
+/**
+ * 后端是否**确实**退出了 —— 判据取"端口已释放"，因为那才是用户可观测的事实。
+ * 只判"我们发过信号"没有判别力；复用孤儿路径没有 child 对象，只剩端口可判。
+ */
+async function waitBackendGone(timeoutMs, child) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const gone = (await isPortFree(SERVER_PORT)) && !childAlive(child);
+    if (gone) return true;
+    if (Date.now() >= deadline) return false;
+    await new Promise((r) => setTimeout(r, 250));
+  }
+}
+
+/** 强杀进程树（本实例子进程与复用孤儿共用）。只在"优雅路径确实超时"后调用。 */
+function killProcessTree(pid) {
+  if (!pid) return;
+  try {
+    if (process.platform === "win32") {
+      execSync(`taskkill /pid ${pid} /T /F`, { stdio: "ignore" });
+    } else {
+      process.kill(pid, "SIGKILL");
+    }
+  } catch {
+    // 进程可能已退出 —— 由调用方按端口释放复核，不在 catch 里下结论
+  }
 }
 
 app.on("before-quit", async (e) => {

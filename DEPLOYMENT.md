@@ -241,10 +241,33 @@ Startup recovery: 3 stuck jobs marked as error (ids: [...])
 
 ### 优雅关闭
 
-Electron 退出前调用 `/api/shutdown` 端点：
-1. 取消所有活跃的 pipeline task
-2. 等待 2 秒让正在进行的 OCR/LLM 调用完成
-3. 返回关闭确认
+关闭窗口时 Electron 走这条链（`electron/main.js::gracefulShutdown`）：
+
+1. `POST /api/shutdown` —— 后端取消所有活跃 pipeline task（写 error 状态 +
+   audit_log），**并在响应写回后请求自己的 uvicorn 优雅关停**；
+2. 按**端口释放**等待后端自行退出（上限 6s）。“优雅”的判据是后端跑完
+   lifespan 收尾（即 `close_db()`，日志里会出现 `Shutdown complete.`），
+   而不是“我们发过什么信号”；
+3. 超时未退 ⇒ `taskkill /pid <pid> /T /F` 强杀（**本实例子进程与复用孤儿后端
+   一视同仁**），再等端口释放；仍不放就明确报错。
+
+响应体里的 `exit_requested` 表示后端是否确认拥有该通道：
+
+```json
+{"status": "shutting_down", "cancelled_tasks": 0, "exit_requested": true}
+```
+
+`exit_requested=false` 表示后端没有绑定退出通道（例如把它当库导入、或换了旧版本
+后端），此时 Electron 会打一条 warn 并依赖强杀兜底 —— **“没有通道”绝不等于
+“已经优雅退出了”**。
+
+为什么要这么绕（都是实测踩出来的，`devlogs/_verify/probe_shutdown_semantics.py`）：
+
+| 旧写法 | 实际后果 |
+|---|---|
+| 只发 `/api/shutdown`（端点当时不触发退出） | 进程根本不退，端口与 DB 句柄一直占着 |
+| 靠 `kill('SIGTERM')` 收尾 | Windows 上等价于 TerminateProcess，**不执行任何 Python 代码** ⇒ `close_db()` 从不运行、SQLite `-wal`/`-shm` 残留（实测 494 KB） |
+| 兜底条件 `!pythonProcess.killed` | Node 的 `killed` 在**信号发出时**即置真（语义是“已发送信号”）⇒ 条件恒假 ⇒ `taskkill` 兜底是**死代码**；复用孤儿路径（`pythonProcess` 为 null）更是整体跳过终止 |
 
 ### 数据库维护
 

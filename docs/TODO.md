@@ -2284,3 +2284,49 @@
   **验收**：`grep -c "B1-10\|B5-4\|B4-3\|B4-5\|B1-16" CHANGELOG.md` ≥ 5；
   且 `[1.2.0]` 段里能逐条找到上列 11 个条目号；
   且 `B4-3`/`B4-5`/`B5-4` 三条在 `docs/TODO.md` 里为 `[x]` 且有完成标记。
+
+### B9 运行时关闭语义（Round 54 对抗性审查产出，2026-09-21）
+
+- [x] **B9-1 「优雅关闭」名不副实：端点不让服务退出 + 强杀兜底是死代码 + 复用孤儿永不终止**（P1，已修）
+  **实测**（`devlogs/_verify/probe_shutdown_semantics.py`，多信号交叉）：
+  `POST /api/shutdown` 返回 200 后 **15s 内进程仍存活、`/health` 仍 200、端口仍占用**；
+  随后 `terminate()` 在 **0.02s** 内杀掉它（`returncode=1`），
+  `data.db-wal` **494 432 B** / `-shm` **32 768 B** **原样残留** ⇒ `close_db()` 从未执行。
+  根因四条：① 端点只取消任务、不触发退出；② `uvicorn.run()` 不返回 `Server`
+  ⇒ 端点**没有**请求退出的通路；③ Windows 上 Node 的 `kill('SIGTERM')` =
+  `TerminateProcess`，Python 侧一行不跑；④ 兜底条件 `!pythonProcess.killed` 恒假
+  （Node 的 `killed` = "信号已发出"），且复用孤儿路径 `pythonProcess === null`
+  ⇒ Step3/4 整体跳过。
+  **修复**：`main.py` 退出通道（响应带 `exit_requested`，延后 0.3s 触发）；
+  `server.py` 显式建 `uvicorn.Server` 并注入 `should_exit`；`electron/main.js` 重写为
+  「请求 → 按端口释放等待 → 超时才强杀」，新增 `childAlive()`/`killProcessTree(targetPid)`；
+  看门狗同源缺陷一并修、`taskkill` 收敛到一处。
+  **验证**：源码模式实测进程 **1.0s 自行退出、returncode 0**、日志出现
+  `main: Shutdown complete.`；护栏 12 条 + **变异 9/9 CAUGHT**；
+  全量 **3042 passed / 2 failed**（两条为重建前预期红灯）。
+
+- [ ] **B9-2 「整机关闭」没有自动化 e2e**（P2，2026-09-21 登记）
+  现在只有**进程级**探针（直接跑 `pbc-server.exe` 并 POST `/api/shutdown`）与
+  **静态**判据（`tests/unit/test_shutdown_graceful_contract.py`）。
+  **Electron 整机路径**（关窗 → `before-quit` → `gracefulShutdown` → 后端退出 → 端口释放）
+  没有任何可重复的自动化验证 —— 而它才是用户真正走的那条路。
+  可做法：`taskkill /pid <BatchSentry.exe> `（**不带 `/F`** = 投递 WM_CLOSE，等价于用户关窗），
+  随后断言 `pbc-server.exe` 已退出、端口已释放、日志有 `Shutdown complete.`。
+  ⚠️ 会拉起 GUI 窗口，须显式声明并考虑在 CI 中跳过。
+
+- [ ] **B9-3 关闭事件本身无审计落库**（P3，2026-09-21 登记）
+  `audit_log.job_id` 是 **NOT NULL** ⇒ 纯关闭事件（无在飞任务时）无处落库；
+  `gracefulShutdown` 旧注释里"audit_log 中有完整的关闭记录"**只对"有在飞任务"成立**。
+  措辞已收紧；若要真正可追溯，需要一张独立的 shutdown 审计表（或在 `jobs` 之外新增
+  `system_events`）。**非必须**，但 GMP 场景下"谁在什么时候关掉了系统"常被问到。
+
+- [ ] **B9-4 dev 模式下的 e2e 隔离不成立（`config.json` 压过环境变量）**（P2，2026-09-21 实测）
+  `config.py::_load_json_config()` **无条件把 config.json 的值写进 `os.environ`**
+  （设计如此：压过"残留 env 值"，防重启回滚），于是注入 `DATABASE_PATH` **无效** ——
+  实测源码模式跑 e2e 时数据落在仓库 `data/pharma.db`（日志 `database_path:` 可证），
+  而非我指定的临时目录。**冻结版不受影响**（`%APPDATA%` 隔离已实测有效）。
+  ⇒ 写"源码态"e2e 时必须知道这一点，否则会**静默污染**开发库
+  （属 PITFALLS §二十九「隔离须覆盖被测代码自身的加载器」同一类）。
+  待办：给 `config.py` 一个**显式**的配置路径覆盖开关（如 `PBC_CONFIG_PATH`），
+  或让 `database_path` 接受绝对路径 env 覆盖（与冻结版口径一致）。
+

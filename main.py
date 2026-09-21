@@ -153,6 +153,57 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+
+# ── 优雅退出通道（v1.2.0）────────────────────────────────────────────────
+# 为什么必须有这一层：`/api/shutdown` 以前**只取消任务、不让服务退出**，于是
+# 关停只能靠 Electron 侧的 SIGTERM —— 而 Windows 上 Node 的 `kill('SIGTERM')`
+# 等价于 TerminateProcess，**不执行任何 Python 代码** ⇒ uvicorn 的 lifespan
+# 收尾（`close_db()`）从不运行，SQLite 的 `-wal`/`-shm` 原样残留。
+# 2026-09-21 实测（`devlogs/_verify/probe_shutdown_semantics.py`，被测 = 产物内嵌
+# exe）：`POST /api/shutdown` 返回 200 后进程仍存活、`/health` 仍 200、端口仍占用；
+# 随后 `terminate()` 0.02 s 被杀，`data.db-wal` 494 KB 原样留下。
+# 现在由 `server.py` 注入 uvicorn 的 `Server` 对象，端点直接请求 `should_exit`
+# ⇒ 走 uvicorn 自己的关停：停止收新连接 → 等 in-flight 响应写完 → 收尾 lifespan
+# → `close_db()`。这样"优雅关闭"才名副其实，Electron 侧也不再需要抢先强杀。
+_shutdown_trigger = None
+
+# 延后一拍再触发退出：退出请求必须在**本次响应写回之后**才生效，否则 uvicorn
+# 的关停流程可能在响应写完前开始收连接（客户端拿到 RST 而不是 200）。
+_SHUTDOWN_EXIT_DELAY_S = 0.3
+
+
+def bind_shutdown_trigger(trigger) -> None:
+    """注入"请求进程优雅退出"的回调（由 `server.py` 绑定 uvicorn `Server`）。
+
+    未绑定（单测 / TestClient / 被当作库导入）时端点保持"只取消任务"的旧行为，
+    但**必须让调用方看得出来**：响应里带 `exit_requested`。否则"没有退出通道"
+    会被读成"已经优雅退出了"—— 这正是本通道要修的那类自欺。
+    """
+    global _shutdown_trigger
+    _shutdown_trigger = trigger
+
+
+def _fire_shutdown_trigger(trigger) -> None:
+    """执行退出回调；失败必须留证据（静默失败 = 服务永不退出）。"""
+    try:
+        trigger()
+    except Exception as e:  # noqa: BLE001 — 退出通道坏了不能让异常消失在回调里
+        logger.error(f"[shutdown] exit trigger failed: {e}", exc_info=True)
+
+
+def _schedule_shutdown_exit() -> bool:
+    """排程"进程优雅退出"。返回是否**确实**排上了（无触发器 ⇒ False）。"""
+    import asyncio
+
+    trigger = _shutdown_trigger
+    if trigger is None:
+        return False
+    asyncio.get_running_loop().call_later(
+        _SHUTDOWN_EXIT_DELAY_S, _fire_shutdown_trigger, trigger
+    )
+    return True
+
+
 # Phase 8 adversarial review: tightened CORS — only 127.0.0.1 variants.
 # Removed localhost:* to align with project constraint (127.0.0.1 only).
 # Electron renderer loads http://127.0.0.1:58765/, dev server uses 8000.
@@ -400,11 +451,17 @@ async def shutdown_endpoint(request: Request):
     """Electron 退出前调用此端点，让后端优雅关闭。
 
     流程：
-      1. 标记正在运行的 pipeline task 为取消（asyncio.CancelledError）
-      2. 等待 2s 让 in-flight LLM/OCR 调用完成或超时
-      3. close_db() 由 lifespan 的 yield 后部分处理
+      1. 取消正在运行的 pipeline task（asyncio.CancelledError）
+      2. 有在飞任务时等 2s，让它们写 error 状态 + audit_log
+      3. **请求进程优雅退出**（v1.2.0 新增）：走 uvicorn 自己的关停流程，
+         lifespan 的 yield 后部分随即执行 `close_db()`。
 
-    Electron main.js 在 before-quit 事件中 fetch 此端点，然后才 kill 进程。
+    步骤 3 的意义：在此之前本端点**只取消任务、不让服务退出**，实际关停靠
+    Electron 侧 SIGTERM —— Windows 上那是 TerminateProcess，Python 侧一行不跑，
+    `close_db()` 永不执行（实测见 `devlogs/_verify/probe_shutdown_semantics.py`）。
+
+    响应带 `exit_requested`：`False` 表示**当前进程没有绑定退出通道**
+    （单测/TestClient/被当库导入），调用方不能把它读成"已经优雅退出了"。
     """
     import asyncio
     from core.pipeline import _pipeline_tasks
@@ -427,8 +484,18 @@ async def shutdown_endpoint(request: Request):
     # 等待 2s 让 task 清理（写 error 状态 + audit_log）
     if _pipeline_tasks:
         await asyncio.sleep(2)
-    logger.info("[shutdown] Graceful shutdown preparation complete")
-    return {"status": "shutting_down", "cancelled_tasks": cancelled_n}
+    # 最后一步：请求进程优雅退出（uvicorn 关停 → lifespan 收尾 → close_db）。
+    # 放在最后 —— 先让响应能写回，再让进程走。
+    exit_requested = _schedule_shutdown_exit()
+    logger.info(
+        f"[shutdown] Graceful shutdown preparation complete "
+        f"(exit_requested={exit_requested})"
+    )
+    return {
+        "status": "shutting_down",
+        "cancelled_tasks": cancelled_n,
+        "exit_requested": exit_requested,
+    }
 
 
 @app.get("/api/health/downstream")

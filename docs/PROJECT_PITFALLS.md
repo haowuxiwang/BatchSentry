@@ -1422,3 +1422,100 @@ RM 具名：**PID `3544` `WorkBuddy.exe`**（`daemon-app-server-entry.js --stdio
 **踩坑痕迹**：`devlogs/_verify/probe_b113f.py`（重跑两次，数字不同）、
 `devlogs/_verify/diag_b116_sentinel.py`（脚本文件 vs `python -c` 的对照）、
 `devlogs/_verify/mutate_b116.log`（11:45–11:49 变异窗口）、`devlogs/_verify/b116_replay_result.json`。
+
+## 三十四、"关闭"类语义的五个陷阱（B9，2026-09-21 实测）
+
+起因是"当前构建物能否优雅关闭"这个问题。实测答案：**不能**，而且原因有**四层**，
+每一层都能独立让"优雅关闭"落空。本节的价值不在修复本身，而在这些**可迁移的判据形状**。
+
+### A. **名字叫 shutdown 的端点，不一定真的会让服务关闭**
+
+`POST /api/shutdown` 返回 `200 {"status":"shutting_down"}` —— 读起来像"已经在关了"，
+实际上它**只取消任务**。判据不能取"接口返回了什么"，只能取**外部可观测状态**：
+
+| 观测点 | 旧实现 | 新实现 |
+|---|---|---|
+| 响应返回后 15s，进程还在吗 | **在** | 已退出（1.0s，rc=0） |
+| `/health` 还通吗 | **通（200）** | 不可达 |
+| 端口释放了吗 | **没** | 释放 |
+| `data.db-wal` / `-shm` | **494 432 B / 32 768 B 残留** | 被 checkpoint 掉 |
+| 服务端日志 | 无 `Shutdown complete.` | 有（= lifespan 尾段跑过、`close_db()` 执行） |
+
+⇒ **规矩**：凡"关闭/停止/清理"类端点，判据必须是**外部状态**（进程表、端口、锁文件、
+数据库文件、日志），而不是端点自己的返回值。**"它说它关了"不是证据。**
+
+### B. 用 `killed` 判断子进程存活 ⇒ 兜底逻辑成了**死代码**
+
+Node 的 `child.kill()` 在**信号发出时**就把 `child.killed` 置真 —— 官方语义是
+"已成功发出信号"，**与"进程是否已退出"无关**。于是这段：
+
+```js
+pythonProcess.kill("SIGTERM");
+await sleep(2000);
+if (pythonProcess && !pythonProcess.killed) { taskkill /T /F }   // ← 恒假
+```
+
+**永远不会执行 `taskkill`**。权威判据是 `exitCode === null && signalCode === null`。
+⚠️ 它与本项目已修的"空断言/恒真判据"是**同一族错误**：一个恒假的守卫，与一个恒真的
+守卫一样**零判别力**，区别只是它更隐蔽（写成"兜底"，读起来像是保守做法）。
+
+### C. 有两条终止路径时，兜底条件只覆盖其中一条 ⇒ 另一条**永远不被清理**
+
+同一函数里有"本实例 spawn 的子进程"与"复用的孤儿后端"两种目标，兜底却写成
+`if (pythonProcess && ...)` —— 复用路径 `pythonProcess === null` ⇒ 分支整体跳过。
+
+⇒ **规矩**：写"终止/清理"逻辑时，先**枚举所有目标来源**，再检查守卫条件是否覆盖**每一种**。
+判据要落在**统一的目标变量**上（本例是 `targetPid`），而不是落在"某一种来源的对象"上。
+本轮的护栏因此直接断言 `killProcessTree(targetPid)` 出现在函数体里 ——
+**只断言"函数里有 taskkill"是不够的**（那就又变成能被别处满足的弱判据，§二十八）。
+
+### D. Windows 上的 `SIGTERM` **不是**"礼貌请求"，它就是 `TerminateProcess`**
+
+于是"先 SIGTERM 让进程自己优雅退出"这套（POSIX 上成立的）写法在 Windows 上**不成立**：
+目标进程的**任何** Python/JS 代码都不会执行。真要优雅，必须让被测进程**自己决定退出**：
+
+```python
+# 服务端：把"请求退出"做成显式契约，并把能力写进响应，便于调用方区分两种失败
+_shutdown_trigger: Callable[[], None] | None = None   # 由入口注入 uvicorn Server
+# 触发必须**晚于响应写回**（0.3s），否则关停流程可能在响应写完前收连接 → 客户端拿到 RST
+loop.call_later(_SHUTDOWN_EXIT_DELAY_S, _fire, trigger)
+return {"status": "shutting_down", "exit_requested": trigger is not None}
+```
+
+⚠️ 连带教训：**"没有这个能力"必须能被调用方看见**。旧实现用 `res.resume()` 把响应体
+丢掉，于是只能**假定**后端优雅了；`exit_requested=false` 这个字段就是用来消灭这种假定的。
+
+### E. 隔离失效的第三种形态：**被测代码自己的配置加载器**绕过你注入的环境变量
+
+给探针注入 `DATABASE_PATH=<临时目录>` 却没生效 —— 因为 `config.py::_load_json_config()`
+**无条件把 `config.json` 的值写进 `os.environ`**（设计如此：压过"残留 env 值"）。
+结果：源码态 e2e 的数据落在**仓库的 `data/pharma.db`**，而探针"以为自己隔离了"。
+
+⇒ 与 §二十九（`find_dotenv()` 不受 cwd 影响）**同源**，可归纳成一条通用规矩：
+**"我设置了环境变量"不等于"被测代码读到了它"**。做隔离时必须**从被测程序自己的日志/接口
+读回生效值**（本例：日志里的 `database_path:`），并把它写进探针输出 —— 让"没隔离成"
+**可见**，而不是用一个空的隔离目录清单冒充"干净"。
+（冻结版不受影响：`%APPDATA%` 重定向实测有效 —— 所以这条只在**源码态**成立，正因如此更隐蔽。）
+
+### F. 顺带：护栏的**"视图"**必须与判据匹配，否则会造出恒真的空断言
+
+本轮给 JS 写了静态护栏，踩了两个自造的坑，都记下来：
+
+1. **判"代码里有没有被禁写法"必须先去注释**：注释里提到 `!child.killed` 会让
+   `.killed not in src` 误红。修法**不是**给文件加白名单（那会让整份文件失去保护，
+   §三十一 E 的老坑），而是把判据面对的文本**归一化**（剥注释/字符串）。
+   但归一化本身要**自检**：若它把源码吃掉，所有断言都会**空转**。
+   ⚠️ 自检阈值别写成"代码视图 ≥ 原文 50%" —— 本文件注释密度高，实测代码视图约 **48%**，
+   这条自检会拿一个**正确**的实现报假红（我第一版就是这么被打回来的）。
+   **比率只配当 sanity 下限，语义保护要靠"关键函数体是否仍可定位"。**
+2. **判"数命令字面量"必须保留字符串**：`taskkill` 写在模板字符串里，
+   用"去注释+去字符串"的视图去数它，结果恒为 0 —— **恒真的空断言**（§二十六）。
+   ⇒ 同一个文件需要**两种视图**：功能 token 用"去字符串"视图，命令字面量用"留字符串"视图。
+
+**踩坑痕迹**：`devlogs/_verify/probe_shutdown_semantics.py`（多信号探针，含"源码/产物"两种模式）、
+`devlogs/_verify/probe_shutdown_source.log`（修复后日志，含 `Shutdown complete.`）、
+`devlogs/_verify/cmp_mainjs.py`（产物 `electron/main.js` 与源码逐字节一致 ⇒
+对旧产物做整机 e2e 的结论对当前源码同样成立）、
+`tests/unit/test_shutdown_graceful_contract.py`（12 条护栏）、
+`devlogs/_verify/mutate_shutdown.py` + `mutate_shutdown.log`（9/9 CAUGHT）。
+

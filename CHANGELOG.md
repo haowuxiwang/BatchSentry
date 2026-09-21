@@ -25,6 +25,57 @@
 > 另：`e2e_run.py` 在**仓库根**，文档里长期写作 `tests/e2e_run.py` 是**笔误**
 > （实测该文件历史上从未在 `tests/` 下存在过），本版一并更正。
 
+### Fixed (Round 54, 2026-09-21 — 优雅关闭：从「名义上」变成「可证」)
+
+> 起因是上一轮遗留的问题之一「当前构建物能否优雅关闭」。答案是**不能** —— 见实测。
+> 本段所有数字都来自 `devlogs/_verify/probe_shutdown_semantics.py`（多信号交叉：
+> 进程存活 / 端口状态 / SQLite `-wal`·`-shm` / 服务端日志 / 退出码）。
+
+- **🔴 `/api/shutdown` 不会让服务退出**：旧产物上 `POST /api/shutdown` 返回
+  `200 {"status":"shutting_down","cancelled_tasks":0}`，之后 **15s 内进程仍存活、
+  `/health` 仍 200、端口仍被占用**。端点只取消任务，真正关停全靠 Electron 侧信号。
+- **🔴 Windows 上「SIGTERM 收尾」是假的**：Node 的 `child.kill('SIGTERM')` 在
+  Windows 上等价于 `TerminateProcess`，**不执行任何 Python 代码** ⇒ uvicorn 的
+  lifespan 收尾从不运行、`close_db()` 不执行。实测强杀后
+  `data.db-wal` **494 432 B** / `data.db-shm` **32 768 B** **原样残留**
+  （干净关闭会把它们 checkpoint 掉）。`electron/main.js` 注释里"数据库连接正常关闭
+  （避免 SQLite WAL 残留）"与实测**不符**，已随代码一并重写。
+- **🔴 强杀兜底是死代码**：条件写成 `if (pythonProcess && !pythonProcess.killed)`，
+  而 Node 的 `killed` 在**信号发出时**即置真（官方语义是"已成功发出信号"，与
+  "进程已退出"无关）⇒ 前置 `kill()` 之后条件**恒假** ⇒ `taskkill /T /F` 从未执行。
+- **🔴 复用孤儿后端永不终止**：复用路径 `pythonProcess === null`，而 Step3/4 整体包在
+  `if (pythonProcess && ...)` 里 ⇒ 孤儿只被通知取消任务、从不被终止。实测该端点
+  不会让服务退出 ⇒ **孤儿必存活**，占着端口与 DB 句柄。
+- **修复（三处，根因优先）**：
+  1. `main.py`：新增退出通道 `bind_shutdown_trigger()` / `_schedule_shutdown_exit()`，
+     端点响应里带 **`exit_requested`**，让"没有通道"与"已经优雅退出"**可区分**；
+     触发器**延后 0.3 s** 执行 —— 退出必须晚于响应写回，否则 uvicorn 的关停流程
+     可能在响应写完前收连接（客户端拿到 RST 而不是 200）。
+  2. `server.py`：不再用 `uvicorn.run(...)`（它内部自建 `Server` 且**不返回引用**，
+     端点因此永远拿不到 Server），改为显式构造 `uvicorn.Config/Server` 并注入
+     `should_exit` 回调 —— 走 uvicorn 自己的关停：停收新连接 → 等 in-flight 响应
+     → 收尾 lifespan → `close_db()`。
+  3. `electron/main.js`：重写关闭流程为「请求优雅退出 → 按**端口释放**等待 →
+     超时才升级强杀」，新增 `childAlive()`（判 `exitCode`/`signalCode`）与
+     `killProcessTree(targetPid)`（本实例子进程与**复用孤儿**一视同仁），并解析响应体
+     的 `exit_requested`；**看门狗重启路径的同源缺陷**（`!pythonProcess.killed`）
+     一并修掉，`taskkill` 全仓收敛到**一处实现**。
+- **实测（源码模式，修复后）**：响应 `exit_requested: true`；进程 **1.0 s 自行退出、
+  returncode 0**；服务端日志出现 `main: Shutdown complete.`（= lifespan 尾段跑过、
+  `close_db()` 执行）；端口释放。对照旧产物：只能被 0.02 s 强杀、`-wal` 残留。
+- **护栏**：新增 `tests/unit/test_shutdown_graceful_contract.py`（**12 条**）。其中 JS 侧
+  是**静态**判据，刻意用「**取函数体 + 包围条件 + 相对位置**」而非全文找 token，并对源码做
+  **注释/字符串归一化**（护栏踩过"注释里提到被禁写法就被误判"的坑；给文件加白名单会让
+  整份文件失去保护，是更差的选项）。**变异验证 9/9 CAUGHT**。
+  ⚠️ 两处自我纠错留档：① 自检阈值原写"代码视图 ≥ 原文 50%"，把**正确**的剥注释实现
+  判红（本文件注释密度高，实测约 48%）⇒ 比率只是 sanity 下限，语义保护靠函数体存在性；
+  ② 数 `taskkill` 必须用"去注释、**留字符串**"的视图（命令字面量在模板字符串里），
+  否则是恒真的空断言。
+- **地面真值**：全量 `pytest tests/unit tests/integration` = **3042 passed / 2 failed**，
+  两条失败均为**重建前预期红灯**（产物仍 1.1.9 构建），非本次改动引入。
+- **顺序纪律**：本提交**先于**重建（否则 `bundle_manifest` 会把 `git_dirty` 记成 `true`，
+  产物无法自证出处）。
+
 ### Added / Fixed (Round 53, 2026-09-21 — P2 批次④：精度/准确性 + 配置与口径 + e2e 覆盖)
 
 - **B1-16 `_parse_time` 不认识「仅时刻 + 中文单位」与「N日H时M分」形态**（P2，精度）：
