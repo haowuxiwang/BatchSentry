@@ -18,7 +18,7 @@ import re
 import time
 from typing import TYPE_CHECKING
 
-from config import config
+from config import config, dev_config_credential_hint
 from llm.adapters import get_adapter
 from llm.adapters.base import ContentInput, append_text_part
 
@@ -335,6 +335,9 @@ class LLMClient:
                     raise LLMConfigError(
                         f"LLM call failed (non-retryable){ctx_tag}: "
                         f"{_mask_secrets(str(last_error))}"
+                        # B4-3：开发模式下把"你正在用仓库那份 config.json"说出来 ——
+                        # 否则 30014 与"凭据真失效"在文案上不可区分。
+                        f"{dev_config_credential_hint()}"
                     )
                 logger.warning(
                     f"LLM call attempt {attempt}/{retries} failed{ctx_tag}: "

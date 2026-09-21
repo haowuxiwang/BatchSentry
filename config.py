@@ -53,15 +53,58 @@ def _is_frozen() -> bool:
     return getattr(sys, "frozen", False)
 
 
-def _config_path() -> Path:
-    """返回 JSON 配置文件路径。
+# 配置来源标签（B4-3）：两份文件装的**不是同一把凭据**，必须能区分。
+CONFIG_SOURCE_REPO = "repo"        # 开发模式：仓库根 config.json
+CONFIG_SOURCE_APPDATA = "appdata"  # 冻结版：%APPDATA%/PBC/config.json
 
-    frozen 模式: %APPDATA%/PBC/config.json
-    开发模式: 项目根 config.json
+
+def config_source() -> tuple[str, Path]:
+    """当前生效配置的 ``(来源标签, 路径)`` —— **唯一**实现点。
+
+    frozen 模式: ``%APPDATA%/PBC/config.json``
+    开发模式: 仓库根 ``config.json``
+
+    ⚠️ 为什么要标签：实测两份文件装的**不是同一把凭据** —— 仓库那份是已吊销的
+    K1（报 ``401 {"code":30014,"message":"Token is invalid."}``），
+    ``%APPDATA%`` 那份才可用。只报"凭据错误"会让用户无法区分
+    "凭据真有问题"与"你用的是仓库里那份死 key"（B4-3）。
     """
     if _is_frozen():
-        return _app_data_dir() / "config.json"
-    return Path("config.json")
+        return CONFIG_SOURCE_APPDATA, _app_data_dir() / "config.json"
+    return CONFIG_SOURCE_REPO, Path("config.json")
+
+
+def config_search_paths(repo: Path | None = None) -> list[tuple[str, Path]]:
+    """**所有**可能装凭据的 config 路径（两条都要查）。
+
+    安全护栏若只读其中一条，在"只按装版使用"的机器上会把**生效值**判成
+    "不存在" ⇒ **漏报**（安全护栏的漏报比假阳性更糟，B4-3）。
+    "两条都要看"这件事收敛在这一处，脚本与自查都调它。
+    """
+    base = Path(repo) if repo is not None else Path(".")
+    return [
+        (CONFIG_SOURCE_REPO, base / "config.json"),
+        (CONFIG_SOURCE_APPDATA, _app_data_dir() / "config.json"),
+    ]
+
+
+def dev_config_credential_hint() -> str:
+    """开发模式下的显式提示；无需提示时返回空串（B4-3）。
+
+    开发模式报 ``30014``（Token is invalid）时，用户无从知道是凭据失效还是
+    "正在用仓库里那份已吊销的 key" —— 这条把两种情况**在文案上分开**，
+    而不是笼统报一个凭据错误。
+    """
+    label, path = config_source()
+    if label != CONFIG_SOURCE_REPO:
+        return ""
+    return (f"（开发模式正在使用仓库 {path} 中的凭据，它可能已吊销；"
+            f"冻结版使用的是 {_app_data_dir() / 'config.json'}）")
+
+
+def _config_path() -> Path:
+    """返回 JSON 配置文件路径 —— 委托 :func:`config_source`（单一实现点）。"""
+    return config_source()[1]
 
 
 def _persist_env_to_config(env_key: str, value: str) -> None:

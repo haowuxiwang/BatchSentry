@@ -29,6 +29,15 @@ import subprocess
 import sys
 from pathlib import Path
 
+# 仓库根入 sys.path，才能 import 项目模块（scripts/ 是 PEP 420 命名空间包，
+# 但没有 config.py 的同级副本）。用**本文件位置**推导，不依赖 cwd ——
+# 该脚本允许 `--repo DIR` 指向别处，靠 cwd 找 config 会在那种调用下失效。
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from config import config_search_paths  # noqa: E402
+
 # 密钥形态 —— 与 tests/unit/test_no_committed_secrets.py 的 `_KEY_RE`、以及
 # DEPLOYMENT.md 第 4 步的自查命令**同一个模式**：`sk-` 后跟 ≥32 个连续字母数字。
 # 口径收窄是刻意的："连续长度"天然排除夹具（`sk-test-fake-key-…` 在 4 个字符后遇
@@ -112,16 +121,34 @@ def scan_history(repo: Path) -> dict[str, set[str]]:
     return found
 
 
-def load_current_keys(repo: Path) -> dict[str, str]:
-    """config.json 中当前生效的密钥（字段名 -> 值）。文件被 gitignore，可能不存在。"""
-    cfg = repo / "config.json"
-    if not cfg.is_file():
-        return {}
-    data = json.load(io.open(cfg, encoding="utf-8"))
-    return {
-        k: v for k, v in data.items()
-        if isinstance(v, str) and _SECRET_RE.fullmatch(v)
-    }
+def load_current_keys(repo: Path) -> dict[str, dict[str, str]]:
+    """**两条配置路径**里当前生效的密钥：``{来源标签: {字段名: 值}}``。
+
+    B4-3：此前只读仓库 ``config.json`` —— 在"只按装版使用"的机器上，
+    真正生效的是 ``%APPDATA%/PBC/config.json``，于是本工具会把**生效值**
+    判成"不存在" ⇒ **漏报**（安全护栏的漏报比假阳性更糟）。
+    两份都可能存在且**内容不同**（实测：仓库那份是已吊销的 K1），故都要查。
+
+    路径表由 `config.config_search_paths` 提供（**单一真值**）—— 这里不再
+    自己拼路径，避免与 `config._config_path()` 漂移。
+    """
+    out: dict[str, dict[str, str]] = {}
+    for label, cfg in config_search_paths(repo):
+        # **两条路径都登记**（缺失/不可解析时为空 dict）——
+        # 若整条略去，报告里就看不到"这条路径查过了、是空的"，
+        # 而"看不见的一条路径"正是漏报的温床（B4-3）。
+        out[label] = {}
+        if not cfg.is_file():
+            continue
+        try:
+            data = json.load(io.open(cfg, encoding="utf-8"))
+        except (ValueError, OSError):
+            continue
+        out[label] = {
+            k: v for k, v in data.items()
+            if isinstance(v, str) and _SECRET_RE.fullmatch(v)
+        }
+    return out
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -145,17 +172,29 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  {fp(secret)}\n      线索: {shown}{more}")
 
     current = load_current_keys(repo)
-    print(f"\n=== ② config.json 当前生效的密钥（{len(current)} 个）===")
+    total = sum(len(v) for v in current.values())
+    print(f"\n=== ② 两条配置路径里当前生效的密钥（{total} 个 / {len(current)} 条路径）===")
     if not current:
-        print("  （config.json 不存在或无 sk- 形态字段）")
-    for name, val in current.items():
-        print(f"  {name:<22} {fp(val)}")
+        print("  （两条路径都没有 config.json，或无 sk- 形态字段）")
+    for label, keys in current.items():
+        path = dict(config_search_paths(repo))[label]
+        exists = "存在" if path.is_file() else "不存在"
+        print(f"  [{label}] {path}（{exists}）")
+        if not keys:
+            print("      （无 sk- 形态字段）")
+        for name, val in keys.items():
+            print(f"      {name:<22} {fp(val)}")
 
-    hits = [(s, name) for s in leaked for name, v in current.items() if s == v]
+    # 泄漏值命中**任一路径**都算 —— 只看一条会漏报（B4-3 的原始缺陷）。
+    hits = [(s, label, name)
+            for s in leaked
+            for label, keys in current.items()
+            for name, v in keys.items() if s == v]
     print("\n=== ③ 结论 ===")
     if hits:
-        for secret, name in hits:
-            print(f"  [!!] 历史泄露的值**仍是** {name} 的生效值 —— 立即轮换（{fp(secret)}）")
+        for secret, label, name in hits:
+            print(f"  [!!] 历史泄露的值**仍是** [{label}] {name} 的生效值 "
+                  f"—— 立即轮换（{fp(secret)}）")
         print("\n  轮换后请重跑本工具确认 ③ 为空。删除文件无效，只能到服务商处作废重发。")
         return 2
     if leaked:
