@@ -76,6 +76,53 @@
 - **顺序纪律**：本提交**先于**重建（否则 `bundle_manifest` 会把 `git_dirty` 记成 `true`，
   产物无法自证出处）。
 
+### Fixed / Verified (Round 54 续, 2026-09-21 — v1.2.0 重建 + 产物级 e2e + 三处判据缺陷)
+
+- **v1.2.0 产物已重建**：`dist/pbc-server/`（PyInstaller，**107.1 MB**，冒烟
+  `/health` 2 s 通）+ Electron 便携版 **381.5 MB**。因宿主（Restart Manager 具名）
+  长期持有 `dist-electron/win-unpacked/resources/app.asar`，`build.ps1` 按设计
+  **自愈**到 `dist-electron-out-20260921-153526/win-unpacked/`，并写了
+  `PROVENANCE.txt`（`git_head=212f2fc`、`version=1.2.0`）—— **产物能自证出处**。
+- **🔴 更正上一轮的"PyInstaller 构建失败"结论：那是误判。** 真因是**长构建被放后台跑，
+  回合结束时被连带回收**（症状＝exit 1 **零输出** + `build/pyinstaller.log`
+  **戛然而止无 Traceback** + workpath 为空 —— 与"构建崩了"**症状完全一致**）。
+  改前台跑同一条命令：**113.8 s 一次通过**。已写入 PITFALLS §三十五 A。
+- **优雅关闭在「要分发的产物」上被证实**（此前只在源码模式验过）：对
+  `dist-electron-out-…/resources/pbc-server/pbc-server.exe` 实测 ——
+  响应 `exit_requested:true`；进程 **0.75 s 自行退出、returncode 0**；
+  端口释放、`/health` UNREACHABLE；日志含 `main: Shutdown complete.` 与
+  `Application shutdown complete.`；`data.db-wal`(494 432 B)/`-shm`(32 768 B)
+  **已 checkpoint 并消失**（`data.db` 4 096 → 323 584 B）；强杀兜底
+  `terminate_result: SKIP (进程已自行退出)` —— **未被触发**。
+- **产物级 e2e（冻结包）**：**22 passed / 1 failed**。唯一失败＝LLM 凭据被上游拒绝
+  （裸客户端直连 `api.siliconflow.cn/v1/models` 得 `401 code=30014`）⇒ 已如实归因、
+  **不冒充 PASS**（登记 B9-7）。
+- **修掉三处"在旧字节上做结论"的判据缺陷**（同一根因的三个实例）：
+  1. `tests/e2e_frozen.py` 的 `#127` 判据原先两半分别**恒假**（class 已搬到
+     `status.js`）与**恒真**（正则在本项目真实写法 `if (["review","done"].includes(st))`
+     上 0 命中）⇒ 零判别力，且把**已正确分发**的修复报成"缺标记"。改为把产物里的
+     `status.js` 交给 **node 真的跑一遍**，断言**语义关系**
+     （`partial_review != review`、`error != review`、`partial_review != error`、
+     `review == done`）。判据实现在新模块 `tests/e2e_status_js.py`（**一处**）。
+     **变异 8/8 CAUGHT**；对照列显示**旧判据对同组变异零反应**（恒红常数）。
+  2. `tests/unit/test_bundle_manifest.py::test_real_asar_matches_source_for_electron_main`
+     **写死** `dist-electron/…/app.asar` ⇒ 自愈目录出现后**永远红**（旧包版本永远
+     追不上）。改为复用 `test_distribution_parity._newest_artifact()`。
+  3. `devlogs/_verify/probe_shutdown_semantics.py` 的 `DEFAULT_EXE` **写死**标准目录
+     ⇒ 会对**旧包**下关闭语义结论。改为按 mtime 取**最新**产物，并把被测字节的
+     **mtime/大小**写进报告（"报告要能自证出处"）。
+- **新增护栏** `tests/unit/test_e2e_status_js.py`（**9 条**：阳性对照 + 覆盖性 +
+  6 条变异），保证判据自身不会退化成空断言。
+- **失败归因改为可证**：`e2e_frozen.py` 不再把"已配 OCR 的 error"一律写成
+  **"真实缺陷"**（实测一份失效 key 就会被这么写，把排查引向代码），改为拿
+  **应用自己上报的 `base_url` + 我们交给它的凭据**做一次直连探测：确凿 `401/403`
+  ⇒ 归因"上游拒绝该凭据（环境）"；探测**通过**而流水线仍 error ⇒ **就是产品缺陷**
+  （这一支恰好能抓"凭据发给了错误提供方"那个历史真事故）；探测**判不了** ⇒
+  按真实缺陷**fail-closed**。
+- ⚠️ **未解决**：`artifact_freshness` 仍**恒红** —— 被持锁的陈旧 `dist-electron/`
+  被 `discover_artifacts` 当作产物。已登记 **B9-5** 并给出两条互斥路线（收敛 / 判据区分），
+  **需决策**：恒红的门禁等于没有门禁。
+
 ### Added / Fixed (Round 53, 2026-09-21 — P2 批次④：精度/准确性 + 配置与口径 + e2e 覆盖)
 
 - **B1-16 `_parse_time` 不认识「仅时刻 + 中文单位」与「N日H时M分」形态**（P2，精度）：

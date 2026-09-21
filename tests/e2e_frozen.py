@@ -1,10 +1,14 @@
 """Frozen build e2e smoke tests."""
-import subprocess, time, requests, sys, os, json, signal, re
+import subprocess, time, requests, sys, os, json, signal
+import urllib.request, urllib.error
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from tests.e2e_proc import (  # noqa: E402
     EXE_ENV, LLM_KEY_ENV, llm_key, llm_provider, resolve_exe, spawn_server,
     stop_server,
+)
+from tests.e2e_status_js import (  # noqa: E402
+    dot_semantics_problems, status_dot_classes,
 )
 
 # 被测产物：默认 PyInstaller 的直接产物；用 PBC_E2E_EXE 指向 Electron 打包后
@@ -25,6 +29,39 @@ def fail(name, detail=""):
 
 def section(title):
     print(f"\n=== {title} ===")
+
+def probe_llm_credential(base_url, key, timeout=15):
+    """对"应用自己上报的 base_url + 我们交给它的凭据"做一次**直连正向对照**。
+
+    用途只有一个：把"流水线以 error 收场"的**归因**说清楚，而不是一律贴
+    "真实缺陷"的标签（Round 54 实测：一份已失效的 key 会让报告写成"真实缺陷"，
+    把排查方向引到代码上）。
+
+    返回 `(verdict, detail)`，verdict ∈ {invalid, ok, unknown}：
+      * `invalid` —— 确凿的 401/403：**上游拒绝该凭据** ⇒ 环境问题。
+      * `ok`      —— 凭据可用。此时流水线仍 error **就是产品缺陷**；尤其能抓住
+                     "把凭据发给了错误提供方/端点"这一历史真实缺陷（见本文件
+                     第 155-163 行的 401 事故）。
+      * `unknown` —— 判不了（网络/异常/其它状态码）。**fail-closed**：调用方按
+                     真实缺陷处理，绝不因"探测不可用"而放行。
+
+    ⚠️ 不得改成"只要 error_message 里出现 401 就降级"：那是按**文案**判定，
+    文案属展示层，改文案会静默改变控制流（本项目已因同类做法踩过坑）。
+    """
+    if not base_url:
+        return "unknown", "应用未上报 base_url"
+    url = base_url.rstrip("/") + "/models"
+    try:
+        req = urllib.request.Request(url, headers={"Authorization": "Bearer " + (key or "")})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return ("ok", f"HTTP {r.status} @ {url}") if r.status == 200 else \
+                   ("unknown", f"HTTP {r.status} @ {url}")
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            return "invalid", f"HTTP {e.code} @ {url}"
+        return "unknown", f"HTTP {e.code} @ {url}"
+    except Exception as e:  # noqa: BLE001 — 判不了 ≠ 通过
+        return "unknown", f"{type(e).__name__}: {str(e)[:80]}"
 
 # --- Start server ---
 # 关键：stdout/stderr 落日志文件（不得用未排空的 PIPE —— 服务端日志写满
@@ -161,6 +198,7 @@ try:
     section("Configure LLM")
     _key = llm_key()
     _prov = llm_provider()
+    _base_url = ""   # 由应用上报后回填（归因探测必须打**应用真正会用的那个端点**）
     if not _key:
         print(f"    [WARN] 未设置 {LLM_KEY_ENV} —— 跳过 LLM 配置，"
               f"下游流水线将走降级路径（不是缺陷）")
@@ -179,6 +217,7 @@ try:
         p = next((x for x in providers_list if x.get("name") == _prov), {})
         p_configured = p.get("configured", False)
         p_key_masked = p.get("api_key", "")
+        _base_url = p.get("base_url") or ""
         ok("settings_configure_llm",
            f"provider={provider} {_prov}_configured={p_configured} key={p_key_masked}")
         # 判别性前置：密钥非空却"没配上"或"活动提供方不是它" ⇒ 后续任何
@@ -314,9 +353,23 @@ try:
             if terminal in ("review", "partial_review"):
                 ok("pipeline_terminal", f"status={terminal}")
             elif terminal == "error" and OCR_CONFIGURED:
+                # 判据强度不变（仍是 FAIL，fail-closed）；这里只把**归因**说准。
+                # 原先把任何"已配 OCR 的 error"一律写成"真实缺陷"，实测会把一份
+                # 已失效的 key 报成产品缺陷，把排查引向代码（Round 54）。
+                verdict, why = probe_llm_credential(_base_url, _key)
+                attribution = {
+                    "invalid": f"归因：同一 base_url/凭据直连探测得 {why} ⇒ "
+                               "**上游确凿拒绝该凭据**（环境问题，轮换密钥后复跑）；"
+                               "非产品缺陷，但本轮 LLM 链路因此未被覆盖。",
+                    "ok": f"归因：同一凭据直连探测得 {why} ⇒ **凭据有效**，"
+                          "故此处失败是产品缺陷（优先查：凭据是否被发给了错误的"
+                          "提供方/端点 —— 本项目发生过完全相同的 401 事故）。",
+                    "unknown": f"归因：凭据探测无法判定（{why}）⇒ 按真实缺陷处理"
+                               "（fail-closed：判不了 ≠ 通过）。",
+                }[verdict]
                 fail("pipeline_terminal",
-                     f"status=error（已配 OCR 仍失败 — 真实缺陷）"
-                     f"error_message={err_msg[:200]}")
+                     f"status=error（已配 OCR 仍失败）"
+                     f"error_message={err_msg[:200]} ｜ {attribution}")
             elif terminal in ("error", "cancelled"):
                 print(f"    [SKIP] pipeline_terminal status={terminal} —— 环境未配 OCR "
                       f"凭据，属预期的降级路径（error_message={err_msg[:160]}）")
@@ -405,16 +458,8 @@ try:
     section("Frontend #127 Visibility (shipped bundle)")
     try:
         up = requests.get(f"{BASE}/static/upload.js", timeout=5).text
-        # 成功色分支不得包含 partial_review（它定义上就不是成功态）
-        success_branch = re.findall(
-            r'if \(([^)]+)\)\s*return "(bg-[a-z-]+)"', up
-        )
-        bad_success = [
-            c for c, ret in success_branch
-            if ret == "bg-success" and "partial_review" in c
-        ]
+        # upload 页必须真的消费失败页与失败原因（文本级，成立即说明控制流消费了它们）
         checks = {
-            "partial_review_not_green": not bad_success and "bg-warning" in up,
             "failed_pages_rendered": "job.failed_pages" in up,
             "reason_shown_for_partial_review": (
                 '(st === "error" || st === "partial_review")' in up
@@ -423,9 +468,21 @@ try:
         }
         missing = [k for k, v in checks.items() if not v]
         assert not missing, f"产物内缺 #127 修复标记: {missing}"
-        ok("upload_js_127", "非绿点 / 显失败页 / 显原因")
+        ok("upload_js_127", "显失败页 / 显原因")
     except Exception as e:
         fail("upload_js_127", str(e))
+
+    # 13c. 档位配色 —— **按行为**验证，不按字面量（Round 54 修：原判据两半都失效）。
+    section("Frontend #127 dot semantics (shipped bundle)")
+    try:
+        sj = requests.get(f"{BASE}/static/status.js", timeout=5).text
+        m = status_dot_classes(sj)
+        problems = dot_semantics_problems(m)
+        assert not problems, "；".join(problems)
+        ok("status_dot_semantics",
+           f"partial_review={m['partial_review']} != review={m['review']}")
+    except Exception as e:
+        fail("status_dot_semantics", str(e))
 
     try:
         rj = requests.get(f"{BASE}/static/review.js", timeout=5).text

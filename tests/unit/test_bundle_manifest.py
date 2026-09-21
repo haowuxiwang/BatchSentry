@@ -241,13 +241,33 @@ class TestAsarReader:
             read_asar_member(asar, "electron/nope.js")
 
     def test_real_asar_matches_source_for_electron_main(self):
-        """对**真实产物**（存在时）：asar 里的 `electron/main.js` 必须能被读出。"""
-        asar = _ROOT / "dist-electron" / "win-unpacked" / "resources" / "app.asar"
+        """对**真实产物**（存在时）：asar 里的 `electron/main.js` 必须与源码一致。
+
+        ⚠️ 目标必须是**最新的**那份产物，不能写死 `dist-electron/`（Round 54 实测）：
+        外部句柄占住 `resources/app.asar` 时，`build.ps1` 会自愈到
+        `dist-electron-out-<ts>/win-unpacked/`，而 `dist-electron/` 里留下的是
+        **上一次**那个包。写死标准目录 ⇒ 本用例在"要发的那份"之外的目录上做校验
+        （"测了 A、发了 B"），而且**永远红**（旧包的版本号必然 ≠ 当前 APP_VERSION，
+        因为它永远追不上最新一次构建）。
+        解析**复用** `test_distribution_parity` 的判定（含"忽略目录 mtime"那处实测坑），
+        不在这里复刻第二份 —— 两份实现必然漂移。
+        """
+        from tests.unit.test_distribution_parity import _label, _newest_artifact
+
+        art = _newest_artifact()
+        if art is None:
+            pytest.skip("无完整 Electron 产物")
+        asar = art / "resources" / "app.asar"
         if not asar.is_file():
-            pytest.skip("无 dist-electron 产物")
-        assert read_asar_version(asar) == read_app_version(_ROOT)
+            pytest.skip(f"{_label(art)} 无 app.asar")
+        got = read_asar_version(asar)
+        want = read_app_version(_ROOT)
+        assert got == want, (
+            f"{_label(art)} 的 app.asar 内版本 {got!r} != 源码 APP_VERSION {want!r}")
         src = (_ROOT / "electron" / "main.js").read_bytes()
-        assert read_asar_member(asar, "electron/main.js") == src
+        assert read_asar_member(asar, "electron/main.js") == src, (
+            f"{_label(art)} 内 app.asar 的 electron/main.js 与源码不一致"
+            f"（打包物陈旧或打包时拷漏）")
 
     def test_asar_path_lookup_is_sibling_of_embedded_server(self, tmp_path):
         wu = tmp_path / "win-unpacked" / "resources"

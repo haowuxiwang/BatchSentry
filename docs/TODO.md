@@ -2330,3 +2330,38 @@
   待办：给 `config.py` 一个**显式**的配置路径覆盖开关（如 `PBC_CONFIG_PATH`），
   或让 `database_path` 接受绝对路径 env 覆盖（与冻结版口径一致）。
 
+- [ ] **B9-5 `artifact_freshness` 恒红：被外部持锁的陈旧目录被当作"产物"**（P1，2026-09-21 实测）
+  宿主（WorkBuddy，Restart Manager 已具名到 PID）长期持有
+  `dist-electron/win-unpacked/resources/app.asar` ⇒ 该目录**不可删**、也**不可重建**
+  （`build.ps1` 自愈到 `dist-electron-out-<ts>/`）。而
+  `bundle_manifest.discover_artifacts()` 会把它一并当产物 ⇒ 缺清单 ⇒ 门禁
+  **永远红**。**恒红与恒真同为零判别力**（PITFALLS §三十一）——一个永远红的门禁
+  等于一个被忽略的门禁。两条路都要走不下去，需**决策**：
+  1. **收敛**：该目录里"可能被误分发"的东西是**内嵌后端**
+     `win-unpacked/resources/pbc-server`（**实测可删**，只有 `app.asar` 被持锁）
+     ⇒ 删掉即不再构成可分发产物；留下的"空壳"用 `HUSK.md` 标出身（沿用
+     `PROVENANCE.txt` 的惯例）。代价：不可逆（走回收站可恢复）+ 留一个残壳。
+  2. **判据区分**：让 `discover_artifacts`/`artifact_freshness` 承认第三态 ——
+     "被外部持有 ⇒ **不可发布**，故不予校验"，并**具名**报出持有者。
+     代价：门禁引入一次"改名探测"（写操作）+ 需要防止把真陈旧降级。
+  ⚠️ 现状（永久红、不表态）**不成立**。另注：`test_e2e_drivers_can_target_the_shipped_artifact`
+  只管"是否支持覆盖"，不管"默认目标是否陈旧"——本轮探针正是从这条缝漏过去的。
+
+- [ ] **B9-6 长构建被"回合拆卸"回收时，与"真失败"无法区分**（P1，2026-09-21 实测）
+  把 `build.ps1` 放**后台**跑，回合结束时它的后代进程被回收 ⇒ 任务报
+  **exit 1 且零输出**、`build/pyinstaller.log` **戛然而止无 Traceback**、
+  workpath 为空 —— 与"PyInstaller 崩了"**症状完全一致**（实测改前台同命令 113.8s 一次过）。
+  待办：让 `build.ps1` 在起步时写 `build/BUILDING.<pid>`、结束时写退出码并删除标记，
+  这样"**中途被杀**"与"**跑完但失败**"可区分（现状只能靠人肉推理）。
+  流程约束已写入 PITFALLS §三十五 A：**长构建一律前台，不得跨回合挂后台**。
+
+- [ ] **B9-7 frozen e2e 的 LLM 链路本轮未被覆盖（凭据失效）**（P2，2026-09-21 实测）
+  `.env` 的 `SILICONFLOW_API_KEY` 已被上游拒绝：裸客户端直连
+  `https://api.siliconflow.cn/v1/models` ⇒ `HTTP 401 {"code":30014,"message":"Token is invalid."}`
+  ⇒ 流水线止于 `status=error`，`review/partial_review` 成功路径与 findings 生成
+  **本轮没有验到**（e2e 已如实标注归因，未冒充 PASS）。
+  ➕ `DEEPSEEK_API_KEY` 实测**仅 11 字符**（正常 key 约 35+）⇒ 疑似占位/失效，一并核对。
+  ➕ 命名债：`tests/e2e_proc.LLM_KEY_ENV = "PBC_E2E_DEEPSEEK_KEY"` 的名字绑死了一个
+  提供方，而语义是 provider-agnostic（配 `PBC_E2E_LLM_PROVIDER` 使用）——
+  本轮就得把**硅基流动**的 key 塞进名为 DEEPSEEK 的变量里。改名需同步 3 个驱动 + 文档。
+

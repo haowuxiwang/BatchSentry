@@ -1519,3 +1519,100 @@ return {"status": "shutting_down", "exit_requested": trigger is not None}
 `tests/unit/test_shutdown_graceful_contract.py`（12 条护栏）、
 `devlogs/_verify/mutate_shutdown.py` + `mutate_shutdown.log`（9/9 CAUGHT）。
 
+---
+
+## 三十五、"标准产物目录"与"回合拆卸"：四类恒红/假红判据（B9/B7，2026-09-21 实测）
+
+### A. 🔴 长构建**不能**交给后台任务 —— 回合结束会连坐杀掉它
+
+**现象**（极具误导性）：`build.ps1` 放后台跑 ⇒ 任务报 **exit code 1 且完全没有任何输出**；
+`build/pyinstaller.log` 停在 `Processing standard module hook 'hook-PIL.SpiderImagePlugin.py'`
+**戛然而止，没有 Traceback**；`build/pbc-server/`（workpath）**空的**。
+乍看像"PyInstaller 崩了 / 依赖坏了"，实测**改前台跑同一条命令一次通过（113.8s）**。
+
+**真因**：非交互运行**在主 agent 结束回合时会回收其后代进程**。PyInstaller 当时正处于
+Analysis 中段（t≈96s），于是被杀在半路；PowerShell 的 `*>` 重定向缓冲也随之丢失尾部。
+
+⇒ **规矩**：构建 / 打包 / 长测试**一律前台驱动**；真要后台，必须在**同一回合内**
+用阻塞等待把结果收回来，**不得跨回合挂着**。
+⇒ 副产物：PowerShell 工具在本会话**不回传 stdout**（连 `Write-Output` 也没有）⇒
+**别靠 stdout 判成败**，让脚本把退出码写进哨兵文件（`build/_last_rc.txt`）再读文件。
+
+### B. 🔴 "标准产物目录"是陈旧字节的天然窠臼 ⇒ 凡判据一律按**最新**解析
+
+外部句柄占住 `resources/app.asar` 时，`build.ps1` 会**自愈**到
+`dist-electron-out-<ts>/win-unpacked/`，而 `dist-electron/` 里**静静地留着上一次那个包**。
+任何写死标准目录的代码都会**在另一份字节上做结论**——正是"测了 A、发了 B"。
+
+本轮一次清查就抓到**三个同源实例**：
+
+| 位置 | 症状 |
+|---|---|
+| `devlogs/_verify/probe_shutdown_semantics.py` 的 `DEFAULT_EXE` | 关闭语义结论会落在**旧包**上 |
+| `tests/unit/test_bundle_manifest.py::test_real_asar_matches_source_for_electron_main` | 写死 `dist-electron/…/app.asar` ⇒ **永远红**（旧包版本永远追不上） |
+| `scripts/release_gate.py` 的 `discover_artifacts` | 把被持锁的陈旧目录也当产物 ⇒ 门禁 `artifact_freshness` **永远红** |
+
+⇒ **正解**：解析"最新完整产物"这件事**只许有一处实现**（本项目为
+`tests/unit/test_distribution_parity.py` 的 `_newest_artifact()`，其 `_build_time`
+刻意**忽略目录 mtime**——理由见该处实测注释）。新写的判据要么复用它，要么
+走 `bundle_manifest.discover_artifacts`，**不要第三次手写 glob**。
+⚠️ 注意现有护栏 `test_e2e_drivers_can_target_the_shipped_artifact` 只管
+"**是否支持** `PBC_E2E_EXE` 覆盖"，**不管默认目标是否陈旧**——这条缺口正是探针漏网之处。
+
+### C. 🔴 判据的**目标文件/形态**会漂移 ⇒ 文本判据退化成恒真/恒假
+
+`e2e_frozen.py` 原判据：`"bg-warning" in upload.js` **且** 正则
+`if \(([^)]+)\)\s*return "(bg-[a-z-]+)"` 无坏命中。实则：
+
+* 配色早已抽成**单一真值** `status.js` 的 `statusDotClass()`，`upload.js` 只**调用**它
+  ⇒ 前半段在**换了文件**后**恒假**（把一个**已正确分发**的修复报成"缺标记"）；
+* 真实写法是 `if (["review","done"].includes(st)) return "bg-success"`，
+  `[^)]+` 在 `.includes(st)` 的 `)` 处截断 ⇒ 正则 **0 命中** ⇒ 后半段**恒真**（§二十六）。
+
+两半合起来**零判别力**，却对**未变异**的源码报红 —— 不是判据，是**写死的假红**。
+
+⇒ **修法**：改用**运行期行为**判据 —— 把产物里的 `status.js` 交给 node **真的跑一遍**，
+断言**语义关系**（`partial_review != review`、`error != review`、`partial_review != error`、
+`review == done`）。重命名/重构/换文件都不失效，也不会把"不可达的文本"读成"已实现"
+（§二十八）。判据实现在 `tests/e2e_status_js.py`（**一处**），e2e 与护栏共用。
+
+### D. 🔴 失败**归因**必须靠正向对照，不能靠文案
+
+同一个 `status=error`，可能是"产品缺陷"，也可能是"环境凭据失效"。原冒烟把
+"已配 OCR 的 error"一律写成**"真实缺陷"**——实测一份失效的 key 就让报告这么写，
+把排查方向引到代码上（我确实先去查了代码）。
+
+⇒ **修法**：拿**应用自己上报的 `base_url` + 我们交给它的那份凭据**做一次**直连探测**：
+确凿 `401/403` ⇒ 归因"上游拒绝该凭据（环境）"；探测**通过**而流水线仍 error ⇒
+**就是产品缺陷**（且这一支恰好能抓住"凭据被发给了错误提供方/端点"那个历史真实事故）；
+探测**判不了** ⇒ 一律按真实缺陷处理（**fail-closed**，§二十三）。
+⚠️ **不得**改成"`error_message` 里出现 401 就降级"——那是按**文案**判定，
+文案属展示层，改文案会静默改变控制流（本项目已因同类做法踩过坑）。
+
+**实测**（本轮）：裸客户端直连 `https://api.siliconflow.cn/v1/models` 得
+`HTTP 401 {"code":30014,"message":"Token is invalid."}` ⇒ **凭据本身失效**，
+非产品缺陷；但该轮 e2e 的 **LLM 链路因此未被覆盖**（如实标注，不冒充 PASS）。
+
+### E. 🔴 变异验证**自己**也会骗人：只替换首次出现 ⇒ 变异无效
+
+`mutate_e2e_127.py` 第一版对 `upload.js` 里的 `job.failed_pages` 只做了
+`replace(old, new, 1)` ⇒ 改掉第一处后，判据仍能从**其余出现**里读到 token ⇒
+**变异根本没生效**，于是把"判据没察觉"记成了"判据失效"（方向完全反了）。
+同理 M2 的第二形态（`["error","partial_review"].includes(st)`）也要一并清掉。
+
+⇒ **规矩**：变异必须**真的把能力拿走**（替换**全部**出现），且每条变异都要有
+**阳性对照**（未变异必须过）与**对照列**（旧判据对同组变异是否也反应）。
+本轮的对照结论：旧判据对 6 条 `status.js` 变异**全部无反应**（恒红常数），
+新判据 **8/8 CAUGHT**。
+
+### F. ⚠️ 外部持锁会让判据**恒红** —— 恒红与恒真同样是**零判别力**（§三十一）
+
+被宿主持有的陈旧 `dist-electron/` **不可删**（`winerror=32`，Restart Manager 具名到
+宿主 PID），但 `discover_artifacts` 仍把它当"产物"⇒ `artifact_freshness`
+**永远红**。一个永远红的门禁等于一个被忽略的门禁。
+⇒ **待决策**（`docs/TODO.md` B9-5）：是**收敛**（该目录内嵌后端
+`resources/pbc-server` 实测**可删**，删掉即不再构成"可分发产物"），
+还是让判据**区分**"陈旧"与"被外部持有 ⇒ 不可发布、不予校验（须具名）"。
+**两条路都成立，但不能不选**——现状（永久红）不成立。
+
+
