@@ -2187,6 +2187,56 @@
   必须等于 HEAD 对应文件的 sha256**（复用一个清单文件，构建时生成）。
   验收：清单与产物不符 ⇒ 发版闸拒绝。
 
+- [x] **B7-5 「占用探针」三份拷贝各自漂移 + 一个静默假阴性**（P2，2026-09-21 登记并完成）
+  **起因**：打包被 `app.asar` 占用阻塞，而负责"点名持有者"的探针本身坏了 ⇒ 连"锁是不是真的"都判不了。
+
+  **① 一个错误结论被推翻**：旧记录写"`who_holds.py` 对**每个**目标都 segfault（含阴性对照 `README.md`）
+  ⇒ `rstrtmgr.dll` 整体不可用"。**证伪**：当天稍后**两个互相独立**的实现都正常，且对同一目标
+  给出**同一个 PID**（`3544`）⇒ **RM 可用，崩的是探针**。旧版重跑仍稳定 3/3 崩（`3221225477`）。
+
+  **② 两个"看起来很像真因"的假设被实验否掉**（记下来免得再猜）：
+  - ~~"session key 声明成 `c_wchar_p` ⇒ ctypes 按实参长度分配 ⇒ key 短于 32 字符就越界"~~
+    —— `rm_bugrepro_pidlen.py` 取 30/31/32 字符（4/5/6 位 PID）**全部 OK**。
+  - ~~"固定崩在某一句"~~ —— `rm_trace.py`：加一句落盘日志、或**任意加一个启动参数**
+    （`-u` / `-X faulthandler`），崩溃即消失（A 恒崩 / B 恒不崩，各 3/3）。
+  ⇒ 可确证的**性质**只有：**内存安全缺陷，表现依赖堆布局**。推论同样重要：
+  **"加日志后不崩了" 绝不能当作"已修好"**，也别花力气"定位到某一行"。
+
+  **③ 真正危险的缺陷（与崩溃无关）**：旧探针**从不检查 `RmStartSession` 返回值** ⇒
+  会话无效也照旧返回 `rc=0, count=0` ⇒ **静默假阴性**（"查不出来"被当成"没人持有"）。
+  新契约：出错抛 `ProbeError`，让两者**可区分**。
+
+  **④ 收敛实现**（事故直接成因就是**同一逻辑三份拷贝各自漂移**）：RM 调用只剩一处
+  = `devlogs/_verify/who_holds.py`；`rm_probe2.py` 改为只做**正/负对照编排**并输出
+  `VERDICT=USABLE/UNKNOWN`，不再复制 ctypes 代码。
+
+  **⑤ 补上真护栏**（此前的测试对这个类别**零判别力**）：`clean_dist.who_holds()` 是 fail-soft 的
+  ⇒ "实现坏了"与"没人持有"返回值一样，而旧测试只测 fail-soft。
+  新增 `tests/unit/test_clean_dist.py::test_who_holds_names_the_real_holder`：
+  **阳性对照**（子进程真实独占持有 ⇒ 必须具名报出该 PID）+ **反向对照**（释放后必须回空表，
+  防实现退化成"永远报一个 pid"）。
+  变异验证 **2/2 CAUGHT**：M1 `holder 列表恒空`、M2 `session key 缓冲给成 4 个 WCHAR`
+  （M2 还顺带证明：违反 33-WCHAR 契约在 `clean_dist` 里表现为 **`[]`＝静默假阴性**，正是被这条抓住的形态）。
+
+  **⑥ 我在这轮新造的护栏错误（留档）**：重写探针时顺手加了 `if session.value == 0: raise`
+  —— **假警**（Win32 并不保证 RM 句柄非 0），它把**本来成功**的 PH 判成失败、`VERDICT` 掉成
+  `UNKNOWN`，而同轮 NEG/TGT 正常（**自相矛盾即护栏错的信号**）⇒ 已删除。
+  教训：**多余的"安全前置条件"与恒真判据同样有害**。
+
+  **地面真值**：全量 `pytest tests/unit tests/integration` = **3032 收集 / 3030 passed / 2 failed**，
+  两条失败**都是重建前的预期红灯**（产物仍是 1.1.9 构建、源码已 1.2.0）：
+  `test_bundle_manifest::TestAsarReader::test_real_asar_matches_source_for_electron_main`、
+  `test_distribution_parity::test_packaged_app_version_matches_app_version`
+  （后者报文为 `app.asar 内版本 '1.1.9' != main.APP_VERSION '1.2.0'`）⇒ 重建后应转绿。
+  坑档更正见 `docs/PROJECT_PITFALLS.md` §三十二 E（旧结论已标注作废）。
+
+  **⑦ 顺带被仓库护栏抓到一次（记录备查）**：新测试最初用子进程持有文件，被
+  `test_no_unread_pipe_in_test_harnesses` 判红 —— 它的判据是**文本匹配**，
+  连我 docstring 里**引用**那个被禁写法也会命中。护栏给了白名单逃生口
+  （`_PIPE_ALLOW`，需写理由），但**白名单会让该文件整体失去保护** ⇒ 我选择**改自己的措辞**
+  而不是加白名单。这类"文本级护栏"对说明性文字天然过敏，值得将来走 AST。
+
+
 - [ ] **B8 发版收尾（v1.2.0）—— 一次性批次的"不变量"清单**（Round 53 登记）
 
   ⚠️ **为什么单独立一条**：Round 53 的 8 个提交（`c751c4a`..`5e53fce`）**都没有改 `CHANGELOG.md`**

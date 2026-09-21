@@ -8,6 +8,7 @@
 - CLI 默认 dry-run，不加 `--apply` 不落盘。
 """
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -317,6 +318,38 @@ def test_who_holds_is_fail_soft(tmp_path, monkeypatch):
 
     monkeypatch.setattr(cd.ctypes, "WinDLL", boom)
     assert cd.who_holds(__file__) == [], "查询失败必须返回空表，而不是抛出去"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Restart Manager 仅 Windows 提供")
+def test_who_holds_names_the_real_holder(tmp_path):
+    """阳性对照：文件**真被独占持有**时必须具名报出持有者 PID。
+
+    为什么非要有这一条：`who_holds` 是 fail-soft 的（任何异常都返回 `[]`），
+    于是"实现坏了"与"没人持有"**返回值完全一样** —— 上面那条 fail-soft 测试
+    对"实现损坏"**零判别力**。这里让**本进程自己**持有该文件，把"具名"钉住；
+    释放后要求回到空表，防止实现退化成"永远报一个 pid"（另一种零判别力）。
+
+    ⚠️ 刻意**不起子进程**：`tests/` 禁止用**未排空的管道**接子进程输出
+    （护栏 `test_no_unread_pipe_in_test_harnesses` 会红）。实测 RM 会把
+    **调用进程自身**报成持有者，所以本进程持有即可构成阳性对照。
+    （此处刻意不写出那个被禁字面量：该护栏是文本匹配，写出来会自伤。）
+    """
+    import scripts.clean_dist as cd
+
+    target = tmp_path / "held.asar"
+    target.write_bytes(b"x")
+    handle = open(target, "r+b")           # 不含 FILE_SHARE_DELETE ⇒ 独占持有
+    try:
+        handle.write(b"y")
+        handle.flush()
+        me = os.getpid()
+        holders = cd.who_holds(target)
+        assert any(h["pid"] == me for h in holders), (
+            f"应具名报出持有者 pid={me}，实际 {holders}")
+    finally:
+        handle.close()
+
+    assert cd.who_holds(target) == [], "持有者释放后必须回到空表"
 
 
 def test_describe_holders_is_empty_when_nobody_holds(tmp_path):
