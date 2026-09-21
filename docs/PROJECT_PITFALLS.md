@@ -1308,6 +1308,26 @@ MoveFileExW(改名)            -> 拒 err=32     # 但改名仍不行
 **踩坑痕迹**：``devlogs/_verify/who_holds.py``、``devlogs/_verify/_rm_owner.txt``、
 ``~/.workbuddy/skills/windows-locked-file-forensics/``。
 
+### E) 补充（2026-09-21 实测）：RM 探针可能**整个坏掉** ⇒ 改用"操作 + 阴性对照"
+
+当天早些时候 `who_holds.py` 还能报出 PID；稍后再跑，**每个目标都 segfault**
+（exit `3221225477` / `0xC0000005`），**连阴性对照 `README.md` 也崩**
+⇒ **该探针此刻零信息量**，不能据此下任何结论（这与 D) 的 RM 用法**不冲突**：
+RM 仍然首选，但要接受它**可能整体不可用**）。
+
+**替代判据（本项目已固化 `devlogs/_verify/can_rebuild.py`）**：拿**操作**当判据 ——
+可逆地 `os.rename(p, tmp)` 再 `os.rename(tmp, p)`，并**必须**同时探一个本来没占用的文件当对照：
+
+| 对照 | 目标 | 结论 |
+|---|---|---|
+| OK | FAIL `winerror=32` | **目标确实被占用**（判据成立） |
+| FAIL | FAIL | 探针/环境问题（权限/ACL），**不是锁** ⇒ 不能下结论 |
+
+2026-09-21 实测：`app.asar` **FAIL `PermissionError winerror=32`**，
+而 `pbc-server.exe` / `README.md` 两个对照**均 OK** ⇒ 对照组成立 ⇒ **`app.asar` 仍被占用，
+重建必须等宿主退出**（用户决策「退出 WorkBuddy 后重建」得到独立佐证）。
+⚠️ 记住本条的核心：**"探测命令报错" ≠ "目标是锁着的"**；判据的可信度来自**对照组成立**。
+
 
 ## 三十三、探针在被测源码"正被并发改写"时采样 ⇒ 读到变异中间态（B1-16，2026-09-21 实测）
 
