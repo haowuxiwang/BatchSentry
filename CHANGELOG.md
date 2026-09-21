@@ -18,6 +18,63 @@
 > **`clean_dist` 认锁探测的"假慢"**；**Round 33** = **归因更正**（目录锁的持有者是
 > **宿主进程**，不是安全软件）+ 工具报告**具名持有者**。Round 33 同样**不进产物**，
 > **不升版号**。
+>
+> **Round 52（2026-09-20）**：B7-1 / B7-3 / B7-4（测试与门禁基础设施）—— 同样**不进产物**，
+> 故仍**不升版号**。⚠️ 但它新增的 `artifact_freshness` 会让门禁**立刻变红**（既有产物陈旧），
+> 这是预期行为，须随 v1.2.0 重建转绿。
+
+### Added / Fixed (Round 52, 2026-09-20 — B7-1 / B7-3 / B7-4：让「产物陈旧」无法静默通过门禁)
+
+> ⚠️ **本批改动不进入产物**（只落在 `scripts/` / `tests/` / `build.ps1` / 文档 —— 实测
+> 产物 `_internal/` 内没有 `scripts/`）⇒ 按 Repo hygiene 规则 9 **不升版号**。
+> **但门禁本轮刻意是红的**：新增的 `artifact_freshness` 立刻把**既有的陈旧产物**照了出来。
+> 这不是回归，正是它要证明的能力 —— 须随 v1.2.0 重建产物后转绿。
+
+- **B7-3 新增门禁第 9 项 `artifact_freshness`（P2，护栏缺口）**
+  （新 `scripts/bundle_manifest.py` + `scripts/release_gate.py`）：
+  **「版本号一致」不蕴含「产物是新构建的」**。实测铁证：源码 `static/settings.js`
+  77547 B（含 `auto_activated`）vs 产物 `_internal/static/settings.js` 77231 B
+  （仍含**已删除**的 `firstConfigured`）—— 两侧版本号**都是 1.1.9**，而
+  `release_gate.py --skip-tests` 照样 **7/7 全绿**。机制上三层叠加都漏：
+  ① `pytest.ini` 的 `testpaths=tests` + `python_files=test_*.py` ⇒ `tests/e2e_*.py`
+  **不在收集范围**；② 唯一依赖产物的 `test_frozen_smoke.py` 只验「能启动」；
+  ③ 唯一含版本断言的 `tests/e2e_frozen.py` 恰在收集范围之外 ⇒
+  **改了进产物的模块却不重建，可静默通过全部门禁**；版本号恰好一致时连「人眼扫一眼」
+  这条兜底也失效。
+  修法：构建收尾把**每个入包源文件**的 sha256 写进 `<artifact>/build_manifest.json`，
+  门禁拿工作树与产物副本**逐字节**比对。**六条判据**：入包集合覆盖 / 版本（AST 读
+  `main.py`，不导入模块）/ 工作树 vs 清单 / **产物副本 vs 清单** / asar 成员与 asar 版本 /
+  exe 绑定。**SKIP 语义**：无产物 ⇒ SKIP（≠ PASS，"没有产物"不构成"产物新鲜"的结论）；
+  **有产物无清单 ⇒ FAIL**（"无法证明新鲜度" ≠ "新鲜"）。
+  ⚠️ **纠正两处旧记录**：**(a)** 「比对 `main.APP_VERSION` vs 产物内 `package.json`」
+  **对 PyInstaller 产物不成立** —— `dist/pbc-server/` 里没有 `package.json`，
+  它只在 electron 的 `app.asar` 里、且**被 electron-builder 重写**过（源 ~1.6 KB vs
+  包内 255 B）⇒ 只能比 `version` 字段，**字节比对必假**。**(b)** `core/`、`api/`、
+  `config.py`、`main.py` 在产物里**根本没有对应字节**（编译进 exe 内的 PYZ）⇒
+  那一层只能靠「工作树 == 清单」；该**盲区已在模块 docstring 里显式声明**
+  （判不了 ≠ 判据确凿）。
+- **B7-4 打 tag/发版补上「产物新鲜度」前置闸**（P2，由 B7-3 派生）：
+  清单生成点接进 `build.ps1` 的 **2.6 步**，时机**刻意**卡在 PyInstaller 之后
+  （绑定 exe 字节）、electron-builder 之前（随 `extraResources` 进
+  `resources\pbc-server\`）⇒ 任何一份产物都能**自证**出处；写完**就地自校验**
+  （把"门禁才发现"提前到构建现场）。发版前置闸写进 `CLAUDE.md` 规则 11（与门禁同判据）。
+- **B7-1 全量测试的沙箱删除预算 flake（P2）——机制上消除 + 修掉一个更严重的护栏漏洞**：
+  ① `run_cmd` 给**子进程**注入 `CODEBUDDY_SAFE_DELETE_BULK_THRESHOLD=100000`
+  （必须**强制赋值**：宿主已显式给 50，`setdefault` 是空操作）；只抬阈值、**不清安全网**
+  （删除仍走回收站）⇒ 比 `CODEBUDDY_SAFE_DELETE_ENABLED=0` 更保守。
+  ② 🔴 **顺带修掉真漏洞**：`env_only` 原先**只按 nodeid 前缀**降级 ⇒ `TestServePdf` 里
+  任何**真实回归**（403 变 200）都会被降级成 WARN、门禁退出码为 0。现要求
+  **前缀 + 签名**双命中（`SystemExit` **且** safe-delete 标记串，标记串取自 shim 源码
+  常量），签名取不到时**不降级**（fail-closed）。
+  ③ 文档固化真变量名（旧文档的 `BULK_THRESHOLD` **不是**真变量名）。
+
+护栏：`tests/unit/test_bundle_manifest.py`（33 例：入包集合 / hash 原始字节 / AST 版本 /
+asar 读取含**数据基址不变式反证** / 清单读写 / 校验器含「落后一个提交 ⇒ 红，同步 ⇒ 绿」）
+与 `tests/unit/test_release_gate.py::TestArtifactFreshness` / `TestSandboxDeleteIsolation` /
+`TestEnvOnlySignature`。**变异 15/15 CAUGHT**（`devlogs/_verify/mutate_b73.py`，逐字节还原）。
+顺带修正 `tests/unit/test_declared_dependencies.py` 的**守卫盲区**：`_is_local` 原先不认
+「与导入方**同目录**的模块」⇒ 仓库自己的 `scripts/*.py` 互导被判成"未声明的第三方依赖"，
+而误报的修法是**把本地模块塞进 requirements.txt**（那才是真的污染供应链清单）。
 
 ### Fixed (Round 51, 2026-09-20 — P2 批次③：并发与配额 B2-7 / B3-2)
 

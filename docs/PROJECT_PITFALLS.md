@@ -1176,3 +1176,83 @@ B2-10 ③ 的护栏初版写成 ``assert "d.error_message" in src``（要求"帧
 ``tests/unit/test_status_js.py::TestReviewJsSurfacesErrorReason``。
 
 
+## 三十一、"新鲜度"类判据的四个陷阱（B7-1/B7-3/B7-4，2026-09-20 实测）
+
+### A. **「版本号一致」不蕴含「字节一致」** —— 存在性检查不构成新鲜度判据
+
+门禁原先 8 项里**没有一项**回答"产物是不是由当前源码构建的"。实测铁证：源码与产物
+``static/settings.js`` **版本号都是 1.1.9**，字节却差 316 B（产物仍含**已删除**的
+``firstConfigured``/``autoReason``；另有 ``status.js`` 5354 vs 3867、``review.js``
+97926 vs 93941 两处），而 ``release_gate.py --skip-tests`` **照旧全绿**。
+
+**为什么容易长期潜伏**：三层叠加，每层单独看都"合理" ——
+① ``pytest.ini`` 的 ``testpaths=tests`` + ``python_files=test_*.py`` ⇒ ``tests/e2e_*.py``
+**不在收集范围**；② 唯一依赖产物的 ``test_frozen_smoke.py`` 只验「能启动」；
+③ 唯一含版本断言的 ``tests/e2e_frozen.py`` 恰在收集范围之外。
+⇒ **改了进产物的模块却不重建，可静默通过全部门禁**；而当版本号恰好一致时，连
+"人眼扫一眼版本号"这条兜底也失效。
+
+⇒ **规则**：判据必须是**内容级**的（逐字节），且要**同时**比对三处 —— 工作树、清单、
+**产物内副本**。只比"版本"或"文件存在"都属于**存在性检查**，不构成新鲜度判据。
+反例记法：*"❌ 文件存在" ≠ ✅ "文件就是那个文件"*。
+
+### B. 产物里**不是所有源文件都有对应字节** —— 判不了就**声明**，别造一个永远为假的判据
+
+落实现成的直觉是"把进产物的源码全跟产物内副本对一遍"。实测**不成立**：
+``core/``、``api/``、``config.py``、``main.py`` 等被编译进 ``pbc-server.exe`` 内的
+**PYZ**，产物侧**没有对应字节**（``dist/pbc-server/`` 只有 ``_internal/`` 下的 datas：
+``static/``、``templates/``、``db/schema.sql``、``core/kb/data/*.json``）。
+
+⇒ **规则**：把"可验证性"按处置**分层**声明（``internal`` / ``asar`` / ``pyz``），
+PYZ 层明写「只能验『工作树 == 清单』」并**把盲区写进模块 docstring**。
+这比发明一条**永远为假**的判据好 —— **恒假的判据和恒真的判据一样没有判别力**。
+（同型实测：electron-builder 会**重写** asar 内的 ``package.json``（源 ~1.6 KB →
+包内 255 B），所以"asar 内 package.json == 源 package.json"是**必假**判据；
+可比的只有 ``version`` 字段。）
+
+### C. 二进制格式：从**实测十六进制**推公式，并把不变式写成**运行时校验**
+
+asar 头部实测（本机 ``app.asar``）：``[0:4]=4``、``[4:8]=headerSize``、
+``[8:12]=headerSize-4``、``[12:16]=len(json)``、**JSON 从偏移 16 开始**，
+数据区起点 ``= 8 + headerSize = json_end + pad``（索引后有 **2 字节** 4 对齐填充）。
+两个坑都能**静默**读出错误字节：把 JSON 起点当 8（而非 16）、用"JSON 文本长度"推基址
+（差 2 字节）。
+
+⇒ **规则**：① 公式必须来自**实测转储**，不能来自记忆或猜测；② 把
+「数据区必须紧邻索引、填充 < 4 字节」写成**运行时校验**（``json_end <= base < json_end + 4``），
+不满足就 **raise** —— 于是"字段含义写错"从**静默错位**变成**响亮失败**；
+③ 用**合成夹具复刻真实公式**（本轮 ``_make_asar`` 写出的 headerSize 与真实文件
+**逐值相等**：``len(json)+8+pad == 52824 == 真实 headerSize``），并配一条
+**反证用例**（故意把 headerSize 写小 8 ⇒ 必须报错）。
+
+### D. 任何**降级**用的白名单都必须按**签名**匹配，且取不到签名时 fail-closed
+
+``release_gate`` 的「环境专有失败」原先只判 ``nodeid.startswith(prefix)``：
+**前缀不区分失败原因** ⇒ ``TestServePdf`` 里任何**真实回归**（例如 403 变 200）
+都会被降级成 WARN、**门禁退出码为 0**。实测判据本应是「``SystemExit`` **且** 带
+``SAFE_DELETE_BULK_CONFIRM_REQUIRED``/``_BULK_REJECTED``/``_FAIL_CLOSED`` 之一」。
+
+⇒ **规则**：白名单只能用来**改变呈现/严重度**，其**匹配条件**必须包含
+"是什么错"的签名（异常类型 + 固定标记串），并且**签名取不到时不降级**（fail-closed）。
+⚠️ 只看其一都不够：只看 ``SystemExit`` ⇒ 被测代码自己的 ``sys.exit()`` 被误降级；
+只看标记串 ⇒ "日志里打印过这个串"的失败被放过。
+
+### E. 护栏报了你的代码 —— 先判断是**代码错**还是**护栏错**；修法不得把错误前提**固化进配置**
+
+新增 ``scripts/bundle_manifest.py`` 后，``test_declared_dependencies.py`` 立刻指控
+``bundle_manifest`` 是"未声明的第三方依赖"（``scripts/clean_dist.py`` /
+``scripts/release_gate.py`` 都 ``import`` 它）。**护栏的修法看似显然**：把它加进
+``requirements.txt`` —— 但那条"修法"会把**本地模块**写进**供应链清单**，
+正是该护栏想防的那类污染。
+
+⇒ **规则**：护栏触发时先分类 —— "同目录扁平脚本互导"是**护栏的盲区**
+（``_is_local`` 只认根模块/包，不认"与导入方同目录的模块"），修**护栏**：
+``_is_local(name, origins)`` 增加第 ④ 形态，并**显式传起点**（单参形态刻意仍不认，
+用例同时锁定这一点）。
+
+**踩坑痕迹**：``scripts/bundle_manifest.py``（模块 docstring 含十六进制实测与盲区声明）、
+``tests/unit/test_bundle_manifest.py``（33 例，含 ``test_data_base_invariant_rejects_wrong_header_size``
+与 ``test_lag_one_commit_then_sync``）、``devlogs/_verify/mutate_b73.py``（**15/15 CAUGHT**）、
+``devlogs/_verify/probe_artifact.py``（产物事实探针）。
+
+

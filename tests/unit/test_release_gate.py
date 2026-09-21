@@ -17,7 +17,6 @@ import pytest
 
 _RG_PATH = Path(__file__).resolve().parents[2] / "scripts" / "release_gate.py"
 
-
 def _load():
     import sys
 
@@ -194,8 +193,11 @@ class TestOrchestration:
         # 契约变更（2026-09-17，仓库卫生）：编排新增两项生成物检查，
         # no_build_outputs（FAIL，拦 `git add -f` 产物）与 dist_variants（WARN，
         # 提醒收敛 dist* 变体）。二者都属"工作区状态"，故紧随 worktree_clean。
+        # 契约变更（2026-09-20，B7-3）：新增 artifact_freshness（产物新鲜度），
+        # 紧随 dist_variants —— 同为"产物/工作区状态"，且必须在 tests_coverage 之前
+        # （否则"测了一堆却发了个陈旧产物"仍会看起来全绿）。
         assert names == ["worktree_clean", "no_build_outputs", "dist_variants",
-                         "packaging_files", "rules_wired",
+                         "artifact_freshness", "packaging_files", "rules_wired",
                          "kb_corpus", "kb_packaging", "tests_coverage"]
         assert results[-1].status == rg.SKIP
         # 结构检查必须能在**不跑测试**时给出（提交前的秒级检查路径）
@@ -265,11 +267,20 @@ _XML_WITH_FAILURES = """<?xml version="1.0" encoding="utf-8"?>
 _XML_ENV_ONLY = """<?xml version="1.0" encoding="utf-8"?>
 <testsuites><testsuite name="pytest" errors="0" failures="1" skipped="0" tests="3">
 <testcase classname="tests.integration.test_main_routes.TestServePdf" name="test_pdf_non_local_host_returns_403" time="0.2">
-  <failure message="SystemExit: 1">tb</failure>
+  <failure message="SystemExit: 1">finally: pdf_path.unlink(...)
+  [safe-delete][SAFE_DELETE_BULK_CONFIRM_REQUIRED] {"count":847,"threshold":50,"scope":"turn"}
+  </failure>
 </testcase>
 <testcase classname="tests.unit.test_x" name="test_ok" time="0.1" />
 <testcase classname="tests.unit.test_x" name="test_ok2" time="0.1" />
 </testsuite></testsuites>"""
+
+# 同一 nodeid、**同样的 SystemExit**，但正文里**没有** safe-delete 标记串 ——
+# 这是"看起来像环境问题"的真缺陷（例如 shim 之外的 sys.exit）。必须照旧 FAIL：
+# 前缀是必要不充分条件，判据要的是「SystemExit + 标记串」双命中。
+_XML_ENV_ONLY_LOOKALIKE = _XML_ENV_ONLY.replace(
+    '[safe-delete][SAFE_DELETE_BULK_CONFIRM_REQUIRED] {"count":847,"threshold":50,"scope":"turn"}',
+    "SystemExit(1) raised by the code under test")
 
 
 _XML_CONTAINER_SKIP = """<?xml version="1.0" encoding="utf-8"?>
@@ -439,6 +450,17 @@ class TestTestsCoverageCheck:
         ]
         assert "allowlist" in r.detail
 
+    def test_env_only_prefix_without_signature_still_fails(self, monkeypatch, tmp_path):
+        """**护栏漏洞的回归用例**：nodeid 前缀在 allowlist、但失败**不是**沙箱
+        safe-delete 引起 ⇒ 必须 FAIL，不得降级 WARN。
+
+        （实测同形态：`TestServePdf` 里 403 变成 200 也会落在这个前缀下。）
+        """
+        self._patch(monkeypatch, tmp_path, junit_xml=_XML_ENV_ONLY_LOOKALIKE)
+        r = rg.check_tests_and_coverage(python="py")
+        assert r.status == rg.FAIL, "前缀相同但无 safe-delete 签名 ⇒ 必须 FAIL"
+        assert r.env_only == []
+
     def test_junit_missing_falls_back_to_stdout(self, monkeypatch, tmp_path):
         self._patch(monkeypatch, tmp_path, junit_xml=None,
                     pytest_out="FAILED tests/x.py::T::t - boom\n1 failed, 5 passed\n")
@@ -521,6 +543,143 @@ class TestJunitAuditTrail:
             encoding="utf-8")
         assert "devlogs/gate_junit_*.xml" in ci, "CI 未上传 junit 审计副本"
         assert "if: always()" in ci, "上传步骤必须无条件执行，否则绿了就丢日志"
+
+
+class TestSandboxDeleteIsolation:
+    """B7-1：门禁在**单个工具调用**里跑整套测试 ⇒ 必撞沙箱「每轮批量删除预算」。
+
+    实测错误原样：`[safe-delete][SAFE_DELETE_BULK_CONFIRM_REQUIRED]
+    {"count":847,"threshold":50,"scope":"turn"}` —— 沙箱策略，不是应用缺陷，
+    却会让门禁**假红**（同一份代码去掉该守卫 ⇒ 2801 passed/0 failed）。
+    这里锁住「子进程拿到的是**放宽后**的阈值」，并且是**真的注入到子进程**里
+    （跑一个真子进程打印它自己的环境变量），不是 mock 出来的假绿。
+    """
+
+    _PROBE = ("import os;print(os.environ.get("
+              "'CODEBUDDY_SAFE_DELETE_BULK_THRESHOLD',''))")
+    _PROBE_OTHER = "import os;print(os.environ.get('PBC_GATE_PROBE',''))"
+
+    def test_child_receives_raised_threshold(self):
+        rc, out = rg.run_cmd([sys.executable, "-c", self._PROBE])
+        assert rc == 0
+        assert out.strip() == str(rg.SANDBOX_BULK_DELETE_THRESHOLD)
+
+    def test_threshold_far_above_the_measured_peak(self):
+        """"抬高"必须真的高过实测量级（峰值 847），否则是形式主义。"""
+        assert rg.SANDBOX_BULK_DELETE_THRESHOLD > 847 * 10
+
+    def test_explicit_env_override_still_applies(self):
+        """调用方显式传的 env 仍生效 —— 放宽阈值不得顺手吞掉其它覆盖。"""
+        rc, out = rg.run_cmd([sys.executable, "-c", self._PROBE_OTHER],
+                             env={"PBC_GATE_PROBE": "ok"})
+        assert rc == 0 and out.strip() == "ok"
+
+
+class TestEnvOnlySignature:
+    """"环境专有失败"的判据 = **前缀 + 签名**双命中（只按前缀是护栏漏洞）。
+
+    2026-09-20 复核：`env_only` 原先只做 `nodeid.startswith(prefix)`，于是
+    `TestServePdf` 里任何**真实回归**（403 变 200）都会被降级成 WARN、
+    门禁退出码为 0 —— "护栏把真缺陷放行了"。
+    """
+
+    NODE = ("tests/integration/test_main_routes.py::TestServePdf"
+            "::test_pdf_non_local_host_returns_403")
+    _MARKED = ('SystemExit: 1\n[safe-delete][SAFE_DELETE_BULK_CONFIRM_REQUIRED] '
+               '{"count":847,"threshold":50,"scope":"turn"}')
+
+    def test_marker_plus_systemexit_is_env_only(self):
+        assert rg._is_sandbox_delete_failure(self._MARKED)
+
+    def test_systemexit_without_marker_is_not_env_only(self):
+        assert not rg._is_sandbox_delete_failure(
+            "SystemExit: 1\nAssertionError: assert 200 == 403")
+
+    def test_marker_without_systemexit_is_not_env_only(self):
+        assert not rg._is_sandbox_delete_failure(
+            "safe-delete reported SAFE_DELETE_BULK_CONFIRM_REQUIRED in a log line")
+
+    def test_no_signature_available_means_no_downgrade(self):
+        """junit 缺失 ⇒ 取不到签名 ⇒ **不得**降级（fail-closed）。"""
+        assert rg.env_only_nodeids([self.NODE], {}) == []
+
+    def test_prefix_is_still_required(self):
+        texts = {self.NODE: self._MARKED}
+        assert rg.env_only_nodeids(["tests/unit/test_other.py::T::t"], texts) == []
+        assert rg.env_only_nodeids([self.NODE], texts) == [self.NODE]
+
+    def test_failure_texts_extraction(self, tmp_path):
+        p = tmp_path / "j.xml"
+        p.write_text(_XML_ENV_ONLY, encoding="utf-8")
+        texts = rg._junit_failure_texts(p)
+        assert "SAFE_DELETE_BULK_CONFIRM_REQUIRED" in texts[self.NODE]
+
+    def test_failure_texts_extraction_survives_bad_xml(self, tmp_path):
+        p = tmp_path / "bad.xml"
+        p.write_text("not xml <<<", encoding="utf-8")
+        assert rg._junit_failure_texts(p) == {}
+
+
+class TestArtifactFreshness:
+    """`check_artifact_freshness` 的**编排**语义（判据本身在 test_bundle_manifest 里测）。
+
+    分层理由：判据（字节比对 / 集合覆盖 / asar）由 `bundle_manifest.verify_artifact`
+    单测；本类只管门禁怎么把它变成 PASS/FAIL/SKIP、怎么归因、崩了怎么办。
+    """
+
+    def _artifact(self, root: Path, kind: str = "backend") -> Path:
+        if kind == "backend":
+            p = root / "dist" / "pbc-server"
+        else:
+            p = root / "dist-electron" / "win-unpacked" / "resources" / "pbc-server"
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+
+    def test_no_artifact_is_skip_not_pass(self, tmp_path):
+        """"没有产物"≠"产物新鲜" —— 不能判 PASS（那是把"判不了"读成"没问题"）。"""
+        r = rg.check_artifact_freshness(root=tmp_path)
+        assert r.status == rg.SKIP and "无构建产物" in r.detail
+
+    def test_lagging_artifact_is_fail_with_attribution(self, tmp_path, monkeypatch):
+        # 只取副作用（建出目录让 discover_artifacts 认得出），路径本身不参与断言 ——
+        # 归因断言在下面用字面量 "dist/pbc-server" 表达。
+        self._artifact(tmp_path)
+        monkeypatch.setattr(rg, "verify_artifact",
+                            lambda a, root: ["3 个产物副本与源码不一致（**产物陈旧**）"])
+        r = rg.check_artifact_freshness(root=tmp_path)
+        assert r.status == rg.FAIL
+        assert "dist/pbc-server" in r.detail and "产物陈旧" in r.detail
+
+    def test_synced_artifact_is_pass(self, tmp_path, monkeypatch):
+        self._artifact(tmp_path)
+        monkeypatch.setattr(rg, "verify_artifact", lambda a, root: [])
+        r = rg.check_artifact_freshness(root=tmp_path)
+        assert r.status == rg.PASS and "逐字节一致" in r.detail
+
+    def test_every_artifact_is_checked_and_named(self, tmp_path, monkeypatch):
+        """两份产物（后端 + electron 嵌入）**都要**查，且问题要能归因到具体哪一份。"""
+        self._artifact(tmp_path, "backend")
+        self._artifact(tmp_path, "embedded")
+
+        def _fake(a, root):
+            return ["boom"] if "win-unpacked" in str(a) else []
+
+        monkeypatch.setattr(rg, "verify_artifact", _fake)
+        r = rg.check_artifact_freshness(root=tmp_path)
+        assert r.status == rg.FAIL
+        assert "dist-electron/win-unpacked/resources/pbc-server" in r.detail
+        assert "boom" in r.detail
+
+    def test_verifier_crash_is_fail_closed(self, tmp_path, monkeypatch):
+        """"判据自己崩了"绝不能被读成"没问题"。"""
+        self._artifact(tmp_path)
+
+        def _boom(a, root):
+            raise RuntimeError("index out of range")
+
+        monkeypatch.setattr(rg, "verify_artifact", _boom)
+        r = rg.check_artifact_freshness(root=tmp_path)
+        assert r.status == rg.FAIL and "校验器异常" in r.detail
 
 
 class TestMainExitCode:

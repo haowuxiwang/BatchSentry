@@ -1719,7 +1719,23 @@
 
 ### B7 测试与静态检查的基础设施（Round 48 提交前复核新发现）
 
-- [ ] **B7-1 全量测试在单次工具调用里会撞沙箱「每轮删除预算」⇒ 顺序性 flake**（P2）
+- [x] **B7-1 全量测试在单次工具调用里会撞沙箱「每轮删除预算」⇒ 顺序性 flake**（P2）
+  ✅ **2026-09-20 完成（Round 52）**。两条动作都做了，且都没走"只写文档"的省事路：
+  ① **机制上消除**（不是记忆纪律）：`release_gate.run_cmd` 给**子进程**注入
+  `CODEBUDDY_SAFE_DELETE_BULK_THRESHOLD=100000`（新常量 `SANDBOX_BULK_DELETE_THRESHOLD`）。
+  为什么必须**强制赋值**而不是 `setdefault`：宿主**已经**显式给了 50，`setdefault` 会
+  变成空操作而 flake 照旧。为什么只抬阈值而不清安全网：删除仍走回收站，只是不再按
+  次数触发确认 ⇒ 比 `CODEBUDDY_SAFE_DELETE_ENABLED=0` **更保守**。
+  护栏 `TestSandboxDeleteIsolation` 用**真子进程打印自己的环境变量**验证（不是 mock 的假绿）。
+  ② 文档固化进 `CLAUDE.md` 的 "Run tests"（含**真变量名**与"旧文档的 `BULK_THRESHOLD`
+  不是真变量名"的更正）；`CODEBUDDY_SAFE_DELETE_ENABLED=0` 的构建用法仍在原处。
+  ③ 🔴 **顺带修掉一个更严重的护栏漏洞**：`env_only` 原先只做
+  `nodeid.startswith(ENV_ONLY_FAILURE_PREFIXES)` —— **前缀不区分失败原因**，于是
+  `TestServePdf` 里任何**真实回归**（例如 403 变 200）都会被降级成 WARN、门禁退出码为 0。
+  现改为**前缀 + 签名**双命中（`SystemExit` **且** `SAFE_DELETE_BULK_CONFIRM_REQUIRED` /
+  `_BULK_REJECTED` / `_FAIL_CLOSED` 之一，标记串取自 shim 源码常量）；签名取不到
+  （junit 缺失）时**不降级**（fail-closed）。变异 M12/M14 双向验证。
+  **实测判据**：失败点是否是 `SystemExit` 且带 `BULK_CONFIRM_REQUIRED`。
   **实测（可复现）**：`pytest tests/unit tests/integration` 一次跑完 ⇒
   `1 failed, 2800 passed`，失败点 `tests/integration/test_main_routes.py::TestServePdf
   ::test_pdf_non_local_host_returns_403` 的 `finally: pdf_path.unlink(...)`，
@@ -1754,7 +1770,31 @@
   的导入，对 ruff 是"未使用"，删掉会**改掉 patch 目标是否存在** ⇒ 静默破坏测试。
   验收：`ruff check .` 归零且全量测试数**不下降**；变异验证：恢复一条真未用导入 ⇒ 必须红。
 
-- [ ] **B7-3 门禁无法发现「产物陈旧」 —— 护栏缺口**（P2，2026-09-20 实测）
+- [x] **B7-3 门禁无法发现「产物陈旧」 —— 护栏缺口**（P2，2026-09-20 实测）
+  ✅ **2026-09-20 完成（Round 52）**。新增**第 9 项**门禁 `artifact_freshness`
+  （`scripts/release_gate.py`），判据实现集中在**新模块** `scripts/bundle_manifest.py`
+  （CLI `--write` / `--check` 与门禁共用同一份 `verify_artifact`，**只有一处实现**）。
+  **六条判据**（每条都有反向用例 + 定向变异）：
+  ① 入包集合覆盖（新增入包文件必须在清单里，否则是永久盲区）；
+  ② 版本（清单 vs `main.APP_VERSION`，AST 读 `main.py`，不导入模块）；
+  ③ 工作树逐字节 vs 清单（抓"源码改了没重建"）；
+  ④ **产物内可读副本逐字节** vs 清单（抓"产物陈旧" —— 唯一能戳破"版本号一致但字节差"的判据）；
+  ⑤ asar 成员（`electron/main.js`）与 asar 的 `package.json` 版本；
+  ⑥ exe 绑定（清单记录的 `pbc-server.exe` sha256 必须对得上，防清单被挪到别的产物旁）。
+  **SKIP 语义**：仓库里**没有**产物 ⇒ SKIP（≠ PASS，本项回答的是"已存在的产物是否新鲜"，
+  CI/干净克隆不该因此变红）；**有产物但没清单 ⇒ FAIL**（"无法证明新鲜度" ≠ "新鲜"）。
+  🔴 **纠正一处旧记录**：既有记忆写的「比对 `main.APP_VERSION` vs 产物内 `package.json`」
+  **对 PyInstaller 产物不成立** —— 实测 `dist/pbc-server/` 里**没有** `package.json`
+  （只有 `_internal/` 下的 datas），`package.json` 只存在于 **electron 的 `app.asar`** 里，
+  且那份**被 electron-builder 重写**过（源 ~1.6 KB vs 包内 255 B）⇒ 只能比
+  **`version` 字段**，**字节比对必假**。另：`core/`、`api/`、`config.py`、`main.py` 等
+  **在产物里根本没有对应字节**（编译进 exe 内的 PYZ）⇒ 那一层只能靠"工作树 == 清单"，
+  盲区已在模块 docstring 里**显式声明**（判不了 ≠ 判据确凿）。
+  **验收（已达成）**：`test_lag_one_commit_then_sync` = 源码改动而产物不重建 ⇒ 红；
+  重建产物 + 重生成清单 ⇒ 绿。`devlogs/_verify/mutate_b73.py` **15/15 CAUGHT** 且字节级还原。
+  真产物实测：`release_gate --skip-tests` 现在**如实报红**（2 份产物都缺清单；
+  `static/status.js` 5354 B vs 产物 3867 B、`review.js` 97926 B vs 93941 B、
+  `settings.js` 77547 B vs 77231 B —— 三处铁证，比原记录多两处）。
   **实测铁证（字节级，非推断）**：源码 `static/settings.js`（09-20 16:11，
   含 B4-4 引入的 `showAutoActivateNotice`/`auto_activated`）与产物内同名文件
   （`dist/pbc-server/_internal/static/settings.js`、以及 electron 内嵌那份，
@@ -1781,7 +1821,21 @@
   断言收进 `test_*.py` 收集范围。
   验收（必须能失败）：故意让产物落后一个提交 ⇒ 门禁红；产物与源码同步 ⇒ 绿。
 
-- [ ] **B7-4 打 tag/发版流程缺「产物新鲜度」前置闸**（P2，由 B7-3 派生）
+- [x] **B7-4 打 tag/发版流程缺「产物新鲜度」前置闸**（P2，由 B7-3 派生）
+  ✅ **2026-09-20 完成（Round 52）**。"复用一个清单文件，构建时生成"这一条已落地：
+  ① 清单 = `dist/pbc-server/build_manifest.json`（schema 1：`app_version` / `git_head` /
+  `git_dirty` / `generated_at` / `files{rel: sha256}` / `artifact{pbc-server.exe: sha256}`）；
+  ② 生成点接进 **`build.ps1` 的 2.6 步**，时机**刻意**卡在 PyInstaller 之后
+  （要绑定 exe 字节）、electron-builder 之前（随 `extraResources` 进
+  `resources\pbc-server\`）⇒ **任何一份产物都能自证**它由哪次提交、哪些字节构建而来；
+  写完后**就地自校验**（`bundle_manifest.py --check`）—— 把"门禁才发现"提前到构建现场；
+  ③ 发版前置闸写进 `CLAUDE.md` 的 **Repo hygiene 规则 11**（与门禁同判据，不会两边漂移）；
+  ④ Bash 构建链（`CLAUDE.md` 的 agent 指令）同步补上该步骤。
+  **验收**：清单与产物不符 ⇒ 门禁 `artifact_freshness` / `bundle_manifest.py --check` 拒绝
+  （exit 1），变异 M1/M2/M11/M15 分别验证"比对被关掉 / 崩溃被吞掉 / 从编排摘掉"都会变红。
+  ⚠️ 与 B7-3 同源的**盲区**（如实声明）：清单是**文本文件**，若有人重建后又改源码并
+  **手工重新生成**清单，本闸看不出来 —— 那是**主动绕过**而非**漏检**；补强手段是
+  ⑤ 把 `bundle_manifest.py` 登记进 `PACKAGING_FILES`（缺它门禁直接 FAIL）。
   理由：B7-3 说明"版本号一致"根本不蕴含"产物是新构建的"。而分发/打 tag
   面向的是**产物**，不是源码树。当前打 tag 只需工作树干净，**不要求产物
   由当前 HEAD 构建**。

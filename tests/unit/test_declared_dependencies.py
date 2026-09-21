@@ -83,16 +83,28 @@ def _declared_dists() -> set[str]:
     return out
 
 
-def _is_local(name: str) -> bool:
+def _is_local(name: str, origins: list[Path] | None = None) -> bool:
     """仓库里真有这个模块/包？**动态判定**，不维护根模块白名单（那必然漂移）。
 
-    三种形态都算本地：
+    四种形态都算本地：
       ① 根目录单文件模块（`e2e_run.py`）；
       ② 常规包（`core/__init__.py`）；
       ③ **命名空间包**（无 `__init__.py` 的目录，如 `scripts/` —— PEP 420，
-         `import scripts.x` 照样成立）→ 只认 `__init__.py` 会漏判。
+         `import scripts.x` 照样成立）→ 只认 `__init__.py` 会漏判；
+      ④ 与导入方**同目录**的模块（`scripts/release_gate.py` 里
+         `import bundle_manifest`，加载前把该目录注入 `sys.path`）—— 故须传 `origins`。
+
+    ④ 的由来（2026-09-20）：`scripts/release_gate.py` 与 `scripts/clean_dist.py`
+    都按文件位置 `import bundle_manifest`（同目录的 `scripts/bundle_manifest.py`）。
+    少了 ④，仓库**自己的**脚本会被判成"未声明的第三方依赖"，而误报的修法是
+    **把本地模块塞进 requirements.txt** —— 那才是真的污染供应链清单。
     仅排除产物/缓存目录，防"恰好叫 build 的依赖被误判成本地"。
     """
+    for origin in origins or ():
+        if (origin.parent / f"{name}.py").is_file():
+            return True
+        if (origin.parent / name / "__init__.py").is_file():
+            return True
     if (_ROOT / f"{name}.py").is_file():
         return True
     d = _ROOT / name
@@ -197,7 +209,8 @@ def find_undeclared() -> list[str]:
     stdlib = set(sys.stdlib_module_names)
     problems: list[str] = []
     for name, files in sorted(_imported_map().items()):
-        if _is_local(name) or name in stdlib or name in _OPTIONAL:
+        if (_is_local(name, [Path(f) for f in files])
+                or name in stdlib or name in _OPTIONAL):
             continue
         if name in _TOOL_ONLY:
             allowed = _TOOL_ONLY[name]
@@ -245,6 +258,14 @@ def test_declared_dependency_guard_positive_control():
     # ④ 反向：本地包（含命名空间包）与标准库不得被判为未声明
     assert _is_local("core") and _is_local("tests") and _is_local("scripts")
     assert "os" in set(sys.stdlib_module_names)
+    # ⑤ 同目录本地模块（形态 ④）：`scripts/release_gate.py` 里 `import bundle_manifest`
+    #    是**仓库自己的**脚本互导，不是第三方依赖。要点：必须**显式给出起点目录**
+    #    —— 单参形态只认根模块/包，故它单独看不出来。
+    assert _is_local("bundle_manifest", [Path("scripts/release_gate.py")])
+    assert not _is_local("bundle_manifest")
+    assert not [p for p in find_undeclared() if "bundle_manifest" in p], (
+        "scripts/ 内的同目录互导被误判成未声明的第三方依赖"
+    )
     # ⑤ 由来仍在：main.py 顶层 import markupsafe，且它**已**被声明（本次修复的目标态）
     assert "main.py" in _imported_map().get("markupsafe", []), (
         "main.py 不再 import markupsafe —— 本护栏的由来已失效，请复核后更新说明"

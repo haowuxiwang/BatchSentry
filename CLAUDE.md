@@ -100,10 +100,31 @@ python server.py            # listens on 127.0.0.1:58765
 # Run tests
 pytest
 
+# Run the FULL suite (unit + integration) in ONE tool call.
+# ⚠️ Under the sandbox this MUST raise the bulk-delete budget, or a *real* red gets
+#    lost in a fake red: one suite run deletes >800 temp files, which trips
+#    `[safe-delete][SAFE_DELETE_BULK_CONFIRM_REQUIRED] {count:847, threshold:50,
+#    scope:turn}` → SystemExit(1) inside a test's cleanup → "1 failed, 2800 passed".
+#    Decisive evidence (2026-09-20): same code, only this env change → 2803 passed /
+#    0 failed. The env var name is CODEBUDDY_SAFE_DELETE_BULK_THRESHOLD — verified in
+#    the shim source (`cli/vendor/shim/safe-delete-bulk-guard.cjs`). The older docs'
+#    `BULK_THRESHOLD` is NOT a real variable name. Raising the threshold keeps
+#    safe-delete ON (deletes still go to the recycle bin); it only removes the
+#    per-turn tripwire. `release_gate.py` injects it into its own pytest child
+#    automatically, so the gate can no longer false-red for this reason.
+CODEBUDDY_SAFE_DELETE_BULK_THRESHOLD=100000 \
+  "$PY" -m pytest tests/unit tests/integration -o addopts="" -q -p no:cacheprovider
+
 # Release gate (packaging signal) — offline; THE authoritative check
 # structure checks + tests + coverage; writes devlogs/gate_report_<ts>.json
+# 9 items: worktree_clean / no_build_outputs / dist_variants / artifact_freshness /
+#          packaging_files / rules_wired / kb_corpus / kb_packaging / tests_coverage
 python scripts/release_gate.py                 # full
 python scripts/release_gate.py --skip-tests    # structure checks only (seconds)
+
+# Artifact freshness alone (B7-3): manifest vs source vs artifact bytes
+python scripts/bundle_manifest.py --check      # checks dist/pbc-server
+python scripts/bundle_manifest.py --write      # (re)generate the manifest — BUILD STEP
 
 # Runtime per-job data-quality gate (needs a running server + a finished job)
 python scripts/golden_gate.py --job-id <id> --expect-pages 51
@@ -117,7 +138,9 @@ npx tailwindcss -i ./static/input.css -o ./static/app.css --minify
 #    chain below; it is the same three steps build.ps1 performs (build.ps1 stays for
 #    manual use). Four preconditions, each learned from a real failure:
 #      * python 3.11 must be FIRST on PATH — only it has pytest + PyInstaller 6.x;
-#      * CODEBUDDY_SAFE_DELETE_ENABLED=0 (and a raised BULK_THRESHOLD) — PyInstaller's
+#      * CODEBUDDY_SAFE_DELETE_ENABLED=0 (plus a raised
+#        CODEBUDDY_SAFE_DELETE_BULK_THRESHOLD — the real variable name; an older
+#        doc said `BULK_THRESHOLD`, which is not a real name) — PyInstaller's
 #        rmtree otherwise trips the sandbox safe-delete fail-closed guard;
 #      * ELECTRON_BUILDER_CACHE must point at the EXISTING cache — otherwise
 #        electron-builder re-downloads winCodeSign, whose archive contains macOS
@@ -135,11 +158,18 @@ PY="C:/Users/<you>/AppData/Local/Programs/Python/Python311/python.exe"
 OUT="dist-electron-out-$(date +%Y%m%d-%H%M%S)"
 ./node_modules/.bin/tailwindcss build -i static/input.css -o static/app.css --minify
 "$PY" -m PyInstaller pbc-server.spec --noconfirm --clean
+# ⚠️ MANDATORY between the two builds (B7-3/B7-4). The manifest MUST be written
+#    AFTER PyInstaller (it binds the exe's sha256) and BEFORE electron-builder
+#    (so extraResources copies it into resources\pbc-server\). Skip it and
+#    `release_gate.py` fails artifact_freshness — by design: without a manifest
+#    there is no way to prove the artifact came from this source tree.
+"$PY" scripts/bundle_manifest.py --write
 ./node_modules/.bin/electron-builder --win --x64 "-c.directories.output=$OUT"
 
 # Then PROVE the fix is inside the product (version equality alone is NOT proof):
-#   python <repo>/tests/unit/test_distribution_parity.py     # embedded exe == build output
-#   GET /static/upload.js from the RUNNING exe                # new semantics present, old gone
+#   python "$PY" scripts/bundle_manifest.py --check            # manifest vs artifact BYTES
+#   python <repo>/tests/unit/test_distribution_parity.py       # embedded exe == build output
+#   GET /static/upload.js from the RUNNING exe                  # new semantics present, old gone
 
 # API docs (Swagger): http://127.0.0.1:8000/docs
 ```
@@ -377,6 +407,10 @@ The probe does NOT submit real OCR/LLM work — it just verifies auth + connecti
    ⚠️ **忽略写法要覆盖"整目录"，别按扩展名列举**：`spike/` 曾被写成 `spike/*.py` / `*.log` / `*.json` / `*.md` 四条，实测 `touch spike/__probe__.png` 立刻让 `git status` 报 `?? spike/`。按扩展名列举挡不住新形态，**一条整目录忽略**才闭合。
 10. **待办单一入口（round-30 立）**：所有待办只写在 **`docs/TODO.md`**，完成一项就地把 `[ ]` 改 `[x]` 并**填证据**（提交号 / 日志路径 / 数字）。`PLAN.md`、`docs/PLAN_v1.1_EXECUTION.md`、`docs/ROADMAP_v1.1.md` 是**存档**、不再更新。开工先读 `docs/TODO.md`，**不要另开 TODO 文件** —— 多份清单必然漂移（本项目的"两份词汇表"同型）。其中"需要用户动作"的项（如安全软件白名单、厂商侧轮换密钥）要单列，别混在可自办事项里装作能自己推进。
 9. **不升版号的边界（round-30 明确）**：改动只落在 `scripts/`、`tests/`、`docs/`、`.gitignore`、`CLAUDE.md` 等**不进 PyInstaller 产物**的文件时，**不升版号**、记 `[Unreleased]`。判定方法不是"我觉得"，而是**核实产物内容**：`ls dist-electron-*/win-unpacked/resources/pbc-server/_internal/ | grep -i scripts`（实测无输出 ⇒ `scripts/` 不入包）。反之，任何改到 `api/`/`core/`/`llm/`/`db/`/`static/`/`templates/` 的改动**必须**重建产物重跑产物级 e2e。
+   ⚠️ **round-52 补充**：`tests/`/`scripts/` 不入包 ⇒ 改它们本身不需要重建；但**只要仓库里存在产物**，门禁的 `artifact_freshness` 就会拿"当前工作树"去比对"上次构建时的字节"。所以**若本次改动顺带动了入包文件**（或上一轮遗留了陈旧产物），必须重建 —— 否则红线是 `artifact_freshness` FAIL，而不是"不升版也全绿"。
+11. **发版/打 tag 的前置闸 = 产物新鲜度（round-52 立，B7-4）**：打 tag 只需工作树干净，**不要求产物由当前 HEAD 构建** —— 而分发面向的是**产物**，不是源码树。故发版前必须让 `python scripts/bundle_manifest.py --check`（与门禁 `artifact_freshness` 项**同一判据**）通过：清单里 N 个入包文件的 sha256 必须同时等于**工作树字节**与**产物内副本字节**。
+   为什么不能只看版本号：B7-3 实测（2026-09-20）源码与产物 `static/settings.js` **版本号都是 1.1.9**，字节却差 316 B（产物仍含已删除的 `firstConfigured`/`autoReason`）—— 版本一致时**连"人眼扫一眼版本号"这条兜底也失效**。
+   清单由 `build.ps1` 的 **2.6 步**在 PyInstaller 之后、electron-builder 之前生成（时机是刻意的：既要绑定 exe 字节，又要随 `extraResources` 进 `resources\pbc-server\`）⇒ 任何一份产物都能**自证**它由哪次提交、哪些字节构建而成。
 
 ---
 

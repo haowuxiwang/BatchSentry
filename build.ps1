@@ -4,6 +4,7 @@
 # Produces:
 #   1. static/app.css       (Tailwind CLI build, ~14KB)
 #   2. dist/pbc-server/     (PyInstaller bundle, ~100MB)
+#      └─ build_manifest.json  (入包清单 — 产物新鲜度的判据载体，见 2.6 步)
 #   3. dist-electron/win-unpacked/  (Electron 文件夹便携版, ~640MB)
 #      └─ BatchSentry.exe   (双击运行，无需安装)
 #
@@ -248,6 +249,39 @@ if (-not $SkipPyInstaller) {
     Write-Step "Step 2/3: Skipping PyInstaller build"
 }
 
+# ── 2.6 入包清单（B7-3/B7-4：产物新鲜度的判据载体）──────────────────
+# 时机是**刻意的**：必须在 PyInstaller 之后（要绑定 exe 字节）、electron-builder
+# 之前（清单随 extraResources 一起进 resources\pbc-server\）。
+# 没有它，release_gate 的 artifact_freshness 无法给出结论 ⇒ 直接 FAIL。
+# 判据与用法见 scripts/bundle_manifest.py 的模块 docstring。
+Write-Step "Step 2.6/3: 生成产物入包清单 build_manifest.json"
+if (-not (Test-Path "dist/pbc-server/pbc-server.exe")) {
+    Write-Fail "dist/pbc-server/pbc-server.exe 不存在 —— 无法生成清单（先跑 PyInstaller）"
+}
+$bmLog = Join-Path $projectRoot "build\bundle_manifest.log"
+New-Item -ItemType Directory -Force -Path (Split-Path $bmLog) | Out-Null
+$prevEAP = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+try {
+    & python scripts/bundle_manifest.py --write *> $bmLog
+} finally {
+    $ErrorActionPreference = $prevEAP
+}
+if ($LASTEXITCODE -ne 0) {
+    Get-Content $bmLog -Tail 20 | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray }
+    Write-Fail "写入 build_manifest.json 失败（日志: $bmLog）"
+}
+if (-not (Test-Path "dist/pbc-server/build_manifest.json")) {
+    Write-Fail "dist/pbc-server/build_manifest.json 未生成"
+}
+# 写完立刻自校验：清单必须与刚构建出来的产物一致（把"门禁才发现"提前到构建现场）
+& python scripts/bundle_manifest.py --check *> $bmLog
+if ($LASTEXITCODE -ne 0) {
+    Get-Content $bmLog -Tail 20 | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray }
+    Write-Fail "产物与清单不一致（日志: $bmLog）—— 产物新鲜度自检未通过"
+}
+Write-OK "dist/pbc-server/build_manifest.json 已生成并自校验通过"
+
 # ── 3. Electron-builder ─────────────────────────────────────────────
 if (-not $SkipElectron) {
     Write-Step "Step 3/3: Building Electron installer with electron-builder"
@@ -423,6 +457,9 @@ Write-Host ""
 Write-Host "Artifacts:"
 if (Test-Path "static/app.css") { Write-Host "  - static/app.css" }
 if (Test-Path "dist/pbc-server/pbc-server.exe") { Write-Host "  - dist/pbc-server/pbc-server.exe" }
+if (Test-Path "dist/pbc-server/build_manifest.json") { Write-Host "  - dist/pbc-server/build_manifest.json (入包清单)" }
 if (Test-Path "dist-electron\win-unpacked\BatchSentry.exe") {
     Write-Host "  - dist-electron\win-unpacked\ (folder, run BatchSentry.exe)"
 }
+Write-Host ""
+Write-Host "Next: python scripts/release_gate.py   # 9 项门禁（含产物新鲜度）"

@@ -48,10 +48,19 @@ import argparse
 import ctypes
 import json
 import os
-import struct
 import sys
 from ctypes import wintypes
 from pathlib import Path
+
+# `scripts/` 非包 ⇒ 按**文件位置**互导（测试用 importlib 从文件路径加载本模块时
+# 也能工作）。asar 的**格式解析只允许一处实现**（bundle_manifest.read_asar_*）：
+# 两份实现里必然有一份会把「数据基址 = 8 + headerSize」写成「8 + JSON 文本长度」，
+# 而那会**差 2 字节并静默读出错误字节**（见该模块 docstring 的十六进制实测）。
+_HERE = Path(__file__).resolve().parent
+if str(_HERE) not in sys.path:
+    sys.path.insert(0, str(_HERE))
+
+from bundle_manifest import read_asar_version  # noqa: E402
 
 # ── 目录分类 ────────────────────────────────────────────────────────
 
@@ -113,26 +122,12 @@ def classify(path: Path) -> dict:
 def asar_version(asar: Path) -> str | None:
     """从 app.asar 里读出打包的 `package.json` 版本（失败返回 None，不抛）。
 
-    注意两点（都是实测踩过的）：
-    - 版本号在 asar 的 ``package.json`` **成员内容**里，不在头部索引的根节点上 ——
-      直接 ``obj.get("version")`` 恒为 None；
-    - 数据基址是 ``8 + data_size``，**不能**用"JSON 文本长度"推算：索引后有 2 字节
-      对齐填充，会差 2 字节并静默错位。
-    - 只读头部并 seek 到成员，别把 380MB 整个读成字符串。
+    具体解析**委托** ``bundle_manifest.read_asar_version`` —— 实现只有一处。
+    那两处实测坑记在彼处：版本号在 ``package.json`` **成员内容**里而不在头部索引根
+    节点上；数据基址是 ``8 + headerSize``（**不能**用 JSON 文本长度推算，会差 2 字节
+    并静默错位）。
     """
-    try:
-        with asar.open("rb") as fh:
-            head = fh.read(1 << 20)
-            json_start = head.index(b'{"files":')
-            data_size = struct.unpack("<I", head[4:8])[0]
-            obj, _ = json.JSONDecoder().raw_decode(
-                head[json_start:json_start + data_size].decode("utf-8", "replace"))
-            node = obj["files"]["package.json"]
-            fh.seek(8 + data_size + int(node["offset"]))
-            blob = fh.read(int(node["size"]))
-        return json.loads(blob.decode("utf-8", "replace")).get("version")
-    except (OSError, ValueError, KeyError, UnicodeDecodeError):
-        return None
+    return read_asar_version(asar)
 
 
 # ── 占锁探测 ────────────────────────────────────────────────────────
