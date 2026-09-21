@@ -385,10 +385,69 @@ def _check_year_contradiction(pages: list[dict]) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 
-def _check_suspicious_dates(pages: list[dict]) -> list[dict]:
+def record_production_year(pages: list[dict]) -> int | None:
+    """记录里**解析出的生产年份**（多页多数票）；一页都没解析出来时返回 ``None``。
+
+    这是"分析基准年"的首选来源（B1-7）。为什么必须固化基准：此前 R4 直接用
+    ``datetime.now().year`` 做上界 ⇒ **同一份 PDF 在不同年份重分析会得到不同结论**
+    （finding 不可复现，审计上不可接受）。判据方向本身是对的（记录里出现未来日期
+    确实可疑），问题只在"基准随运行时刻漂移"。
+    """
+    votes: dict[int, int] = {}
+    for page in pages:
+        pi = page.get("page_info") or {}
+        y = _extract_year(pi.get("production_date"))
+        if y is not None:
+            votes[y] = votes.get(y, 0) + 1
+    if not votes:
+        return None
+    # 票数优先；票数相同取**较小年份** —— 让结果与 dict 顺序无关、可复现
+    return max(votes.items(), key=lambda kv: (kv[1], -kv[0]))[0]
+
+
+def _baseline_year(pages: list[dict], override: int | None = None) -> tuple[int, bool]:
+    """返回 ``(分析基准年, 是否由"当前年"回退而来)``。
+
+    优先级：调用方显式给出 > 记录里的生产年份 > 当前年（**并在 finding 里注明**）。
+    返回第二个分量是为了让"回退"这件事在文案上**可见** —— 悄悄回退会让
+    "不可复现"重新从后门回来。
+    """
+    if override is not None:
+        return int(override), False
+    ry = record_production_year(pages)
+    if ry is not None:
+        return ry, False
+    return datetime.now().year, True
+
+
+def _suspicion_reason(year: int, ceiling: int, now_ceiling: int) -> str | None:
+    """该年份"可疑"的**依据**；不可疑返回 ``None``。
+
+    两条判据**语义不同**，刻意分开表达、并在文案里各自点名基准：
+
+    ① 相对**分析基准年**（记录内解析出的生产年份 ⇒ **可复现**）：
+       记录内部就不该出现超出"生产年+1"的日期。
+    ② 相对**当前年份**（绝对不可信）：**整份记录落在未来**。
+       ⚠️ 这一条**天然依赖运行时刻** —— 一份 2036 年的记录放到 2036 年再看，
+       它就不再"未来"了。所以文案里**明说是按当前年份判的**，不假装它可复现。
+       （若丢掉这条，B1-7 的"固化基准"就会**静默削弱检测**：
+       记录自我一致地落在未来时，只靠 ① 永远判不出来。）
+    """
+    if year < 2000:
+        return "早于2000"
+    if year > ceiling:
+        return f"晚于{ceiling}"
+    if year > now_ceiling:
+        return f"晚于当前年份+1（{now_ceiling}），按运行时刻判断"
+    return None
+
+
+def _check_suspicious_dates(pages: list[dict],
+                            analysis_year: int | None = None) -> list[dict]:
     findings = []
-    current_year = datetime.now().year
-    max_year = current_year + 1
+    baseline, year_inferred = _baseline_year(pages, analysis_year)
+    ceiling = baseline + 1
+    now_ceiling = datetime.now().year + 1
     for page in pages:
         pno = page["page"]
         seen: set[str] = set()
@@ -399,19 +458,25 @@ def _check_suspicious_dates(pages: list[dict]) -> list[dict]:
             year = _extract_year(ds)
             if year is None:
                 continue
-            if year < 2000 or year > max_year:
-                findings.append({
-                    "page": pno,
-                    "type": "suspicious_date",
-                    "severity": "warning",
-                    "description": (
-                        f"第{pno}页 日期 {ds} 年份 {year} 异常"
-                        f"（早于2000或晚于{max_year}），需人工确认"
-                    ),
-                    "ocr_text": ds,
-                    "operator": "",
-                    "source": "rule",
-                })
+            reason = _suspicion_reason(year, ceiling, now_ceiling)
+            if reason is None:
+                continue
+            # 回退到"当前年"时必须注明 —— 否则用户看不出这条结论**依赖运行时刻**
+            basis_note = (
+                "；基准年取当前年份（记录中未解析出生产年份）" if year_inferred else ""
+            )
+            findings.append({
+                "page": pno,
+                "type": "suspicious_date",
+                "severity": "warning",
+                "description": (
+                    f"第{pno}页 日期 {ds} 年份 {year} 异常（{reason}），"
+                    f"需人工确认{basis_note}"
+                ),
+                "ocr_text": ds,
+                "operator": "",
+                "source": "rule",
+            })
     return findings
 
 
