@@ -23,7 +23,7 @@
 > 同时**纠正 2 条已过时的登记**（`B4-1` 的 `id:` 帧其实早已存在；`#155` 对复核页不适用）。
 > 报告 → `docs/ADVERSARIAL_AUDIT.md` **§15**）·
 > Round 42：**产物级端到端测试（#149 闭环）** ——
-> 用 `tests/e2e_run.py` 驱动 **Electron 内嵌的那份 exe**（`win-unpacked/resources/
+> 用 `e2e_run.py`（**仓库根**）驱动 **Electron 内嵌的那份 exe**（`win-unpacked/resources/
 > pbc-server/pbc-server.exe`），跑 **7 个轮次全部 PASS**（`pdf` / `img` / `cancel` /
 > **`real` 51 页真实批记录** / `rot` / `robust`×2），driver 报 `ALL ROUNDS PASSED` + `exit=0`。
 > **独立核验**（不采信自述）：findings **直查库**与 driver 逐条一致（real **293 条** /
@@ -767,7 +767,7 @@
 - [x] **B0-3 `#149` 产物级端到端测试**（唯一未验的执行项）—— ✅ **2026-09-18 完成**
       被测对象：`dist-electron/win-unpacked/resources/pbc-server/pbc-server.exe`
       （sha256 `cfe28a30…`，20 340 967 B）—— **即用户双击运行时内嵌的那一份**。
-      驱动：`tests/e2e_run.py`（`PBC_E2E_EXE` 指向上述 exe；driver 自行以
+      驱动：`e2e_run.py`（**仓库根**；`PBC_E2E_EXE` 指向上述 exe；driver 自行以
       `APPDATA=%TEMP%/pbc_e2e_appdata` + `PORT=58799` 隔离）。
       **结果：7 个轮次全过、`ALL ROUNDS PASSED`、exit=0**：
 
@@ -1898,7 +1898,11 @@
   动作：至少在设置页提示；或支持引用环境变量；评估是否加密存储。
   验收：文档写明存储位置与风险；若改存储方式需兼容旧配置。
 
-- [ ] **B4-3 配置双轨 ⇒ "死 key 假红" 与自查盲区**（P2，Round 41 新发现）
+- [x] **B4-3 配置双轨 ⇒ "死 key 假红" 与自查盲区**（P2，Round 41 新发现）
+      ✅ **已完成**（Round 48 修主体 + Round 53 `c751c4a` 补"双轨可见性"；
+      2026-09-21 复核：`config.py` 已有 `CONFIG_SOURCE_APPDATA` 常量 ⇒ 两份配置的
+      来源在代码里可区分、可显示）。⚠️ 回填此前缺失（原为 `[ ]` 无完成标记）——
+      写 `[1.2.0]` 发布说明时补齐，见 **B8 第 6 条**。
   现象：`config.py:_config_path()` 让**开发模式读仓库根 `config.json`**、**冻结版读
   `%APPDATA%/PBC/config.json`**。两个文件装的**不是同一把凭据**：仓库那份是已吊销的 K1
   （实测 `401 {"code":30014,"message":"Token is invalid."}`），`%APPDATA%` 那份才可用（实测 200）。
@@ -1997,7 +2001,10 @@
     （`devlogs/_lint/mutate_b44b.py`，逐字节还原自校验通过）。
   - 记录：`tests/unit/test_settings_auto_activate.py::test_badge_write_is_unconditional_and_reachable`。
 
-- [ ] **B4-5 KB 条目数口径虚高 + 文档两套数字并存**（P2，Round 43 新发现）
+- [x] **B4-5 KB 条目数口径虚高 + 文档两套数字并存**（P2，Round 43 新发现）
+      ✅ **已完成**（Round 53 `caf6a7c`；2026-09-21 复核：`release_gate.count_kb_entries`
+      已把 `chapters` **分列并明确不计入**语料规模，返回文案里同时透明地列出章节标题条数）。
+      ⚠️ 回填此前缺失（原为 `[ ]` 无完成标记）—— 见 **B8 第 6 条**。
   实测（本轮亲自跑，可复现）：`scripts/release_gate.count_kb_entries('core/kb/data')` = **477**，
   而检索器 `core.kb.store.entries()` = **441**；差值 **36** = 4 个 JSON 的 `chapters`
   （**纯章节标题元数据**：无正文、无 `entry_id`、**检索器根本不索引**）。
@@ -2026,10 +2033,15 @@
   动作：显式统一为**一层**（关掉 SDK 重试或关掉自己的循环），并让总次数可预测。
   验收：桩收到的请求数 == 预期值；变异验证：把两层都打开 ⇒ 护栏红。
 
-- [ ] **B5-4 生产模型（DeepSeek-V3.2）路径未被 e2e 覆盖**（P2，Round 42 实测新发现）
+- [x] **B5-4 生产模型（DeepSeek-V3.2）路径未被 e2e 覆盖**（P2，Round 42 实测新发现）
+      ✅ **已完成**（Round 53 `b94b816`；2026-09-21 复核：**仓库根** `e2e_run.py` 已支持
+      `--model` / `PBC_E2E_MODEL` 覆盖，不再硬编码单一模型）。
+      ⚠️ 回填此前缺失（原为 `[ ]` 无完成标记）—— 见 **B8 第 6 条**。
+      ⚠️ 顺带更正一处**路径笔误**：`e2e_run.py` 在**仓库根**，不是 `tests/`。
   ⚠️ 2026-09-20 补录：本条此前**只在 `docs/TODO.md` 的 Round 42 段被引用**
   （"已登记 B5-4"），清单里**没有对应条目** —— 属**悬空引用**，现补齐。
-  现象：`tests/e2e_run.py:308` **硬编码** `siliconflow_model = "Qwen/Qwen2.5-72B-Instruct"`，
+  现象：`e2e_run.py:308`（**仓库根**；本条原文写作 `tests/e2e_run.py`，属**笔误** ——
+  该文件历史上从未在 `tests/` 下存在过）**硬编码** `siliconflow_model = "Qwen/Qwen2.5-72B-Instruct"`，
   而本机生效的生产配置是 `SILICONFLOW_MODEL = deepseek-ai/DeepSeek-V3.2`
   （`%APPDATA%/PBC/config.json`）。两者**都走 OpenAI adapter、协议一致**，
   故"链路可用"这一结论**有效**；但被测模型 ≠ 生产模型 ⇒ **生产模型这条具体路径本轮未覆盖**。
@@ -2192,9 +2204,22 @@
      `packages[""]` / `PORTABLE_README.txt`）—— ⚠️ lock 里另有 2 处 `1.1.4` 系**依赖自带**，勿改。
   3. 重建**三步不许漏中间那步**：Tailwind → PyInstaller → `python scripts/bundle_manifest.py --write`
      → electron-builder（漏掉清单 ⇒ 门禁 `artifact_freshness` FAIL，属**设计**）。
-  4. 门禁 **9 项**（含 `artifact_freshness`）；产物级 e2e（`tests/e2e_run.py`，`PBC_E2E_EXE` 指向
+  4. 门禁 **9 项**（含 `artifact_freshness`）；产物级 e2e（**`e2e_run.py` —— 在仓库根**，
+     不是 `tests/`；`PBC_E2E_EXE` 指向
      `dist-electron/win-unpacked/resources/pbc-server/pbc-server.exe`）。
   5. tag 一律 **annotated**，且与引用它的文档**同树**。
+  6. 🔴 **写发布说明前必须先补齐三个"已提交但 TODO 未回填"的条目**：
+     `B4-3` / `B4-5` / `B5-4` 的提交（`c751c4a` / `caf6a7c` / `b94b816`）已落在 Round 53，
+     但它们的 TODO 条目**仍是 `[ ]` 且无完成标记**（实测 `grep -n "✅ \*\*2026-09-21"`
+     命中里没有这三条）。后果：**发布说明无从取证** —— 若照抄提交标题写，
+     就违反本条"不得凭记忆写"的纪律。
+     2026-09-21 已核实代码确实落地（`CONFIG_SOURCE_APPDATA` 在 `config.py`；
+     `release_gate.count_kb_entries` 已把 `chapters` 分列并不计入；
+     `PBC_E2E_MODEL`/`--model` 已在**仓库根** `e2e_run.py` 生效）⇒ 只补回填、不返工。
+     ⚠️ 这条同时暴露一个**流程缺口**：Round 53 有 3/10 个提交**未回填 TODO**
+     （另有 8/10 未写 CHANGELOG，见第 1 条）⇒ **"提交即回填"目前靠自觉，没有机检**。
+     后续可考虑把"提交信息里点名的条目号必须在 TODO 里有对应完成标记"做成机检（另立条目）。
 
   **验收**：`grep -c "B1-10\|B5-4\|B4-3\|B4-5\|B1-16" CHANGELOG.md` ≥ 5；
-  且 `[1.2.0]` 段里能逐条找到上列 11 个条目号。
+  且 `[1.2.0]` 段里能逐条找到上列 11 个条目号；
+  且 `B4-3`/`B4-5`/`B5-4` 三条在 `docs/TODO.md` 里为 `[x]` 且有完成标记。
