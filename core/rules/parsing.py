@@ -42,6 +42,31 @@ _TIME_ONLY_RE = re.compile(r"^\s*(\d{1,2}):(\d{2})(?::(\d{2}))?\s*$")
 _MD_TIME_RE = re.compile(
     r"(?<!\d)(\d{1,2})-(\d{1,2})\s+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*$"
 )
+# 「仅时刻 + 中文单位」（B1-16）：`09 时 00 分` / `08时 09分` / `19 时 15 分`。
+# 需 fallback_date 补年月日（与 `_TIME_ONLY_RE` 同契约）。
+#
+# ⚠️ 三条硬约束，改动前务必读完（B1-16 实测）：
+#   ① **整串锚定**。同一语料里还有 `22108时26分`、`2109时31分`、
+#      `15时36分008232-2412017` 这类"批号/日期与时刻粘连"的噪声 ——
+#      锚定后它们**仍然判不可解析**（判不了 ≠ 判据确凿；宁可缺，不可错）。
+#   ② **分钟必须两位**（与 `_TIME_ONLY_RE` / `_CN_DATE_RE` 同一约定）：
+#      放成 `\d{1,2}` 会让 `13时6` 被读成 13:06，而一位分钟在 OCR 语料里
+#      与"被截断的数字"不可区分（p6 的 `13:6 m^3` 正是该风险的真实样本）。
+#   ③ 不认"时/分"以外的单位，也不接受 `~` / `-` 区间形态（`01:01 ~ 01:27`）。
+_CN_TIME_ONLY_RE = re.compile(r"^\s*(\d{1,2})\s*时\s*(\d{2})\s*分?\s*$")
+# 「N日 + 时刻」：`21日 00 时36分` / `21日07时49分` / `20 日 17 时 29 分`。
+# 月份/年份由 fallback_date 推定，故必须保守（见 `_DAY_WINDOW_DAYS`）。
+_CN_DAY_TIME_RE = re.compile(
+    r"^\s*(\d{1,2})\s*日\s*(\d{1,2})\s*时\s*(\d{2})\s*分?\s*$"
+)
+# `N日H时M分` 里"日"与 fallback 生产日期允许相差的天数。
+#
+# 为什么是 1：生产记录跨午夜是常态（同日或前后一天），此范围内**月份是确定的**。
+# 再放宽就必须在"用本月还是相邻月"之间猜 —— 而 TODO B1-16 明确要求
+# **不得猜月**，且实测 p15 的 `21日` 配 `production_date=1月27日`（差 6 天）、
+# p46 的 `23日` 配一个伪造的当天日期（差 5 天）都属"输入里没有可用锚点"。
+# ⇒ 超窗口一律返回 None：降级为"判不了"，不伪造结论。
+_DAY_WINDOW_DAYS = 1
 # Glued name+date like "庞明女署2027.01.17" — we already extract via _DATE_RE,
 # but keep a fallback for cases without separator inside the date.
 _YEAR_RE = re.compile(r"\b((?:19|20)\d{2})\b")
@@ -63,6 +88,9 @@ def _parse_time(s: Optional[str], fallback_date: Optional[str] = None) -> Option
       - "2024年5月7日" / "2024年05月07日 14时30分" (Chinese format)
       - "07-17 14:30"        -> uses fallback_date for year (no year prefix)
       - "11:04" / "11:04:30" -> uses fallback_date (e.g. page production_date)
+      - "09 时 00 分" / "08时 09分" -> 中文单位时刻, uses fallback_date 的年月日
+      - "21日07时49分" / "20 日 17 时 29 分" -> 日 + 中文单位时刻, uses fallback_date
+        的年月, **仅当"日"与生产日期相差 <= `_DAY_WINDOW_DAYS` 天**才接受
       - "2022/4/202205.07"   -> OCR noise, clean to "2022.05.07"
       - "庞明女署2027.01.17"  -> extract via regex
 
@@ -105,6 +133,35 @@ def _parse_time(s: Optional[str], fallback_date: Optional[str] = None) -> Option
             except ValueError:
                 return None
         return None
+
+    # 1c) 「N日 + 时刻」`21日07时49分` / `20 日 17 时 29 分`（B1-16）
+    #     年月靠 fallback 生产日期推定 ⇒ 只在"日"与生产日期足够近时才接受，
+    #     超出窗口返回 None（不猜月）。阈值依据见 `_DAY_WINDOW_DAYS` 注释。
+    m = _CN_DAY_TIME_RE.match(raw)
+    if m:
+        fb = _parse_time(fallback_date) if fallback_date else None
+        if not fb:
+            return None
+        try:
+            cand = fb.replace(day=int(m.group(1)), hour=int(m.group(2)),
+                              minute=int(m.group(3)), second=0)
+        except ValueError:
+            return None
+        if abs((cand.date() - fb.date()).days) > _DAY_WINDOW_DAYS:
+            return None
+        return cand
+
+    # 1d) 「仅时刻 + 中文单位」`09 时 00 分` / `08时 09分`（B1-16）
+    #     与 `_TIME_ONLY_RE` 同契约：整个年月日都取自 fallback 生产日期。
+    m = _CN_TIME_ONLY_RE.match(raw)
+    if m:
+        fb = _parse_time(fallback_date) if fallback_date else None
+        if not fb:
+            return None
+        try:
+            return fb.replace(hour=int(m.group(1)), minute=int(m.group(2)), second=0)
+        except ValueError:
+            return None
 
     # 2) OCR noise pattern "2022/4/202205.07"
     m = _OCR_NOISE_DATE_RE.search(raw)
@@ -165,7 +222,13 @@ def _extract_year(s: Optional[str]) -> Optional[int]:
 # Match whether a time string carries an explicit time-of-day part
 # ("14:30", "9:05", "14时30分"). Used to distinguish point-in-time values
 # from date-only values (which span the whole day).
-_TIME_OF_DAY_RE = re.compile(r"\d{1,2}[:时]\d{2}")
+#
+# ⚠️ B1-16：分隔符两侧**必须容忍空白**。实测本语料大量时刻写作 `09 时 00 分` /
+# `08时 09分`（时/分两侧带空格）—— 旧式 `\d{1,2}[:时]\d{2}` 认不出它们，
+# 于是**同一种形态只因空格**被判成两种精度：`21日07时49分` 是精确点，
+# `09 时 00 分` 却成了"整天"区间 ⇒ 区间被放宽 ⇒ `_interval_after` 更难成立
+# ⇒ 时序倒序被**系统性漏报**（判据与解析器不同源）。
+_TIME_OF_DAY_RE = re.compile(r"\d{1,2}\s*[:时]\s*\d{2}")
 
 
 # ---------------------------------------------------------------------------

@@ -673,6 +673,174 @@ class TestParseTime:
 
 
 # ===========================================================================
+# B1-16「仅时刻 + 中文单位」形态
+# ===========================================================================
+
+
+class TestParseTimeChineseUnitForms:
+    """B1-16：`09 时 00 分` / `21日07时49分` 这类形态此前**完全解析不出来**。
+
+    实测（真实 51 页隔离库，job `6f80145a-47f`，`devlogs/_verify/probe_b113f.py`）：
+    162 个"看起来是时刻"的字面量中 **51 条的形态本体不被支持**（给了哨兵日期仍失败）
+    ⇒ R1/R1b 与 `llm_finding_guard` 的时序复算**同时饿死**，"判不了 ⇒ 降级"成为这些
+    页的唯一结局。
+
+    ⚠️ 本类同时钉住 **B1-16 明文要求的两条反向约束**（只测"救活了"不算数）：
+      ① 放宽形态**不得**连带接受噪声（`13:6 m^3` / `22108时26分`）或区间形态
+         —— 否则会**激活** p6 那条"体积当时间"的假倒序；
+      ② 带"日"的形态**不得猜月** —— 与生产日期差太远一律判不了，不按本月硬推。
+    """
+
+    FB = "2025年01月20日"
+
+    def _iv(self, *args, **kwargs):
+        # 局部导入（同 `TestParseTimeInterval` 约定）：本模块从
+        # `core.cross_page_analyzer` 取常用再导出，而 `_parse_time_interval`
+        # 只在这里用 ⇒ 不为此改动模块级导入面。
+        from core.rules.parsing import _parse_time_interval
+
+        return _parse_time_interval(*args, **kwargs)
+
+    @pytest.mark.parametrize("lit,hh,mm", [
+        ("09 时 00 分", 9, 0),         # p6  param.接收开始时间
+        ("19 时 15 分", 19, 15),       # p38 meas.清洗罐搅拌开始时间
+        ("08时 09分", 8, 9),           # p17 start
+        ("21日07时49分", 7, 49),       # p15 meas.过滤开始时间（日=21，与生产日差 1）
+        ("20 日 18 时 06 分", 18, 6),   # p38 meas.透出循环起始时间
+    ])
+    def test_real_corpus_forms_are_parseable(self, lit, hh, mm):
+        dt = _parse_time(lit, fallback_date=self.FB)
+        assert dt is not None, f"{lit!r} 应可解析（B1-16 验收）"
+        assert (dt.hour, dt.minute) == (hh, mm)
+
+    def test_time_only_branch_positive_control(self):
+        """1d 分支（仅时刻 + 中文单位）的正向对照，**也是变异验证的稳定锚点**。
+
+        为什么必须单独存在：本类其余用例对"只有时刻"的形态断言的都是 `None`
+        （fail-open 方向），对 1d 分支**存在与否不敏感** —— 若只靠它们，
+        "把 1d 分支整条打掉"这个变异不会有**任何**用例变红（假绿）。
+        """
+        dt = _parse_time("09 时 00 分", fallback_date=self.FB)
+        assert dt is not None, "1d 分支被打掉 ⇒ 本用例必须红"
+        assert (dt.hour, dt.minute) == (9, 0)
+
+    # ⚠️ 下面四条**刻意写成具名用例而不是 parametrize**：变异验证要按 nodeid 指名
+    #    "哪条必须变红"，而 parametrize 的 id 是 pytest 自动生成且会把中文转义成
+    #    `\uXXXX`，脚本里只能硬编码转义串（不可读、脆弱）。具名 = 稳定锚点。
+    def test_volume_as_time_stays_unparseable(self):
+        """护栏①的核心样本：p6 的体积被误绑到时间列。
+
+        它必须**继续**判不可解析 —— 否则会**激活** p6 那条"体积当时间"的假倒序
+        （B1-16 明文要求）。
+        """
+        assert _parse_time("13:6 m^3", fallback_date=self.FB) is None
+
+    def test_intervals_stay_unparseable(self):
+        """区间不是时刻：p11 `01:01 ~ 01:27` / p47 `11:05 - 11:12`。"""
+        assert _parse_time("01:01 ~ 01:27", fallback_date=self.FB) is None
+        assert _parse_time("11:05 - 11:12", fallback_date=self.FB) is None
+
+    def test_glued_noise_stays_unparseable(self):
+        """批号/日期与时刻**粘连**的噪声必须仍判不可解析（判不了 ≠ 判据确凿）。
+
+        依赖"整串锚定"这个约束：一旦去掉锚定，`15时36分008232-2412017`
+        会被截出 `15时36分` 而误收 —— 本用例就是钉住锚定的。
+        """
+        assert _parse_time("22108时26分", fallback_date=self.FB) is None
+        assert _parse_time("2109时31分", fallback_date=self.FB) is None
+        assert _parse_time("15时36分008232-2412017", fallback_date=self.FB) is None
+
+    def test_truncated_minute_stays_unparseable(self):
+        """一位分钟 ⇒ 与"被截断的数字"不可区分，必须拒（分钟一律两位）。"""
+        assert _parse_time("13时6", fallback_date=self.FB) is None
+        assert _parse_time("08时9分", fallback_date=self.FB) is None
+
+    def test_requires_fallback_date(self):
+        """无 fallback 生产日期 ⇒ 新形态同样**不臆造**日期（与 `11:04` 同契约）。"""
+        assert _parse_time("09 时 00 分") is None
+        assert _parse_time("21日07时49分") is None
+
+    def test_day_must_be_near_fallback_day(self):
+        """护栏②：日与生产日期相差 > 窗口 ⇒ 判不了（**不猜月**）。
+
+        实测同类形态：p15 `21日07时49分` 配 `production_date=1月27日`（差 6 天）、
+        p46 `23日08时42分` 配一个伪造的当天日期（差 5 天）—— 都属于
+        "输入里没有可用锚点"，只能如实降级。
+        """
+        assert _parse_time("21日07时49分", fallback_date="2025年01月27日") is None
+        assert _parse_time("23日08时42分", fallback_date="2026-09-18") is None
+
+    def test_never_guesses_adjacent_month(self):
+        """更硬的"不猜月"：`28日` 配 1 月 1 日**不得**被推成 12 月 28 日。"""
+        assert _parse_time("28日09时00分", fallback_date="2025.01.01") is None
+
+    def test_day_window_boundary_both_sides(self):
+        """窗口边界成对断言：相差 **1** 天接受、相差 **2** 天拒绝。"""
+        dt = _parse_time("29日10时00分", fallback_date="2025年01月28日")
+        assert dt is not None and (dt.month, dt.day, dt.hour) == (1, 29, 10)
+        assert _parse_time("30日10时00分", fallback_date="2025年01月28日") is None
+
+    def test_invalid_day_for_fallback_month_returns_none(self):
+        """`31日` 配 2 月 ⇒ 该月无此日 ⇒ 判不了且不崩（docstring 承诺不抛）。"""
+        assert _parse_time("31日10时00分", fallback_date="2025年02月01日") is None
+
+    def test_out_of_range_clock_returns_none(self):
+        """越界时刻沿用既有契约：返回 None 而非抛异常（同 `25:10`）。"""
+        assert _parse_time("25时10分", fallback_date=self.FB) is None
+        assert _parse_time("09 时 99 分", fallback_date=self.FB) is None
+
+    def test_existing_forms_unaffected(self):
+        """回归对照：既有形态结果不因新增分支而改变。"""
+        dt = _parse_time("11:04", fallback_date=self.FB)
+        assert (dt.year, dt.month, dt.day, dt.hour, dt.minute) == (2025, 1, 20, 11, 4)
+        dt = _parse_time("2025年01月20日 09时00分")
+        assert (dt.year, dt.month, dt.day, dt.hour, dt.minute) == (2025, 1, 20, 9, 0)
+
+    @pytest.mark.parametrize("lit", [
+        "21日07时49分",        # 无空格（旧式就能认出）
+        "09 时 00 分",         # 时两侧带空格 —— 旧式认不出
+        "08时 09分",
+        "20 日 18 时 06 分",
+    ])
+    def test_spaced_forms_are_precise_points_not_whole_day(self, lit):
+        """精度判定必须与解析器**同源**：同一种形态不得只因空格被判成两种精度。
+
+        背景（B1-16 实测）：`_parse_time_interval` 靠 `_TIME_OF_DAY_RE` 区分
+        "精确点" 与 "整天区间"。旧式 `\\d{1,2}[:时]\\d{2}` 不容忍空格 ⇒
+        `21日07时49分` 是精确点，而 `09 时 00 分` 会退化成"整天" ⇒ 区间被放宽
+        ⇒ `_interval_after` 更难成立 ⇒ **倒序被系统性漏报**。
+        """
+        iv = self._iv(lit, self.FB)
+        assert iv is not None
+        assert iv[2] is True, f"{lit!r} 是精确时刻，不得被判成整天区间"
+        assert iv[0] == iv[1], "精确点 ⇒ start == end"
+
+    def test_spaced_time_of_day_is_precise_point(self):
+        """`_TIME_OF_DAY_RE` 必须**容忍时分两侧的空白**（本类的具名变异锚点）。
+
+        为什么单独具名：上面那条是 `parametrize`，而变异脚本按 nodeid **精确匹配**
+        （`mutation_harness` 用集合判定），pytest 会把中文 id 转义成 `\\uXXXX`
+        —— 用转义串当锚点既不可读又一改就断。具名 = 稳定锚点。
+        语义：形态本体被解析成精确点还不够，**精度判定**也必须认它是精确点，
+        否则区间被放宽 ⇒ `_interval_after` 更难成立 ⇒ 倒序系统性漏报。
+        """
+        iv = self._iv("09 时 00 分", self.FB)
+        assert iv is not None
+        assert iv[2] is True, "带空格的时刻仍是精确点"
+        assert iv[0] == iv[1]
+
+    def test_date_only_is_still_whole_day(self):
+        """反向对照：真正的 date-only 值必须**仍**是整天区间（不得被一起放宽）。
+
+        没有这条，"把 `_TIME_OF_DAY_RE` 放成永远匹配"也能让上面那条变绿。
+        """
+        iv = self._iv("2025年01月20日", self.FB)
+        assert iv is not None
+        assert iv[2] is False, "date-only 不是精确点"
+        assert (iv[1] - iv[0]).days == 1, "date-only 应覆盖整天"
+
+
+# ===========================================================================
 # _extract_year 测试
 # ===========================================================================
 
