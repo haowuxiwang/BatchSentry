@@ -54,6 +54,35 @@ _TERMINAL = ("review", "partial_review", "error", "cancelled")
 _FINDINGS_PAGE_LIMIT = 200
 _FINDINGS_MAX_PAGES = 25  # 安全上限：200×25=5000 条；超出即视为异常而非无限翻页
 
+# B5-4：被测 LLM 模型。默认值**刻意保持历史基线**（曾硬编码在 configure 表单里），
+# 这样"没显式传参"的轮次与历史结果可比；要覆盖生产模型（如
+# `deepseek-ai/DeepSeek-V3.2`）用 `--model` 或 `PBC_E2E_MODEL`。
+DEFAULT_SILICONFLOW_MODEL = "Qwen/Qwen2.5-72B-Instruct"
+
+
+def resolve_llm_model(explicit: str | None) -> str:
+    """被测 LLM 模型的**唯一**解析点：显式传参 > 环境变量 > 默认基线。
+
+    为什么要函数而不是直接写 argparse default：`argparse` 的 default 只在
+    **未传参**时生效，无法表达"传空串也算没传"，也让"显式传参确实生效"这件事
+    没有可断言的落点。这里把优先级收敛成一处，护栏可以**直接调它**验证。
+    """
+    return explicit or os.environ.get("PBC_E2E_MODEL") or DEFAULT_SILICONFLOW_MODEL
+
+
+def model_mismatch(requested: str, effective: str | None) -> str | None:
+    """返回"被测模型 ≠ 传入模型"的说明；一致时返回 ``None``。
+
+    与 :func:`backend_mismatch` 同源：**只断言"我 POST 了什么"没有判别力**
+    —— POST 的值可能被服务端规范化、忽略或被别的链路覆盖。必须比对
+    **服务端生效值**（``GET /api/settings`` → ``llm.siliconflow.model``）。
+    """
+    if effective == requested:
+        return None
+    return (f"被测模型与传入模型不一致：effective={effective!r} "
+            f"requested={requested!r}")
+
+
 
 def backend_mismatch(expect_backend, used_backend):
     """返回后端不一致的说明；一致（或未指定期望）时返回 ``None``。
@@ -264,6 +293,12 @@ def main():
     ap.add_argument("--mineru-token", default=os.environ.get("PBC_E2E_MINERU_TOKEN"))
     ap.add_argument("--rounds", default="pdf,img,mineru")
     ap.add_argument(
+        "--model", default=None,
+        help="被测 LLM 模型（B5-4）。默认保持历史基线 Qwen/Qwen2.5-72B-Instruct；"
+             "也可用环境变量 PBC_E2E_MODEL 注入生产模型，例如 "
+             "PBC_E2E_MODEL=deepseek-ai/DeepSeek-V3.2。",
+    )
+    ap.add_argument(
         "--exe", default=os.environ.get("PBC_E2E_EXE", ""),
         help="被测 pbc-server.exe。默认 dist/pbc-server（PyInstaller 直接产物）；"
              "要测**真正分发的那份**请指向 "
@@ -274,6 +309,8 @@ def main():
     args.sf_key = _require(args.sf_key, "--sf-key", "PBC_E2E_SILICONFLOW_KEY")
     args.paddle_token = _require(args.paddle_token, "--paddle-token", "PBC_E2E_PADDLE_TOKEN")
     args.mineru_token = _require(args.mineru_token, "--mineru-token", "PBC_E2E_MINERU_TOKEN")
+    llm_model = resolve_llm_model(args.model)
+    args.model = llm_model
     rounds = args.rounds.split(",")
 
     appdata = os.path.join(tempfile.gettempdir(), "pbc_e2e_appdata")
@@ -305,7 +342,7 @@ def main():
                 "siliconflow_protocol": "openai",
                 "siliconflow_api_key": args.sf_key,
                 "siliconflow_base_url": "https://api.siliconflow.cn/v1",
-                "siliconflow_model": "Qwen/Qwen2.5-72B-Instruct",
+                "siliconflow_model": args.model,
                 "paddle_ocr_api_url": "https://paddleocr.aistudio-app.com/api/v2/ocr/jobs",
                 "paddle_ocr_token": args.paddle_token,
                 "paddle_ocr_model": "PaddleOCR-VL-1.6",
@@ -315,6 +352,17 @@ def main():
             r = c.post(f"{API}/api/settings", json=form)
             print(f"[e2e] settings POST -> {r.status_code}")
             r.raise_for_status()
+
+            # B5-4 判据：**读回生效配置，断言被测模型 == 传入模型**。
+            # 只断言"我 POST 了什么"没有判别力（POST 可能被规范化/忽略/覆盖）；
+            # 必须从 GET /api/settings 读**服务端生效值**来比。
+            eff = c.get(f"{API}/api/settings").json()
+            eff_model = (eff.get("llm", {}).get("siliconflow", {}) or {}).get("model")
+            print(f"[e2e] effective model = {eff_model} (requested = {args.model})")
+            why = model_mismatch(args.model, eff_model)
+            if why:
+                print(f"[e2e] FAIL: {why}")
+                sys.exit(2)
 
             # quick connectivity probe (LLM) — provider test endpoint
             try:
