@@ -298,6 +298,34 @@ def _check_batch_consistency(pages: list[dict]) -> list[dict]:
 # prompt filters those; here we only judge what survived extraction).
 # ---------------------------------------------------------------------------
 
+# 「空框字形」= 勾选标记的**空**状态（未勾选）。
+#
+# B1-15：`selected='否'` 配一个空框是**记录内部自相矛盾** —— 一个"被选中"的
+# 选项不可能配空框（p45 `「是否将柱内甲醇压干」selected='否' marker='☐'`）。
+# 该条的 `selected` 因此**不可信**，不能据此断言"勾选为否 ⇒ 需确认是否已启动
+# 偏差处理"（实测 p45/p39/p46 三页 8 条 warning **全部**是假阳性，原页核验：
+# 有 √ 的是「是」框）。
+#
+# ⚠️ 三条边界（都是"判不了 ≠ 判据确凿"的落地，改前务必读完）：
+#   ① **只认这 5 个字形**，不扩大到 `⬜` / `🔲` 等（未实测，不猜）；
+#   ② **只认"整串都是空框"**：`√☐` 这类混合里有勾号 ⇒ 说不清 ⇒ 维持原判
+#      （fail-open，宁可留着让人看一眼，也不静默吞掉一个可能的真偏差）；
+#   ③ **marker 缺失/空白不算矛盾** —— 缺失是"不知道"，不是"矛盾" ⇒ 维持原判。
+_EMPTY_BOX_GLYPHS = frozenset("☐□◻○◯")
+
+
+def _is_empty_box_only(marker: str) -> bool:
+    """marker 非空、且其中**每个非空白字符**都是空框字形。
+
+    混合（`√☐`）、含勾号（`√`）、空白、缺失 一律返回 False ⇒ fail-open。
+    """
+    if not marker:
+        return False
+    chars = [ch for ch in marker if not ch.isspace()]
+    if not chars:
+        return False
+    return all(ch in _EMPTY_BOX_GLYPHS for ch in chars)
+
 
 def _check_check_consistency(pages: list[dict]) -> list[dict]:
     findings = []
@@ -311,6 +339,23 @@ def _check_check_consistency(pages: list[dict]) -> list[dict]:
                 if not selected or not item:
                     continue
                 if selected == "否":
+                    if _is_empty_box_only(marker):
+                        # 自相矛盾 ⇒ 降为 info 并**如实**说明矛盾点，不再断言
+                        # "勾选为否"（B1-15）。不静默丢弃：矛盾本身仍值得人看一眼。
+                        findings.append({
+                            "page": pno,
+                            "type": "completeness",
+                            "severity": "info",
+                            "description": (
+                                f"第{pno}页 检查项「{item[:40]}」勾选标记与选项不一致"
+                                f"（标记为未勾选的空框 {marker}，却读作“否”），"
+                                f"该选项不可信，请对照 PDF 原页人工核对"
+                            ),
+                            "ocr_text": f"item={item[:40]} selected=否 marker={marker}",
+                            "operator": "",
+                            "source": "rule",
+                        })
+                        continue
                     findings.append({
                         "page": pno,
                         "type": "completeness",

@@ -1039,6 +1039,76 @@ class TestCheckConsistency:
         ])
         assert _check_check_consistency(pages) == []
 
+    # -----------------------------------------------------------------
+    # B1-15：`selected='否'` 配**空框**是记录内部自相矛盾 ⇒ 不得据此断言
+    # "勾选为否"。实测 p45 就是这一档（`marker='☐'`），原页上打 √ 的是「是」框。
+    # ⚠️ 本档只覆盖**可从记录内部证明**的那部分；`否`+`√`（p39/p46 ×7 条）
+    #    记录内部自洽、只有原图能证伪 ⇒ **判不了**，维持原判（fail-open），
+    #    治本在抽取层（与 B1-14 的字段/列溯源同源）。
+    # -----------------------------------------------------------------
+
+    _EMPTY_BOXES = ["☐", "□", "◻", "○", "◯"]
+
+    def _one(self, selected, marker):
+        from core.rules.rule_doc import _check_check_consistency
+
+        pages = _norm([
+            _make_page(45, [
+                _make_step(1, checks=[
+                    {"item": "是否将柱内甲醇压干", "selected": selected,
+                     "marker": marker},
+                ]),
+            ]),
+        ])
+        return _check_check_consistency(pages)
+
+    def test_empty_box_with_no_is_downgraded_to_info(self):
+        """`否` + 空框 ⇒ 降为 info 且**不得**再断言"勾选为否"（B1-15 核心）。
+
+        这是**具名**用例，同时充当变异验证的稳定锚点（`mutation_harness` 按 nodeid
+        精确匹配，而 parametrize 的非 ASCII id 会被 pytest 转义）。
+        """
+        f = self._one("否", "☐")
+        assert len(f) == 1
+        assert f[0]["severity"] == "info", "空框 ⇒ 内部矛盾 ⇒ 必须降级"
+        assert "勾选为“否”" not in f[0]["description"], "不得再断言勾选为否"
+        assert "不一致" in f[0]["description"]
+        assert "人工核对" in f[0]["description"]
+
+    @pytest.mark.parametrize("glyph", _EMPTY_BOXES, ids=[f"box{i}" for i in range(5)])
+    def test_all_empty_box_glyphs_downgraded(self, glyph):
+        """5 个空框字形都必须触发降级（不是只修了碰巧遇到的那一个）。"""
+        f = self._one("否", glyph)
+        assert len(f) == 1 and f[0]["severity"] == "info"
+
+    def test_check_mark_marker_keeps_warning(self):
+        """`否` + `√` ⇒ 记录**内部自洽** ⇒ 维持 warning（**fail-open**）。
+
+        实测 p39 ×6 / p46 ×1 是这一档。把它也降级就等于"因为可能错所以永不说"，
+        会把真偏差一起吞掉 ⇒ 明确不这么做。
+        """
+        f = self._one("否", "√")
+        assert len(f) == 1 and f[0]["severity"] == "warning"
+        assert "偏差" in f[0]["description"]
+
+    def test_missing_marker_keeps_warning(self):
+        """marker 缺失/空白 = **不知道**（不是矛盾）⇒ 维持 warning。"""
+        for marker in ("", "   "):
+            f = self._one("否", marker)
+            assert len(f) == 1 and f[0]["severity"] == "warning"
+
+    def test_mixed_marker_keeps_warning(self):
+        """`√☐` 混合里有勾号 ⇒ 说不清 ⇒ 维持 warning（不扩大判据）。"""
+        f = self._one("否", "√☐")
+        assert len(f) == 1 and f[0]["severity"] == "warning"
+
+    def test_yes_with_empty_box_unaffected(self):
+        """对照：`是` + 空框同样矛盾，但 R8 **本来就不判「是」** ⇒ 仍无 finding。
+
+        没有这条，"把整个 `否` 分支删掉"也能让上面几条变绿。
+        """
+        assert self._one("是", "☐") == []
+
 
 # ===========================================================================
 # R3: 边缘超范围降噪（手写 OCR 误读可能）
