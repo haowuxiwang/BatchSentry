@@ -296,6 +296,17 @@ def _check_batch_consistency(pages: list[dict]) -> list[dict]:
 # clearly N/A-safe is fine. The check data comes from steps[].checks[]
 # (printed "√是/□否" option templates are NOT real checkboxes — the LLM
 # prompt filters those; here we only judge what survived extraction).
+#
+# ⚠️ 文案**刻意中性**（2026-09-21，B1-15 同轮回放发现）：
+# 「否」到底是好是坏**取决于题面的极性**，而题面极性我们没有可靠判据：
+#   - 「地面是否干净」答“否” ⇒ 真问题；
+#   - 「是否发生偏差」「清洗过程是否无异常」答“否” ⇒ **正常答案**（无偏差/无异常）。
+# 实测 p51 三条（是否发生偏差 / OOS/OOT / 变更）就是这样被误判方向的。
+# 旧文案断言"需确认是否已启动偏差处理并在记录中留痕"，对否定式提问是**反向**的。
+# 🔴 **不得**用"题目里有没有『是否发生』『无异常』"这类**措辞词表**去翻转档位 ——
+# 那正是 B1-12 已明令禁止并修掉的病（布尔类处置档位不得由措辞决定）。
+# 故只做两件事：**陈述事实**（勾选为“否”）+ **请人工确认**，不替用户判断语义。
+# 定级仍为 warning：对「地面是否干净」这类题面，否确实需要人看一眼。
 # ---------------------------------------------------------------------------
 
 # 「空框字形」= 勾选标记的**空**状态（未勾选）。
@@ -362,8 +373,8 @@ def _check_check_consistency(pages: list[dict]) -> list[dict]:
                         "severity": "warning",
                         "description": (
                             f"第{pno}页 检查项「{item[:40]}」勾选为“否”"
-                            f"（{marker or '勾选标记'}），需确认是否已启动偏差"
-                            f"处理并在记录中留痕"
+                            f"（{marker or '勾选标记'}），请对照 PDF 原页确认该答案"
+                            f"是否为预期（否定式提问的“否”通常即正常答案）"
                         ),
                         "ocr_text": f"item={item[:40]} selected=否",
                         "operator": "",

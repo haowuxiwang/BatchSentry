@@ -999,7 +999,29 @@ class TestCheckConsistency:
         findings = _check_check_consistency(pages)
         assert len(findings) == 1
         assert findings[0]["severity"] == "warning"
-        assert "偏差" in findings[0]["description"]
+        assert "生产场地是否整洁" in findings[0]["description"]
+        # B1-15 同轮：文案改**中性**后，不得再替用户断言「否」= 需要偏差处理
+        assert "偏差处理" not in findings[0]["description"]
+        assert "原页" in findings[0]["description"]
+
+    def test_no_polarity_inference(self):
+        """R8 **不得**按题面措辞翻转判定或文案（B1-12 禁止措辞驱动）。
+
+        实测 p51 三条（是否发生偏差 / 是否发生 OOS/OOT / 是否发生变更）答「否」
+        **本来就是正常答案**（无偏差），旧文案却提示"需确认是否已启动偏差处理"
+        ⇒ 对否定式提问方向反了。正确做法不是猜极性，而是**不猜**：
+        文案只陈述事实 + 请人工确认。
+        判据：肯定式与否定式题面的文案**模板必须一致**（只差检查项名）。
+        """
+        pos = self._one("否", "√", item="地面是否干净")
+        neg = self._one("否", "√", item="是否发生偏差")
+        assert len(pos) == 1 and len(neg) == 1
+        assert (pos[0]["description"].replace("地面是否干净", "X")
+                == neg[0]["description"].replace("是否发生偏差", "X")), \
+            "两条文案模板必须一致 ⇒ 说明未按措辞翻转"
+        for f in (pos[0], neg[0]):
+            assert "偏差处理" not in f["description"], "不得替用户下结论"
+            assert "原页" in f["description"] and "确认" in f["description"]
 
     def test_checked_yes_no_finding(self):
         from core.rules.rule_doc import _check_check_consistency
@@ -1049,14 +1071,13 @@ class TestCheckConsistency:
 
     _EMPTY_BOXES = ["☐", "□", "◻", "○", "◯"]
 
-    def _one(self, selected, marker):
+    def _one(self, selected, marker, item="是否将柱内甲醇压干"):
         from core.rules.rule_doc import _check_check_consistency
 
         pages = _norm([
             _make_page(45, [
                 _make_step(1, checks=[
-                    {"item": "是否将柱内甲醇压干", "selected": selected,
-                     "marker": marker},
+                    {"item": item, "selected": selected, "marker": marker},
                 ]),
             ]),
         ])
@@ -1089,7 +1110,7 @@ class TestCheckConsistency:
         """
         f = self._one("否", "√")
         assert len(f) == 1 and f[0]["severity"] == "warning"
-        assert "偏差" in f[0]["description"]
+        assert "勾选为“否”" in f[0]["description"]
 
     def test_missing_marker_keeps_warning(self):
         """marker 缺失/空白 = **不知道**（不是矛盾）⇒ 维持 warning。"""
