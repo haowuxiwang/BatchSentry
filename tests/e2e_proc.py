@@ -57,6 +57,20 @@ LLM_KEY_ENV_LEGACY = "PBC_E2E_DEEPSEEK_KEY"
 LLM_PROVIDER_ENV = "PBC_E2E_LLM_PROVIDER"
 DEFAULT_LLM_PROVIDER = "siliconflow"
 
+# LLM 模型：与提供方**配对**注入（写进设置时拼成 `<provider>_model`）。
+# ⚠️ 必须可配，否则端到端会静默沿用产品默认值 —— 而默认值未必是运行方的可用档位。
+# 实测（2026-09-23）：产品默认 `deepseek-ai/DeepSeek-V4-Pro` 是**收费**模型，
+# 免费档账号用它必得 `402 code=30001 balance insufficient`，流水线随即降级到
+# `error`；而**同一把 key 的小请求探针仍返回 200**（费用按请求规模预授权）
+# ⇒ 极易被误读成"产品 LLM 链路坏了"。空值 = 沿用产品默认（此时失败才真在产品侧）。
+#
+# 🔴 变量名**必须**与仓库根 `e2e_run.py`（其 ``resolve_llm_model`` 是模型解析的
+# 唯一权威点）一致 —— 曾差点在此另起 `PBC_E2E_LLM_MODEL`，那就是"同物不同名"：
+# 运行方设对一个、另一个静默落到默认档，正是上面那条 402 误归因的翻版。
+# 一致性由 `tests/unit/test_e2e_proc_helper.py::test_model_env_name_matches_root_driver`
+# 机检。
+LLM_MODEL_ENV = "PBC_E2E_MODEL"
+
 
 def llm_provider(default: str = DEFAULT_LLM_PROVIDER) -> str:
     """返回 e2e 用的 LLM 提供方名（小写），由 ``PBC_E2E_LLM_PROVIDER`` 覆盖。
@@ -65,6 +79,22 @@ def llm_provider(default: str = DEFAULT_LLM_PROVIDER) -> str:
     应当归属的字段名。**不要**在调用点再写死提供方名。
     """
     return (os.environ.get(LLM_PROVIDER_ENV) or default).strip().lower()
+
+
+def llm_model(default: str = "") -> str:
+    """返回 e2e 要用的 LLM 模型名（由 ``PBC_E2E_MODEL`` 覆盖）。
+
+    与 :func:`llm_provider` 配对使用：写进设置时字段名是
+    ``f"{llm_provider()}_model"``。**不要**在调用点再写死提供方名。
+
+    与根目录 ``e2e_run.resolve_llm_model`` **共用同一个环境变量**（只是本函数
+    不设历史默认基线，故默认返回空串）—— 两个 driver 必须能被同一份环境配置驱动。
+
+    返回空串表示**沿用产品默认值** —— 这是有意义的档位（验的正是"发出去的那份
+    默认值"），所以空串不是错误，调用方不得因此判失败；但一旦非空，就必须校验
+    它**确实生效**（否则验的是别的模型，结论无意义）。
+    """
+    return (os.environ.get(LLM_MODEL_ENV) or default).strip()
 
 
 def resolve_exe(default=None) -> str:

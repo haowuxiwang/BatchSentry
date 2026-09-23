@@ -42,7 +42,12 @@ from pathlib import Path
 #: 必然无效的 key，应用照样报 configured=True）。凭据有效性由
 #: :data:`ENTRY_LLM_PIPELINE` 回答，两者不可互相顶替。
 ENTRY_LLM_CONFIG = "llm_config"
-#: 流水线真的跑到成功终态（LLM 链路**已验**）。
+#: 流水线真的跑到成功终态**且**该链路有权威证据（LLM 链路**已验**）。
+#: ⚠️ 「成功终态」本身**不够** —— 2026-09-23 实测：余额不足时逐页分析成功、
+#: 跨页 LLM 得 402，产品**按设计降级**并照常走到 ``review``。故本条目还要求
+#: ``llm_call_audit`` 中存在 ``success=1`` 的调用（见
+#: :func:`_judge_llm_success`）。凭据有效性由本条目回答，与
+#: :data:`ENTRY_LLM_CONFIG` 不可互相顶替。
 ENTRY_LLM_PIPELINE = "llm_pipeline"
 ENTRY_OCR_CONFIG = "ocr_config"
 ENTRY_OCR_PIPELINE = "ocr_pipeline"
@@ -177,21 +182,77 @@ class Coverage:
 # ── 事实 → 状态：规则唯一实现 ────────────────────────────────────────
 
 
+def _judge_llm_success(llm_call_succeeded: bool | None, terminal: str):
+    """成功终态下判 LLM 链路是否**真的**被覆盖。
+
+    🔴 **成功终态不蕴含 LLM 成功过**（2026-09-23 实测的真实假绿）：
+    一把 key 的账户**余额耗尽**时，逐页分析先成功、跨页 LLM 得
+    ``402 {'code': 30001, 'account balance is insufficient'}``；
+    产品**按设计降级**（把 "LLM 调用失败" 写成 severity=info/warning 的 finding）
+    并照常走到 ``review``。于是 ``terminal == review`` 被记成
+    ``llm_pipeline = covered``、``PBC_E2E_REQUIRE_LLM=1`` 下退出码 **0**
+    —— 一条本该拦住发版的门禁**放了行**。
+
+    ⇒ ``covered`` 只能建立在**审计表里真有一次成功调用**之上，
+    且判不了（``None``）一律 fail-closed。
+    """
+    if llm_call_succeeded is True:
+        return (STATUS_COVERED,
+                f"流水线到达成功终态（terminal={terminal}），"
+                f"且 llm_call_audit 中存在 success=1 的调用", "LLM")
+    if llm_call_succeeded is False:
+        return (STATUS_FAILED,
+                f"流水线到达成功终态（terminal={terminal}），但 llm_call_audit 中"
+                f"**没有任何成功调用** ⇒ 该终态是靠**降级**达成的，LLM 链路未验",
+                "LLM")
+    return (STATUS_FAILED,
+            f"流水线到达成功终态（terminal={terminal}），但**未取得 LLM 调用证据**"
+            f"（llm_call_succeeded=None）⇒ fail-closed：判不了 ≠ 已验", "LLM")
+
+
+def _judge_ocr_success(ocr_backend_used: str | None, terminal: str):
+    """成功终态下判 OCR 链路是否**真的**走了真实后端。
+
+    判据取**产品自己记录**的 ``jobs.ocr_backend_used``（不是驱动自述）：
+    非空 ⇒ 确实由某个真实后端完成了解析；空/None ⇒ 无从断定
+    （可能是 failover 掩盖或根本没跑 OCR）⇒ fail-closed。
+    """
+    backend = (ocr_backend_used or "").strip()
+    if backend:
+        return (STATUS_COVERED,
+                f"流水线到达成功终态（terminal={terminal}），"
+                f"且 ocr_backend_used={backend}（真实后端）", "OCR")
+    return (STATUS_FAILED,
+            f"流水线到达成功终态（terminal={terminal}），但**未记录 "
+            f"ocr_backend_used** ⇒ 无法断定 OCR 走了真实后端"
+            f"（可能被 failover 掩盖）⇒ fail-closed", "OCR")
+
+
 def classify_pipeline(terminal: str, *, llm_ready: bool, ocr_ready: bool,
-                      upload_failed: bool = False) -> dict:
+                      upload_failed: bool = False,
+                      llm_call_succeeded: bool | None = None,
+                      ocr_backend_used: str | None = None) -> dict:
     """由**原始事实**推导 ``llm_pipeline`` / ``ocr_pipeline`` 两条覆盖状态。
 
-    参数是事实（终态字符串 + 凭据是否齐备 + 上传是否失败），不是结论 —— 这样
-    规则只有一处，且可被单测直接钉住（无需起服务）。
+    参数是事实（终态字符串 + 凭据是否齐备 + 上传是否失败 + **两条链路各自的
+    权威证据**），不是结论 —— 这样规则只有一处，且可被单测直接钉住（无需起服务）。
 
     行为表（``llm_ready`` / ``ocr_ready`` 指凭据已提供且被应用**写入**）：
 
     | terminal | 结果 |
     |---|---|
-    | ``review`` / ``partial_review`` | 对应凭据齐备的一侧记 covered；缺凭据的一侧记 skipped |
+    | ``review`` / ``partial_review`` | 凭据齐备 **且该链路有权威证据** ⇒ covered；凭据齐备但**无证据** ⇒ failed；缺凭据 ⇒ skipped |
     | ``error`` | 凭据齐备的一侧记 failed；缺凭据的一侧记 skipped |
     | ``cancelled`` | 两侧均 skipped（作业被取消 ⇒ 什么也没验到，但不是缺陷）|
     | 空串（未达终态）| 两侧均 failed（超时**不得**被读成"环境跳过"）|
+
+    ``llm_call_succeeded``（LLM 的权威证据）取自产品自己的
+    ``GET /api/jobs/{id}/llm_audit``：**有 success=1 的调用**才为 ``True``。
+    ``ocr_backend_used``（OCR 的权威证据）取自 ``GET /api/jobs/{id}`` 的同名字段。
+
+    ⚠️ 两者**默认 ``None`` = 判不了 ⇒ failed**（fail-closed）。这条默认值就是
+    "成功终态不蕴含链路被覆盖"的落地：忘记传证据**不会**得到绿，而不是悄悄变绿
+    （2026-09-23 的真实事故见 :func:`_judge_llm_success`）。
 
     ``upload_failed=True``（且终态为空）表示**作业从未建立** —— 与"作业跑了但
     没跑完"同属失败，但**归因不同**，reason 必须分开写（2026-09-21 实测：
@@ -217,7 +278,11 @@ def classify_pipeline(terminal: str, *, llm_ready: bool, ocr_ready: bool,
         (ENTRY_OCR_PIPELINE, ocr_ready, "OCR"),
     ):
         if success and ready:
-            out[entry] = (STATUS_COVERED, f"流水线到达成功终态（terminal={terminal}）", who)
+            out[entry] = (
+                _judge_llm_success(llm_call_succeeded, terminal)
+                if entry == ENTRY_LLM_PIPELINE
+                else _judge_ocr_success(ocr_backend_used, terminal)
+            )
         elif success and not ready:
             out[entry] = (
                 STATUS_SKIPPED,

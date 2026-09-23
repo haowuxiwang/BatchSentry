@@ -13,6 +13,7 @@
 3. **源码扫描护栏**：tests/ 下不得写死本仓库 / 家目录的绝对路径（换台机器即失效，
    改用 ``tests.e2e_proc.REPO_ROOT`` 派生）。
 """
+import ast
 import re
 import sys
 import time
@@ -186,6 +187,72 @@ def test_llm_key_env_names_are_not_provider_bound():
     assert LLM_KEY_ENV == "PBC_E2E_LLM_KEY"
     for provider in ("DEEPSEEK", "SILICONFLOW", "GLM", "OPENAI"):
         assert provider not in LLM_KEY_ENV, f"变量名仍绑定 {provider}"
+
+
+# ── 模型注入（B11-11）───────────────────────────────────────────────
+
+
+def test_llm_model_absent_yields_empty(monkeypatch):
+    """未设环境变量 ⇒ 空串（调用方据此**沿用产品默认**，不得判失败）。"""
+    monkeypatch.delenv("PBC_E2E_MODEL", raising=False)
+    from tests.e2e_proc import llm_model
+    assert llm_model() == ""
+
+
+def test_llm_model_from_env(monkeypatch):
+    monkeypatch.setenv("PBC_E2E_MODEL", "deepseek-ai/DeepSeek-V3.2")
+    from tests.e2e_proc import llm_model
+    assert llm_model() == "deepseek-ai/DeepSeek-V3.2"
+
+
+def test_llm_model_falls_back_to_default(monkeypatch):
+    monkeypatch.delenv("PBC_E2E_MODEL", raising=False)
+    from tests.e2e_proc import llm_model
+    assert llm_model("fallback/model") == "fallback/model"
+
+
+def _env_name_read_by(src: str, func_name: str) -> str:
+    """取出 ``def func_name(...)`` 体内 ``os.environ.get("<字面量>")`` 的变量名。
+
+    走 AST 而非正则：正则会被**注释或别处**的同名 token 满足（§二十八 盲区一）。
+    """
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.FunctionDef) and node.name == func_name:
+            for sub in ast.walk(node):
+                if (isinstance(sub, ast.Call)
+                        and isinstance(sub.func, ast.Attribute)
+                        and sub.func.attr == "get"
+                        and isinstance(sub.func.value, ast.Attribute)
+                        and sub.func.value.attr == "environ"
+                        and sub.args
+                        and isinstance(sub.args[0], ast.Constant)
+                        and isinstance(sub.args[0].value, str)):
+                    return sub.args[0].value
+    raise AssertionError(f"未在 {func_name} 中找到 os.environ.get(<字面量>)")
+
+
+def test_model_env_name_matches_root_driver():
+    """两个 driver 必须从**同一个**环境变量读被测模型（防"同物不同名"漂移）。
+
+    实测教训（2026-09-23）：``tests/e2e_proc.py`` 曾拟另起 ``PBC_E2E_LLM_MODEL``，
+    而根 ``e2e_run.py`` 用的是 ``PBC_E2E_MODEL``。运行方只会设一个 ⇒ 另一个
+    静默落到默认档；若默认档恰是**收费模型**，就会得到 402 并被误报成产品缺陷。
+    """
+    from tests.e2e_proc import LLM_MODEL_ENV
+    root_src = (_ROOT / "e2e_run.py").read_text(encoding="utf-8", errors="replace")
+    assert _env_name_read_by(root_src, "resolve_llm_model") == LLM_MODEL_ENV, (
+        "两个 driver 的模型环境变量名不一致 —— 设对一个，另一个静默失效"
+    )
+
+
+def test_model_env_extractor_positive_control():
+    """阳性对照：提取器必须能识别**别的**名字，否则上一条是恒真断言。"""
+    fake = ('def resolve_llm_model(e):\n'
+            '    return e or os.environ.get("WRONG_NAME") or "d"\n')
+    assert _env_name_read_by(fake, "resolve_llm_model") == "WRONG_NAME"
+    # 找不到函数时必须**报错**而不是静默返回空 ⇒ 否则护栏会假绿
+    with pytest.raises(AssertionError):
+        _env_name_read_by("def other():\n    pass\n", "resolve_llm_model")
 
 
 # 允许保留该字面量的文件（含说明性文字或有意演示反例），均需给出理由

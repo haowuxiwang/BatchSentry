@@ -48,7 +48,8 @@ def test_missing_key_never_reads_as_covered():
     这是本模块存在的理由：成功的终态**不蕴含** LLM 被调用过（Stage 2 在无
     凭据时走降级），二者必须分开记账。
     """
-    got = classify_pipeline("review", llm_ready=False, ocr_ready=True)
+    got = classify_pipeline("review", llm_ready=False, ocr_ready=True,
+                            ocr_backend_used="mineru")
     assert got[ENTRY_LLM_PIPELINE][0] == STATUS_SKIPPED
     assert got[ENTRY_OCR_PIPELINE][0] == STATUS_COVERED
     assert "无法断定" in got[ENTRY_LLM_PIPELINE][1]
@@ -75,7 +76,9 @@ def test_require_llm_on_and_skipped_produces_gap():
 
 def test_require_llm_on_and_covered_produces_no_gap():
     cov = Coverage(path=Path("unused.json"))
-    cov.record_many(classify_pipeline("partial_review", llm_ready=True, ocr_ready=True))
+    cov.record_many(classify_pipeline(
+        "partial_review", llm_ready=True, ocr_ready=True,
+        llm_call_succeeded=True, ocr_backend_used="mineru"))
     cov.record(ENTRY_LLM_CONFIG, STATUS_COVERED, "凭据被接受")
     assert required_gaps(cov, require_llm=True) == []
     assert exit_code(0, []) == 0
@@ -89,7 +92,9 @@ def test_require_llm_covers_two_entries_config_and_pipeline():
     """
     # 只覆盖 pipeline（模拟"凭据未记录"）⇒ 仍应产生 gap
     cov = Coverage(path=Path("unused.json"))
-    cov.record_many(classify_pipeline("review", llm_ready=True, ocr_ready=True))
+    cov.record_many(classify_pipeline(
+        "review", llm_ready=True, ocr_ready=True,
+        llm_call_succeeded=True, ocr_backend_used="mineru"))
     gaps = required_gaps(cov, require_llm=True)
     assert len(gaps) == 1 and "llm_config" in gaps[0], gaps
 
@@ -155,9 +160,62 @@ def test_require_llm_env_actually_drives_required_gaps(monkeypatch):
 
 
 def test_classify_success_with_both_credentials_covers_both():
-    got = classify_pipeline("review", llm_ready=True, ocr_ready=True)
+    """**凭据齐备 ≠ 链路已验** —— 必须同时给出各链路的权威证据。"""
+    got = classify_pipeline("review", llm_ready=True, ocr_ready=True,
+                            llm_call_succeeded=True, ocr_backend_used="mineru")
     assert got[ENTRY_LLM_PIPELINE][0] == STATUS_COVERED
     assert got[ENTRY_OCR_PIPELINE][0] == STATUS_COVERED
+
+
+# ── 🔴 回归护栏：真实事故「成功终态掩盖链路失败」（2026-09-23）──────────
+#
+# 事故经过：一把 SiliconFlow key **账户余额耗尽**（`402 code=30001
+# account balance is insufficient`）。逐页分析先成功、跨页 LLM 被拒；产品
+# **按设计降级**（把"LLM 调用失败"写成 severity=info/warning 的 finding），
+# 流水线照常走到 `review`。旧判据只看 `terminal == review` ⇒ 记 `covered`
+# ⇒ `PBC_E2E_REQUIRE_LLM=1` 下**退出码 0** —— 发版门禁被假绿放行。
+#
+# 这三条用例钉住"终态绿但链路没成功"必须**红**，且必须能被 REQUIRED 开关兜住。
+
+
+def test_classify_terminal_green_but_llm_never_succeeded_is_failed():
+    """`review` + 凭据齐备 + **审计表里没有成功调用** ⇒ 必须 failed（不是 covered）。"""
+    got = classify_pipeline("review", llm_ready=True, ocr_ready=True,
+                            llm_call_succeeded=False, ocr_backend_used="mineru")
+    assert got[ENTRY_LLM_PIPELINE][0] == STATUS_FAILED, got[ENTRY_LLM_PIPELINE]
+    assert got[ENTRY_OCR_PIPELINE][0] == STATUS_COVERED, "OCR 侧不受影响"
+    assert "降级" in got[ENTRY_LLM_PIPELINE][1]
+
+
+def test_classify_missing_llm_evidence_is_fail_closed():
+    """证据**取不到**（None）不得当成已验 —— 判不了 ⇒ failed。"""
+    got = classify_pipeline("review", llm_ready=True, ocr_ready=True,
+                            ocr_backend_used="mineru")
+    assert got[ENTRY_LLM_PIPELINE][0] == STATUS_FAILED, got[ENTRY_LLM_PIPELINE]
+    assert "fail-closed" in got[ENTRY_LLM_PIPELINE][1]
+
+
+def test_classify_missing_or_empty_ocr_backend_is_failed():
+    """OCR：没记录真实后端（空串/None）⇒ failed；且空白串不得被当成有值。"""
+    for backend in (None, "", "   "):
+        got = classify_pipeline("review", llm_ready=True, ocr_ready=True,
+                                llm_call_succeeded=True, ocr_backend_used=backend)
+        assert got[ENTRY_OCR_PIPELINE][0] == STATUS_FAILED, (backend, got)
+        assert got[ENTRY_LLM_PIPELINE][0] == STATUS_COVERED
+
+
+def test_require_llm_gap_when_terminal_green_but_llm_degraded(monkeypatch):
+    """端到端口径：真实事故场景下 `PBC_E2E_REQUIRE_LLM=1` **必须**产生 gap、
+    退出码必须为 1 —— 这正是当年被放行的那一次。"""
+    cov = Coverage(path=Path("unused.json"))
+    cov.record(ENTRY_LLM_CONFIG, STATUS_COVERED, "凭据被写入（余额不足，但写入成功）")
+    cov.record_many(classify_pipeline(
+        "review", llm_ready=True, ocr_ready=True,
+        llm_call_succeeded=False, ocr_backend_used="mineru"))
+    monkeypatch.setenv(REQUIRE_LLM_ENV, "1")
+    gaps = required_gaps(cov)
+    assert any("llm_pipeline" in g for g in gaps), gaps
+    assert exit_code(0, gaps) == 1, "终态绿但 LLM 降级 ⇒ 退出码必须非 0"
 
 
 def test_classify_error_with_credentials_marks_failed():
@@ -194,15 +252,41 @@ def test_classify_cancelled_is_skipped_on_both():
 
 
 def test_classify_covers_every_entry_with_a_legal_status():
-    """表驱动：任意终态 × 凭据组合都必须给出**合法**状态且覆盖两条条目。"""
+    """表驱动：任意终态 × 凭据组合 × **证据组合**都必须给出合法状态且覆盖两条条目。
+
+    证据维度不可省 —— 它正是本轮的修复点：漏传证据必须走 fail-closed，
+    而不是悄悄退回旧行为（"终态绿即覆盖"）。
+    """
     for terminal in ("review", "partial_review", "error", "cancelled", "", "weird"):
         for llm in (True, False):
             for ocr in (True, False):
-                got = classify_pipeline(terminal, llm_ready=llm, ocr_ready=ocr)
-                assert set(got) == {ENTRY_LLM_PIPELINE, ENTRY_OCR_PIPELINE}, terminal
-                for entry, (status, reason, _who) in got.items():
-                    assert status in (STATUS_COVERED, STATUS_SKIPPED, STATUS_FAILED)
-                    assert reason, f"{terminal}/{entry} 缺 reason（不可审计）"
+                for llm_ev in (True, False, None):
+                    for ocr_ev in ("mineru", "", None):
+                        got = classify_pipeline(
+                            terminal, llm_ready=llm, ocr_ready=ocr,
+                            llm_call_succeeded=llm_ev, ocr_backend_used=ocr_ev)
+                        assert set(got) == {ENTRY_LLM_PIPELINE, ENTRY_OCR_PIPELINE}, terminal
+                        for entry, (status, reason, _who) in got.items():
+                            assert status in (STATUS_COVERED, STATUS_SKIPPED, STATUS_FAILED)
+                            assert reason, f"{terminal}/{entry} 缺 reason（不可审计）"
+
+
+def test_classify_covered_implies_evidence_was_present():
+    """**反身判据**：`covered` 只可能出现在证据齐备的那些组合里。
+
+    这条比逐例断言更强：它把"covered ⇒ 有证据"变成一条不变量，
+    将来新增分支若绕过证据，会在这里被抓住。
+    """
+    for terminal in ("review", "partial_review", "error", "cancelled", "", "weird"):
+        for llm_ev in (True, False, None):
+            for ocr_ev in ("mineru", "", None):
+                got = classify_pipeline(
+                    terminal, llm_ready=True, ocr_ready=True,
+                    llm_call_succeeded=llm_ev, ocr_backend_used=ocr_ev)
+                if got[ENTRY_LLM_PIPELINE][0] == STATUS_COVERED:
+                    assert llm_ev is True, f"{terminal}: LLM covered 但证据={llm_ev}"
+                if got[ENTRY_OCR_PIPELINE][0] == STATUS_COVERED:
+                    assert (ocr_ev or "").strip(), f"{terminal}: OCR covered 但证据={ocr_ev!r}"
 
 
 # ── 落盘 ────────────────────────────────────────────────────────────
@@ -210,7 +294,8 @@ def test_classify_covers_every_entry_with_a_legal_status():
 
 def test_coverage_write_and_read_back(tmp_path):
     cov = Coverage(path=tmp_path / "deep" / "cov.json")
-    cov.record_many(classify_pipeline("review", llm_ready=True, ocr_ready=False))
+    cov.record_many(classify_pipeline(
+        "review", llm_ready=True, ocr_ready=False, llm_call_succeeded=True))
     out = cov.write()
     assert out.is_file(), "父目录未自动创建"
     data = json.loads(out.read_text(encoding="utf-8"))
@@ -343,3 +428,132 @@ def test_legacy_env_name_guard_has_positive_control():
     # 注释/文档里的历史说明不得被判违规
     assert "PBC_E2E_DEEPSEEK_KEY" not in _string_constants(
         "# 旧名 PBC_E2E_DEEPSEEK_KEY 已弃用\nk = llm_key()")
+
+
+# ── 🔴 链路证据的**接线**护栏（2026-09-23 假绿事故的配套）────────────
+#
+# 判据修好了，还要保证驱动**真的把证据传进去**、且证据来自**产品的审计记录**
+# 而不是由终态反推。判据侧默认 fail-closed，所以"漏传"是安全的（会红）；
+# 但"传错"（拿 terminal/status 当证据）会让修复形同虚设 —— 这一组钉住它。
+
+
+def _call_nodes(src: str, func_name: str) -> list:
+    """所有 ``func_name(...)`` 的调用节点（要连同其关键字**取值**一起看）。"""
+    return [n for n in ast.walk(ast.parse(src))
+            if (isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                and n.func.id == func_name)]
+
+
+def _keyword_args(src: str, func_name: str) -> list:
+    """每个 ``func_name(...)`` 调用点的关键字参数名集合。"""
+    return [{k.arg for k in c.keywords if k.arg} for c in _call_nodes(src, func_name)]
+
+
+def _is_upload_failed_call(call) -> bool:
+    """该调用点是否显式声明 ``upload_failed=True``（作业从未建立那条路径）。
+
+    这条路径下终态恒为空串，判据在 :func:`classify_pipeline` 开头就返回
+    "两侧 failed"，**根本不看链路证据** ⇒ 要求它传证据是无意义的
+    （而且此处的 ``_llm_ok`` 变量尚未定义）。
+    """
+    for k in call.keywords:
+        if (k.arg == "upload_failed" and isinstance(k.value, ast.Constant)
+                and k.value.value is True):
+            return True
+    return False
+
+
+def _assign_rhs_sources(src: str, name: str) -> list:
+    """所有 ``name = <expr>`` 的右值源码文本。"""
+    out = []
+    for n in ast.walk(ast.parse(src)):
+        if isinstance(n, ast.Assign):
+            for t in n.targets:
+                if isinstance(t, ast.Name) and t.id == name:
+                    out.append(ast.unparse(n.value))
+    return out
+
+
+def _evidence_wiring_problems(src: str) -> list:
+    """返回接线缺陷清单（空 = 合格）。抽成函数以便阳性对照直接喂合成源码。
+
+    规则：**断言了真实终态的调用点**（即没有 ``upload_failed=True`` 的那些）
+    必须把两条链路的证据传进去；证据必须由事实**推导**，不得由终态/状态反推。
+    """
+    problems: list[str] = []
+    calls = _call_nodes(src, "classify_pipeline")
+    if not calls:
+        return ["找不到 classify_pipeline 调用 ⇒ 护栏空转"]
+    live = [c for c in calls if not _is_upload_failed_call(c)]
+    if not live:
+        return ["所有调用点都标了 upload_failed=True ⇒ 护栏空转"]
+    for c in live:
+        kw = {k.arg for k in c.keywords if k.arg}
+        for key in ("llm_call_succeeded", "ocr_backend_used"):
+            if key not in kw:
+                problems.append(
+                    f"第 {c.lineno} 行未传 {key}=（判据会 fail-closed，但覆盖率也随之丢失）")
+    rhs = _assign_rhs_sources(src, "_llm_ok")
+    if not rhs:
+        problems.append("没有给 _llm_ok 赋值")
+    elif all("success" not in s for s in rhs if s != "None"):
+        problems.append(f"_llm_ok 的取值未引用 success 字段：{rhs}")
+    for key in ("_llm_ok", "_ocr_backend"):
+        for s in _assign_rhs_sources(src, key):
+            if s == "None":
+                continue
+            if "terminal" in s or "status" in s:
+                problems.append(f"{key} 由终态/状态推导（{s}）—— 正是假绿事故的成因")
+    return problems
+
+
+def test_frozen_driver_wires_link_evidence_into_the_judge():
+    src = (_ROOT / "tests" / "e2e_frozen.py").read_text(encoding="utf-8")
+    problems = _evidence_wiring_problems(src)
+    assert not problems, "驱动未正确接线链路证据：\n" + "\n".join(f"  - {p}" for p in problems)
+
+
+def test_frozen_driver_reads_llm_evidence_from_the_product_audit_endpoint():
+    """LLM 证据必须来自**产品的审计端点**，不另起第二份真值。"""
+    src = (_ROOT / "tests" / "e2e_frozen.py").read_text(encoding="utf-8")
+    assert "/llm_audit" in _string_constants(src) or "/llm_audit" in src, \
+        "驱动未读取 /api/jobs/{id}/llm_audit"
+
+
+def test_evidence_wiring_guard_has_positive_control():
+    """阳性对照：证明接线护栏**真的会报**，而不是因解析失败而空转。"""
+    bad = (
+        'COV.record_many(classify_pipeline(t, llm_ready=True, ocr_ready=True))\n'
+        '_llm_ok = terminal == "review"\n'
+    )
+    problems = _evidence_wiring_problems(bad)
+    assert problems, "护栏对「只传终态」的写法零反应"
+    assert any("未传" in p for p in problems), problems
+    assert any("终态" in p or "success" in p for p in problems), problems
+
+    good = (
+        'r = requests.get(f"{BASE}/api/jobs/{jid}/llm_audit")\n'
+        '_llm_ok = any(e.get("success") for e in r.json()["entries"])\n'
+        '_ocr_backend = requests.get(u).json().get("ocr_backend_used")\n'
+        'COV.record_many(classify_pipeline(t, llm_ready=True, ocr_ready=True,\n'
+        '    llm_call_succeeded=_llm_ok, ocr_backend_used=_ocr_backend))\n'
+    )
+    assert not _evidence_wiring_problems(good), "误报合格写法"
+
+    # 豁免面必须**窄**：只有显式 upload_failed=True 的调用点才免传证据。
+    # （同时含一个「有终态」的调用点，否则护栏本身会因"全在豁免分支"而空转。）
+    exempt = (
+        '_llm_ok = any(e.get("success") for e in es)\n_co = backend_of(j)\n'
+        'COV.record_many(classify_pipeline(t, llm_ready=True, ocr_ready=True,\n'
+        '    llm_call_succeeded=_llm_ok, ocr_backend_used=_co))\n'
+        'COV.record_many(classify_pipeline("", llm_ready=False, ocr_ready=False,\n'
+        '    upload_failed=True))\n'
+    )
+    assert not _evidence_wiring_problems(exempt), "upload_failed 分支应被豁免"
+
+    # 但"没有 upload_failed、却漏传证据"必须仍然报 —— 豁免不得外溢。
+    leaked = (
+        '_llm_ok = any(e.get("success") for e in es)\n_co = None\n'
+        'COV.record_many(classify_pipeline(t, llm_ready=True, ocr_ready=True))\n'
+    )
+    assert _evidence_wiring_problems(leaked), "豁免外溢：漏传证据未被报出"

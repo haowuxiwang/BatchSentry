@@ -7,6 +7,50 @@
 
 ## [Unreleased]
 
+### 分发就绪 **W3**（Round 59，2026-09-23 — D4 真实成功路径真验通过）
+
+> **D4 从"从未真验"变为"三层互证通过"。** 过程中连抓两个真缺陷，**都在验收方法上**
+> （一个让假绿放行、一个让失败被误归因到产品），均已修 + 变异验证。
+> 教训 → `docs/PROJECT_PITFALLS.md` **§四十三**；条目 → `docs/TODO.md` 的 **B11-11 / B11-12**。
+
+**Fixed（真缺陷）**
+
+- 🔴 **端到端"覆盖判据"假绿放行**（`tests/e2e_coverage.py::classify_pipeline`）：
+  `llm_pipeline` 被记 `covered` **只因为终态是 `review` 且凭据被写入过** ——
+  它**从不检查 LLM 是否真的成功过**。首次真跑即复现：`E2E_RC=0`、`covered=4 failed=0`，
+  而直查库显示 `llm_call_audit` **3 条调用 2 条失败**（`402`），findings 描述写着
+  「**LLM 调用失败: RuntimeError**」 ⇒ **终态是降级路径达成的，LLM 从未跑通**，
+  但 `--require-llm` 一条门禁被它放行。这是 B9-7 自己写下的警告
+  「成功终态**不蕴含** LLM 被调用过」在**流水线**这一项上从未落地。
+  **已修**：判定改为**消费真实证据**（`llm_call_succeeded` / `ocr_backend_used`），
+  取不到就 **fail-closed** 记 `failed`；并加**接线护栏**（AST 校验调用点必须传证据、
+  证据不得由终态/状态推导）防回归。登记 **B11-19**。
+- 🟠 **产物级驱动从不注入 LLM 模型** ⇒ 静默落到产品默认的**收费**档
+  (`deepseek-ai/DeepSeek-V4-Pro`) ⇒ 撞 `402 balance insufficient`，
+  而报告把 `pipeline_terminal FAIL` 归因成 **"产品缺陷，优先查凭据是否发给了错误的提供方"**。
+  **已修**：驱动支持模型注入（复用既有 `PBC_E2E_MODEL`），并新增
+  **读回生效值断言** `settings_llm_model_matches`（`GET /api/settings → providers[].model`）。
+
+**Added**
+
+- `tests/e2e_proc.py`：`LLM_MODEL_ENV` / `llm_model()` —— 与根 `e2e_run.resolve_llm_model`
+  **共用同一变量名**（曾拟另起 `PBC_E2E_LLM_MODEL`，那会形成"同物不同名"，
+  设对一个、另一个静默失效）。
+- `tests/unit/test_e2e_proc_helper.py`：模型解析行为用例 +
+  **跨模块一致性护栏**（AST 取 `os.environ.get(<字面量>)` 比对两个 driver）并配阳性对照。
+
+**Verified（实测结论，多层互证，非推测）**
+
+- **① 驱动层**：`E2E_RC=0`｜`Total: 26 passed, 0 failed`｜`covered=4 skipped=0 failed=0`。
+- **② 产品权威端点**：`GET /api/jobs/{id}/llm_audit` ⇒ **`success=3/3`（失败 0 次）**。
+- **③ 直查库**：job = `review` / `error_message=None`；`llm_call_audit` 3 条全 `success=1`；
+  `model` 列 = `deepseek-ai/DeepSeek-V3.2`（**无静默替换**）；
+  findings 来源分布 `{llm_page:1, llm_cross:1, rule:3}`。
+- **④ 抽样核对语义**：LLM 正确抓出夹具超规格项（`actual=9.8 mg` vs `spec=10.0 mg`）。
+- **OCR 侧**：`ocr_backend_used = mineru`（真实后端，非 failover 掩盖），
+  1 页进/1 页出，`ocr_text` 与夹具内容一致。
+- ⚠️ **模型档位**：`deepseek-ai/DeepSeek-V3.2`（免费档；用户指定只用它或 `Qwen/Qwen3.5-35B-A3B`）。
+
 ### 分发就绪 **W1**（Round 59，2026-09-23 — 安全/供应链/性能的机检补齐）
 
 > 计划全文 → `docs/RELEASE_READINESS_PLAN.md`；条目 → `docs/TODO.md` 的
@@ -124,6 +168,40 @@
 - ⚠️ **venv 耗时（12m37s vs 基线 6m09s）不得当性能结论**：差异**未归因**，
   但"新建 venv 首次导入 + 杀软扫描"足以解释 ⇒ 换采样环境之后"变慢"**先怀疑采样环境**。
   B11-5 的吞吐判据**仍须在新鲜产物上做**。
+
+### 分发就绪 **W3 真验**（Round 59 续，2026-09-23 — 端到端跑出来的第一个真缺陷）
+
+> 教训 → `docs/PROJECT_PITFALLS.md` **§四十二**；条目 → `docs/TODO.md` **B11-19**。
+> 本轮**只有测试台改动**（`tests/`），`BUNDLE_SOURCES` 不含 `tests/` ⇒ **不触发重建**。
+
+**Fixed（真缺陷 —— 前六轮审查 / 门禁 11 项 / 63 条护栏全部未覆盖）**
+
+- 🔴 **e2e 覆盖判定把"成功终态"当成"链路已验"（假绿，会放行发版）。**
+  `tests/e2e_coverage.classify_pipeline` 原规则：
+  `if success and ready: 记 covered`。而 `REQUIRE_LLM=1` 的硬要求只查
+  `llm_pipeline` 是否 `covered` ⇒ **退出码 0**。
+  **实测翻船**：终态 `review`、覆盖清单写 `[covered] llm_pipeline`，
+  但直查 `llm_call_audit` ⇒ **3 条调用 2 条失败**（`402 code=30001`），
+  findings 描述里写着「**LLM 调用失败: RuntimeError**」——
+  **终态是降级路径达成的，LLM 链路从未跑通**。
+  **已修**：`covered` 现在必须由**产品自己暴露的证据**支撑
+  （`GET /api/jobs/{id}/llm_audit` 的 `success` 字段 / `ocr_backend_used`），
+  且**判据值禁止由终态推导**（AST 护栏钉住调用点必须传证据）。
+  修复后**用同一真实场景复跑** ⇒ `E2E_RC` 由 **0 → 1**，点名
+  `llm_pipeline=failed`（**这才是"验完"的判据**，单测绿不算）。
+
+**Verified（实测结论，非推测）**
+
+- **OCR 链路真验通过**：`ocr_backend_used = mineru`（**真实 MinerU 后端**，非降级），
+  1 页解析 13.9 s；`failed_pages=[]`。
+- **LLM 链路真验：失败，归因=外部**。同一把 key：一次 `chat` 探针得 **HTTP 200**，
+  首次 e2e 的 `page_analysis` **成功**（3213+3126 tokens / 72.8 s，并**消耗掉账户最后余量**），
+  此后**所有调用 402**。逐模型实测（含用户点名的 `DeepSeek-V3.2` /
+  `V3.1-Terminus` / `Qwen3.5-35B-A3B` 与产品默认 `DeepSeek-V4-Pro`）
+  ⇒ **4/4 全部 402 `code=30001 balance insufficient`**；另 6 个小模型候选同样 402
+  ⇒ **本账户不存在免费 chat 档**。**结论：D4 阻塞于账户余额（需充值），与产品无关。**
+- **判据修复已变异验证 7/7 CAUGHT**（`devlogs/_verify/mutate_e2e_coverage.txt`）：
+  覆盖判据侧 2 个 + 接线侧 5 个（含"证据由终态推导""调用点不传证据"）。
 
 ### 对抗性审查（Round 58，2026-09-23 — 第五轮：供应链与守卫时序）
 

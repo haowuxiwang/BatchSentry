@@ -9,8 +9,8 @@ from tests.e2e_coverage import (  # noqa: E402
     classify_pipeline, exit_code, required_gaps,
 )
 from tests.e2e_proc import (  # noqa: E402
-    EXE_ENV, LLM_KEY_ENV, llm_key, llm_key_env_display, llm_provider,
-    resolve_exe, spawn_server, stop_server,
+    EXE_ENV, LLM_KEY_ENV, llm_key, llm_key_env_display, llm_model,
+    llm_provider, resolve_exe, spawn_server, stop_server,
 )
 from tests.e2e_status_js import (  # noqa: E402
     dot_semantics_problems, status_dot_classes,
@@ -209,16 +209,20 @@ try:
     section("Configure LLM")
     _key = llm_key()
     _prov = llm_provider()
+    # 模型与提供方**配对**注入（空 = 沿用产品默认值）。不注入模型会落到产品默认
+    # 的**收费**档，拿到 `402 balance insufficient` —— 那是**档位选择**问题，
+    # 不是产品缺陷（详见 e2e_proc.LLM_MODEL_ENV 的实测记录）。
+    _model = llm_model()
     _base_url = ""   # 由应用上报后回填（归因探测必须打**应用真正会用的那个端点**）
     _llm_ready = False   # 覆盖清单口径：凭据被应用**接受**才算就绪（不是"存在即可"）
     if not _key:
         print(f"    [WARN] 未设置 {llm_key_env_display()} —— 跳过 LLM 配置，"
               f"下游流水线将走降级路径（不是缺陷，但会记入覆盖清单）")
     try:
-        r = requests.post(f"{BASE}/api/settings", json={
-            "llm_provider": _prov,
-            f"{_prov}_api_key": _key,
-        }, timeout=5)
+        _payload = {"llm_provider": _prov, f"{_prov}_api_key": _key}
+        if _model:
+            _payload[f"{_prov}_model"] = _model
+        r = requests.post(f"{BASE}/api/settings", json=_payload, timeout=5)
         print(f"    POST settings status={r.status_code} body={r.text[:300]}")
         # Verify GET returns the key for THAT provider
         r2 = requests.get(f"{BASE}/api/settings", timeout=5)
@@ -230,6 +234,7 @@ try:
         p_configured = p.get("configured", False)
         p_key_masked = p.get("api_key", "")
         _base_url = p.get("base_url") or ""
+        _model_used = p.get("model") or ""
         ok("settings_configure_llm",
            f"provider={provider} {_prov}_configured={p_configured} key={p_key_masked}")
         # 判别性前置：密钥非空却"没配上"或"活动提供方不是它" ⇒ 后续任何
@@ -244,6 +249,14 @@ try:
             else:
                 ok("settings_llm_provider_matches_key", _prov)
                 _llm_ready = True
+                # 判别性前置（B11-11）：**要求了模型却没生效** ⇒ 本轮验的不是
+                # 我们选定的那个档位 ⇒ 结论无意义（且会被误归因到产品头上）。
+                if _model and _model_used != _model:
+                    fail("settings_llm_model_matches",
+                         f"请求模型={_model} 但应用上报 model={_model_used!r} ⇒ 模型未生效")
+                else:
+                    ok("settings_llm_model_matches",
+                       f"model={_model_used or '(产品默认)'}")
     except Exception as e:
         fail("settings_configure_llm", str(e))
 
@@ -273,8 +286,12 @@ try:
     _paddle = os.environ.get("PBC_E2E_PADDLE_TOKEN", "")
     _mineru = os.environ.get("PBC_E2E_MINERU_TOKEN", "")
     OCR_CONFIGURED = bool(_paddle or _mineru)
+    #: 本轮**实际配置的**后端名 —— 后面用它判 `ocr_backend_used` 是否被
+    #: failover 掩盖（"跑了 OCR" 与 "跑了我配的那个后端" 是两件事）。
+    _ocr_expected = ""
     if OCR_CONFIGURED:
         payload = {"ocr_backend": "paddle" if _paddle else "mineru"}
+        _ocr_expected = payload["ocr_backend"]
         if _paddle:
             payload["paddle_ocr_api_url"] = os.environ.get(
                 "PBC_E2E_PADDLE_URL",
@@ -472,11 +489,59 @@ try:
         except Exception as e:
             fail("report_md", str(e))
 
+        # 12b. 链路**权威证据** —— 覆盖清单里的 covered 只能建立在此之上。
+        #
+        # 为什么必须新增（2026-09-23 实测的真实假绿）：一把 key 的账户**余额耗尽**时，
+        # 逐页分析先成功、跨页 LLM 得 `402 code=30001 account balance is insufficient`；
+        # 产品**按设计降级**（把"LLM 调用失败"写成 finding）并照常走到 `review`。
+        # 旧的覆盖判据只看 `terminal == review` ⇒ 记 `covered` ⇒ 在
+        # `PBC_E2E_REQUIRE_LLM=1` 下**退出码 0**：一条本该拦住发版的门禁**放了行**。
+        # 这就是本项目自己的纪律「跳过 ≠ 已覆盖」在"流水线"这一项上从未落地。
+        #
+        # 证据一律取**产品自己的记录**，不另起一套真值：
+        #   LLM —— `GET /api/jobs/{id}/llm_audit` 的 entries 里有没有 `success=1`
+        #   OCR —— `GET /api/jobs/{id}` 的 `ocr_backend_used`（产品记录的真实后端）
+        # 取不到 ⇒ 事实为 None ⇒ 判据侧 fail-closed（判不了 ≠ 已验）。
+        section("Link evidence (authoritative)")
+        _llm_ok = None
+        _ocr_backend = None
+        try:
+            r = requests.get(f"{BASE}/api/jobs/{job_id}/llm_audit", timeout=10)
+            assert r.status_code == 200, f"status={r.status_code}"
+            _entries = r.json().get("entries") or []
+            _llm_ok = any(e.get("success") for e in _entries)
+            _bad = [e for e in _entries if not e.get("success")]
+            _okc = sum(1 for e in _entries if e.get("success"))
+            if _llm_ok:
+                ok("llm_audit_success",
+                   f"success={_okc}/{len(_entries)}（失败 {len(_bad)} 次）")
+            else:
+                _why = str((_bad[0].get("error") if _bad else "") or
+                           "审计表里没有任何 LLM 调用")
+                fail("llm_audit_success",
+                     f"**没有任何成功的 LLM 调用**（共 {len(_entries)} 条）"
+                     f"⇒ 终态是靠降级达成的，LLM 链路未验；首条错误：{_why[:220]}")
+        except Exception as e:  # noqa: BLE001 — 判不了 ⇒ fail-closed
+            fail("llm_audit_success", f"取不到 LLM 审计 ⇒ 判不了（fail-closed）：{e}")
+        try:
+            _job = requests.get(f"{BASE}/api/jobs/{job_id}", timeout=5).json()
+            _ocr_backend = _job.get("ocr_backend_used")
+            assert _ocr_backend, "产品未记录 ocr_backend_used"
+            if _ocr_expected:
+                assert str(_ocr_backend).strip().lower() == _ocr_expected, (
+                    f"ocr_backend_used={_ocr_backend!r}，期望本轮配置的 "
+                    f"{_ocr_expected!r} ⇒ 可能被 failover 掩盖")
+            ok("ocr_backend_used", f"{_ocr_backend}（期望 {_ocr_expected or '未配'}）")
+        except Exception as e:  # noqa: BLE001 — 判不了 ⇒ fail-closed
+            _ocr_backend = None
+            fail("ocr_backend_used", str(e))
+
         # ── 覆盖清单（B9-7）：流水线两条链路的状态一律由**事实**推导
-        # （终态字符串 + 凭据是否被应用接受），规则只此一处
-        # （`tests/e2e_coverage.classify_pipeline`）。
+        # （终态字符串 + 凭据是否被应用接受 + **各链路自己的权威证据**），
+        # 规则只此一处（`tests/e2e_coverage.classify_pipeline`）。
         COV.record_many(classify_pipeline(
-            terminal, llm_ready=_llm_ready, ocr_ready=OCR_CONFIGURED))
+            terminal, llm_ready=_llm_ready, ocr_ready=OCR_CONFIGURED,
+            llm_call_succeeded=_llm_ok, ocr_backend_used=_ocr_backend))
     else:
         # 上传就没成功 ⇒ 流水线根本没跑（产品在未配置 LLM 时会直接 400 拒绝上传，
         # 见 api/jobs/upload.py）。**传空终态 + upload_failed** 让判据记 failed，

@@ -2780,15 +2780,57 @@
 
 #### W3 · 需外部条件
 
-- [ ] **B11-11 LLM 成功路径真验**（对应 **D4**／= B1／计划 §FUNC-1／**分发阻断**）
-  凭据被上游拒（401 `code=30014`）⇒ `review`/`partial_review` 终态与 findings 生成
-  **从未真验**。**验收**：终态 = `review`｜findings **>0**｜**直查库**核对（不采信驱动自述）｜
-  ⚠️ **e2e 全绿 ≠ LLM 判得对** ⇒ 抽样直读原页核几条。
-  🔴 **阻塞：需一把有额度的 key**（用户动作）。
+- [x] **B11-11 LLM 成功路径真验**（对应 **D4**／= B1／计划 §FUNC-1／**分发阻断**）
+  ——**2026-09-23 已验完**。**验收**：终态 = `review`｜findings **>0**｜**直查库**核对
+  （不采信驱动自述）｜抽样直读原页核对"LLM 判得对不对"。
 
-- [ ] **B11-12 OCR 成功路径真验**（计划 §FUNC-2）
-  本轮无 `PADDLE_TOKEN`/`MINERU_TOKEN` ⇒ 如实记 skipped。
+  **状态（Round 59 W3 终态 —— ✅ 三层互证通过）**：
+
+  **① 证据链（三层，逐层收紧）**
+  - **驱动层**（`devlogs/e2e_frozen_d4_v32.log`）：`E2E_RC=0`｜`Total: 26 passed, 0 failed`｜
+    `covered=4 skipped=0 failed=0`｜`status=review`｜`findings count=5`。
+  - **产品权威端点**（`GET /api/jobs/{id}/llm_audit`）：**`success=3/3`（失败 0 次）**
+    —— 这才是"LLM 真被调用过"的判据；**终态绿不蕴含它**（§四十二）。
+  - **直查库**（`data.db`，不采信驱动自述）：job `1759df18-411` = `review` / `error_message=None`；
+    `llm_call_audit` 3 条**全 `success=1`**（`page_analysis` 3134+500 tokens / 22.3 s、
+    `cross_page_llm_fallback` 2.5 s、`cross_page_llm` 5.5 s）；`model` 列 = `deepseek-ai/DeepSeek-V3.2`
+    （**无静默替换**）；findings 5 条，来源分布 `{llm_page:1, llm_cross:1, rule:3}`。
+  - **抽样核对"判得对不对"**：LLM 正确抓出夹具的超规格项
+    （`actual=9.8 mg` vs `spec=10.0 mg`），并触发产品自带的
+    「LLM 独断 critical ⇒ 降为 warning 待人工核对」降级逻辑；
+    夹具的 `ZHANG`/`LI`/`2026-09-17` 落在 findings `#6` 的 `ocr_text` 中。
+
+  **② 两次翻车（都已修，是本轮最有价值的产出）**
+  - **第一次：假绿。** `E2E_RC=0`，但直查库发现 `llm_call_audit` **2/3 失败**、
+    findings 描述写着「**LLM 调用失败: RuntimeError**」⇒ **终态是降级路径达成的，
+    LLM 从未跑通**。根因在**判据本身**（`classify_pipeline` 把"成功终态"当"链路已验"）
+    ⇒ 已修 + 变异 **7/7**，登记为 **B11-19**。
+    修复后同场景复跑 `E2E_RC=1` / `llm_pipeline=failed` ⇒ **判据能红了**（这才是"验完"）。
+  - **第二次：归因错。** 判据修好后仍红，追下去发现**驱动从不注入模型** ⇒ 落到产品默认的
+    **收费**档 `deepseek-ai/DeepSeek-V4-Pro`，撞 `402 balance insufficient`。
+    已给驱动补**模型注入**（复用既有 `PBC_E2E_MODEL`，不另起名字）+ **读回生效值断言**
+    `settings_llm_model_matches`（走 `GET /api/settings → providers[].model`）。
+
+  **③ 两条必须更正的旧结论**
+  - ⚠️ **§四十二 里"该账户无免费 chat 档"已作废**：真因是**余额为 0**（余额为 0 时
+    连免费档也被拒），充值后 `DeepSeek-V3.2` / `Qwen3.5-35B-A3B` / `V4-Pro` /
+    `V3.1-Terminus` **4/4 实测 HTTP 200**。
+  - ⚠️ **模型档位由用户指定**：本项真验用 `deepseek-ai/DeepSeek-V3.2`（DeepSeek 系，
+    最贴近产品默认，避免引入模型特有输出形态的差异）。用户明确要求**只用**
+    `deepseek-ai/DeepSeek-V3.2` 或 `Qwen/Qwen3.5-35B-A3B`（免费档）。
+
+- [x] **B11-12 OCR 成功路径真验**（计划 §FUNC-2）——**2026-09-23 已验完**
   **验收**：`ocr_backend_used` 是**真实后端**（非 failover 掩盖）｜页数/文本与金标对得上。
+
+  **证据**：
+  - **凭据实测有效**（`devlogs/_verify/probe_ocr_creds.py`）：MinerU `HTTP 200 code=0`；
+    Paddle `HTTP 404 jobId 不存在` = **鉴权已过**（非 401/403）。
+  - **真实后端**：产物级 e2e 报 `ocr_backend_used = mineru`（**非 failover 掩盖**），
+    1 页进 / 1 页出，`failed_pages=None`，可见产物 `page_image` 24241 B。
+  - **文本与金标对得上**：findings `#6` 的 `ocr_text` = `9.8 mg；ZHANG；LI；2026-09-17`，
+    与夹具 `e2e-test-text.pdf` 的实际内容一致；`#8` 正确报出"Charge API 有操作描述但缺执行时间"。
+  - **交叉确认**：直查库 `jobs.ocr_backend_used` 与 findings 的 `ocr_text` 同源一致。
+  ⚠️ 夹具是**合成文本 PDF**；"第 2 份**真实**批记录"的对照仍属 **B11-13** 范围。
 
 - [ ] **B11-13 ≥120 页实跑**（= `C2`／计划 §FUNC-5）
   51 页已实跑；**200 页上限仍是线性外推未实跑**。跑一份 ≥120 页输入，记录时间/内存/无超时。
@@ -2852,14 +2894,40 @@
   （基线 **6m09s**）。差异**未归因**，但"**采样环境不同**"（新建 venv 首次导入 + 杀软扫描）
   足以解释 ⇒ **不得**据此宣称"升依赖导致 2× 性能回归"。B11-5 的吞吐实测**仍须在新鲜产物上做**。
 
+- [x] **B11-19 e2e 覆盖判据的"假绿"**（新增／W3 真验抓出／**已修 + 变异 7/7**／2026-09-23）
+  **事实**：B11-11 首次真跑报 `E2E_RC=0` + `[covered] llm_pipeline` + `status=review`，
+  但直查 `llm_call_audit` ⇒ **3 条调用 2 条失败**（`402`），findings 明写
+  「LLM 调用失败: RuntimeError」⇒ 终态是**降级路径**达成的，**LLM 从未跑通**。
+  **根因**：`tests/e2e_coverage.classify_pipeline` 规则 `if success and ready:` —— 把
+  「到达成功终态」当成「该链路已验」。而 `REQUIRE_LLM=1` 只查 `llm_pipeline` 是否
+  `covered` ⇒ **一条本该拦发版的门禁在真实运行里放行**。
+  ⚠️ 这条警告**是本项目自己写在 B9-7 里的**，但**只用在"没配凭据"这一种情形上**。
+  **修**：`covered` 必须由**产品自己暴露的证据**支撑
+  （`GET /api/jobs/{id}/llm_audit` → `success` 字段 / `ocr_backend_used`），
+  且**判据值禁止由终态推导**（AST 护栏钉住调用点必须传 `llm_call_succeeded`/
+  `ocr_backend_used`；豁免面只限显式 `upload_failed=True`，并**带阳性对照**）。
+  **验**：修复后**同场景复跑** `E2E_RC` 由 **0 → 1** 且点名 `llm_pipeline=failed`；
+  变异 **7/7 CAUGHT**（`devlogs/_verify/mutate_e2e_coverage.txt`）；单测 **45 passed**。
+  **改动范围**：仅 `tests/`（`BUNDLE_SOURCES` 不含 `tests/`）⇒ **不触发重建**。
+  教训 → **PITFALLS §四十二**（"成功终态 ≠ 链路已验"的假绿五类纪律）。
+
 > **最小分发路径**：`B11-1 → B11-7 → B11-2 → 一次重建 → B11-11`
 > ⇒ D1/D2/D3/D4/D5 全绿 ⇒ 允许分发。
-> 其中**重建需用户退出宿主**、**LLM 真验需可用凭据** —— 两条都是**外部依赖**，不是工程量问题。
 >
-> **W1 已完成**，剩下的**全部**落在 W2/W3，且**都**依赖外部条件：
-> - **W2**（B11-7/8/9/10/17）⇒ 🔴 **需用户完全退出宿主**才能重建 `app.asar`
-> - **W3**（B11-11/12/13）⇒ 🔴 **需可用 LLM 凭据**、OCR token、第 2 份真实批记录
-> - B11-5 的**实测基线值**也留到重建后一并采集（判据已就位，只差一次真实测量）
+> **⚠️ 更正（Round 59 续，2026-09-23 实测）**：旧记录写"**重建需用户退出宿主**"——
+> **该结论是错的**，已由三组实测推翻：① Restart Manager 探针显示用户重启宿主后
+> **三处 `app.asar` 全部 free**；② **新建**的 `app.asar`（工作区内/外）**从不被锁**
+> ⇒ "锁"针对的是**已存在的文件句柄**，不是文件名/路径；③ `build.ps1:375` 的既有设计
+> 就是**被占用时自动输出到新的时间戳目录**（归位仅 best-effort，**构建不会失败**），
+> 且实测三步构建的**其余输出路径全部 free**。
+> ⇒ **W2 重建不再被宿主锁阻塞**；真正的阻断只剩 **D1/D2（重建即可修）** 与
+> **D4（外部：账户余额）**。
+>
+> **W1 已完成**；**W2 现已解锁**（B11-7/8/9/10/17/18，一次重建同批做）：
+> - **W2**（B11-7/8/9/10/17/18）⇒ ✅ **锁已释放，可开工**（见上方更正）
+> - **W3**（B11-11/13）⇒ 🔴 **需账户充值**（402）与第 2 份真实批记录；
+>   **B11-12 的"真实后端"半边已验**
+> - B11-5 的**实测基线值**随 W2 重建一并采集（判据已就位，只差一次真实测量）
 
 
 
