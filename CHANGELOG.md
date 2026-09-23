@@ -92,6 +92,12 @@
 > 隔离手段：基于 Python311 建 `--system-site-packages` 的隔离 venv
 > （`…\binaries\python\envs\pbc-pillow12`），**只在该 venv 内**升级 4 个依赖；
 > 升级后逐项核对 **全局 Python311 未动**（10.1.0 / 0.0.21 / 1.2.1 / 2.32.4 原样）。
+>
+> **门禁实测（`d584faa`，11 项）**：`OVERALL: fail (pass=8 fail=3 warn=0 skip=0)`
+> —— **与 W1 完全一致，无意外红**。`tests_coverage` = **3233 passed / 0 failed**
+> （= W1 的 **3223** + 新护栏 **10 条**）；`no_build_outputs` 已跟踪文件 **321 → 322**。
+> 3 条 FAIL 仍是那三条**预期项**（`artifact_freshness` / `dependency_vulns` / `runtime_eol`），
+> 全部要等 W2 重建才会转绿。证据：`devlogs/gate_w2prep_d584faa.log`。
 
 **Verified（实测结论，非推测）**
 
