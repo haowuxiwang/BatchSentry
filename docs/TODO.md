@@ -2742,8 +2742,10 @@
   `python-dotenv` 1.2.1 → 1.2.2（顺手，`set_key` **零调用**）。
   **阻断项只有前两个**：`python-multipart` 解析**每一次上传**；
   `Pillow` 在 `api/jobs/upload.py:216-269` 处理**用户上传图片**。
-  **验收**：`pip-audit` ⇒ **0 条**｜全量 pytest + 门禁 **9/9**｜
-  `tests/unit/test_declared_dependencies.py` 跟过｜**B11-6 全绿**。
+  **验收**：`pip-audit` ⇒ **0 条**（**已由 B11-18 的隔离预演直接证实**：升级后清单
+  RC=0 / "No known vulnerabilities found"）｜全量 pytest + 门禁 **11/11**｜
+  `tests/unit/test_declared_dependencies.py` 跟过｜**B11-6 全绿**｜
+  **B11-18 的新护栏全绿**（它就是为这一刻准备的：**抬版本而不改 `self_heal.py` 就会红**）。
   ⚠️ 这是"版本落后 + 处于不可信输入路径"两条**独立成立**的事实叠加，
   **不是**已证明的可利用性（→ B11-4）。
 
@@ -2823,6 +2825,32 @@
   **做**：从 `dependencies` 删除 `docx`；`npm install` 更新 lock；确认 `app.asar` 缩到主进程量级。
   **验收**：asar 条目数从 203 降到 **< 10**｜重建后产物冒烟通过｜`npm audit` 计数不变或更好。
   ⚠️ 与其他 W2 项**共用同一次重建**（不要单独为它多建一次）。
+
+- [ ] **B11-18 修掉 Pillow 12 的弃用调用 + 把"未来断裂"变成可机检**（新增／W2 预演发现／**与 B11-7 同一提交**）
+  **事实（隔离 venv 预演实测，2026-09-23）**：基于 Python311 建 `--system-site-packages`
+  隔离 venv（`…\binaries\python\envs\pbc-pillow12`），**只在该 venv 内**装
+  `Pillow 12.3.0`／`python-multipart 0.0.31`／`python-dotenv 1.2.2`／`requests 2.33.0`
+  ⇒ 跑全量 `tests/unit tests/integration`：**3223 passed / 0 failed**（与升级前**用例数一致**）
+  ⇒ **升级在源码级零破坏**。（**全局 Python311 未动**，升级后逐项核对仍为 10.1.0/0.0.21/1.2.1/2.32.4。）
+  **D1 已被直接证实会转绿**：对升级后的 4 行清单跑 `pip-audit -r`
+  ⇒ **`No known vulnerabilities found`（RC=0）**；且门禁给出的**最低安全版本与本次预演升到的完全一致**。
+  **但冒出 22 条 `DeprecationWarning`**：
+  `core/pipeline/self_heal.py:184,186 — Image.Image.getdata is deprecated and will be
+  removed in Pillow 14 (2027-10-15). Use get_flattened_data instead.`
+  ⚠️ **`Pillow 10.1.0` 不报这条** ⇒ 在**当前门禁环境**里它是"恒绿"的判据（PITFALLS §二十六/§四十同源）。
+  **做**：① `self_heal.py:184,186` 的 `getdata()` → `get_flattened_data()`，
+  **必须与 `requirements.txt` 的版本变更同一提交**（Pillow 10 **没有**该 API，
+  提前改会让当前环境直接跑不起来 —— 源码与锁定清单必须同批变）；
+  ② **护栏已备好并已变异验证**：`tests/unit/test_pillow_api_compat.py`（**10 条**，
+  变异 **7/7 CAUGHT**，对照表 `devlogs/_verify/mutate_pillow_compat.txt`）。
+  它**从 `requirements.txt` 派生阈值**（不手写），所以 **B11-7 一落地就会立刻变红并点名行号**
+  —— 变异 **M1 就是模拟这个场景**（把锁定值抬到 12.3.0）⇒ **CAUGHT**。
+  **验收**：升版后 ① 上述护栏 10 条全绿（⚠️ 届时要按文件内提示**更新**那条"惰性断言"，
+  **不是删掉它**）；② `pytest -W error::DeprecationWarning:core.*` **零命中**
+  —— 这一步用来发现**其它**未登记的弃用，命中的补进 `_DEPRECATED` 登记表。
+  ⚠️ **`pbc-pillow12` venv 的耗时不可当性能结论**：同一套用例在该 venv 里 **12m37s**
+  （基线 **6m09s**）。差异**未归因**，但"**采样环境不同**"（新建 venv 首次导入 + 杀软扫描）
+  足以解释 ⇒ **不得**据此宣称"升依赖导致 2× 性能回归"。B11-5 的吞吐实测**仍须在新鲜产物上做**。
 
 > **最小分发路径**：`B11-1 → B11-7 → B11-2 → 一次重建 → B11-11`
 > ⇒ D1/D2/D3/D4/D5 全绿 ⇒ 允许分发。

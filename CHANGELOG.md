@@ -14,7 +14,8 @@
 > **W1 = 6 项"不碰产物、不依赖用户"的工作**，全部完成；护栏合计 **63 条用例**、
 > 变异验证 **20/20 CAUGHT**（`devlogs/mutate_b11_1_control.txt` 等四份对照表）。
 >
-> **门禁实测（`fb29999`，11 项）**：`OVERALL: fail (pass=8 fail=3 warn=0 skip=0)`。
+> **门禁实测（`fb29999`，11 项）**：`OVERALL: fail (pass=8 fail=3 warn=0 skip=0)`；
+> **在最终提交 `e3b3b4a` 上复测，结论一致**（`devlogs/gate_w1_final_e3b3b4a.log`）。
 > `tests_coverage` = **3223 passed / 0 failed / coverage 95.04%**；
 > 3 条 FAIL **全部是预期且具名**的（见下方 Known Issues），**无意外的红**。
 
@@ -82,6 +83,41 @@
 - ⚠️ **`artifact_freshness` 现在如实 FAIL**：`main.py` 已改但产物未重建 ——
   **这是预期中的红，不是回归**；W2 重建后转绿。
 - **B11-5 的实测基线值**待重建后采集（判据已就位，只差一次真实测量）。
+
+### 分发就绪 **W2 预演**（Round 59 末，2026-09-23 — 隔离 venv 先验「升依赖会不会坏」）
+
+> **本轮不改产品源码、不改锁定清单**（只新增 1 个护栏文件 + `docs/` + `devlogs/`）
+> ⇒ **无需重建**。目的：趁"等用户退出宿主"的空档，把 W2 里**唯一带技术未知数**的一步
+> （`Pillow` 跨 **4 个大版本**）先跑一遍，把风险提前清零。
+> 隔离手段：基于 Python311 建 `--system-site-packages` 的隔离 venv
+> （`…\binaries\python\envs\pbc-pillow12`），**只在该 venv 内**升级 4 个依赖；
+> 升级后逐项核对 **全局 Python311 未动**（10.1.0 / 0.0.21 / 1.2.1 / 2.32.4 原样）。
+
+**Verified（实测结论，非推测）**
+
+- ✅ **升级在源码级零破坏**：venv 内 `Pillow 12.3.0` + `python-multipart 0.0.31` +
+  `python-dotenv 1.2.2` + `requests 2.33.0` ⇒ 全量 `tests/unit tests/integration`
+  **3223 passed / 0 failed**，与升级前**用例数完全一致**。
+- ✅ **D1 已被直接证实会转绿**：对升级后的 4 行清单跑 `pip-audit -r`
+  ⇒ **`No known vulnerabilities found`（RC=0）**；且门禁给出的**最低安全版本与预演升到的完全一致**
+  （pillow 12.3.0 / python-multipart 0.0.31 / python-dotenv 1.2.2 / requests 2.33.0）。
+
+**Added（新护栏：把"未来的断裂"提前变成红灯）**
+
+- **`tests/unit/test_pillow_api_compat.py`**（**10 条**，变异 **7/7 CAUGHT**，
+  对照表 `devlogs/_verify/mutate_pillow_compat.txt`）。
+  预演同时暴露：`core/pipeline/self_heal.py:184,186` 的 `Image.getdata()` 自 Pillow 12 起
+  **发弃用警告**，官方给出移除版本 `Pillow 14（2027-10-15）` —— 而 **`Pillow 10.1.0` 不报这条**
+  ⇒ 在当前门禁环境里它是"**恒绿**"的判据。护栏**从 `requirements.txt` 派生阈值**（不手写），
+  因此 **B11-7 一落地就会立刻变红并点名行号**（变异 **M1** 即模拟此场景 ⇒ CAUGHT）。
+  登记为 **B11-18**，与 B11-7 **同一提交**修（Pillow 10 **没有** `get_flattened_data`，
+  提前改会让当前环境直接跑不起来 —— 源码必须与锁定清单**同批变**）。
+
+**Known Issues（本预演新增，如实登记）**
+
+- ⚠️ **venv 耗时（12m37s vs 基线 6m09s）不得当性能结论**：差异**未归因**，
+  但"新建 venv 首次导入 + 杀软扫描"足以解释 ⇒ 换采样环境之后"变慢"**先怀疑采样环境**。
+  B11-5 的吞吐判据**仍须在新鲜产物上做**。
 
 ### 对抗性审查（Round 58，2026-09-23 — 第五轮：供应链与守卫时序）
 
