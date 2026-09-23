@@ -9,13 +9,21 @@
   worktree_clean      工作区干净（打包必须来自干净树，未提交改动不可放行）
   no_build_outputs    构建产物**未入库**（拦 `git add -f` / .gitignore 被误改 /
                       新落点未登记；已提交的产物删文件也抹不掉）
-  dist_variants       根目录 `dist*` 变体未堆积（WARN；提醒跑 clean_dist.py）
+  dist_variants       **完整产物**不堆积（B11-3：按"**可分发产物的份数**"判，不再数
+                      目录个数 —— 实测 3 个目录里 2 个是残壳时旧判据**恰好不触发**；
+                      残壳**具名披露但不算风险**：宿主持锁时它们清不掉，报警会恒红）
   artifact_freshness  产物**新鲜**（B7-3：清单 + 版本 + **逐字节**比对源码与产物副本；
                       无产物时 SKIP —— 它管的是"产物是否由当前源码构建"）
   packaging_files     打包前置文件齐备（spec / 构建脚本 / electron 入口 / 清单工具）
   rules_wired         规则层已接线（core/rules/*.py 中 _check_* 数量 ≥ 阈值）
   kb_corpus           知识库语料可用（core/kb/data/*.json 条目数 ≥ 阈值）
   kb_packaging        每个 KB 源都随包分发（spec datas 覆盖 core/kb/data/*.json）
+  dependency_vulns    依赖**无已知公告**（B11-2：读 `docs/DEPENDENCY_AUDIT.json`
+                      **快照**，门禁**不联网** —— 断网误红与"取不到就 PASS"
+                      都不可接受；有公告 / 快照与锁定脱节 / 快照缺失 ⇒ FAIL）
+  runtime_eol         运行时**在安全支持期内**（B11-2：从**产物二进制**读 Electron
+                      版本 vs 仓库内显式维护的 `docs/RUNTIME_SUPPORT.json`
+                      —— 不采信 `package.json` 的 `^` 范围，那是范围不是事实）
   tests_coverage      单测通过 + 覆盖率 ≥ 门禁
 
 失败事实源：优先 `--junitxml`（机器可读，免疫 `log_cli` 日志交错）；XML 缺失/
@@ -74,7 +82,11 @@ from bundle_manifest import discover_artifacts, verify_artifact  # noqa: E402
 # 那里是项目既定的占用探测入口（见 docs/PROJECT_PITFALLS.md §二十二 与 clean_dist
 # 模块 docstring 的实测记录）。门禁复用它而不另写一份 ctypes —— 两份必然漂移，
 # 而这里用的是**降级判据**，漂移会直接放过真回归。
-from clean_dist import named_holders  # noqa: E402
+from clean_dist import ELECTRON_ENTRY, EMBEDDED_SERVER, named_holders  # noqa: E402
+# 依赖漏洞的**快照**由 `scripts/audit_deps.py` 生成（联网）；门禁只读快照。
+# `locked_requirements` 是"requirements.txt 唯一解析口径"，复用而不另写一份
+# （两份必然漂移：一处改了注释处理、另一处没改 ⇒ 判据悄悄失效）。
+from audit_deps import locked_requirements  # noqa: E402
 
 # 与 pytest.ini 的 --cov 口径保持一致
 COVERAGE_SOURCES = "api,core,llm,db,config,main"
@@ -312,24 +324,253 @@ def count_dist_variants(root: Path = REPO_ROOT) -> list[str]:
         return []
 
 
+#: 完整产物需要的 `win-unpacked` 内文件（相对产物目录）。
+#: `PROVENANCE.txt` 单独列出：它是"能自证由哪次提交构建"的凭据。
+PROVENANCE_FILE = Path("win-unpacked") / "PROVENANCE.txt"
+
+
+def count_complete_artifacts(root: Path = REPO_ROOT) -> list[str]:
+    """枚举**完整可分发**的 Electron 产物目录（= 真能双击跑起来的那一份）。
+
+    为什么要按"完整"计数，而不是数目录个数（Round 59 实测得出的教训）：
+      当时根目录有 3 个 `dist-*`，其中 **2 个是残壳**（`clean_dist
+      --converge-locked` 回收了内嵌后端，只留下被宿主持锁的 `app.asar`），
+      只有 1 个是完整产物。而当时的判据是"**目录个数** > 3 才 WARN"
+      ⇒ **恰好不触发**。于是**最危险的状态（1 真 + 2 假，最怕发错哪一份）
+      正好落在阈值内侧** —— 阈值卡在恰好不触发的位置 = 零判别力
+      （PITFALLS §二十六）。
+
+    完整性 = 三件齐备（缺一即"不是能发的那一份"）：
+      · `win-unpacked/BatchSentry.exe`            —— Electron 入口
+      · `win-unpacked/resources/pbc-server/…exe`  —— 内嵌后端（被 Electron 拉起）
+      · `win-unpacked/PROVENANCE.txt`             —— 构建出处
+    部件路径复用 `clean_dist` 的常量，**不另写一份**（两份必然漂移）。
+    """
+    complete: list[str] = []
+    for name in count_dist_variants(root):
+        d = root / name
+        if ((d / ELECTRON_ENTRY).is_file()
+                and (d / EMBEDDED_SERVER).is_file()
+                and (d / PROVENANCE_FILE).is_file()):
+            complete.append(name)
+    return complete
+
+
 def check_dist_variants(root: Path = REPO_ROOT) -> CheckResult:
-    """磁盘上 `dist*` 变体堆积 → 提醒收敛（WARN，不影响退出码）。
+    """磁盘上**完整产物**堆积 ⇒ 提醒收敛（WARN，不影响退出码）。
 
     对应 CLAUDE.md「Repo hygiene」规则 3。之所以做成门禁的一部分而不是只写进
     文档：文档规则不会自我执行，而"每次打包前都会看一眼"的门禁天然会被看到。
+
+    判据演进（2026-09-23，Round 59）
+    --------------------------------
+    旧：`dist-*` **目录个数** > `DIST_VARIANT_WARN_AT` ⇒ WARN。它数的是目录，
+        不是"**可分发产物的份数**" ⇒ 实测 3 个目录里 2 个是残壳时**恰好不触发**。
+    新：**完整产物数 > 1 ⇒ WARN**（那才是"可能发错版本"的实质风险）。
+        残壳 **不报警但必须具名披露** —— 因为宿主持有 `app.asar` 时残壳
+        **清不掉**（B9-8），报警会恒红、反而让人忽略这一项。它是"未被收敛"
+        的证据，属**可见性**问题，不是"两份都能跑"的风险。
     """
     t0 = _ms()
     variants = count_dist_variants(root)
+    complete = count_complete_artifacts(root)
+    husks = [n for n in variants if n not in complete]
+
+    parts = [f"{len(complete)} 份完整产物"
+             f"（{', '.join(complete) if complete else '无'}）"]
+    if husks:
+        parts.append(f"残壳 {len(husks)} 个（{', '.join(husks)}"
+                     "，缺内嵌后端/PROVENANCE ⇒ 不可分发）")
+    detail = "；".join(parts)
+
+    if len(complete) > 1:
+        return CheckResult(
+            "dist_variants", WARN,
+            f"**{len(complete)} 份完整产物并存 ⇒ 有发错版本的风险**：{detail}"
+            "｜收尾跑 `python scripts/clean_dist.py`（先 dry-run）",
+            _ms() - t0)
     if len(variants) > DIST_VARIANT_WARN_AT:
         return CheckResult(
             "dist_variants", WARN,
             f"根目录有 {len(variants)} 个 dist-* 变体（阈值 "
-            f"{DIST_VARIANT_WARN_AT}）：{', '.join(variants[:4])}…"
+            f"{DIST_VARIANT_WARN_AT}）：{detail}"
             "｜收尾跑 `python scripts/clean_dist.py`（先 dry-run）",
             _ms() - t0)
-    return CheckResult("dist_variants", PASS,
-                       f"{len(variants)} 个 dist-* 变体（阈值 {DIST_VARIANT_WARN_AT}）",
-                       _ms() - t0)
+    return CheckResult("dist_variants", PASS, detail, _ms() - t0)
+
+
+# ── 依赖漏洞 + 运行时支持期（B11-2，Round 59）───────────────────────────────
+# 为什么门禁**不自己联网**跑 pip-audit，而读一份快照：
+#   · 本模块的定位是"**离线**聚合检查"（见模块 docstring）；
+#   · 实测（2026-09-23）直连 PyPI `Read timed out` ⇒ 门禁会因网络误红；
+#   · 而"取不到数据就记 PASS"违反 fail-closed。
+# ⇒ 快照由 `scripts/audit_deps.py`（联网、流程触发）生成，门禁只做确定性比对。
+#   代价：新披露的 CVE 不会立刻出现 ⇒ 故对"快照与锁定脱节/过老"一律报警。
+DEPENDENCY_SNAPSHOT_MAX_AGE_DAYS = 90
+RUNTIME_TABLE_MAX_AGE_DAYS = 180
+
+#: 运行时版本串在产物二进制里的形态（分块扫描用；实测出自 BatchSentry.exe）。
+_RUNTIME_PATTERNS = {
+    "electron": re.compile(rb"Electron/(\d+\.\d+\.\d+)"),
+    "chrome": re.compile(rb"Chrome/(\d+\.\d+\.\d+\.\d+)"),
+    "node": re.compile(rb"node\.js/v(\d+\.\d+\.\d+)"),
+}
+
+
+def _age_days(stamp: str | None) -> int | None:
+    """把 ISO 时间戳换算成"距今天数"；解析不出来返回 None（判据随之降级）。"""
+    if not stamp:
+        return None
+    try:
+        return (datetime.now() - datetime.fromisoformat(stamp)).days
+    except (TypeError, ValueError):
+        return None
+
+
+def _read_runtime_versions(exe: Path, *, chunk: int = 8 << 20) -> dict[str, str]:
+    """从产物可执行文件里读 Electron/Chrome/Node 版本。
+
+    ⚠️ 判据落在**真要发出去的那份字节**上，而不是 `package.json` 的 `^33.0.0`
+    （那是**范围**，装进去的可能是范围内任何版本 —— 这正是漏掉 EOL 的原因）。
+    分块扫描 + 跨块留 96 字节重叠，避免版本串正好被块边界切断而"读不到"。
+    """
+    found: dict[str, str] = {}
+    if not exe.is_file():
+        return found
+    tail = b""
+    try:
+        with exe.open("rb") as fh:
+            while True:
+                block = fh.read(chunk)
+                if not block:
+                    break
+                data = tail + block
+                for key, pat in _RUNTIME_PATTERNS.items():
+                    if key in found:
+                        continue
+                    m = pat.search(data)
+                    if m:
+                        found[key] = m.group(1).decode()
+                if len(found) == len(_RUNTIME_PATTERNS):
+                    break
+                tail = data[-96:]
+    except OSError:
+        return found
+    return found
+
+
+def check_dependency_vulns(root: Path = REPO_ROOT) -> CheckResult:
+    """依赖漏洞（读**快照**，离线）。有公告 / 快照脱节 / 快照缺失 ⇒ FAIL。
+
+    fail-closed 三处：快照文件缺失、JSON 不可读、锁定版本与快照对不上
+    —— 一律 FAIL，**不得记 PASS**。否则"没扫过"会被读成"没漏洞"。
+    """
+    t0 = _ms()
+    snap_path = root / "docs" / "DEPENDENCY_AUDIT.json"
+    if not snap_path.is_file():
+        return CheckResult(
+            "dependency_vulns", FAIL,
+            f"快照缺失（{snap_path.name}）⇒ 无法判定一个未扫描的依赖树"
+            "｜跑 `python scripts/audit_deps.py` 生成", _ms() - t0)
+    try:
+        snap = json.loads(snap_path.read_text(encoding="utf-8"))
+        locked = locked_requirements(root / "requirements.txt")
+    except (OSError, ValueError) as e:
+        return CheckResult("dependency_vulns", FAIL, f"快照不可读：{e}", _ms() - t0)
+
+    snap_locked = snap.get("locked") or {}
+    drift = sorted(n for n, v in locked.items() if snap_locked.get(n) != v)
+    if drift:
+        return CheckResult(
+            "dependency_vulns", FAIL,
+            f"快照与 requirements.txt **脱节**（{len(drift)} 个包：{drift[:6]}）"
+            "⇒ 改过依赖必须重扫：`python scripts/audit_deps.py`", _ms() - t0)
+
+    hits = snap.get("packages_with_vulns") or {}
+    if hits:
+        detail = "；".join(
+            f"{n} {p.get('version')} **{p.get('advisory_count')} 条**"
+            f"（最低安全版本 {p.get('minimum_safe_version') or '无'}）"
+            for n, p in sorted(hits.items(),
+                               key=lambda kv: -kv[1].get("advisory_count", 0)))
+        # 唯一公告数 vs pip-audit 原始条目数：只说一个数会误导（原始条目含重复）。
+        adv = snap.get("totals", {}).get("advisories")
+        raw = snap.get("totals", {}).get("raw_advisory_entries")
+        count = f"{adv} 条公告（唯一）" + (f"，原始条目 {raw}" if raw and raw != adv else "")
+        return CheckResult(
+            "dependency_vulns", FAIL,
+            f"{count} / {len(hits)} 个包：{detail}", _ms() - t0)
+
+    age = _age_days(snap.get("generated_at"))
+    if age is not None and age > DEPENDENCY_SNAPSHOT_MAX_AGE_DAYS:
+        return CheckResult(
+            "dependency_vulns", WARN,
+            f"无已知公告，但快照已 **{age} 天**未刷新"
+            f"（阈值 {DEPENDENCY_SNAPSHOT_MAX_AGE_DAYS}）⇒ 新 CVE 未必已收录",
+            _ms() - t0)
+    return CheckResult(
+        "dependency_vulns", PASS,
+        f"0 条公告（快照 {age} 天前，扫描 "
+        f"{snap.get('totals', {}).get('dependencies_scanned')} 个条目）", _ms() - t0)
+
+
+def check_runtime_eol(root: Path = REPO_ROOT) -> CheckResult:
+    """运行时组件是否在**安全支持期内**（产物二进制 vs 仓库内支持线表）。
+
+    三态（都不许含糊）：无完整产物 ⇒ **SKIP**（如实记，不冒充 PASS）；
+    读不到版本 ⇒ **FAIL**（fail-closed）；版本超出支持线 ⇒ **FAIL**（具名 + 附支持线）。
+    """
+    t0 = _ms()
+    table_path = root / "docs" / "RUNTIME_SUPPORT.json"
+    if not table_path.is_file():
+        return CheckResult("runtime_eol", FAIL,
+                           "支持线表缺失（docs/RUNTIME_SUPPORT.json）⇒ fail-closed",
+                           _ms() - t0)
+    try:
+        table = json.loads(table_path.read_text(encoding="utf-8"))
+        supported = table["components"]["electron"]["supported_major"]
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        return CheckResult("runtime_eol", FAIL,
+                           f"支持线表不可读/结构不对：{e}", _ms() - t0)
+
+    complete = count_complete_artifacts(root)
+    if not complete:
+        return CheckResult("runtime_eol", SKIP,
+                           "无完整产物 ⇒ 读不到运行时版本（不冒充通过）", _ms() - t0)
+
+    seen: list[str] = []
+    problems: list[str] = []
+    for name in complete:
+        versions = _read_runtime_versions(root / name / ELECTRON_ENTRY)
+        electron = versions.get("electron")
+        if not electron:
+            return CheckResult(
+                "runtime_eol", FAIL,
+                f"{name}：**读不到 Electron 版本** ⇒ fail-closed"
+                "（不得记为通过；检查产物是否完整）", _ms() - t0)
+        seen.append(f"{name}: Electron/{electron}")
+        try:
+            major = int(electron.split(".")[0])
+        except ValueError:
+            return CheckResult("runtime_eol", FAIL,
+                               f"{name}：版本串不可解析（{electron!r}）⇒ fail-closed",
+                               _ms() - t0)
+        if major not in supported:
+            problems.append(f"{name}: Electron/{electron} 不在支持线 {supported}")
+
+    if problems:
+        return CheckResult("runtime_eol", FAIL,
+                           "**运行时已过安全支持期**：" + "；".join(problems)
+                           + "｜升级 Electron 后必须重建产物", _ms() - t0)
+
+    age = _age_days(table.get("updated_at"))
+    if age is not None and age > RUNTIME_TABLE_MAX_AGE_DAYS:
+        return CheckResult("runtime_eol", WARN,
+                           f"运行时在支持线内，但支持线表已 **{age} 天**未复核"
+                           f"（阈值 {RUNTIME_TABLE_MAX_AGE_DAYS}）：{'；'.join(seen)}",
+                           _ms() - t0)
+    return CheckResult("runtime_eol", PASS,
+                       f"在支持线 {supported} 内：{'；'.join(seen)}", _ms() - t0)
 
 
 def count_rule_checks(rules_dir: Path = RULES_DIR) -> int:
@@ -898,6 +1139,9 @@ def run_all(*, skip_tests: bool = False, fail_under: int = 95,
         check_rules_wired(),
         check_kb_corpus(),
         check_kb_packaging(),
+        # B11-2：把"我们依赖的东西还安不安全"变成机检（此前两项完全无人看着）
+        check_dependency_vulns(),
+        check_runtime_eol(),
     ]
     if skip_tests:
         results.append(CheckResult("tests_coverage", SKIP, "已跳过（--skip-tests）"))

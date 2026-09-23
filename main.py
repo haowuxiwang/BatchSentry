@@ -306,6 +306,168 @@ async def request_id_middleware(request: Request, call_next):
     finally:
         request_id_var.reset(token)
 
+# ── 本地守卫 + 请求体硬上限（B11-1 / 第五轮对抗性审查 S1）──────────────────
+# 为什么守卫必须放在**这里**，而不是端点函数体内：
+#   FastAPI 在**调用端点之前**就解析请求体（端点签名要求 `UploadFile`），
+#   所以写在 `api/jobs/upload.py` 函数体第一行的 `is_local_request` 永远排在
+#   解析器**之后**。2026-09-23 实测：畸形体 1 MB 0.62 s → 16 MB **8.60 s**，
+#   且状态是 **422**（请求体校验失败）而非 403 ⇒ 守卫**一行都没执行**。
+#   触发面 = 任意网页（`multipart/form-data` 属 CORS safelist，浏览器不发
+#   preflight）；服务是单 worker ⇒ 解析期间事件循环被占 ⇒ UI 无响应。
+#
+# 为什么用**纯 ASGI 中间件**，而不是 `@app.middleware("http")`：
+#   体积上限必须做**流式计数** —— `Content-Length` 可以缺失（chunked）也可以
+#   撒谎（实测：chunked 8 MB 被**完整读入**后才报 parse error）。这要求直接
+#   包装原始 `receive`；而 `BaseHTTPMiddleware` 已经把 receive 换成了内部流。
+#   纯 ASGI 还顺带不构造 Request 上下文、不触碰 body。
+#
+# 🔴 为什么注册在**最后**：Starlette 的 `add_middleware` 是 **LIFO —— 后加的
+#   先执行**。守卫要"最先跑"就必须最后注册。`tests/unit/test_local_guard_middleware.py`
+#   用 **AST 判据**断言这一点（文字判据在这里会退化成恒真，见 PITFALLS §二十六）。
+
+_GUARD_MAX_BODY_BYTES = int(UPLOAD_LIMITS["max_bytes"])
+
+# Content-Length 非法（非数字 / 负数 / 重复）的哨兵 —— 三者一律拒。
+# 负数那条对应 `CVE-2026-53540`（负 Content-Length ⇒ 全量缓冲）；
+# 重复那条对应请求走私形态（`CVE-2026-53537/53538`）。
+_BAD_LENGTH = object()
+
+
+# 注：早先的实现在 `receive` 里**抛自定义异常**来中断超限读取 —— **行不通**：
+# 异常穿越 `BaseHTTPMiddleware`（`request_id_middleware`）的 anyio task group 时
+# 会被包成 `ExceptionGroup`，守卫自己的 `except` 抓不到，状态码只能由下游决定
+# （实测得到 400 "error parsing the body"）。现改为"返回 `http.disconnect` +
+# 状态标记"，见 `LocalGuardMiddleware.__call__` 的 ③。
+
+
+def _declared_length(scope) -> object:
+    """从 ASGI scope 解析 `Content-Length`：None（未提供）/ int / `_BAD_LENGTH`。"""
+    found: int | None = None
+    for key, value in scope.get("headers") or ():
+        if key != b"content-length":
+            continue
+        if found is not None:
+            return _BAD_LENGTH          # 重复头 ⇒ 走私形态
+        try:
+            n = int(value)
+        except (TypeError, ValueError):
+            return _BAD_LENGTH
+        if n < 0:
+            return _BAD_LENGTH          # CVE-2026-53540
+        found = n
+    return found
+
+
+async def _send_plain(send, status: int, detail: str) -> None:
+    """最小 JSON 响应 —— 守卫在最外层，此时下游（含 CORS/异常处理器）尚未接手。"""
+    body = json.dumps({"detail": detail}).encode()
+    await send({
+        "type": "http.response.start",
+        "status": status,
+        "headers": [
+            (b"content-type", b"application/json"),
+            (b"content-length", str(len(body)).encode()),
+        ],
+    })
+    await send({"type": "http.response.body", "body": body})
+
+
+class LocalGuardMiddleware:
+    """在读 body **之前**拒绝跨站请求，并给请求体加硬上限。
+
+    两道闸，顺序不可调换：
+      ① Host/Origin 守卫 —— 不读 body 即判定（复用 `core.security.is_local_request`
+         这一**唯一实现**，不复制第二份判据）；
+      ② 请求体上限 —— 先看 `Content-Length`（非法值一律拒），**再**在 `receive`
+         层流式计数、超限即中断（chunked / 缺头 / 撒谎的头都挡得住）。
+
+    被拒时自己记日志：守卫在 `request_id` 中间件**外层**，被拒请求不会经过
+    下游的 access log（这是"最先执行"的代价，用这里的 warning 补上）。
+    """
+
+    def __init__(self, app, *, max_body_bytes: int) -> None:
+        self.app = app
+        self.max_body_bytes = max_body_bytes
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        # ① 守卫（不读 body）
+        from starlette.requests import Request
+        from core.security import is_local_request
+
+        request = Request(scope)
+        if not is_local_request(request):
+            logger.warning(
+                "[guard] 拒绝非本机请求 %s %s (host=%r origin=%r)",
+                scope.get("method"), scope.get("path"),
+                request.headers.get("host"), request.headers.get("origin"),
+            )
+            await _send_plain(send, 403, "Forbidden (non-local request)")
+            return
+
+        # ② Content-Length：非法值 / 声明值即超限 ⇒ 一个字节都不必读
+        declared = _declared_length(scope)
+        if declared is _BAD_LENGTH:
+            logger.warning("[guard] 拒绝非法 Content-Length %s %s",
+                           scope.get("method"), scope.get("path"))
+            await _send_plain(send, 400, "Invalid Content-Length")
+            return
+        if declared is not None and declared > self.max_body_bytes:
+            logger.warning("[guard] 拒绝超限请求体 %s bytes（上限 %s）",
+                           declared, self.max_body_bytes)
+            await _send_plain(send, 413, "Request body too large")
+            return
+
+        # ③ 流式计数（Content-Length 缺失/撒谎时的唯一防线）
+        limit = self.max_body_bytes
+        state = {"received": 0, "started": False, "over": False}
+
+        async def limited_receive():
+            message = await receive()
+            if message["type"] == "http.request":
+                state["received"] += len(message.get("body", b""))
+                if state["received"] > limit:
+                    state["over"] = True
+                    # 🔴 这里**不抛异常**，返回 `http.disconnect` 让下游停止读取。
+                    # 原因（2026-09-23 实测）：异常要穿越 `BaseHTTPMiddleware`
+                    # 的 anyio task group，会被包成 **ExceptionGroup** ⇒ 本中间件
+                    # 的 `except _BodyTooLargeError` **抓不到**，状态码只能由下游
+                    # 决定（实测得到 400 "error parsing the body"）。
+                    # 用状态标记 + disconnect：既不无限缓冲（这才是要的效果），
+                    # 又能由本中间件**确定性地**给出 413（下游尚未产生响应时）。
+                    return {"type": "http.disconnect"}
+            return message
+
+        async def tracked_send(message):
+            if message["type"] == "http.response.start":
+                state["started"] = True
+            await send(message)
+
+        try:
+            await self.app(scope, limited_receive, tracked_send)
+        except Exception:
+            # 只吞"超限引发的下游异常"（ClientDisconnect / 解析中断）；
+            # 其余异常必须原样上抛，不能被守卫静默。
+            if not state["over"]:
+                raise
+
+        if state["over"]:
+            if state["started"]:
+                # 下游在解析中已自行产生响应（如 400）⇒ 状态码不可改，
+                # 保持它并断开连接；记日志避免"413 没发出去"变成静默。
+                logger.warning(
+                    "[guard] 请求体超限中断（流式计数 > %s），下游已产生响应 "
+                    "⇒ 保持其状态码并断开连接", limit)
+            else:
+                logger.warning("[guard] 请求体超限中断（流式计数 > %s）", limit)
+                await _send_plain(send, 413, "Request body too large")
+
+
+app.add_middleware(LocalGuardMiddleware, max_body_bytes=_GUARD_MAX_BODY_BYTES)
+
 # Templates
 templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
 

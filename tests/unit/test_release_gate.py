@@ -232,9 +232,14 @@ class TestOrchestration:
         # 契约变更（2026-09-20，B7-3）：新增 artifact_freshness（产物新鲜度），
         # 紧随 dist_variants —— 同为"产物/工作区状态"，且必须在 tests_coverage 之前
         # （否则"测了一堆却发了个陈旧产物"仍会看起来全绿）。
+        # 契约变更（2026-09-23，B11-2）：新增 dependency_vulns（依赖漏洞，读离线快照）
+        # 与 runtime_eol（运行时支持期，读**产物二进制**）。两项都属"供应链"维度，
+        # 排在 tests_coverage 之前 —— 它们**不需要**跑测试（读快照/读二进制即可），
+        # 因此保留"提交前秒级检查"的能力；且都 **fail-closed**（取不到数 ⇒ FAIL）。
         assert names == ["worktree_clean", "no_build_outputs", "dist_variants",
                          "artifact_freshness", "packaging_files", "rules_wired",
-                         "kb_corpus", "kb_packaging", "tests_coverage"]
+                         "kb_corpus", "kb_packaging", "dependency_vulns",
+                         "runtime_eol", "tests_coverage"]
         assert results[-1].status == rg.SKIP
         # 结构检查必须能在**不跑测试**时给出（提交前的秒级检查路径）
         assert all(r.status != rg.SKIP for r in results[:-1])

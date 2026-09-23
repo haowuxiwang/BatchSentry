@@ -7,6 +7,78 @@
 
 ## [Unreleased]
 
+### 分发就绪 **W1**（Round 59，2026-09-23 — 安全/供应链/性能的机检补齐）
+
+> 计划全文 → `docs/RELEASE_READINESS_PLAN.md`；条目 → `docs/TODO.md` 的
+> **B11 分发就绪清单**（W1 段已完成记录 + 证据表）；硬约束教训 → `docs/PROJECT_PITFALLS.md` **§四十**。
+> **W1 = 6 项"不碰产物、不依赖用户"的工作**，全部完成；护栏合计 **63 条用例**、
+> 变异验证 **20/20 CAUGHT**（`devlogs/mutate_b11_1_control.txt` 等四份对照表）。
+
+**Fixed（真缺陷，前四轮审查均未覆盖）**
+
+- 🔴 **头部炸弹 PNG 返回 500**（`api/jobs/upload.py`）。Pillow 的
+  `DecompressionBombError` 是 `Exception` 的**直接子类**，既不是 `ValueError`
+  也不是 `OSError`；而图片转换路径只 `except (ValueError, OSError, TypeError)`
+  ⇒ 该异常落到通用 `except Exception` ⇒ **客户端输入问题被报成 500**，
+  并以 `logger.error(exc_info=True)` 记**全栈**。**78 字节**文件即可触发
+  （真实像素 8×8、IHDR 声明 40000×40000）。**已修**：显式接住 ⇒ **400**；
+  新增 `test_upload_header_bomb_png_rejected_not_500`。
+- 🟠 **依赖公告计数虚高 2×**（`scripts/audit_deps.py`）。`pip-audit -r` 会在
+  **同一个包的 `vulns` 里把同一条公告重复列出**（实测每条正好 2 份）
+  ⇒ 照抄 `len(vulns)` 把 **24 条唯一公告报成 47 条**（pip-audit 自己的汇总行同此）。
+  **已修**：按 `id` 去重，同时保留 `raw_entry_count` 使两个数都可见。
+  ⚠️ 去重**不改变**安全结论（`minimum_safe_version` 取最大修复版本），只污染证据链。
+- 🟡 **两条 magic 用例断言过弱**：只断言 `"图片"`，而"进了解码器才失败"也返回含
+  "图片"的 400 ⇒ **摘掉 magic 闸门它们照样绿**（零判别力）。已改为断言 `"文件头"`，
+  并由变异 M5 证明现在能红。
+- 🟡 **像素上限用例只测了"比较逻辑"**：原用例把上限 `monkeypatch` 到很小、用一张小图，
+  未证明"声明超大尺寸的文件在**解码前**被拒"。已补**头部炸弹 PNG**用例。
+
+**Added（机检能力）**
+
+- **门禁 9 → 11 项**（`scripts/release_gate.py`）：
+  **第 10 项 `dependency_vulns`**（读离线快照，有公告即**具名 FAIL**）与
+  **第 11 项 `runtime_eol`**（从**产物二进制**读 Electron/Chromium/Node 版本，
+  与仓库内支持线表比对）。两项均 **fail-closed**（取不到数 ⇒ FAIL，不得记 PASS）；
+  产物不存在时 `runtime_eol` **如实 SKIP**（不冒充 PASS）。
+- `scripts/audit_deps.py`（**联网**快照生成器）+ `docs/DEPENDENCY_AUDIT.json`
+  —— 门禁保持**离线**，不因断网误红，也不随外部数据漂移；快照过老/与
+  `requirements.txt` 脱节都会报警。
+- `docs/RUNTIME_SUPPORT.json` —— 仓库内显式维护的支持线表（**不联网抓取**）。
+- `docs/CVE_REACHABILITY.md` —— **逐条 CVE 可达性表**：24 条唯一公告分为
+  **6 可达 / 18 不可达**，并给出判定方法（调用面 grep + 解码面探针 + 入站闸门）。
+  另含**首次** `npm audit` 结果（18 包），按**分发面**分三层：
+  运行时（仅 `electron`）／构建期（16 个，含 `tar` critical）／**随包死代码**。
+- `scripts/perf_baseline.py` —— 性能**相对**判据（`本次/参考 ≥ 0.8×`），
+  **刻意不设绝对 SLA**（跨机/杀软会漂移 ⇒ 绝对阈值必然恒真或恒假）。
+
+**Changed**
+
+- **守卫前移到 ASGI 中间件 + 请求体硬上限**（B11-1，对应分发门槛 D3）。
+  `main.py` 新增纯 ASGI 的 `LocalGuardMiddleware`：**不读 body** 即按 `Host`/`Origin`
+  返 **403**；`Content-Length` 非法 ⇒ 400、超限 ⇒ 413；并对 body 做**流式计数截断**
+  （因为**只信 `Content-Length` 会被 chunked/缺头绕过**）。
+  ⚠️ Starlette `add_middleware` 是 **LIFO** ⇒ 守卫必须**最后注册**才在最外层
+  （护栏含 AST 判据，防注册顺序被改回）。
+  实测：畸形体 16 MB 由 **10.26 s / 422** ⇒ **毫秒级 / 403**；
+  正常路径吞吐不受影响（B/C 比由 **87–127×** 降到 **0.65–0.82×**）。
+- `dist_variants` 判据由"**数目录个数**"改为"**数完整产物份数**"
+  （完整性 = `ELECTRON_ENTRY` + `EMBEDDED_SERVER` + `PROVENANCE.txt`），
+  并对残壳出**具名清单**。原判据在"1 完整 + 2 残壳"这一**最危险状态**上静默 PASS。
+
+**Known Issues（未修，属 W2/W3，均需外部条件）**
+
+- 🔴 **D1/D2 仍未绿**：依赖公告 24 条（可达 6 条）与 Electron 33.4.11 过支持期。
+  修复 = 升级依赖 + 升 Electron ⇒ **必然改产物 ⇒ 必须重建**，
+  而重建需**用户完全退出宿主**释放 `app.asar`（会话内无解）。
+- 🔴 **D4 仍未验**：LLM 成功路径需要**可用凭据**（现有凭据被上游 401 拒）。
+- 🟠 **`docx` 是零消费的生产依赖**：`electron/main.js` 从不 `require('docx')`，
+  但 `app.asar` 因此含 **201 个 `node_modules` 条目 ≈6 MB** 死代码
+  （也是**永久供应链面**）⇒ 登记 **B11-17**，随 W2 同一次重建删除。
+- ⚠️ **`artifact_freshness` 现在如实 FAIL**：`main.py` 已改但产物未重建 ——
+  **这是预期中的红，不是回归**；W2 重建后转绿。
+- **B11-5 的实测基线值**待重建后采集（判据已就位，只差一次真实测量）。
+
 ### 对抗性审查（Round 58，2026-09-23 — 第五轮：供应链与守卫时序）
 
 > 报告全文 → `docs/ADVERSARIAL_AUDIT.md` **§17**；条目 → `docs/TODO.md` **B10**。

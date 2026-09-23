@@ -269,6 +269,17 @@ async def create_job(
                 )
                 doc.save(dst, garbage=4, deflate=True)
             return 1
+        except Image.DecompressionBombError as e:
+            # ⚠️ B11-6 定位到的缺陷：Pillow 自己的 bomb 阈值（默认 2×MAX_IMAGE_PIXELS
+            # ≈ 1.79e8 像素）比产品上限（_MAX_IMAGE_PIXELS = 1e8）**更宽**，所以在
+            # (1e8, 1.79e8] 区间由**产品的头部检查**拦下，而超过 1.79e8 时
+            # **Pillow 在 Image.open 阶段就先抛** DecompressionBombError。
+            # 它是 `Exception` 的直接子类 —— 既不是 ValueError 也不是 OSError
+            # ⇒ 早先的 `except (ValueError, OSError, TypeError)` **接不住**，
+            # 一路落到通用 `except Exception` ⇒ 客户端输入问题被报成 **500**
+            # 并记 `logger.error(exc_info=True)` 全栈（实测 78 字节即可触发）。
+            # 显式接住 ⇒ 归为 400 友好拒绝。
+            raise _PdfStructuralError(f"图片过大（{e}）") from e
         except (ValueError, OSError, TypeError) as e:
             raise _PdfStructuralError(str(e)) from e
 
