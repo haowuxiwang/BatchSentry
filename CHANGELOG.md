@@ -237,6 +237,52 @@
   **"任何文件都禁 shell 重定向追加"** —— 且**理由改正**（原写"CP936 乱码"，
   真实机制是无 `O_APPEND`；理由写错会让人在"这次没编码问题"时放心破例）。
 
+### Added / Verified (Round 57, 2026-09-23 — 产物级 e2e：补上「用户双击的那一份」应用层验收)
+
+> 起因：「对 `dist-electron-out-20260921-160111/win-unpacked/` 做多次端到端测试，并设立评价标准」。
+> **结论先行**：该目录**此前从未被端到端驱动过** —— 既有 `e2e_frozen.py` 直接跑内嵌
+> `pbc-server.exe`（不经 Electron），Round 55 的关闭探针同理。本轮补上应用层，并先
+> 用 12 轮探针定位了一件**会让整个产物"起不来"的环境性事实**（见下第 1 条）。
+
+- 🔴 **B9-10 根因（本轮最重要的事实）**：宿主 WorkBuddy 自身以
+  **`ELECTRON_RUN_AS_NODE=1`** 运行 Electron daemon，该变量**继承给所有子进程**
+  ⇒ `BatchSentry.exe` 以**纯 Node 模式**启动：不加载 `app.asar`、不起 Chromium、
+  **0.2–0.7 s 静默 `rc=0` 退出**、零输出。旁证一次性对齐：`--version` 打印
+  `v20.18.3`（**Node 版本**，不是 Electron 版本）、`--xxx` 报 `bad option`+`rc=9`
+  （Node CLI 行为）。清除该变量后**产物立即正常**：`/health` 5.1–5.7 s 就绪、
+  `version=1.2.0`、拉起内嵌 `pbc-server.exe`、渲染进程
+  `--app-path=…\resources\app.asar`、主窗口
+  `'BatchSentry — 批记录辅助审查'`、关窗后**端口 0.5 s 释放 / 进程 1.4–2.3 s 退出
+  `exitCode=0`**、`-wal`/`-shm` 已 checkpoint 收敛。
+- **新增 `tests/e2e_unpacked.py`**（应用层驱动，D1–D8 八维）：D1 启动可达、
+  D2 版本与 `PROVENANCE.txt` 自证一致、D3 拉起的是**内嵌**后端、D4 渲染进程加载
+  `app.asar`、D5 主窗口就绪（splash 收敛后）、D6 `WM_CLOSE` → 端口释放 + 进程
+  `exitCode=0`、D7 `close_db`/checkpoint 收敛、D8 数据隔离真实性。
+  **实测 5 次重复：35 passed / 0 failed / 5 skipped，零 flaky**
+  （boot 5.09–5.70 s、主窗 1.01–1.02 s、端口释放恒 0.5 s）；证据
+  `devlogs/e2e_unpacked_<ts>.json`、覆盖清单 `devlogs/e2e_unpacked_coverage_*.json`。
+- **D8 如实报 SKIP（不冒充"隔离完全"）**：真实 `%APPDATA%\PBC\logs\backend-boot.log`
+  每次都会被写 —— Electron 的 `bootLog` 走 `app.getPath('appData')`
+  （`SHGetFolderPath`），**不受 `APPDATA` 环境变量影响**；隔离因此需要**两把钥匙**
+  （`--user-data-dir` 给 Chromium + `APPDATA` 给 Python 后端）。
+- **新增 `tests/unit/test_e2e_unpacked_guard.py`（16 条结构断言）** 把驱动里
+  "每一条都是踩出来的"约束钉死：必须删 `ELECTRON_RUN_AS_NODE`、两把隔离钥匙齐备、
+  关闭前等窗口收敛为 1、存活判据必须内核级、Win32 常量正确、产物解析不得写死
+  `dist-electron/`、D8 有变化只能 `skip` 不得 `ok`、`_reap` 必须**先确认存活再强杀**、
+  快照必须递归、记账状态只能来自 `tests.e2e_coverage`。
+- **变异验证 `devlogs/_verify/mutate_b910.py`：14/14 CAUGHT**（M1–M14 逐条对应上表）。
+  ⚠️ 首轮 **M12 MISSED** 并当场暴露**护栏自身的弱点**：只断言"函数里出现过
+  `kernel_alive`"会被 `_reap` **结尾那次复核调用**掩盖 ⇒ 改为 **AST 顺序判据**
+  （`kernel_alive` 与 `if not alive: return` 的行号都必须**早于** taskkill）；
+  另一处缺口是 `dir_snapshot` 递归性**当时没有护栏**（M14 会 MISSED）⇒ 已补
+  `test_dir_snapshot_is_recursive`。
+- **新增 `docs/E2E_UNPACKED_ACCEPTANCE.md`**：评价标准（判据/实测方法/通过条件/
+  失败归因口径逐条写清），并明确**已知盲区**（D8 bootLog、本轮未验 LLM/OCR 成功路径）。
+- 陷阱固化到 `docs/PROJECT_PITFALLS.md` **§三十八**（六条）：宿主环境变量污染子进程；
+  GUI 子系统 exe 无 stdout（"零输出"≠"没跑"）；隔离两把钥匙；splash 陷阱让
+  "关闭后残留"成为**探针缺陷**而非产品缺陷；存活判据要内核级且**自身要做正负对照**；
+  变异验证会暴露**护栏自身**的弱点（"出现过"≠"用对了"，要用顺序判据）。
+
 ### Added / Fixed (Round 53, 2026-09-21 — P2 批次④：精度/准确性 + 配置与口径 + e2e 覆盖)
 
 - **B1-16 `_parse_time` 不认识「仅时刻 + 中文单位」与「N日H时M分」形态**（P2，精度）：

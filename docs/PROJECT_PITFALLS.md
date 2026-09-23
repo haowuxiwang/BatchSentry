@@ -1779,4 +1779,92 @@ Analysis 中段（t≈96s），于是被杀在半路；PowerShell 的 `*>` 重�
 `..._on_and_failed_...`）也会给出同样的假 MISSED ——
 所以 `MISSED` 的第一处置永远是"先核对 id 是否存在"，而不是"判据不行"（§二十九）。
 
+## 三十八、Electron/产物级 e2e 的六类陷阱（B9-10，2026-09-23 实测）
+
+> 背景：要对"用户双击的那一份"（`win-unpacked/`）做产物级 e2e。该目录**此前从未被
+> 驱动过** —— 既有驱动只跑内嵌 `pbc-server.exe`，不过 Electron 层。
+> 定位过程花 12 轮探针，最贵的结论是下面 A 条：**产物完全正常，是环境让它"装死"**。
+
+### A. 🔴 宿主的环境变量会**继承进子进程**，把 Electron 应用变成纯 Node
+
+宿主 WorkBuddy 自身以 **`ELECTRON_RUN_AS_NODE=1`** 运行 Electron daemon
+（`--stdio`，无窗口）⇒ 该变量继承给**所有后代进程**。于是 `BatchSentry.exe`
+启动后走 **Node 模式**：不初始化 Chromium、不加载 `app.asar`、没有脚本可执行
+⇒ **0.2–0.7 s 静默 `rc=0` 退出**。
+
+症状与"应用坏了"**完全一致**（静默、无输出、无崩溃记录、换哪个产物都一样）。
+四个旁证合起来才锤死：
+
+| 观测 | Node 模式下的解释 |
+|---|---|
+| `--version` → `v20.18.3` | 是 **Node 版本**（Electron 会打印 Electron 版本）|
+| `--user-data-dir=…` → `bad option` + `rc=9` | Node CLI 对未知参数的行为（Chromium 是**容忍**的）|
+| 不加载 `app.asar`、无 renderer/gpu 子进程 | 没跑 Electron 主进程 |
+| 三个不同产物行为**完全一致**（2.51/2.51/2.52 s） | 排除"这份产物特有回归" |
+
+⇒ **驱动必须在子进程 env 里显式 `pop` 掉它**，并把这个"前提"写成**结构护栏**
+（删掉这行，驱动照样"跑完"，但所有断言都在**测空气**）。
+
+⚠️ 可复用的判别法：**Electron 应用 + 静默秒退 + 零输出 + 传参报 bad option**
+⇒ 先查 `ELECTRON_RUN_AS_NODE`，别去查应用代码。
+
+⚠️ **作用域已实证**（别再当"我猜"）：该变量**不在** `HKCU\Environment`、
+也**不在** `HKLM\…\Session Manager\Environment` ⇒ 属**进程级注入**，由宿主在会话的
+进程链里传入 ⇒ **用户双击（经 explorer，环境来自注册表）不受影响**，
+但**会话内的一切 Electron 产物 e2e 都必须先处理它**。
+📌 取证时注意：`reg.exe` 在**本机被安全策略拦**，`reg query … || echo "(无)"`
+打出的"(无)"是**命令没跑成**、不是"键不存在" —— 换 Python `winreg` 读（§二十一·§二十八）。
+
+### B. ⚠️ GUI 子系统 exe **没有 stdout** —— "零输出"不是证据
+
+实测该 exe 的 PE `Subsystem=2`（GUI）⇒ 控制台永远空的，`ELECTRON_ENABLE_LOGGING=1`
+也**一个字节都没有**（日志走 `OutputDebugString`）。
+⇒ 别把"没有日志"读成"没执行"；要换**有证据的通道**：
+`ELECTRON_RUN_AS_NODE=1 … --version`（证明 exe 本体可用）、`--log-file`、
+Windows 事件日志、内存/窗口/子进程采样。
+
+### C. 🔴 隔离需要**两把钥匙**（Chromium 不读 `APPDATA`）
+
+- **Chromium 的 userData** 走 `SHGetFolderPath` ⇒ **不读 `APPDATA` 环境变量**，
+  必须 `--user-data-dir=<dir>`；
+- **Python 后端**的数据根读 `os.environ["APPDATA"]`（`config.py`）⇒ 必须设该变量。
+
+只设其中一个 = 一半没隔离。而**真实目录里总会被写的那一项**（`bootLog` 走
+`app.getPath('appData')`）**两个都管不到** ⇒ 隔离判据必须**如实报 SKIP**，
+不能因为它"总是有变化"就把它降级成 PASS（§三十七 C 同一原则）。
+
+### D. 🔴 splash 与主窗口**都是可见的 `Chrome_WidgetWin_1`**，且 splash **先出现**
+
+⇒ "取第一个可见窗口发 `WM_CLOSE`" **关的是 splash**。关掉 splash 后主窗口才创建、
+应用继续运行 ⇒ 现象看起来是 **"关闭后进程残留、连 `taskkill` 都杀不掉"**。
+本轮据此**误判过一次产品缺陷**（v13–v15 三份探针"都复现"），实为**探针缺陷**。
+正解：**等可见窗口收敛为 1**（连续采样）再取；且窗口枚举要**按 pid 过滤**
+（搜狗输入法等会往同一进程注入窗口）。
+⚠️ 与 §三十四"关闭类语义的五个陷阱"同源：**"关闭"必须先定义"发给谁"**。
+
+### E. 🔴 存活判据要**内核级**，且这份判据**自己也要做正负对照**
+
+- 用 `OpenProcess` + `GetExitCodeProcess == STILL_ACTIVE(259)`；
+  **禁** `tasklist` 文本解析（本地化/编码会让它骗人；`grep '\s'` 类坑的同类）。
+  ⚠️ 也别用 `os.kill(pid, 0)` —— Windows 上对任意 pid 都像成功（§三十七 B）。
+- **但"用了内核 API"不等于"判据可信"**：本轮 `alive()` 一度"永远返回 True"，
+  差点写成"进程杀不掉"的产品缺陷。**正负对照**才定案：
+  确定不存在的 PID ⇒ 必须 `False`；自己的 PID ⇒ 必须 `True`。
+  （同理 `taskkill` 报的 `(属于 PID xxx 子进程)` 是**本地化消息的一部分**，
+  不是"失败原因"—— 别按文案归因，§二十八。）
+- 补充实测：`taskkill /T /F` 的输出在中文环境下会**乱码**，
+  且杀掉后进程**可能几秒后**才真正消失 ⇒ 关闭时间线要用**轮询 + 内核判据**，
+  不能"发完信号 sleep N 秒就下结论"。
+
+### F. ⚠️ 变异验证会暴露**护栏自身**的弱点：`出现过` ≠ `用对了`
+
+本轮 14 条变异首轮 **M12 MISSED**：护栏只断言 `_reap` 里"出现过 `kernel_alive`"，
+而函数**结尾还有第二次调用**（强杀后复核）⇒ 把"强杀前根本没确认存活"的变异
+**放行了**。
+⇒ 顺序/位置敏感的约束要写成 **AST 顺序判据**（比较 `lineno`），不要写成
+"字符串是否出现"。同类：`M14` 暴露 `dir_snapshot` 递归性**当时没有护栏**
+（只扫顶层会让 D8 恒报"未被写入"= **假绿**）⇒ 补 `test_dir_snapshot_is_recursive`。
+📌 **推广**：`test_driver_functions_present` 这类"函数名必须还在"的护栏，
+价值在于**防顺手改名让整份护栏静默失效**（护栏按函数名取源码段）。
+
 

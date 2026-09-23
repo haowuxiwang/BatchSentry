@@ -2439,3 +2439,40 @@
   ➕ 本轮另修 `mutation_harness.expect_satisfied`：`expect` 现在容忍**参数化后缀**
   （`...::test_x` 命中 `...::test_x[0]`）—— 此前会把**已抓到的变异**判成 MISSED。
 
+- [x] **B9-10 要发出去的那一份产物（`win-unpacked/`）从未被端到端驱动过**（P1，2026-09-23 结项）
+  既有驱动全在**内嵌后端 exe** 层：`tests/e2e_frozen.py` 直接跑
+  `resources/pbc-server/pbc-server.exe`，Round 55 的关闭探针同理
+  （`probe_shutdown_semantics.py`，端口 58871）⇒ **Electron 主进程层是空白**：
+  没人验过"双击 `BatchSentry.exe` 能不能起来、拉起的是不是内嵌后端、
+  渲染进程有没有真加载 `app.asar`、点 X 后是不是真的优雅退出"。
+  ✅ **结项内容**：
+  1. **新增评价标准** `docs/E2E_UNPACKED_ACCEPTANCE.md`：D1–D8 八维（启动可达 /
+     版本自证 / 内嵌后端 / 渲染层 / 主窗口 / 优雅关闭 / checkpoint 收敛 / 数据隔离），
+     每维给出判据、实测方法、通过条件、失败归因口径，并**显式写明已知盲区**。
+  2. **新增驱动** `tests/e2e_unpacked.py`：解析产物一律走
+     `dist-electron*/win-unpacked` 并**按 mtime 取最新**（绝不写死 `dist-electron/`）；
+     隔离用**两把钥匙**；关闭用 `WM_CLOSE` 发给**收敛后的主窗口**；
+     存活判据走 `OpenProcess`+`GetExitCodeProcess`；覆盖清单复用 `tests/e2e_coverage`。
+     **实测 5 次重复：35 passed / 0 failed / 5 skipped，零 flaky**
+     （boot 5.09–5.70 s、主窗 1.01–1.02 s、端口释放恒 0.5 s、进程退出 1.37–2.26 s
+     `exitCode=0`）。
+  3. **新增护栏** `tests/unit/test_e2e_unpacked_guard.py`（16 条结构/AST 断言）+
+     **变异 14/14 CAUGHT**（`devlogs/_verify/mutate_b910.py`）。
+  🔴 **根因（本轮最贵的一条，属环境性）**：宿主 WorkBuddy 以
+  `ELECTRON_RUN_AS_NODE=1` 运行 Electron daemon，该变量**继承给所有子进程**
+  ⇒ `BatchSentry.exe` 以**纯 Node 模式**启动（不加载 `app.asar`、不起 Chromium、
+  0.2–0.7 s 静默 `rc=0`）。旁证：`--version` 打印 `v20.18.3`(Node)、
+  `--xxx` 报 `bad option`+`rc=9`、三份产物行为完全一致。
+  ⇒ 驱动必须**显式 `pop` 该变量**，且这是一条**结构护栏**（删掉它驱动照样"跑完"，
+  但所有断言都在测空气）。已固化 PITFALLS **§三十八**。
+  ⚠️ **本轮两次"误判产品缺陷"，均为探针缺陷**（已改正）：
+  ① "关闭后 Electron 进程残留、连 `taskkill` 都杀不掉" —— 实际是 `WM_CLOSE`
+  发给了 **splash 窗口**（splash 与主窗口都是可见 `Chrome_WidgetWin_1` 且 splash 先出现）；
+  ② "`alive()` 恒返回 True" —— 判据自己不可信，**正负对照**（不存在的 PID / 自己的 PID）
+  才定案。
+  ⚠️ **残余（如实登记，未解决）**：D8 隔离**不完整** —— 真实
+  `%APPDATA%\PBC\logs\backend-boot.log` 每轮都会被写（Electron `bootLog` 走
+  `app.getPath('appData')`，`APPDATA` 环境变量管不到）⇒ 驱动**如实记 SKIP**，
+  不冒充"隔离完全"。另：本驱动只验应用层起停，**LLM/OCR 成功路径仍由
+  `e2e_frozen.py` 负责**（且凭据仍失效，见 B9-7）。
+
