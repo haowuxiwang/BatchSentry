@@ -2330,22 +2330,44 @@
   待办：给 `config.py` 一个**显式**的配置路径覆盖开关（如 `PBC_CONFIG_PATH`），
   或让 `database_path` 接受绝对路径 env 覆盖（与冻结版口径一致）。
 
-- [ ] **B9-5 `artifact_freshness` 恒红：被外部持锁的陈旧目录被当作"产物"**（P1，2026-09-21 实测）
+- [x] **B9-5 `artifact_freshness` 恒红：被外部持锁的陈旧目录被当作"产物"**（P1，2026-09-23 结项）
   宿主（WorkBuddy，Restart Manager 已具名到 PID）长期持有
   `dist-electron/win-unpacked/resources/app.asar` ⇒ 该目录**不可删**、也**不可重建**
   （`build.ps1` 自愈到 `dist-electron-out-<ts>/`）。而
   `bundle_manifest.discover_artifacts()` 会把它一并当产物 ⇒ 缺清单 ⇒ 门禁
-  **永远红**。**恒红与恒真同为零判别力**（PITFALLS §三十一）——一个永远红的门禁
-  等于一个被忽略的门禁。两条路都要走不下去，需**决策**：
-  1. **收敛**：该目录里"可能被误分发"的东西是**内嵌后端**
-     `win-unpacked/resources/pbc-server`（**实测可删**，只有 `app.asar` 被持锁）
-     ⇒ 删掉即不再构成可分发产物；留下的"空壳"用 `HUSK.md` 标出身（沿用
-     `PROVENANCE.txt` 的惯例）。代价：不可逆（走回收站可恢复）+ 留一个残壳。
-  2. **判据区分**：让 `discover_artifacts`/`artifact_freshness` 承认第三态 ——
-     "被外部持有 ⇒ **不可发布**，故不予校验"，并**具名**报出持有者。
-     代价：门禁引入一次"改名探测"（写操作）+ 需要防止把真陈旧降级。
-  ⚠️ 现状（永久红、不表态）**不成立**。另注：`test_e2e_drivers_can_target_the_shipped_artifact`
+  **永远红**。**恒红与恒真同为零判别力**（PITFALLS §三十一）。
+  ✅ **两条路都做了**（它们治的是不同问题）：
+  1. **收敛**（治字节）：`clean_dist.py --apply --converge-locked` 按**目标粒度**
+     回收内嵌后端 `win-unpacked/resources/pbc-server`（实测只有 `app.asar` 被持锁，
+     该子树可替换），残壳写 `HUSK.md` 具名。目标派生自既有 `EMBEDDED_SERVER` 常量，
+     默认 dry-run、走回收站、逐项先做改名探测。
+     **实测**：已执行 ⇒ `discover_artifacts` 不再返回它，本项转 **PASS**。
+  2. **判据三态**（治判据）：可替换 ⇒ `FAIL`；不可替换 + 具名 ⇒ **第三态 `WARN`**
+     （明确写"仍可被读取并打包分发，勿据此认为可发布"）；不可替换 + **取不到签名**
+     ⇒ 仍 `FAIL`（fail-closed）；**一份新鲜的都没有** ⇒ 一律 `FAIL`。
+     ⚠️ 残余风险（刻意接受、已写进 docstring）：理论上可"把陈旧产物锁住"来降级；
+     四条把可利用面压到"真持句柄 + 能被 RM 具名 + 另有新鲜产物 + 必须具名"。
+  变异验证 10/10 CAUGHT（`devlogs/_verify/mutate_b95.py`）；对照表
+  `devlogs/mutate_b95_control.txt` 证明**只**「不可替换」那一态判定改变，另两态逐字未动。
+  另注：`test_e2e_drivers_can_target_the_shipped_artifact`
   只管"是否支持覆盖"，不管"默认目标是否陈旧"——本轮探针正是从这条缝漏过去的。
+
+- [ ] **B9-8 收敛后"残壳"仍会被打上宿主锁，导致变体无法靠脚本收敛**（P2，2026-09-23 实测）
+  实测：**新建**的 `dist-electron-out-<ts>/win-unpacked/resources/app.asar` 也会被宿主
+  句柄持有 ⇒ `clean_dist.py --apply` 对**两个** electron 目录都跳过整目录回收。
+  即"多份变体并存"这个状态**无法在会话内靠脚本收敛**（只能等宿主退出后在**外部终端**跑）。
+  现状可接受（`dist_variants` 超阈值只是 WARN），但"变体堆积"的根因未除。
+  待办：给宿主持有场景一个**显式**的收敛路径说明（或在 `--json` 里区分
+  "因锁跳过"与"不该删"）。
+
+- [ ] **B9-9 门禁与清理工具现在会**对仓库做写操作**（改名探测）**（P3，2026-09-23 引入）
+  `release_gate.check_artifact_freshness` 判定"陈旧但不可替换"时会调
+  `clean_dist.named_holders` ⇒ 内部 `_rename_probe` 会把目标**改名再改回**。
+  正常路径无副作用，但**中途被打断**（Ctrl-C / 断电 / 进程被杀）理论上会把对象留在
+  `__lockprobe__.<name>` 名下。已做的缓解：探针名**刻意不带 `dist` 前缀**
+  （不会被 `discover()` 误认成变体），改回失败时会重试一次。
+  待办：评估是否改成**只读**判据（如直接 `open(..., 'rb+')` 试写首字节，或
+  `CreateFileW` 带 `dwShareMode=0` 探测），彻底消除"检查会动仓库"这一性质。
 
 - [ ] **B9-6 长构建被"回合拆卸"回收时，与"真失败"无法区分**（P1，2026-09-21 实测）
   把 `build.ps1` 放**后台**跑，回合结束时它的后代进程被回收 ⇒ 任务报

@@ -35,12 +35,28 @@ electron-builder 的输出目录名会**漂移**：``resources/app.asar`` 被外
 4. **清理**：默认 **dry-run**，只打印；``--apply`` 才动手，且走**回收站**
    （可恢复），逐项核对。
 
+## 整目录删不掉时：部分收敛（B9-5，2026-09-21）
+
+宿主长期持有 ``<out>/win-unpacked/resources/app.asar`` ⇒ 整个 Electron 输出目录
+**既不可删、也不可原地重建**（``build.ps1`` 自愈到时间戳目录）。此时"什么都不做"
+并不安全：该目录里那份**内嵌后端** ``win-unpacked/resources/pbc-server`` 正是
+``discover_artifacts`` 认得的**可分发产物**，陈旧时会让门禁**永久变红**
+（恒红的门禁与恒真的判据一样零判别力），也可能被误当成要发的那个包。
+
+故新增 ``--converge-locked``：只回收这一个**派生自** :data:`EMBEDDED_SERVER` 的目标
+（不另写一份路径规则），且必须先证明**它自己能替换**（改名探测通过；宁缺勿错），
+回收后写 ``HUSK.md`` 标出残壳身份。留一个残壳是刻意的取舍 ——
+把"这份字节已不存在"变成**能被读到的事实**，而不是"目录还在，所以它大概还在"。
+
 ## 硬约束
 
 - 只清理**可再生成**的构建产物，绝不碰源码；
 - **不删**最新的完整 Electron 产物，也**不删** ``dist/``（它是 electron-builder
   的 ``extraResources`` 输入，删了下次打包要先重跑 PyInstaller）；
-- 认不出的目录只通报、不清理（宁缺勿错）。
+- 认不出的目录只通报、不清理（宁缺勿错）；
+- **残壳（husk）= 有 ``BatchSentry.exe`` 却**没有**内嵌后端的 Electron 目录**：
+  它跑不起来，绝不参与"最新产物"的比较（否则会保护错对象）；但一个真包都没有时
+  仍然什么都不删。
 """
 from __future__ import annotations
 
@@ -50,6 +66,7 @@ import json
 import os
 import sys
 from ctypes import wintypes
+from datetime import datetime
 from pathlib import Path
 
 # `scripts/` 非包 ⇒ 按**文件位置**互导（测试用 importlib 从文件路径加载本模块时
@@ -72,6 +89,22 @@ KIND_UNKNOWN = "unknown"
 ELECTRON_ENTRY = Path("win-unpacked") / "BatchSentry.exe"
 # 内嵌后端：真正被 Electron 拉起的那份 pbc-server
 EMBEDDED_SERVER = Path("win-unpacked") / "resources" / "pbc-server" / "pbc-server.exe"
+# 部分收敛后留在残壳目录里的标记（沿用 PROVENANCE.txt 的"把状态写成可读到的事实"惯例）
+HUSK_NAME = "HUSK.md"
+
+
+def state_of(item: dict) -> str:
+    """三态显示名：``完整`` / ``残壳`` / ``残缺``（非 Electron 返回 ``-``）。
+
+    "残壳"独立成一态是 B9-5 的直接产物：有入口却**没有**内嵌后端 ⇒ 双击跑不起来。
+    它既不能充当可发布候选，也不能与"文件还没生成齐"的残缺混为一谈 ——
+    前者是**已经收过尾的**状态（``HUSK.md`` 会说明），后者是**构建中断**的痕迹。
+    """
+    if item["kind"] != KIND_ELECTRON:
+        return "-"
+    if not item.get("complete"):
+        return "残缺"
+    return "完整" if item.get("has_embedded_server") else "残壳"
 
 
 def discover(root: Path) -> list[Path]:
@@ -109,6 +142,7 @@ def classify(path: Path) -> dict:
         "version": None,
         "mtime": None,
     }
+    info["husk"] = state_of(info) == "残壳"
     if kind == KIND_ELECTRON:
         asar = path / "win-unpacked" / "resources" / "app.asar"
         info["version"] = asar_version(asar) if asar.is_file() else None
@@ -307,7 +341,44 @@ def describe_holders(path) -> str:
         rows = who_holds(path)
     except Exception:
         return ""
-    return ", ".join(f"{r['app'] or '(未具名)'}(pid={r['pid']}, {r['type']})" for r in rows)
+    return ", ".join(label_holder(r) for r in rows)
+
+
+def label_holder(row: dict) -> str:
+    """把一条 :func:`who_holds` 记录渲染成稳定标签（**单一渲染实现**）。"""
+    return f"{row['app'] or '(未具名)'}(pid={row['pid']}, {row['type']})"
+
+
+def named_holders(path, locks=None) -> tuple[list[str], list[str]]:
+    """返回 ``(holder_labels, lock_entries)`` —— "谁持有"的唯一推导实现。
+
+    门禁（:mod:`release_gate`）与清理工具共用它，**避免两处各推一遍**：
+    门禁需要"具名"来决定能否把陈旧产物降级，清理工具需要它来出处置建议。
+    只传 ``path`` 时内部会先跑 :func:`locked_files`。
+
+    ⚠️ 三条实测坑（2026-09-17 / 2026-09-21）：
+
+    1. 只能按 ``who_holds`` 的**结构化行**去重，**不能**对渲染文本按 ``", "`` 切分
+       —— 条目内部本身就含 ``", "``（``App(pid=1, Unknown)``），切分会把条目截断成
+       ``App(pid=1``。
+    2. 目录级伪条目（``"(目录级改名被拒 …)"``）没有文件路径可查 ⇒ **跳过**，
+       **不能**把它当成"已具名"（那会把"查不到人"读成"有人"）。
+    3. ``winerror=5``（ACCESS_DENIED）与 ``winerror=32``（SHARING_VIOLATION）不是一回事：
+       前者是"目录里含被持有的子项"的**派生**症状，真凶在子项里 ⇒ 必须**下钻**
+       （:func:`locked_files` 已做），不能就地具名到外层目录。
+    """
+    path = Path(path)
+    lock_entries = locked_files(path) if locks is None else list(locks)
+    labels: list[str] = []
+    for one in lock_entries:
+        rel = one.split("(", 1)[0].strip()
+        if not rel:                      # 目录级伪条目：没有文件路径可查
+            continue
+        for r in who_holds(path / rel):
+            s = label_holder(r)
+            if s not in labels:
+                labels.append(s)
+    return labels, lock_entries
 
 
 # ── 方案（纯函数，便于单测） ─────────────────────────────────────────
@@ -337,21 +408,78 @@ def plan(items: list[dict]) -> tuple[list[dict], list[dict], list[dict]]:
             review.append(it)
 
     electrons = [it for it in items if it["kind"] == KIND_ELECTRON]
-    complete = [it for it in electrons if it["complete"]]
-    partial = [it for it in electrons if not it["complete"]]
+    # 只有**完整**（有入口）**且带内嵌后端**的目录才算可发布候选。残壳
+    # （B9-5 部分收敛的产物）有入口却跑不起来 ⇒ 必须排除在"最新"比较之外，
+    # 否则它会把真正可发的包比下去、被当成要保留的那一个（比误删更坏）。
+    candidates = [it for it in electrons if state_of(it) == "完整"]
 
-    if not complete:
+    if not candidates:
         review.extend(electrons)
         return keep, doom, review
 
     # 「最新」按内嵌入口 mtime，缺失则退化成体积（完整包明显大于残缺包）
-    newest = max(complete, key=lambda it: (it.get("mtime") or 0, it["bytes"]))
+    newest = max(candidates, key=lambda it: (it.get("mtime") or 0, it["bytes"]))
     for it in electrons:
         if it is newest:
             keep.append(it)
         else:
             doom.append(it)
     return keep, doom, review
+
+
+# ── 部分收敛（B9-5）：整目录删不掉时，回收其中的「可分发陈旧字节」 ──────
+
+
+def convergence_target(dist_dir: Path) -> Path | None:
+    """返回**可回收**的部分收敛目标；``None`` = 不该动。
+
+    目标**派生自** :data:`EMBEDDED_SERVER`（路径规则只有一处），即
+    ``<dist_dir>/win-unpacked/resources/pbc-server`` —— 它正是
+    :func:`bundle_manifest.discover_artifacts` 认得的"产物"，也是唯一可能
+    **被误当成要发的那个包**而流传出去的字节。
+
+    返回 ``None`` 的两种情况（都必须**保持不动**，宁缺勿错）：
+
+    * 目标不存在（目录本来就没有内嵌后端 —— 已经是残壳）；
+    * 目标自己**不可替换**（:func:`locked_files` 报出占用项）。
+
+    ⚠️ 判据用 :func:`locked_files` 而**不是**外层目录能不能改名：外层
+    ``win-unpacked`` 因为含被持有的 ``app.asar`` 必然改名失败（``winerror=5``），
+    而目标子目录其实完全可以回收。把两者混为一谈正是 B9-5 最初卡住的地方。
+    """
+    tgt = Path(dist_dir) / EMBEDDED_SERVER.parent
+    if not tgt.is_dir():
+        return None
+    if locked_files(tgt):
+        return None
+    return tgt
+
+
+def write_husk_note(dist_dir: Path, target: Path, locks: list[str]) -> str:
+    """在残壳目录写 ``HUSK.md``，把"这里少了一份可分发产物"变成**读得到的事实**。
+
+    写失败不抛（标记不该把清理带崩），但**必须把失败说出来** —— 否则又会回到
+    "目录还在，所以它大概还在"的默认假设里。
+    """
+    holders, _ = named_holders(dist_dir, locks) if locks else ([], [])
+    lock_lines = "\n".join(f"- {one}" for one in locks) or "- (未记录占用项)"
+    body = (
+        "# 残壳（HUSK）—— 本目录不是可分发产物\n\n"
+        "本目录是一次**已过期**的 electron-builder 输出。它的内嵌后端\n"
+        f"`{Path(target).relative_to(dist_dir).as_posix()}` 已被 "
+        "`scripts/clean_dist.py --converge-locked`\n"
+        "回收（送回收站，可恢复）。之所以只回收这一部分：整目录无法删除，占用项为\n\n"
+        f"{lock_lines}\n\n"
+        f"具名持有者：{'；'.join(holders) or '(未能具名)'}\n\n"
+        f"回收时间：{datetime.now().isoformat(timespec='seconds')}\n\n"
+        "⇒ **不要再分发本目录**：它缺少后端，双击也跑不起来。\n"
+        "   要发版请重建：`powershell -NoProfile -File build.ps1`。\n"
+    )
+    try:
+        (Path(dist_dir) / HUSK_NAME).write_text(body, encoding="utf-8")
+        return f"已写 {HUSK_NAME}"
+    except OSError as e:
+        return f"⚠ 未能写 {HUSK_NAME}（{type(e).__name__}: {e}）—— 请手动标注本目录已失效"
 
 
 # ── 回收站 ──────────────────────────────────────────────────────────
@@ -406,6 +534,9 @@ def main(argv=None):
     ap.add_argument("--root", default=".", help="仓库根（默认当前目录）")
     ap.add_argument("--apply", action="store_true",
                     help="真正执行清理（默认 dry-run，只打印方案）")
+    ap.add_argument("--converge-locked", action="store_true",
+                    help="（需与 --apply 同用）对整目录删不掉的待清理目录做**部分收敛**："
+                         "只回收其中的内嵌后端，并写 HUSK.md 标出残壳（B9-5）")
     ap.add_argument("--json", action="store_true", help="以 JSON 输出体检结果")
     args = ap.parse_args(argv)
 
@@ -422,20 +553,26 @@ def main(argv=None):
         if lk:
             locks[name] = lk
 
+    # 部分收敛目标（B9-5）：只对"整目录删不掉"的待清理目录派生。**纯计算无副作用**，
+    # 所以 dry-run 也能如实预告"加 --apply --converge-locked 会发生什么"。
+    converge: dict[str, str] = {}
+    for name in sorted(set(doom_names) & set(locks)):
+        tgt = convergence_target(root / name)
+        if tgt is not None:
+            converge[name] = tgt.relative_to(root / name).as_posix()
+
     if args.json:
         print(json.dumps({"items": items, "keep": [i["name"] for i in keep],
                           "doom": [i["name"] for i in doom],
                           "review": [i["name"] for i in review],
-                          "locks": locks}, ensure_ascii=False, indent=2))
+                          "locks": locks, "converge": converge},
+                         ensure_ascii=False, indent=2))
     else:
         print(f"仓库根: {root}")
         print(f"\n{'目录':<38}{'类型':<10}{'体积':>10}  {'状态':<8}{'版本':<8}")
         print("-" * 84)
         for it in items:
-            if it["kind"] == KIND_ELECTRON:
-                status = "完整" if it["complete"] else "残缺"
-            else:
-                status = "-"
+            status = state_of(it)
             ver = it["version"] or "-"
             print(f"{it['name']:<38}{it['kind']:<10}{it['mb']:>8} MB  {status:<8}{ver:<8}")
         print("\n保留:", ", ".join(i["name"] for i in keep) or "(无)")
@@ -446,23 +583,20 @@ def main(argv=None):
             print(f"\n⚠ {name} 内有 {len(lk)} 个文件被外部句柄占用，整目录无法删除：")
             for one in lk[:10]:
                 print(f"    {one}")
-            # 具名持有者：把"可能是谁"变成"就是谁"（Restart Manager，实测可用）
-            # ⚠️ 只能按 who_holds 的**结构化行**去重，不能对 describe_holders 的
-            #    文本按 ", " 切分 —— 条目内部本身就含 ", "（如 "App(pid=1, Unknown)"），
-            #    切分会把条目截断成 "App(pid=1"（2026-09-17 实测踩到）。
-            holders: list[str] = []
-            for one in lk:
-                rel = one.split("(", 1)[0].strip()
-                if not rel:                  # 目录级伪条目，没有文件路径可查
-                    continue
-                for r in who_holds(root / name / rel):
-                    s = f"{r['app'] or '(未具名)'}(pid={r['pid']}, {r['type']})"
-                    if s not in holders:
-                        holders.append(s)
+            # 具名持有者：把"可能是谁"变成"就是谁"（Restart Manager，实测可用）。
+            # 推导**只有一处实现**（named_holders）—— 门禁也要用同一份结论来决定
+            # 能否把陈旧产物降级，两边各推一遍必然漂移。
+            holders, _ = named_holders(root / name, lk)
             if holders:
                 print(f"    → 实测持有者：{'; '.join(holders)}（Restart Manager 具名，非推测）")
             else:
                 print("    → 未能具名持有者（Restart Manager 查不到 ⇒ 可能是驱动级拦截）")
+            if name in converge:
+                print(f"    → 可**部分收敛**：只回收 {converge[name]}"
+                      f"（并写 {HUSK_NAME} 标出残壳）；"
+                      f"加 `--apply --converge-locked` 执行。")
+            else:
+                print("    → 无可部分收敛的目标（内嵌后端不存在，或它自己也删不掉）。")
             print("    → 处置：**退出持有者进程后重跑本脚本**，句柄随进程消失。")
             print("      注：加杀软白名单对本例**无效**（持有者不是杀软）。")
             print("      判别（2026-09-17 实测）：文件级 winerror=32")
@@ -480,6 +614,23 @@ def main(argv=None):
         if blocked:
             emit(f"\n[跳过] {', '.join(blocked)} —— 内含被占用文件，整目录删不掉；"
                  f"先释放占用再试。")
+        if args.converge_locked:
+            for name in blocked:
+                rel = converge.get(name)
+                if not rel:
+                    emit(f"[converge] {name}: 跳过 — 无可回收目标"
+                         f"（内嵌后端不存在，或它自己也删不掉）")
+                    continue
+                ok, msg = to_recycle_bin(root / name / rel)
+                if ok:
+                    note = write_husk_note(root / name, root / name / rel, locks[name])
+                    emit(f"[converge] {name}: OK — 已回收 {rel}；{note}")
+                else:
+                    emit(f"[converge] {name}: FAIL — {msg}")
+        elif blocked:
+            emit(f"         若要部分收敛（只回收内嵌后端 + 写 {HUSK_NAME}），"
+                 f"加 --converge-locked；本轮可收敛："
+                 f"{', '.join(sorted(converge)) or '(无)'}。")
         if not actionable:
             emit("[apply] 没有可安全清理的目录")
             return 1 if blocked else 0
@@ -488,6 +639,9 @@ def main(argv=None):
             emit(f"[apply] {name}: {'OK' if ok else 'FAIL'} — {msg}")
     elif not args.json:
         print("\n(dry-run) 加 --apply 才真正清理；清理走回收站，可恢复。")
+        if converge:
+            print(f"         整目录删不掉的 {', '.join(sorted(converge))} 可做部分收敛"
+                  f"（只回收内嵌后端 + 写 {HUSK_NAME}）：--apply --converge-locked")
     return 0
 
 

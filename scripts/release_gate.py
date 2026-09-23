@@ -70,6 +70,11 @@ if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
 from bundle_manifest import discover_artifacts, verify_artifact  # noqa: E402
+# 占用探测（"谁持有 / 能不能换掉"）**只有一处实现**，且刻意放在 `clean_dist`：
+# 那里是项目既定的占用探测入口（见 docs/PROJECT_PITFALLS.md §二十二 与 clean_dist
+# 模块 docstring 的实测记录）。门禁复用它而不另写一份 ctypes —— 两份必然漂移，
+# 而这里用的是**降级判据**，漂移会直接放过真回归。
+from clean_dist import named_holders  # noqa: E402
 
 # 与 pytest.ini 的 --cov 口径保持一致
 COVERAGE_SOURCES = "api,core,llm,db,config,main"
@@ -475,32 +480,94 @@ def check_artifact_freshness(root: Path = REPO_ROOT) -> CheckResult:
     **只有一处实现**）：入包集合覆盖、版本、工作树逐字节、**产物副本逐字节**、
     asar 版本、exe 绑定。逐字节比对是**唯一**能戳破"版本号一致但产物陈旧"的判据
     （B7-3 实测：源码与产物 `static/settings.js` 都是 v1.1.9，字节却差 316 B）。
+
+    ## 第三态：陈旧但**不可替换**（B9-5，2026-09-21）
+
+    背景：宿主进程长期持有 `<out>/win-unpacked/resources/app.asar` ⇒ 那份陈旧产物
+    **既删不掉也原地重建不了**。此时本项原先判 FAIL —— 而它**永远**红。
+    **恒红的门禁与恒真的判据一样零判别力**（PITFALLS §三十一），等于把本项废掉。
+
+    故按"能不能换掉它"分流：
+
+    * **可替换**（改名探测通过）⇒ FAIL，并提示用
+      `python scripts/clean_dist.py --apply --converge-locked` 收敛（可行动）；
+    * **不可替换且持有者具名** ⇒ **第三态**（WARN，不影响退出码），具名报出持有者，
+      并**显式说明它仍可被读取/打包分发** —— 不是"已安全"；
+    * **不可替换但取不到签名** ⇒ 仍 **FAIL**（fail-closed，见
+      「降级白名单必须按签名匹配」）；
+    * **一份新鲜的都没有** ⇒ 一律 **FAIL**（"要发的就是旧的"，任何锁都不构成借口）。
+
+    ⚠️ 已知残余风险（刻意接受并显式登记）：理论上可以把陈旧产物**锁住**来让本项降级。
+    上面的四条把可利用面压到"必须真持有句柄 + 必须能被 RM 具名 + 必须另有新鲜产物"，
+    且报告里必须具名 —— 但它仍是**降级**，而不是校验通过。
     """
     t0 = _ms()
     artifacts = discover_artifacts(root)
     if not artifacts:
         return CheckResult("artifact_freshness", SKIP,
                            "无构建产物（本项只在存在产物时生效）", _ms() - t0)
-    reported: list[str] = []
+    fresh: list[str] = []
     problems: list[str] = []
+    blocked: list[str] = []
     for artifact in artifacts:
         rel = (artifact.relative_to(root).as_posix()
                if artifact.is_relative_to(root) else str(artifact))
-        reported.append(rel)
         try:
             found = verify_artifact(artifact, root)
         except Exception as e:  # noqa: BLE001 — 校验器自身出错也必须 fail-closed，
             # 否则"判据崩了"会被读成"没问题"（这正是它要防的那类错误）。
             found = [f"校验器异常：{type(e).__name__}: {e}"]
-        problems.extend(f"{rel}: {p}" for p in found)
+        if not found:
+            fresh.append(rel)
+            continue
+
+        # 陈旧 ⇒ 先问"这份字节能不能被换掉"。**能**换 ⇒ 可收敛，必须收敛，判 FAIL；
+        # **不能**换（被外部句柄持有）⇒ 门禁对它只能给出第三态（见下）。
+        # 判据用 clean_dist 的**同一份**占用探测实现（`named_holders`）——
+        # 门禁与清理工具各推一遍必然漂移（PITFALLS §二十六）。
+        holders, locks = named_holders(artifact)
+        if locks and holders:
+            blocked.append(
+                f"{rel}: {'；'.join(holders)} ⇒ 陈旧但**不可替换**"
+                f"（{len(found)} 项不符，首项：{found[0][:80]}）")
+        else:
+            problems.extend(f"{rel}: {p}" for p in found)
+            if locks and not holders:
+                # ⚠️ fail-closed：确实删不掉、却**取不到签名** ⇒ 不能降级。
+                # 否则"探测不到持有者"会被读成"持有者无所谓"，放过真回归。
+                problems.append(
+                    f"{rel}: 不可替换但无法具名持有者（Restart Manager 查不到）—— "
+                    f"**不降级**，先查清是谁持有")
+
+    # 没有任何一份产物新鲜 ⇒ "要发的东西本身就是旧的"，任何锁都不能作为借口。
+    if blocked and not fresh:
+        problems.extend(blocked)
+        blocked = []
+
     if problems:
-        return CheckResult("artifact_freshness", FAIL,
-                           f"{len(artifacts)} 份产物中 {len(problems)} 项不符："
-                           + " ｜ ".join(problems[:4]),
+        detail = (f"{len(artifacts)} 份产物中 {len(problems)} 项不符："
+                  + " ｜ ".join(problems[:4]))
+        if blocked:
+            detail += ("；另有 " + f"{len(blocked)} 份陈旧但**不可替换**（被外部持有，"
+                       "未计入本项，需先释放持有者）：" + " ｜ ".join(blocked[:2]))
+        return CheckResult("artifact_freshness", FAIL, detail, _ms() - t0)
+
+    if blocked:
+        # **第三态**：陈旧 + **不可替换** + 持有者**具名**。
+        # 判 FAIL 会**永久红**（会话内无法清理，见 TODO B9-5）；判 PASS 是**假绿**。
+        # 故如实报第三态（WARN，不影响退出码），把"谁持有、怎么办"摆到台面上。
+        # 代价（刻意接受）：理论上可以"把陈旧产物锁住"来让本项降级 —— 所以
+        # ① 要求**具名**（取不到签名一律 FAIL，见上）；② 只要一份新鲜的都没有就 FAIL；
+        # ③ 文案必须显式说明它**仍可被读取/打包分发**，不是"已安全"。
+        return CheckResult("artifact_freshness", WARN,
+                           f"{len(fresh)} 份产物新鲜；{len(blocked)} 份陈旧但不可替换"
+                           f"（**仍可被读取并打包分发，勿据此认为可发布**）："
+                           + " ｜ ".join(blocked[:2]),
                            _ms() - t0)
+
     return CheckResult("artifact_freshness", PASS,
                        f"{len(artifacts)} 份产物与源码逐字节一致"
-                       f"（{', '.join(reported)}）", _ms() - t0)
+                       f"（{', '.join(fresh)}）", _ms() - t0)
 
 
 def _parse_pytest_summary(output: str) -> tuple[int, int, list[str]]:

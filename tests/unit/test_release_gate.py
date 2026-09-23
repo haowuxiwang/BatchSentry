@@ -717,6 +717,80 @@ class TestArtifactFreshness:
         r = rg.check_artifact_freshness(root=tmp_path)
         assert r.status == rg.FAIL and "校验器异常" in r.detail
 
+    # ── 第三态（B9-5）：陈旧但**不可替换** ──────────────────────────────
+    #
+    # 背景：宿主进程长期持有 `app.asar` ⇒ 那份陈旧产物既删不掉、也原地重建不了。
+    # 原判据一律 FAIL ⇒ **永久红** ⇒ 零判别力（等于把本项废掉）。分流后有四条
+    # 契约，缺一条就会从"永久红"滑到"假绿"。
+    #
+    # ⚠️ 占用探测是 `clean_dist.named_holders`（唯一实现），本模块导入它成名字，
+    #    所以这里 monkeypatch 的是 `rg.named_holders`。
+
+    def _stale_one_and_fresh_one(self, tmp_path, monkeypatch):
+        """一份新鲜 + 一份陈旧（陈旧的那份在 electron 里）。"""
+        self._artifact(tmp_path, "backend")
+        self._artifact(tmp_path, "embedded")
+        monkeypatch.setattr(
+            rg, "verify_artifact",
+            lambda a, root: ["缺少 build_manifest.json"] if "win-unpacked" in str(a) else [])
+
+    def test_replaceable_stale_artifact_is_fail_not_downgraded(self, tmp_path, monkeypatch):
+        """能换掉却没换 ⇒ 必须 FAIL。"可收敛"是**待办**，不是降级的理由。"""
+        self._stale_one_and_fresh_one(tmp_path, monkeypatch)
+        monkeypatch.setattr(rg, "named_holders", lambda a, l=None: ([], []))
+        r = rg.check_artifact_freshness(root=tmp_path)
+        assert r.status == rg.FAIL
+        assert "dist-electron/win-unpacked/resources/pbc-server" in r.detail
+
+    def test_unreplaceable_stale_artifact_with_named_holder_is_third_state(
+            self, tmp_path, monkeypatch):
+        """三条缺一不可：陈旧 + 不可替换 + **持有者具名** ⇒ 第三态。"""
+        self._stale_one_and_fresh_one(tmp_path, monkeypatch)
+        monkeypatch.setattr(
+            rg, "named_holders",
+            lambda a, l=None: (["WorkBuddy(pid=21016, MainWindow)"],
+                               [r"win-unpacked/resources/app.asar  (winerror=32)"]))
+        r = rg.check_artifact_freshness(root=tmp_path)
+        assert r.status == rg.WARN
+        assert r.status != rg.PASS, "第三态绝不能是 PASS —— 那就是假绿"
+        assert "WorkBuddy(pid=21016" in r.detail, "必须具名持有者，否则无法行动"
+        assert "仍可被读取" in r.detail, "必须说明它仍可能被分发，不是「已安全」"
+        assert "dist-electron/win-unpacked/resources/pbc-server" in r.detail, "要能归因到哪一份"
+
+    def test_unreplaceable_but_unnamed_stays_fail(self, tmp_path, monkeypatch):
+        """删不掉却**取不到签名** ⇒ 不降级（降级必须按签名匹配，禁止按前缀降级）。"""
+        self._stale_one_and_fresh_one(tmp_path, monkeypatch)
+        monkeypatch.setattr(
+            rg, "named_holders",
+            lambda a, l=None: ([], [r"win-unpacked/resources/app.asar  (winerror=32)"]))
+        r = rg.check_artifact_freshness(root=tmp_path)
+        assert r.status == rg.FAIL
+        assert "无法具名" in r.detail
+
+    def test_no_fresh_artifact_cancels_the_third_state(self, tmp_path, monkeypatch):
+        """一份新鲜的都没有 ⇒ 「要发的就是旧的」，任何锁都不构成借口。"""
+        self._artifact(tmp_path, "embedded")
+        monkeypatch.setattr(rg, "verify_artifact",
+                            lambda a, root: ["缺少 build_manifest.json"])
+        monkeypatch.setattr(
+            rg, "named_holders",
+            lambda a, l=None: (["WorkBuddy(pid=1, MainWindow)"], ["x (winerror=32)"]))
+        r = rg.check_artifact_freshness(root=tmp_path)
+        assert r.status == rg.FAIL, "没有新鲜产物时不得降级"
+
+    def test_third_state_coexists_with_a_real_failure(self, tmp_path, monkeypatch):
+        """同一轮里既有「可行动的陈旧」又有「不可替换的陈旧」⇒ 总判定必须 FAIL。"""
+        self._artifact(tmp_path, "backend")
+        self._artifact(tmp_path, "embedded")
+        monkeypatch.setattr(rg, "verify_artifact", lambda a, root: ["boom"])
+        monkeypatch.setattr(
+            rg, "named_holders",
+            lambda a, l=None: (["WorkBuddy(pid=1, MainWindow)"], ["x (winerror=32)"])
+            if "win-unpacked" in str(a) else ([], []))
+        r = rg.check_artifact_freshness(root=tmp_path)
+        assert r.status == rg.FAIL
+        assert "不可替换" in r.detail, "被持有那份也要出现在归因里，不能悄悄丢掉"
+
 
 class TestMainExitCode:
     def test_main_returns_1_when_fail(self, monkeypatch, tmp_path):

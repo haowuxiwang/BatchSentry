@@ -119,9 +119,42 @@
   ⇒ 归因"上游拒绝该凭据（环境）"；探测**通过**而流水线仍 error ⇒ **就是产品缺陷**
   （这一支恰好能抓"凭据发给了错误提供方"那个历史真事故）；探测**判不了** ⇒
   按真实缺陷**fail-closed**。
-- ⚠️ **未解决**：`artifact_freshness` 仍**恒红** —— 被持锁的陈旧 `dist-electron/`
-  被 `discover_artifacts` 当作产物。已登记 **B9-5** 并给出两条互斥路线（收敛 / 判据区分），
-  **需决策**：恒红的门禁等于没有门禁。
+- ⚠️ 当时**未解决**：`artifact_freshness` 仍**恒红** —— 被持锁的陈旧 `dist-electron/`
+  被 `discover_artifacts` 当作产物。已登记 **B9-5**（**已于 Round 55 结项**，见下节）。
+
+### Fixed / Changed (Round 55, 2026-09-23 — B9-5 结项：收敛陈旧字节 + 门禁承认第三态)
+
+> **本段改动不进产物**（只落在 `scripts/` / `tests/` / 文档；已核实入包清单 97 个文件中
+> **没有任何 `scripts/` 条目**）⇒ **v1.2.0 产物无需重建**，`artifact_freshness` 与
+> 产物级 e2e 的结论对当前 HEAD 仍然成立。
+
+- **① 收敛（治字节）**：`clean_dist.py` 新增 `--converge-locked`。整目录回收失败时，
+  退到**目标粒度**回收"会被误分发的那一份" = 内嵌后端
+  `win-unpacked/resources/pbc-server`（派生自既有 `EMBEDDED_SERVER` 常量，
+  不新写路径规则）。逐项先做**改名探测**（不可替换就不动）、走**回收站**、
+  默认 **dry-run**、残壳写 **`HUSK.md`** 具名身份与"这里少了一份产物"。
+  **实测**：执行后 `discover_artifacts` 不再返回该陈旧产物 ⇒ 本项**由恒红转 PASS**；
+  最新产物（`dist-electron-out-20260921-160111`）**毫发无伤**。
+- **② 判据三态（治判据）**：`release_gate.check_artifact_freshness` 不再只有两态。
+  陈旧 + **可替换** ⇒ `FAIL`（可行动，提示 `--converge-locked`）；
+  陈旧 + **不可替换 + Restart Manager 具名** ⇒ **第三态 `WARN`**
+  （具名持有者，并**显式写明**"仍可被读取并打包分发，勿据此认为可发布"——**不是 PASS**）；
+  不可替换 + **取不到签名** ⇒ **仍 `FAIL`**（fail-closed）；
+  **一份新鲜的都没有** ⇒ 一律 `FAIL`（锁不构成借口）。
+  持有者探测复用 `clean_dist` 的**同一份**实现（`named_holders`），避免第二份 ctypes。
+- **护栏**：`test_release_gate.py` + `test_clean_dist.py` 新增 9 条
+  （三态各一条 + 第三态**不是 PASS** + fail-closed + 部分收敛只动白名单目标 /
+  不可替换则不动 / 写 HUSK / dry-run 不动手）。合计 **120 passed**。
+- **变异验证 10/10 CAUGHT**（`devlogs/_verify/mutate_b95.py`）；对照实验
+  （`devlogs/mutate_b95_control.txt`）证明改动**只**改变「不可替换」那一态的判定，
+  另两态判据**逐字未动** —— 差异是判据性的，不是文案。
+- **新增遗留**：**B9-8**（新建的 `dist-electron-out-*/…/app.asar` **同样**会被宿主句柄
+  持有 ⇒ 多份变体**无法在会话内靠脚本收敛**）；**B9-6 / B9-7** 见 `docs/TODO.md`。
+- 陷阱固化到 `docs/PROJECT_PITFALLS.md` **§三十六**：
+  ① 任务清单的"已完成"不是证据（本轮实测**假完成**：清单标 `[completed]` 的
+  `scripts/artifact_lock.py` **根本不存在**，虽实质目的已达成）；
+  ② "整目录删不掉" ≠ "无法收敛"（锁落在**文件**上，必须按目标粒度探测）；
+  ③ 第三态**不能降成 PASS**；④ 加载历史版本脚本做对照时 `@dataclass` 要求模块在 `sys.modules`。
 
 ### Added / Fixed (Round 53, 2026-09-21 — P2 批次④：精度/准确性 + 配置与口径 + e2e 覆盖)
 

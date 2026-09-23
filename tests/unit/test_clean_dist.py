@@ -23,8 +23,15 @@ from scripts.clean_dist import (  # noqa: E402
 )
 
 
-def _item(name, kind, complete=False, mtime=None, size=1000):
+def _item(name, kind, complete=False, mtime=None, size=1000, embedded=True):
+    """体检条目夹具。
+
+    ``embedded`` 对应 ``has_embedded_server``：**默认 True，因为那是常态**。
+    B9-5 起"有入口但无内嵌后端"是**独立的一态**（残壳），所以夹具必须能表达它，
+    否则既测不到残壳、又会让旧用例因为缺字段被误判成残壳。
+    """
     return {"name": name, "kind": kind, "complete": complete,
+            "has_embedded_server": embedded,
             "mtime": mtime, "bytes": size, "mb": size / 1048576}
 
 
@@ -91,7 +98,8 @@ def test_ties_break_on_size():
 # ── 目录识别 ────────────────────────────────────────────────────────
 
 
-def _make(tmp_path, name, *, backend=False, electron=False, complete=False, version=None):
+def _make(tmp_path, name, *, backend=False, electron=False, complete=False, version=None,
+          embedded=True):
     d = tmp_path / name
     d.mkdir()
     if backend:
@@ -99,9 +107,11 @@ def _make(tmp_path, name, *, backend=False, electron=False, complete=False, vers
         (d / "pbc-server" / "pbc-server.exe").write_bytes(b"MZ")
     if electron:
         wu = d / "win-unpacked"
-        (wu / "resources" / "pbc-server").mkdir(parents=True)
-        (wu / "resources" / "pbc-server" / "pbc-server.exe").write_bytes(b"MZ")
+        (wu / "resources").mkdir(parents=True)
         (wu / "resources" / "app.asar").write_bytes(b"\x00" * 16)
+        if embedded:
+            (wu / "resources" / "pbc-server").mkdir()
+            (wu / "resources" / "pbc-server" / "pbc-server.exe").write_bytes(b"MZ")
         if complete:
             (wu / "BatchSentry.exe").write_bytes(b"MZ")
     return d
@@ -396,4 +406,171 @@ def test_module_docstring_states_the_measured_root_cause():
     doc = cd.__doc__ or ""
     assert "WorkBuddy" in doc, "须写明实测持有者是谁"
     assert "不是安全软件" in doc, "必须显式否掉旧的「杀软/火绒」误判"
+
+
+# ── 部分收敛（B9-5）：整目录删不掉时，只回收「可分发陈旧字节」 ──────────
+#
+# 为什么需要：宿主长期持有 `app.asar` ⇒ 那份陈旧 Electron 目录既删不掉、也原地
+# 重建不了；而它里面的**内嵌后端**才是 `discover_artifacts` 认得的"产物"
+# （会让门禁**永久红**，也可能被误当成要发的那个包）。四条硬约束各有一条用例：
+#   ① 目标**派生**自 EMBEDDED_SERVER（不另写路径规则）；
+#   ② 目标自己不可替换 ⇒ 绝不动手（宁缺勿错）；
+#   ③ 默认 dry-run，只有 `--apply --converge-locked` 才动手；
+#   ④ 动了就必写 HUSK.md，且写不进去要**说出来**。
+
+
+def _fake_locks(p):
+    """模拟 B9-5 的真实锁形：**只有 electron 根目录**报占用（app.asar 被持有）。
+
+    子目录（包括收敛目标 `…/resources/pbc-server`）一律空闲 —— 这正是实测结论：
+    整目录删不掉 ≠ 里面每一部分都删不掉（外层是 `winerror=5` 的**派生**症状）。
+    """
+    return ([r"win-unpacked/resources/app.asar  (OSError: winerror=32)"]
+            if Path(p).name.startswith("dist-electron") else [])
+
+
+def test_state_of_distinguishes_husk_from_partial():
+    """残壳（有入口、无后端）必须与"残缺"分开：前者跑不起来，且是**已收尾**状态。"""
+    import scripts.clean_dist as cd
+    assert cd.state_of(_item("d", KIND_ELECTRON, complete=True)) == "完整"
+    assert cd.state_of(_item("d", KIND_ELECTRON, complete=True, embedded=False)) == "残壳"
+    assert cd.state_of(_item("d", KIND_ELECTRON, complete=False)) == "残缺"
+    assert cd.state_of(_item("d", KIND_BACKEND)) == "-"
+
+
+def test_husk_never_becomes_the_kept_candidate():
+    """残壳更"新"也不得被保留 —— 保留它等于保护一个双击跑不起来的目录。"""
+    import scripts.clean_dist as cd
+    husk = _item("dist-electron-husk", KIND_ELECTRON, complete=True, embedded=False,
+                 mtime=2_000_000_000, size=999)
+    real = _item("dist-electron-real", KIND_ELECTRON, complete=True,
+                 mtime=1_000_000_000, size=100)
+    keep, doom, review = cd.plan([real, husk])
+    assert [i["name"] for i in keep] == ["dist-electron-real"]
+    assert [i["name"] for i in doom] == ["dist-electron-husk"]
+
+
+def test_husk_alone_deletes_nothing():
+    """只剩残壳（一个真包都没有）⇒ 仍然什么都不删（继续守着"宁缺勿错"）。"""
+    import scripts.clean_dist as cd
+    keep, doom, review = cd.plan([_item("h", KIND_ELECTRON, complete=True, embedded=False)])
+    assert doom == [] and [i["name"] for i in review] == ["h"]
+
+
+def test_convergence_target_is_derived_and_requires_replaceability(tmp_path, monkeypatch):
+    import scripts.clean_dist as cd
+    d = _make(tmp_path, "dist-electron", electron=True, complete=True)
+    assert cd.convergence_target(d) == d / "win-unpacked" / "resources" / "pbc-server"
+    # 目标自己不可替换 ⇒ 不动（"能改名"不等于"能删"，这里直接锁死）
+    monkeypatch.setattr(cd, "locked_files", lambda p: ["pbc-server.exe (winerror=32)"])
+    assert cd.convergence_target(d) is None
+
+
+def test_convergence_target_is_none_for_a_husk(tmp_path):
+    """已经是残壳（没有内嵌后端）⇒ 没有可收敛的目标，而不是"再删一次"。"""
+    import scripts.clean_dist as cd
+    d = _make(tmp_path, "dist-electron", electron=True, complete=True, embedded=False)
+    assert cd.convergence_target(d) is None
+
+
+def test_cli_converge_is_dry_run_unless_apply(tmp_path, capsys, monkeypatch):
+    """默认（不加 --apply）必须**只预告不动手** —— 部分收敛也是删除操作。"""
+    import scripts.clean_dist as cd
+    _make(tmp_path, "dist-electron-old", electron=True, complete=True)
+    _make(tmp_path, "dist-electron-new", electron=True, complete=True)
+    _touch_newer(tmp_path / "dist-electron-new", 2_000_000_000)
+    _touch_newer(tmp_path / "dist-electron-old", 1_000_000_000)
+    monkeypatch.setattr(cd, "locked_files", _fake_locks)
+    done = []
+    monkeypatch.setattr(cd, "to_recycle_bin", lambda p: (done.append(p), (True, "stub"))[1])
+    assert cd.main(["--root", str(tmp_path)]) == 0
+    assert done == [], "dry-run 不得回收任何东西"
+    out = capsys.readouterr().out
+    assert "部分收敛" in out and "--converge-locked" in out, "dry-run 要预告可收敛的目标"
+    assert not (tmp_path / "dist-electron-old" / "HUSK.md").exists(), "没动手就不该写标记"
+
+
+def test_cli_apply_converge_locked_recycles_only_the_target(tmp_path, capsys, monkeypatch):
+    """--apply --converge-locked：只回收内嵌后端，并写 HUSK.md 标出残壳。"""
+    import scripts.clean_dist as cd
+    old = _make(tmp_path, "dist-electron-old", electron=True, complete=True)
+    _make(tmp_path, "dist-electron-new", electron=True, complete=True)
+    _touch_newer(tmp_path / "dist-electron-new", 2_000_000_000)
+    _touch_newer(old, 1_000_000_000)
+    monkeypatch.setattr(cd, "locked_files", _fake_locks)
+    done = []
+    monkeypatch.setattr(cd, "to_recycle_bin", lambda p: (done.append(p), (True, "stub"))[1])
+    assert cd.main(["--root", str(tmp_path), "--apply", "--converge-locked"]) == 1
+    assert done == [old / "win-unpacked" / "resources" / "pbc-server"], (
+        f"只允许回收内嵌后端，实际回收 {done}")
+    husk = old / "HUSK.md"
+    assert husk.is_file(), "必须留下「这里少了一份产物」的标记"
+    text = husk.read_text(encoding="utf-8")
+    assert "win-unpacked/resources/pbc-server" in text, "标记要写明被回收的是哪一份"
+    assert "不要" in text and "分发" in text, "标记要明说本目录不可分发"
+    assert "[converge]" in capsys.readouterr().out
+
+
+def test_cli_converge_skips_a_non_replaceable_target(tmp_path, capsys, monkeypatch):
+    """目标自己也删不掉 ⇒ 不动手，也**不写** HUSK（没发生的事不许留痕）。"""
+    import scripts.clean_dist as cd
+    old = _make(tmp_path, "dist-electron-old", electron=True, complete=True)
+    _make(tmp_path, "dist-electron-new", electron=True, complete=True)
+    _touch_newer(tmp_path / "dist-electron-new", 2_000_000_000)
+    _touch_newer(old, 1_000_000_000)
+    monkeypatch.setattr(cd, "locked_files", lambda p: [r"x  (OSError: winerror=32)"])
+    done = []
+    monkeypatch.setattr(cd, "to_recycle_bin", lambda p: (done.append(p), (True, "stub"))[1])
+    assert cd.main(["--root", str(tmp_path), "--apply", "--converge-locked"]) == 1
+    assert done == [], "目标不可替换时绝不能动手"
+    assert not (old / "HUSK.md").exists(), "没真的收敛就不该写标记"
+    assert "跳过" in capsys.readouterr().out
+
+
+def test_cli_json_reports_converge_targets(tmp_path, capsys, monkeypatch):
+    """JSON 报告要把可收敛目标报出来（机器可读，便于事后审计「删了什么」）。"""
+    import scripts.clean_dist as cd
+    old = _make(tmp_path, "dist-electron-old", electron=True, complete=True)
+    _make(tmp_path, "dist-electron-new", electron=True, complete=True)
+    _touch_newer(tmp_path / "dist-electron-new", 2_000_000_000)
+    _touch_newer(old, 1_000_000_000)
+    monkeypatch.setattr(cd, "locked_files", _fake_locks)
+    assert cd.main(["--root", str(tmp_path), "--json"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["converge"] == {"dist-electron-old": "win-unpacked/resources/pbc-server"}
+
+
+def test_named_holders_skips_pseudo_entries_and_dedupes(tmp_path, monkeypatch):
+    """具名推导的**唯一实现**：伪条目跳过、重复去重、原锁清单原样保留。
+
+    伪条目（"(目录级改名被拒 …)"）没有文件路径可查 ⇒ 跳过。若把它当成一条
+    "已具名"，门禁就会把"查不到是谁"读成"有人持有"并据此**降级**。
+    """
+    import scripts.clean_dist as cd
+    d = tmp_path / "dist-electron"
+    (d / "win-unpacked").mkdir(parents=True)
+    monkeypatch.setattr(cd, "who_holds",
+                        lambda p: [{"pid": 7, "app": "A", "type": "Unknown"}])
+    locks = ["win-unpacked/app.asar (x)", "win-unpacked/app.asar (x)",
+             "(目录级改名被拒 winerror=5，但逐项探测未见被占用者)", "win-unpacked/o (y)"]
+    labels, kept = cd.named_holders(d, locks)
+    assert labels == ["A(pid=7, Unknown)"], f"应去重且跳过伪条目，实际 {labels}"
+    assert kept == locks, "锁清单要原样保留（展示用），不得被改写"
+
+
+def test_husk_note_write_failure_is_reported_not_swallowed(tmp_path):
+    """标记写不进去必须**说出来** —— 否则又回到"目录还在，所以它大概还在"。"""
+    import scripts.clean_dist as cd
+    ghost = tmp_path / "gone" / "dist-electron"
+    tgt = ghost / "win-unpacked" / "resources" / "pbc-server"
+    msg = cd.write_husk_note(ghost, tgt, [])
+    assert "⚠" in msg and "HUSK.md" in msg
+
+
+def test_docstring_documents_the_partial_convergence_semantics():
+    """B9-5 的取舍（只回收内嵌后端 + 留残壳）必须写在文档里，不能只留在代码里。"""
+    import scripts.clean_dist as cd
+    doc = cd.__doc__ or ""
+    assert "部分收敛" in doc and "--converge-locked" in doc
+    assert "残壳" in doc, "必须给出「残壳」这个可辨识的名字"
 
