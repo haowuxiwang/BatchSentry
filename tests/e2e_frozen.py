@@ -3,9 +3,14 @@ import subprocess, time, requests, sys, os, json, signal
 import urllib.request, urllib.error
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from tests.e2e_coverage import (  # noqa: E402
+    Coverage, ENTRY_LLM_CONFIG, ENTRY_OCR_CONFIG,
+    STATUS_COVERED, STATUS_FAILED, STATUS_SKIPPED,
+    classify_pipeline, exit_code, required_gaps,
+)
 from tests.e2e_proc import (  # noqa: E402
-    EXE_ENV, LLM_KEY_ENV, llm_key, llm_provider, resolve_exe, spawn_server,
-    stop_server,
+    EXE_ENV, LLM_KEY_ENV, llm_key, llm_key_env_display, llm_provider,
+    resolve_exe, spawn_server, stop_server,
 )
 from tests.e2e_status_js import (  # noqa: E402
     dot_semantics_problems, status_dot_classes,
@@ -18,6 +23,12 @@ EXE = resolve_exe()
 BASE = "http://127.0.0.1:58765"
 APPDATA = os.path.join(os.environ["TEMP"], "pbc-e2e-frozen")
 RESULTS = []
+
+# 覆盖清单（B9-7）：把"真的验过"与"因环境跳过"分开记账并落盘。
+# 为什么必须落盘：本冒烟的多数断言与外部凭据无关，缺凭据时照样全绿；
+# 若"最贵的 LLM 链路其实没跑"不落成可机读的事实，一次关键路径从未运行的
+# 发版冒烟与一次真正跑通的冒烟在报告上**完全一样**。
+COV = Coverage()
 
 def ok(name, detail=""):
     RESULTS.append(("PASS", name, detail))
@@ -184,8 +195,8 @@ try:
         fail("jobs_list", str(e))
 
     # 5. Configure LLM provider
-    # 密钥只从环境取（PBC_E2E_DEEPSEEK_KEY），绝不写进仓库。
-    # 未提供时如实登记为"未配置"，不伪造通过。
+    # 密钥只从环境取（PBC_E2E_LLM_KEY；旧名 PBC_E2E_DEEPSEEK_KEY 仍兼容），
+    # 绝不写进仓库。未提供时如实登记为"未配置"，不伪造通过。
     #
     # ⚠️ 提供方**不得写死**：字段名必须由提供方名派生（f"{prov}_api_key"）。
     # 反例（2026-09-17 实测，本段曾在真实产物上 401）：原先固定写
@@ -199,9 +210,10 @@ try:
     _key = llm_key()
     _prov = llm_provider()
     _base_url = ""   # 由应用上报后回填（归因探测必须打**应用真正会用的那个端点**）
+    _llm_ready = False   # 覆盖清单口径：凭据被应用**接受**才算就绪（不是"存在即可"）
     if not _key:
-        print(f"    [WARN] 未设置 {LLM_KEY_ENV} —— 跳过 LLM 配置，"
-              f"下游流水线将走降级路径（不是缺陷）")
+        print(f"    [WARN] 未设置 {llm_key_env_display()} —— 跳过 LLM 配置，"
+              f"下游流水线将走降级路径（不是缺陷，但会记入覆盖清单）")
     try:
         r = requests.post(f"{BASE}/api/settings", json={
             "llm_provider": _prov,
@@ -231,8 +243,27 @@ try:
                      f"{_prov} 收到密钥后仍 configured=False（密钥被拒写？）")
             else:
                 ok("settings_llm_provider_matches_key", _prov)
+                _llm_ready = True
     except Exception as e:
         fail("settings_configure_llm", str(e))
+
+    # LLM 配置这条覆盖项：就绪记 covered，未提供凭据记 skipped（**不得**因为
+    # "其它断言全绿"而被读成已验）。凭据缺失是环境事实，不是缺陷。
+    # ⚠️ 措辞收窄：covered 的含义只是"凭据被**写入**并生效于 settings 通路"，
+    # **不**声称凭据有效 —— 2026-09-21 实测：塞一把必然无效的 key，应用照样
+    # 报 configured=True（配置期不做上游校验）。凭据是否有效由 LLM 链路覆盖项
+    # （流水线终态）回答，两者不可互相顶替。
+    if _llm_ready:
+        COV.record(ENTRY_LLM_CONFIG, STATUS_COVERED,
+                   f"provider={_prov} 凭据被应用写入（仅证明配置通路，不证明凭据有效）",
+                   _prov)
+    elif not _key:
+        COV.record(ENTRY_LLM_CONFIG, STATUS_SKIPPED,
+                   f"未提供 {LLM_KEY_ENV} ⇒ LLM 链路本轮未验", "")
+    else:
+        COV.record(ENTRY_LLM_CONFIG, STATUS_FAILED,
+                   f"提供了 {LLM_KEY_ENV} 但配置未生效（见 settings_llm_provider_matches_key）",
+                   _prov)
 
     # 5b. Configure OCR backend —— 只配 LLM 不配 OCR 是**假的绿**：
     # 实测（2026-09-16）Paddle 的 api_url 为空时提交即失败
@@ -257,11 +288,17 @@ try:
             r = requests.post(f"{BASE}/api/settings", json=payload, timeout=5)
             assert r.status_code == 200, r.text[:200]
             ok("settings_configure_ocr", f"backend={payload['ocr_backend']}")
+            COV.record(ENTRY_OCR_CONFIG, STATUS_COVERED,
+                       f"backend={payload['ocr_backend']} 配置被接受",
+                       payload["ocr_backend"])
         except Exception as e:
             fail("settings_configure_ocr", str(e))
+            COV.record(ENTRY_OCR_CONFIG, STATUS_FAILED, f"配置 OCR 失败：{e}", "")
     else:
         print("    [WARN] 未提供 PBC_E2E_PADDLE_TOKEN / PBC_E2E_MINERU_TOKEN —— "
               "OCR 未配置，pipeline 无法跑通（下游将如实标注为降级，不冒充 PASS）")
+        COV.record(ENTRY_OCR_CONFIG, STATUS_SKIPPED,
+                   "未提供 OCR 凭据 ⇒ 流水线成功路径本轮未验", "")
 
     # 6. PDF upload —— 样例必须**含真实文字**，不能是空白页。
     # 为什么（2026-09-17 实测，两处盲区同根）：
@@ -435,6 +472,19 @@ try:
         except Exception as e:
             fail("report_md", str(e))
 
+        # ── 覆盖清单（B9-7）：流水线两条链路的状态一律由**事实**推导
+        # （终态字符串 + 凭据是否被应用接受），规则只此一处
+        # （`tests/e2e_coverage.classify_pipeline`）。
+        COV.record_many(classify_pipeline(
+            terminal, llm_ready=_llm_ready, ocr_ready=OCR_CONFIGURED))
+    else:
+        # 上传就没成功 ⇒ 流水线根本没跑（产品在未配置 LLM 时会直接 400 拒绝上传，
+        # 见 api/jobs/upload.py）。**传空终态 + upload_failed** 让判据记 failed，
+        # 且归因写成"作业从未建立" —— 绝不能因为"作业都没建起来"就记成 skipped：
+        # 把"没跑"混进"环境跳过"里，正是本轮要消除的盲区。
+        COV.record_many(classify_pipeline(
+            "", llm_ready=_llm_ready, ocr_ready=OCR_CONFIGURED, upload_failed=True))
+
     # 13. Static assets
     section("Static Assets")
     try:
@@ -503,6 +553,21 @@ try:
 finally:
     stop_server(proc, _logf, timeout=5)
 
+# ── 覆盖清单收尾（B9-7）────────────────────────────────────────────
+# 先落盘、再判定：即使下面因硬要求未满足而 FAIL，清单本身也必须在磁盘上 ——
+# 事后审计要回答的是"这轮到底验到了什么"，不该依赖还留在终端里的 stdout。
+COVERAGE_FILE = COV.write()
+section("Coverage")
+for _line in COV.report_lines():
+    print(_line)
+print(f"  coverage file = {COVERAGE_FILE}")
+
+# 硬要求**默认不开启**：日常冒烟可在弱环境跑；发版/验收前置
+# PBC_E2E_REQUIRE_LLM=1，未真实覆盖即整体 FAIL（见 DEPLOYMENT.md）。
+GAPS = required_gaps(COV)
+for _gap in GAPS:
+    fail("coverage_requirement", _gap)
+
 section("Results")
 passed = sum(1 for s, _, _ in RESULTS if s == "PASS")
 failed = sum(1 for s, _, _ in RESULTS if s == "FAIL")
@@ -512,5 +577,11 @@ print(f"Total: {passed} passed, {failed} failed")
 for s, name, detail in RESULTS:
     marker = "OK" if s == "PASS" else "XX"
     print(f"  {marker} {name}: {detail}")
+_counts = COV.counts()
+print(f"Coverage: covered={_counts[STATUS_COVERED]} "
+      f"skipped={_counts[STATUS_SKIPPED]} failed={_counts[STATUS_FAILED]}"
+      f"  (file: {COVERAGE_FILE})")
+if GAPS:
+    print(f"UNMET HARD REQUIREMENTS: {'; '.join(GAPS)}")
 print(f"{'='*50}")
-sys.exit(1 if failed else 0)
+sys.exit(exit_code(failed, GAPS))

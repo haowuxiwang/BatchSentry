@@ -2,7 +2,8 @@ import subprocess, time, os, sys, requests, json
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from tests.e2e_proc import (  # noqa: E402
-    EXE_ENV, LLM_KEY_ENV, llm_key, resolve_exe, spawn_server, stop_server, tail_log,
+    EXE_ENV, llm_key, llm_key_env_display, llm_provider, resolve_exe,
+    spawn_server, stop_server, tail_log,
 )
 
 EXE = resolve_exe()
@@ -25,20 +26,23 @@ try:
     print(f"Health: {r.status_code} {r.json()}")
     
     # Configure LLM（密钥只从环境取，绝不入库）
+    # ⚠️ 提供方不得写死：字段名由提供方名派生（原先是写死的 deepseek ——
+    # 那是把"密钥发给错误提供方"这类 401 事故固化进脚本，见 e2e_frozen.py）。
     _key = llm_key()
+    _prov = llm_provider()
     if not _key:
-        print(f"[WARN] 未设置 {LLM_KEY_ENV} —— LLM 不配置，流水线走降级路径")
+        print(f"[WARN] 未设置 {llm_key_env_display()} —— LLM 不配置，流水线走降级路径")
     r = requests.post(f"{BASE}/api/settings", json={
-        "llm_provider": "deepseek",
-        "deepseek_api_key": _key,
+        "llm_provider": _prov,
+        f"{_prov}_api_key": _key,
     }, timeout=10)
     print(f"Settings POST: {r.status_code}")
     
     # Verify
     r2 = requests.get(f"{BASE}/api/settings", timeout=5)
     s = r2.json()
-    ds = next((p for p in s.get("llm",{}).get("providers",[]) if p.get("name")=="deepseek"), {})
-    print(f"LLM configured: provider={s['llm']['provider']} deepseek={ds.get('configured')}")
+    _p = next((p for p in s.get("llm",{}).get("providers",[]) if p.get("name")==_prov), {})
+    print(f"LLM configured: provider={s['llm']['provider']} {_prov}={_p.get('configured')}")
     
     # Create unique test PDF (different from previous run)
     import random

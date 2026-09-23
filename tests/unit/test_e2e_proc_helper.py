@@ -132,16 +132,60 @@ def test_resolve_exe_default_is_repo_relative(monkeypatch):
     assert REPO_ROOT.is_dir() and (REPO_ROOT / "main.py").is_file()
 
 
+def _clear_llm_keys(monkeypatch):
+    """清掉新/旧两个变量名 —— 漏清一个会让"未设置"用例在开发机上假绿。"""
+    for name in ("PBC_E2E_LLM_KEY", "PBC_E2E_DEEPSEEK_KEY"):
+        monkeypatch.delenv(name, raising=False)
+
+
 def test_llm_key_absent_yields_empty(monkeypatch):
-    monkeypatch.delenv("PBC_E2E_DEEPSEEK_KEY", raising=False)
+    _clear_llm_keys(monkeypatch)
     from tests.e2e_proc import llm_key
     assert llm_key() == ""
 
 
 def test_llm_key_from_env(monkeypatch):
-    monkeypatch.setenv("PBC_E2E_DEEPSEEK_KEY", "sk-from-env-only")
+    _clear_llm_keys(monkeypatch)
+    monkeypatch.setenv("PBC_E2E_LLM_KEY", "sk-from-env-only")
     from tests.e2e_proc import llm_key
     assert llm_key() == "sk-from-env-only"
+
+
+def test_llm_key_legacy_name_still_works(monkeypatch, capsys):
+    """旧名仍可读（防已写好的发版命令静默失效），但必须**提示**已弃用。"""
+    _clear_llm_keys(monkeypatch)
+    monkeypatch.setenv("PBC_E2E_DEEPSEEK_KEY", "sk-legacy")
+    from tests.e2e_proc import llm_key
+    assert llm_key() == "sk-legacy"
+    assert "已弃用" in capsys.readouterr().err, "读到旧名却未提示弃用（迁移无从推进）"
+
+
+def test_llm_key_new_name_wins_over_legacy(monkeypatch):
+    """两名同设时新名优先 —— 否则"改名未生效"会被旧值悄悄掩盖。"""
+    monkeypatch.setenv("PBC_E2E_DEEPSEEK_KEY", "sk-legacy")
+    monkeypatch.setenv("PBC_E2E_LLM_KEY", "sk-new")
+    from tests.e2e_proc import llm_key
+    assert llm_key() == "sk-new"
+
+
+def test_llm_key_absent_falls_back_to_default_without_warning(monkeypatch, capsys):
+    """两个都没设时返回 default，且**不得**报弃用（无旧名可弃）。"""
+    _clear_llm_keys(monkeypatch)
+    from tests.e2e_proc import llm_key
+    assert llm_key(default="sk-default") == "sk-default"
+    assert "已弃用" not in capsys.readouterr().err
+
+
+def test_llm_key_env_names_are_not_provider_bound():
+    """命名债（B9-7）：变量名不得再绑定某一提供方。
+
+    语义是 provider-agnostic 的（配 ``PBC_E2E_LLM_PROVIDER`` 使用）；旧名
+    叫 DEEPSEEK 却要装硅基流动的 key，等于把"名字骗人"固化进发布流程。
+    """
+    from tests.e2e_proc import LLM_KEY_ENV
+    assert LLM_KEY_ENV == "PBC_E2E_LLM_KEY"
+    for provider in ("DEEPSEEK", "SILICONFLOW", "GLM", "OPENAI"):
+        assert provider not in LLM_KEY_ENV, f"变量名仍绑定 {provider}"
 
 
 # 允许保留该字面量的文件（含说明性文字或有意演示反例），均需给出理由

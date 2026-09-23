@@ -2360,30 +2360,82 @@
   待办：给宿主持有场景一个**显式**的收敛路径说明（或在 `--json` 里区分
   "因锁跳过"与"不该删"）。
 
-- [ ] **B9-9 门禁与清理工具现在会**对仓库做写操作**（改名探测）**（P3，2026-09-23 引入）
+- [x] **B9-9 门禁与清理工具会对仓库做**写操作**（改名探测）**（P3，2026-09-23 结项）
   `release_gate.check_artifact_freshness` 判定"陈旧但不可替换"时会调
   `clean_dist.named_holders` ⇒ 内部 `_rename_probe` 会把目标**改名再改回**。
   正常路径无副作用，但**中途被打断**（Ctrl-C / 断电 / 进程被杀）理论上会把对象留在
-  `__lockprobe__.<name>` 名下。已做的缓解：探针名**刻意不带 `dist` 前缀**
-  （不会被 `discover()` 误认成变体），改回失败时会重试一次。
-  待办：评估是否改成**只读**判据（如直接 `open(..., 'rb+')` 试写首字节，或
-  `CreateFileW` 带 `dwShareMode=0` 探测），彻底消除"检查会动仓库"这一性质。
+  `__lockprobe__.<name>` 名下。
+  ✅ **已改为只读判据**：`_rename_probe` / `_find_locked` 整段删除，换成
+  `can_delete(path)`——`CreateFileW(path, DELETE, FILE_SHARE_READ|WRITE|DELETE,
+  OPEN_EXISTING)` **只请求删除权、不删除**，随后立即 `CloseHandle`。零副作用。
+  ⚠️ **关键陷阱（必须记住）**：**只读判据对目录会低估锁定** ——
+  实测 `dist-electron/win-unpacked/resources`：改名探测 `winerror=5`（拒绝）
+  而只读探测 `winerror=0`（放行）。根因是**目录自身的 DELETE 权限 ≠ 其子项可删**
+  （NTFS 只在真正递归删除时才检查子项句柄）。
+  ⇒ 只读方案**必须全树遍历逐文件判定，不得目录级短路**；目录自身不可删只作为
+  一条**无路径的伪条目**如实上报（`_scan_locked` 记 `(winerror=..)` 开头，
+  `named_holders` 跳过它，避免把"目录"当"持有者"报出去）。
+  **等价性实证**：`devlogs/_verify/probe_lock_equivalence.py` 在真实目标上对比
+  新旧两种口径 ⇒ 报出的被锁文件集合**完全一致（0 不一致）**，最坏 937 文件 0.69s。
+  护栏 42 passed（含 AST 断言"探测路径上无任何写操作"+ 正/反句柄对照 +
+  "不得目录短路"回归）；变异验证 **9/9 CAUGHT**（`devlogs/_verify/mutate_b99.py`）。
 
-- [ ] **B9-6 长构建被"回合拆卸"回收时，与"真失败"无法区分**（P1，2026-09-21 实测）
+- [x] **B9-6 长构建被"回合拆卸"回收时，与"真失败"无法区分**（P1，2026-09-23 结项）
   把 `build.ps1` 放**后台**跑，回合结束时它的后代进程被回收 ⇒ 任务报
   **exit 1 且零输出**、`build/pyinstaller.log` **戛然而止无 Traceback**、
   workpath 为空 —— 与"PyInstaller 崩了"**症状完全一致**（实测改前台同命令 113.8s 一次过）。
-  待办：让 `build.ps1` 在起步时写 `build/BUILDING.<pid>`、结束时写退出码并删除标记，
-  这样"**中途被杀**"与"**跑完但失败**"可区分（现状只能靠人肉推理）。
-  流程约束已写入 PITFALLS §三十五 A：**长构建一律前台，不得跨回合挂后台**。
+  ✅ **已用运行台账区分**：`build.ps1` 起步写 `build/_run/<runId>.start.json`
+  （含 `git_head` 与 `pid`），每个出口写 `<runId>.finish.json`（含 `rc` 与错误文本）；
+  `scripts/build_status.py` 读台账给**六态**：`none / running / interrupted /
+  failed / completed / unreadable`。
+  核心签名：**「有 start 台账、无 finish 台账」= 被外部终止**（`finally` 在
+  `TerminateProcess` 下不执行，所以"始而无终"是可靠的被杀痕迹，而非猜测）。
+  ⚠️ **实测中撞到更深的一层**：`CommandNotFoundException`（工具缺失）是
+  **statement-terminating** 错误 —— 即使 `$ErrorActionPreference="Continue"` 也会
+  中断语句、**绕过 `Write-Fail`**，于是"工具缺失"被伪装成"被杀"（正是本项要消除的
+  现象，却在实现时先复现了一遍）。修法两层：① `Invoke-Native`/`Invoke-NativeText`
+  内层 catch 显式 `$script:LASTEXITCODE=1`；② 顶层 `trap` 兜底 `Write-Finish 1`。
+  ⚠️ **pid 存活检测不得用 `os.kill(pid, 0)`**：Windows 上它对任意 pid 都像"成功"，
+  会把"已死的构建"读成"还在跑"。改用 `OpenProcess` + `GetExitCodeProcess ==
+  STILL_ACTIVE`。
+  护栏 17 passed（含一条**真实失败路径** E2E：复制 build.ps1 到空 PATH 目录跑，
+  必须判 `failed` 且 rc=1）；变异 **10/10 CAUGHT**（`devlogs/_verify/mutate_b96.py`）。
+  流程约束保留：PITFALLS §三十五 A **长构建一律前台，不得跨回合挂后台**。
 
-- [ ] **B9-7 frozen e2e 的 LLM 链路本轮未被覆盖（凭据失效）**（P2，2026-09-21 实测）
+- [x] **B9-7 frozen e2e 的 LLM 链路未被覆盖（凭据失效）**（P2，2026-09-23 结项）
   `.env` 的 `SILICONFLOW_API_KEY` 已被上游拒绝：裸客户端直连
   `https://api.siliconflow.cn/v1/models` ⇒ `HTTP 401 {"code":30014,"message":"Token is invalid."}`
   ⇒ 流水线止于 `status=error`，`review/partial_review` 成功路径与 findings 生成
   **本轮没有验到**（e2e 已如实标注归因，未冒充 PASS）。
   ➕ `DEEPSEEK_API_KEY` 实测**仅 11 字符**（正常 key 约 35+）⇒ 疑似占位/失效，一并核对。
-  ➕ 命名债：`tests/e2e_proc.LLM_KEY_ENV = "PBC_E2E_DEEPSEEK_KEY"` 的名字绑死了一个
-  提供方，而语义是 provider-agnostic（配 `PBC_E2E_LLM_PROVIDER` 使用）——
-  本轮就得把**硅基流动**的 key 塞进名为 DEEPSEEK 的变量里。改名需同步 3 个驱动 + 文档。
+  ✅ **结项的三件事（都是"让未覆盖成为一等公民"的工程手段，与能否换到有效 key 无关）**：
+  1. **覆盖清单落盘**：新增 `tests/e2e_coverage.py`，`Coverage` 逐条记
+     `covered / skipped / failed` + 原因 + 自解释 `meaning`，冻结包冒烟每轮落盘
+     `devlogs/e2e_coverage_<ts>.json`（可用 `PBC_E2E_COVERAGE_JSON` 改路径）。
+     判定规则**只有一处实现**（`classify_pipeline`：由终态字符串 + 凭据是否齐备 +
+     上传是否失败推导），故可被单测直接钉住、无需起服务。
+  2. **硬要求 `PBC_E2E_REQUIRE_LLM`**：置 1 ⇒ `llm_config` 与 `llm_pipeline`
+     **两条**只要有一条不是 `covered`，整体 FAIL（退出码 1）并打印
+     `UNMET HARD REQUIREMENTS`。默认关闭。
+     ⚠️ **"默认关闭"≠"无凭据也能跑绿"**：产品自身在未配置 LLM 时**直接 400 拒绝上传**
+     （`api/jobs/upload.py`），那轮冒烟本来就红。这道门拦住的是
+     "其它全绿、只差 LLM 链路"的**假成功** —— 此前它读起来与真正跑通的冒烟一模一样。
+  3. **命名债**：`LLM_KEY_ENV` 由 `PBC_E2E_DEEPSEEK_KEY` 改为 `PBC_E2E_LLM_KEY`
+     （provider-agnostic；旧名仍可读、打印弃用提示、**新名优先**）。同步 3 个驱动
+     + `DEPLOYMENT.md` + PITFALLS。
+     ➕ **顺带修掉同类未爆弹**：`e2e_quick.py` / `e2e_manual.py` 都把
+     `{"llm_provider": "deepseek", ...}` **写死**了（与 §六记录的 401 事故同源，
+     只因样例 PDF 曾是空白页而长期"绿"）⇒ 改为由 `llm_provider()` 派生，并加
+     **AST 护栏**（查 dict 字面量，不查注释文案 —— 注释里刻意留了反例）。
+  **实测**（真实产物 `dist-electron-out-20260921-160111/win-unpacked/resources/pbc-server`）：
+  开 `REQUIRE_LLM=1` ⇒ **EXIT=1** + `UNMET HARD REQUIREMENTS: llm_pipeline=failed`；
+  默认口径 ⇒ 清单如实记 `covered=0 skipped=2 failed=2`（`llm_config`/`ocr_config`
+  = skipped，两条 pipeline = failed）。
+  护栏 55 passed；变异 **20/20 CAUGHT**（`devlogs/_verify/mutate_b97.py`，
+  含"缺凭据被升级成 covered""超时被读成跳过""开关 `"0"` 关不掉""清单记了不生效"
+  "提供方被写死回 deepseek"等）。
+  ⚠️ **残余（环境性，非工程缺陷）**：凭据仍失效 ⇒ LLM 成功路径**仍未真验过**。
+  发版前必须换到有效 key，并用 `PBC_E2E_REQUIRE_LLM=1` 跑一次拿到 `covered`。
+  ➕ 本轮另修 `mutation_harness.expect_satisfied`：`expect` 现在容忍**参数化后缀**
+  （`...::test_x` 命中 `...::test_x[0]`）—— 此前会把**已抓到的变异**判成 MISSED。
 

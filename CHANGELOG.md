@@ -156,6 +156,87 @@
   ② "整目录删不掉" ≠ "无法收敛"（锁落在**文件**上，必须按目标粒度探测）；
   ③ 第三态**不能降成 PASS**；④ 加载历史版本脚本做对照时 `@dataclass` 要求模块在 `sys.modules`。
 
+### Fixed / Added (Round 56, 2026-09-23 — B9-6 / B9-7 / B9-9 结项：让「没验到」成为一等公民)
+
+> 三项的共同点：都属**判据/记账**问题，而非产品功能缺陷。改动只落在 `scripts/` /
+> `tests/` / `build.ps1` / 文档 —— **已核实产物入包清单 97 个文件里无 `scripts/`、
+> 无 `tests/`** ⇒ **本轮无需重建产物**（`1.2.0` 仍为当前可分发版本）。
+>
+> ⚠️ 先澄清一个易误读的前提：**v1.2.0 产物已成功重建**，不存在"无法打包"。
+> 生产 `dist-electron/` 目录**被宿主进程（WorkBuddy）持锁**（锁落在 **文件**
+> `win-unpacked/resources/app.asar` 上），故 `build.ps1` 按设计自愈到
+> `dist-electron-out-<ts>/` 并写 `PROVENANCE.txt`。`app.asar` 是 Electron 的归档格式
+> （类似 tar/zip，内含应用代码与 `electron/main.js`）—— 宿主把它当"包"打开后留下
+> 未带 `FILE_SHARE_DELETE` 的句柄，于是该目录不可删、不可原地重建。
+> 判据只有一个实现：`devlogs/_verify/who_holds.py`（Restart Manager 直接具名 PID）。
+
+- **B9-9 门禁/清理工具"检查会动仓库"（改名探测）→ 改只读判据**：
+  `clean_dist.py` 删除 `_rename_probe` / `_find_locked`，改为 `can_delete(path)` ——
+  `CreateFileW(path, DELETE, FILE_SHARE_READ|WRITE|DELETE, OPEN_EXISTING)` 只请求删除权、
+  **不删除**，随即 `CloseHandle`。零副作用。
+  🔴 **实测撞到的关键陷阱：只读判据对目录会低估锁定** ——
+  `dist-electron/win-unpacked/resources`：改名探测 `winerror=5`（拒绝）而
+  只读探测 `winerror=0`（放行）。根因：**目录自身的 DELETE 权限 ≠ 其子项可删**
+  （NTFS 只在真正递归删除时才检查子项句柄）⇒ 只读方案**必须全树遍历逐文件判定，
+  不得目录级短路**；目录自身不可删只作**无路径的伪条目**如实上报。
+  **等价性实证**：新旧两种口径在真实目标上报出的被锁集合**完全一致（0 不一致）**，
+  最坏 937 文件 0.69s（`devlogs/_verify/probe_lock_equivalence.py`）。
+  护栏 42 passed｜变异 **9/9 CAUGHT**（`devlogs/_verify/mutate_b99.py`）。
+- **B9-6 长构建"有始无终"与"真失败"不可区分 → 运行台账**：
+  `build.ps1` 起步写 `build/_run/<runId>.start.json`（`git_head` + `pid`），
+  每个出口写 `<runId>.finish.json`（`rc` + 错误文本）；`scripts/build_status.py`
+  读台账给六态 `none/running/interrupted/failed/completed/unreadable`。
+  核心签名：**「有 start 无 finish」= 被外部终止**（`finally` 在 `TerminateProcess`
+  下不执行 ⇒ "始而无终"是被杀的可靠痕迹，不是猜测）。
+  ⚠️ **实现时先复现了一遍要消除的现象**：`CommandNotFoundException`（工具缺失）是
+  **statement-terminating** 错误 —— 即便 `$ErrorActionPreference="Continue"` 也会
+  中断语句、**绕过 `Write-Fail`**，于是"工具缺失"伪装成"被杀"。
+  两层修复：内层 catch 显式 `$script:LASTEXITCODE=1` + 顶层 `trap` 兜底 `Write-Finish 1`。
+  ⚠️ pid 存活检测**不得用 `os.kill(pid, 0)`**（Windows 上对任意 pid 都像成功）⇒
+  改用 `OpenProcess` + `GetExitCodeProcess == STILL_ACTIVE`。
+  护栏 17 passed（含**真实失败路径** E2E）｜变异 **10/10 CAUGHT**（`mutate_b96.py`）。
+- **B9-7 让"未覆盖"可审计、可卡门 + 命名债**：
+  新增 `tests/e2e_coverage.py`（记账口径的**唯一实现**）：`Coverage` 逐条记
+  `covered / skipped / failed` + 原因 + 自解释 `meaning`，冻结包冒烟每轮落盘
+  `devlogs/e2e_coverage_<ts>.json`；判定规则集中在 `classify_pipeline`（由**事实**
+  推导：终态字符串 + 凭据是否齐备 + 上传是否失败），故可被单测钉住、无需起服务。
+  新增硬要求 `PBC_E2E_REQUIRE_LLM`（默认关）：置 1 时 `llm_config` 与 `llm_pipeline`
+  **两条**任一不是 `covered` ⇒ 整体 FAIL 并打印 `UNMET HARD REQUIREMENTS`。
+  🔴 **`skipped` 绝不等于 `covered`**：缺凭据时哪怕流水线走到成功终态，LLM 链路也只记
+  `skipped` —— 成功的终态**不蕴含** LLM 被调用过（Stage 2 会降级）。
+  这正是"22 条断言全绿、最贵的那条链路从没跑过"不再能冒充发版通过的机制。
+  ⚠️ **"默认关闭"≠"无凭据也能跑绿"**：产品自身在未配置 LLM 时**直接 400 拒绝上传**
+  ⇒ 那轮冒烟本来就红；这道门拦的是"其它全绿、只差 LLM 链路"的**假成功**。
+  命名债：`LLM_KEY_ENV` → `PBC_E2E_LLM_KEY`（旧名 `PBC_E2E_DEEPSEEK_KEY` 仍可读、
+  打印弃用提示、**新名优先**）；同步 3 个驱动 + `DEPLOYMENT.md` + PITFALLS。
+  ➕ **顺带修掉同类未爆弹**：`e2e_quick.py` / `e2e_manual.py` 把
+  `{"llm_provider": "deepseek", ...}` **写死**（与 Round 33/54 记录的 401 事故同源，
+  只因样例 PDF 曾是空白页而长期"绿"）⇒ 改为由 `llm_provider()` 派生，并加 **AST 护栏**
+  （查 dict 字面量，不查注释文案 —— 注释里**刻意**留了反例）。
+  **实测**（真实产物 `dist-electron-out-20260921-160111/…/pbc-server`）：
+  开 `REQUIRE_LLM=1` ⇒ **EXIT=1** + `UNMET HARD REQUIREMENTS: llm_pipeline=failed`；
+  默认口径 ⇒ 清单如实记 `covered=0 skipped=2 failed=2`。
+  护栏 55 passed｜变异 **20/20 CAUGHT**（`mutate_b97.py`）。
+  ⚠️ **残余（环境性，非工程缺陷）**：凭据仍失效（`401 code=30014 Token is invalid`）
+  ⇒ LLM 成功路径**仍未真验过**；发版前须换有效 key 并开 `PBC_E2E_REQUIRE_LLM=1` 跑出 `covered`。
+- **工具修复**：`devlogs/_verify/mutation_harness.py` 的 `expect` 现在容忍**参数化后缀**
+  （`...::test_x` 可命中 `...::test_x[0]`）—— 此前会把**已抓到的变异**判成 MISSED
+  （本轮实测踩到，且首次归因还怀疑错了对象）。
+- 陷阱固化到 `docs/PROJECT_PITFALLS.md`：只读锁判据为何不能用于目录；
+  "有始无终"= 被杀签名；`CommandNotFoundException` 会绕过 PowerShell 的失败出口；
+  **变量名/请求体都不得绑定提供方**；覆盖清单 `skipped ≠ covered`。
+- 🔴 **本轮出现的操作事故（已定位并固化，非产品问题）**：用
+  `cat >> .workbuddy/memory/2026-09-23.md <<'EOF' …` 追加日志时，
+  **本环境的 shell `>>` 丢掉了 `O_APPEND` 语义** ⇒ 新内容**从 offset 0 覆盖写且不
+  truncate**，旧文件 4178 B → 5563 B，**该日日志 Round 55 正文的开头被覆盖**
+  （只在末尾残留 25 行）。最小复现 `devlogs/_verify/_append_probe.txt`：
+  38 B 文件追加一行后**仍为 38 B**、新行在开头、旧内容尾部残留。
+  该目录被 `.gitignore:37` 忽略、从未入库 ⇒ **无备份可恢复**；已按
+  `CHANGELOG`/`TODO`/`MEMORY.md` 如实**标注重建**，不冒充当轮记录。
+  ⇒ PITFALLS §七 的规矩从"中文文件禁 `cat >>`"升级为
+  **"任何文件都禁 shell 重定向追加"** —— 且**理由改正**（原写"CP936 乱码"，
+  真实机制是无 `O_APPEND`；理由写错会让人在"这次没编码问题"时放心破例）。
+
 ### Added / Fixed (Round 53, 2026-09-21 — P2 批次④：精度/准确性 + 配置与口径 + e2e 覆盖)
 
 - **B1-16 `_parse_time` 不认识「仅时刻 + 中文单位」与「N日H时M分」形态**（P2，精度）：

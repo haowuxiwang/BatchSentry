@@ -44,7 +44,7 @@ electron-builder 的输出目录名会**漂移**：``resources/app.asar`` 被外
 （恒红的门禁与恒真的判据一样零判别力），也可能被误当成要发的那个包。
 
 故新增 ``--converge-locked``：只回收这一个**派生自** :data:`EMBEDDED_SERVER` 的目标
-（不另写一份路径规则），且必须先证明**它自己能替换**（改名探测通过；宁缺勿错），
+（不另写一份路径规则），且必须先证明**它自己能替换**（只读 DELETE 探针通过；宁缺勿错），
 回收后写 ``HUSK.md`` 标出残壳身份。留一个残壳是刻意的取舍 ——
 把"这份字节已不存在"变成**能被读到的事实**，而不是"目录还在，所以它大概还在"。
 
@@ -164,87 +164,138 @@ def asar_version(asar: Path) -> str | None:
     return read_asar_version(asar)
 
 
-# ── 占锁探测 ────────────────────────────────────────────────────────
+# ── 占锁探测（**只读**） ───────────────────────────────────────────
+#
+# 判据：向系统**请求** DELETE 访问权，但**不执行任何删除**。
+#   ``CreateFileW(p, DELETE, FILE_SHARE_READ|WRITE|DELETE, OPEN_EXISTING, ...)``
+#   * 成功 ⇒ 本进程拿到了删除权 ⇒ 没有别的句柄以"不含 FILE_SHARE_DELETE"的
+#     方式持有它 ⇒ 该**文件**可删/可覆盖（这正是构建需要的性质）。
+#   * 失败 ⇒ 报出 winerror：``32`` = SHARING_VIOLATION（他人持有）、
+#     ``5`` = ACCESS_DENIED（权限 / 只读属性）。两者都属"不可删"，如实上报。
+#   句柄随即关闭：本进程不留持有、不改变对象状态、**不产生任何写操作**。
+#
+# ⚠️ 为什么淘汰"改名再改回"（2026-09-23 决定，B9-9）：
+#   ① 它是**写操作**。门禁判定"陈旧但不可替换"时会调 :func:`locked_files`，
+#      于是**检查动作本身**会改仓库目录项；中途被打断（Ctrl-C / 断电 / 被杀）
+#      还会把对象留在 ``__lockprobe__.<name>`` 名下。检查不该制造风险。
+#   ② 只读探针实测更快：最大的一份产物 937 个文件 0.69 s；而改名探测每次都要
+#      过一遍安全软件的过滤驱动，历史实测 6500 次改名 >10 min 仍无结论。
+#
+# ⚠️ 只读判据**不能**用于**目录** —— 本轮最关键的一处实测（2026-09-23）：
+#   目录自身的 DELETE 权限 **≠** 目录可删（NTFS 只在**递归删除时**才检查子项
+#   句柄）。实测 ``dist-electron/win-unpacked/resources``：
+#     改名探测 ``winerror=5``（拒绝）｜只读探针 ``winerror=0``（放行）
+#   若用只读探针做"目录级短路"，会把**内有锁的目录**读成"可删" —— 这是最危险的
+#   误判方向（误删；或把不可替换的陈旧产物**误降级**）。
+#   ⇒ 只读方案**必须全树遍历、逐文件判定**，不得沿用旧的目录级短路。
+#   证据：``devlogs/probe_lock_equivalence.py``（真实目标上两种口径报出的被锁
+#   文件集合完全一致）+ ``devlogs/probe_lock_readonly.py``（MISMATCH 现场）。
+
+_DELETE_ACCESS = 0x00010000
+_FILE_SHARE_ALL = 0x00000001 | 0x00000002 | 0x00000004
+_OPEN_EXISTING = 3
+_FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
+_INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+
+_KERNEL32 = None
 
 
-def _rename_probe(p: Path):
-    """尝试把 ``p`` 改名再改回。可改名返回 ``None``，否则返回那个 ``OSError``。
+def _kernel32():
+    """惰性取 kernel32（非 Windows 上不应调用；签名只在此处声明一次）。"""
+    global _KERNEL32
+    if _KERNEL32 is None:
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.CreateFileW.argtypes = [
+            wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
+            wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
+        ]
+        k32.CreateFileW.restype = ctypes.c_void_p
+        k32.CloseHandle.argtypes = [ctypes.c_void_p]
+        k32.CloseHandle.restype = wintypes.BOOL
+        _KERNEL32 = k32
+    return _KERNEL32
 
-    探针名**刻意不带 ``dist`` 前缀**：本文件自己的 :func:`discover` 用
-    ``startswith("dist")`` 找变体目录，若探针叫 ``dist-xxx.lockprobe`` 且
-    中途被打断，它会被**误认成一个真实变体**（并把体检结论带偏）。
+
+def can_delete(path) -> tuple[bool, int]:
+    """**只读**判据：``path`` 能否删除/替换。返回 ``(可删, winerror)``。
+
+    "请求权限但不执行删除"是这里的关键 —— 判据要回答的正是"能不能删"，而
+    ``CreateFileW`` 的 ``DELETE`` 访问位恰好精确对应：他人若以不含
+    ``FILE_SHARE_DELETE`` 的方式持有，请求就会被拒（``winerror=32``），
+    这与 ``DeleteFile`` 会失败**同源**。
+
+    非 Windows 一律 ``(True, 0)``：本项目的锁语义（宿主持有 ``.asar``）是
+    Windows 特有的。
     """
-    probe = p.with_name("__lockprobe__." + p.name)
-    try:
-        os.rename(p, probe)
-    except OSError as e:
-        return e
-    try:
-        os.rename(probe, p)
-    except OSError as e:
-        # 改回来了却失败：尽力复原，别把对象留在探针名下。
-        try:
-            os.rename(probe, p)
-        except OSError:
-            pass
-        return e
-    return None
+    if sys.platform != "win32":
+        return True, 0
+    path = Path(path)
+    k32 = _kernel32()
+    flags = _FILE_FLAG_BACKUP_SEMANTICS if path.is_dir() else 0
+    ctypes.set_last_error(0)
+    handle = k32.CreateFileW(str(path), _DELETE_ACCESS, _FILE_SHARE_ALL,
+                             None, _OPEN_EXISTING, flags, None)
+    if not handle or handle == _INVALID_HANDLE_VALUE:
+        return False, ctypes.get_last_error()
+    k32.CloseHandle(handle)
+    return True, 0
 
 
-def _find_locked(path: Path, out: list[str], rel: str = "") -> None:
-    """在 ``path`` 子树内定位被占用者（**按目录递归二分**）。
+def _scan_locked(path: Path, out: list[str], rel: str = "") -> None:
+    """遍历子树、**逐文件**只读探测，把不可删者记进 ``out``。
 
-    NTFS 拒绝重命名含被占用子项的目录 ⇒ 某目录能整体改名，就证明它**整棵子树**
-    都没有占用者，可以直接跳过。于是代价从"文件数"降到"目录数 + 被占用的文件数"。
-
-    为什么必须这样（2026-09-17 实测）：逐文件探测在本机待清理目录上约
-    6500 次改名，每次都撞安全软件，实测 **>10 分钟仍无结论**；而按目录下钻
-    只需数十次探测即可指名到具体文件。
+    不做目录级短路 —— 见上方实测（目录探针会**低估**锁定）。
     """
-    if _rename_probe(path) is None:
-        return
-    if not path.is_dir():
-        out.append(f"{rel or path.name}  (被外部句柄占用)")
-        return
     try:
-        children = sorted(path.iterdir())
-    except OSError:
-        out.append(f"{rel or path.name}  (目录不可读)")
+        with os.scandir(path) as it:
+            entries = sorted(it, key=lambda e: e.name)
+    except OSError as e:
+        out.append(f"{rel or path.name}  (目录不可读"
+                   f" winerror={getattr(e, 'winerror', None)})")
         return
-    for c in children:
-        if c.is_dir():
-            _find_locked(c, out, f"{rel}{c.name}/")
+    for ent in entries:
+        child = Path(ent.path)
+        if ent.is_dir(follow_symlinks=False):
+            ok, we = can_delete(child)
+            if not ok:
+                # 目录自身拿不到删除权：**如实记录**（以 "(" 开头的伪条目，
+                # 下游会跳过它、只拿有文件路径的条目去问"谁持有"），但仍
+                # **继续下钻** —— 目录权限问题不等于子项不可删，别把
+                # "查不到具体文件"读成"没问题"。
+                out.append(f"({rel}{ent.name}/ 目录自身不可删 winerror={we}，已继续下钻)")
+            _scan_locked(child, out, f"{rel}{ent.name}/")
         else:
-            e = _rename_probe(c)
-            if e is not None:
-                out.append(f"{rel}{c.name}  ({type(e).__name__}: errno={e.errno}"
-                           f" winerror={getattr(e, 'winerror', None)})")
+            ok, we = can_delete(child)
+            if not ok:
+                out.append(f"{rel}{ent.name}  (winerror={we})")
 
 
 def locked_files(path: Path) -> list[str]:
-    """返回目录内**无法重命名**的文件（=被外部句柄占用）。
+    """返回子树内**不可删除/替换**的文件（=被外部句柄占用），带相对路径。
 
-    判据用"改名再改回"：Windows 上只要文件被别的进程以不含
-    ``FILE_SHARE_DELETE`` 的方式打开，改名就会失败 —— 而这类文件同样会让
-    **整个目录**无法删除/改名（NTFS 拒绝重命名含被占用子项的目录）。
-    这也是历史构建被迫"自愈"到备用目录的根因。
+    **只读**：判据是 :func:`can_delete`（请求 DELETE 权限但不删除），实现是
+    :func:`_scan_locked`（全树逐文件）。两者都**不写任何东西** —— 这正是
+    B9-9 的目的：把"检查"与"清理"彻底分开，让门禁可以放心调用它。
 
-    ⚠️ **先整目录探一次，失败才下钻**（2026-09-17 实测的性能修复）：
-    目录级改名成功即证明内部无占用者，一次 syscall 定案；只有真被占用才
-    按目录递归下钻（见 :func:`_find_locked`），只为**指名到具体文件**
-    （"加白名单"要的是文件名，不是"某目录被占"）。
+    条目格式 ``"<相对路径>  (<详情>)"``；以 ``"("`` 开头的条目是"目录自身受阻"
+    这类**没有文件路径可查**的伪条目，:func:`named_holders` 会（且必须）跳过 ——
+    否则"查不到人"会被读成"有人"。
+
+    ⚠️ 条目必须带**相对路径**：下游要拿它去 Restart Manager 问"谁持有"，而
+    "某目录被占"是查不到人的（2026-09-17 实测：正是这一步缺失，导致长期被
+    误判成"安全软件"）。
     """
-    e = _rename_probe(path)
-    if e is None:
+    path = Path(path)
+    if not path.exists():
         return []
+    if path.is_file():
+        ok, we = can_delete(path)
+        return [] if ok else [f"{path.name}  (winerror={we})"]
     out: list[str] = []
-    _find_locked(path, out)
-    if not out:
-        # 目录级被拒、却没有**任何**单文件/子目录被占用 ⇒ 大概率是安全软件的
-        # **目录级**拦截（过滤驱动直接拒绝目录改名），而非"某个文件被打开"。
-        # 如实说明，别让"没找到占用者"被读成"可以放心删"。
-        out.append(f"(目录级改名被拒 winerror={getattr(e, 'winerror', None)}，"
-                   f"但逐项探测未见被占用者 —— 可能是安全软件的目录级拦截)")
+    ok, we = can_delete(path)
+    if not ok:
+        out.append(f"({path.name}/ 根目录自身不可删 winerror={we}，已继续下钻)")
+    _scan_locked(path, out)
     return out
 
 
@@ -283,7 +334,7 @@ def who_holds(path) -> list[dict]:
     """返回正在持有 ``path`` 的进程：``[{"pid": int, "app": str, "type": str}]``。
 
     失败一律返回 ``[]`` —— 这只是**诊断**辅助，绝不能让清理脚本因它崩掉。
-    是否"可删"由 :func:`locked_files` 的改名探测决定，与本函数无关。
+    是否"可删"由 :func:`locked_files` 的**只读探针**决定，与本函数无关。
     """
     if sys.platform != "win32":
         return []
@@ -361,11 +412,12 @@ def named_holders(path, locks=None) -> tuple[list[str], list[str]]:
     1. 只能按 ``who_holds`` 的**结构化行**去重，**不能**对渲染文本按 ``", "`` 切分
        —— 条目内部本身就含 ``", "``（``App(pid=1, Unknown)``），切分会把条目截断成
        ``App(pid=1``。
-    2. 目录级伪条目（``"(目录级改名被拒 …)"``）没有文件路径可查 ⇒ **跳过**，
-       **不能**把它当成"已具名"（那会把"查不到人"读成"有人"）。
-    3. ``winerror=5``（ACCESS_DENIED）与 ``winerror=32``（SHARING_VIOLATION）不是一回事：
-       前者是"目录里含被持有的子项"的**派生**症状，真凶在子项里 ⇒ 必须**下钻**
-       （:func:`locked_files` 已做），不能就地具名到外层目录。
+    2. 以 ``"("`` 开头的**伪条目**（如 ``"(<dir>/ 目录自身不可删 winerror=5，
+       已继续下钻)"``）没有文件路径可查 ⇒ **跳过**，**不能**把它当成"已具名"
+       （那会把"查不到人"读成"有人"）。
+    3. 外层的派生症状不能就地具名到**外层目录**：一个目录不可删**未必**是它自己
+       被持有（更常见是它的某个子项被持有）⇒ 必须下钻到**文件**才能问出人。
+       本实现由 :func:`_scan_locked` 全程遍历保证（**刻意不短路**，见其说明）。
     """
     path = Path(path)
     lock_entries = locked_files(path) if locks is None else list(locks)
@@ -443,9 +495,11 @@ def convergence_target(dist_dir: Path) -> Path | None:
     * 目标不存在（目录本来就没有内嵌后端 —— 已经是残壳）；
     * 目标自己**不可替换**（:func:`locked_files` 报出占用项）。
 
-    ⚠️ 判据用 :func:`locked_files` 而**不是**外层目录能不能改名：外层
-    ``win-unpacked`` 因为含被持有的 ``app.asar`` 必然改名失败（``winerror=5``），
-    而目标子目录其实完全可以回收。把两者混为一谈正是 B9-5 最初卡住的地方。
+    ⚠️ 判据用 :func:`locked_files`（对**目标子树**逐文件探测）而**不是**外层目录
+    能不能整体回收：外层 ``win-unpacked`` 里含被持有的 ``app.asar``（在
+    ``resources/`` 下，**不在**目标子树内）⇒ 整目录回收必然失败，而目标
+    ``resources/pbc-server`` 的子树里没有任何占用者 ⇒ 完全可以单独回收。
+    把"外层不可回收"与"目标不可替换"混为一谈，正是 B9-5 最初卡住的地方。
     """
     tgt = Path(dist_dir) / EMBEDDED_SERVER.parent
     if not tgt.is_dir():
@@ -599,9 +653,10 @@ def main(argv=None):
                 print("    → 无可部分收敛的目标（内嵌后端不存在，或它自己也删不掉）。")
             print("    → 处置：**退出持有者进程后重跑本脚本**，句柄随进程消失。")
             print("      注：加杀软白名单对本例**无效**（持有者不是杀软）。")
-            print("      判别（2026-09-17 实测）：文件级 winerror=32")
-            print("      （ERROR_SHARING_VIOLATION，句柄未带 FILE_SHARE_DELETE）且**持续**复现；")
-            print("      此时只读、可写都正常，唯独改名/删除被拒。")
+            print("      判别（2026-09-17 实测；2026-09-23 起改用只读探针判定）：")
+            print("      文件级 winerror=32（ERROR_SHARING_VIOLATION，句柄未带")
+            print("      FILE_SHARE_DELETE）且**持续**复现；此时读取与写入内容都正常，")
+            print("      唯独**删除 / 替换**被拒。")
             print('      已知机制：WorkBuddy 宿主把 .asar 当"包"打开后会持久持有 ——')
             print("      所以**核验 app.asar 请走子进程读取**（见 asar_version），别用宿主读取通道。")
             print("      （它不可用 `--apply` 绕过：SHFileOperationW 会以 DE_INVALIDFILES 整单失败）")

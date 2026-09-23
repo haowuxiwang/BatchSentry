@@ -3,7 +3,8 @@ import subprocess, time, os, sys, requests, json
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from tests.e2e_proc import (  # noqa: E402
-    LLM_KEY_ENV, REPO_ROOT, llm_key, spawn_server, stop_server,
+    REPO_ROOT, llm_key, llm_key_env_display, llm_provider, spawn_server,
+    stop_server,
 )
 
 BASE = "http://127.0.0.1:8000"
@@ -53,12 +54,17 @@ try:
 
     section("Configure LLM")
     _key = llm_key()
+    _prov = llm_provider()
     if not _key:
-        print(f"    [WARN] 未设置 {LLM_KEY_ENV} —— LLM 不配置（不是缺陷）")
+        print(f"    [WARN] 未设置 {llm_key_env_display()} —— LLM 不配置（不是缺陷）")
     try:
+        # ⚠️ 提供方**不得写死**：字段名必须由提供方名派生（f"{prov}_api_key"）。
+        # 本行原先是 `{"llm_provider": "deepseek", "deepseek_api_key": _key}`，
+        # 而注入的通常是硅基流动的 key ⇒ 请求打到 api.deepseek.com 得 401，
+        # 且会被误读成产品缺陷（同一事故见 tests/e2e_frozen.py 的 401 记录）。
         r = requests.post(f"{BASE}/api/settings", json={
-            "llm_provider": "deepseek",
-            "deepseek_api_key": _key,
+            "llm_provider": _prov,
+            f"{_prov}_api_key": _key,
         }, timeout=5)
         ok("settings_post", f"{r.status_code}")
     except Exception as e:

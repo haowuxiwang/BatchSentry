@@ -33,6 +33,42 @@ $projectRoot = $PSScriptRoot
 if (-not $projectRoot) { $projectRoot = (Get-Location).Path }
 Set-Location $projectRoot
 
+# ── 运行台账（B9-6）─────────────────────────────────────────────────
+# 目的：把「中途被杀」与「跑完但失败」**分开**。2026-09-21 实测：把构建放后台
+# 跑、回合结束时被连带回收，症状与真崩溃**完全一致**（exit 1 + 零输出 +
+# 日志戛然而止无 Traceback + workpath 为空），当时据此误判成"PyInstaller 失败"。
+#
+# 原理：进程被 TerminateProcess 时 **finally 不会执行**（Windows 强杀不给收尾
+# 机会）⇒「有 start 台账、没有 finish 台账」就是**被终止的签名**。
+# 判定与解读见 scripts/build_status.py（唯一实现，支持 --json / --assert-state）。
+$runDir = Join-Path $projectRoot "build\_run"
+New-Item -ItemType Directory -Force -Path $runDir | Out-Null
+# 只保留最近 20 次运行（40 个文件），避免无限堆积
+Get-ChildItem $runDir -Filter "*.json" -ErrorAction SilentlyContinue |
+    Sort-Object Name -Descending | Select-Object -Skip 40 |
+    Remove-Item -Force -ErrorAction SilentlyContinue
+$runId = "$(Get-Date -Format 'yyyyMMdd-HHmmss')-$PID"
+$startFile = Join-Path $runDir "$runId.start.json"
+$finishFile = Join-Path $runDir "$runId.finish.json"
+$gitHeadForLedger = ""
+try { $gitHeadForLedger = (& git rev-parse --short HEAD) 2>$null } catch { }
+@{
+    run_id     = $runId
+    started_at = (Get-Date -Format 'yyyy-MM-ddTHH:mm:ss')
+    pid        = $PID
+    git_head   = "$gitHeadForLedger"
+} | ConvertTo-Json | Set-Content -Path $startFile -Encoding UTF8
+
+# 落"结局"。**成功与失败都要落** —— 只落成功的话，"失败"就与"被杀"不可区分了。
+function Write-Finish($code, $errText) {
+    @{
+        run_id      = $runId
+        finished_at = (Get-Date -Format 'yyyy-MM-ddTHH:mm:ss')
+        rc          = [int]$code
+        error       = "$errText"
+    } | ConvertTo-Json | Set-Content -Path $finishFile -Encoding UTF8
+}
+
 function Write-Step($msg) {
     Write-Host ""
     Write-Host "============================================================" -ForegroundColor Cyan
@@ -46,6 +82,28 @@ function Write-OK($msg) {
 
 function Write-Fail($msg) {
     Write-Host "  [FAIL] $msg" -ForegroundColor Red
+    # 真失败必须**落下退出码** —— 这一步正是与被杀的关键差别：
+    # 被杀时本函数根本不会执行（进程已死），台账于是停在"有始无终"。
+    Write-Finish 1 $msg
+    exit 1
+}
+
+# ── 未捕获异常的兜底出口（B9-6）─────────────────────────────────────
+# `Write-Fail` 只覆盖**显式失败**（我们能写出可操作提示的那些）。而**未捕获的
+# 终止错误**同样是"真失败"，却会绕过它 ⇒ 台账停在"有始无终" ⇒ 被判成"被杀"。
+#
+# 2026-09-23 实测（正是本条护栏发现的）：`& python --version` 在 python 不在
+# PATH 时抛 `CommandNotFoundException` —— 它是 **statement-terminating** 错误，
+# 即使 `$ErrorActionPreference="Continue"` 也会中断该语句，并在脚本层
+# （EAP=Stop）变成 terminating ⇒ 脚本**直接中断**，pre-flight 后面那句
+# `Write-Fail "Python not found"` 根本执行不到。于是"工具缺失"伪装成"进程被杀"。
+#
+# trap 补上这条出口：任何未捕获的终止错误都留下退出码。内层 try/catch 是防
+# "落台账本身又失败"导致 trap 递归。
+trap {
+    $emsg = "$($_.Exception.Message)"
+    Write-Host "  [FAIL] 未捕获异常：$emsg" -ForegroundColor Red
+    try { Write-Finish 1 "未捕获异常：$emsg" } catch { }
     exit 1
 }
 
@@ -59,6 +117,14 @@ function Invoke-Native {
     $ErrorActionPreference = "Continue"
     try {
         & $Command 2>&1 | Out-Null
+    } catch {
+        # 命令**不存在**（CommandNotFoundException）等异常必须在这里截住：
+        # 传出去会被脚本级 trap 收成一条晦涩的 CategoryInfo，而调用方的
+        # `$LASTEXITCODE -ne 0` 分支才是给得出"怎么修"的地方。
+        # ⚠️ 必须**显式**把退出码设成非 0 —— CommandNotFoundException 不会改
+        # `$LASTEXITCODE`，它会保持上一条命令的值（可能是 0）⇒ 调用方会把
+        # "工具缺失"读成"成功"（2026-09-23 实测）。
+        $script:LASTEXITCODE = 1
     } finally {
         $ErrorActionPreference = $prevEAP
     }
@@ -74,6 +140,11 @@ function Invoke-NativeText {
     $ErrorActionPreference = "Continue"
     try {
         return (& $Command 2>&1 | Out-String).Trim()
+    } catch {
+        # 同 Invoke-Native：把"命令不存在"截在这里，并**显式**给出非 0 退出码
+        # （CommandNotFoundException 不会动 $LASTEXITCODE）。
+        $script:LASTEXITCODE = 1
+        return ""
     } finally {
         $ErrorActionPreference = $prevEAP
     }
@@ -449,6 +520,9 @@ if (-not $SkipElectron) {
 }
 
 # ── Summary ─────────────────────────────────────────────────────────
+# 先落"成功"结局再打印总结（总结里的 Write-Host 万一出错，不该让台账漏记结局）。
+Write-Finish 0 ""
+
 Write-Host ""
 Write-Host "============================================================" -ForegroundColor Green
 Write-Host "  Build complete!" -ForegroundColor Green

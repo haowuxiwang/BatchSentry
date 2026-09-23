@@ -362,9 +362,34 @@ failover 到 MinerU 时**流程中途失败**（护栏
    机器上它会把"生效值"判成"已不存在"，从而**漏报**。自查时两条路径都要看。
 5. e2e 需要真实 key 时一律走环境变量，不要写进代码：
    ```bash
-   PBC_E2E_DEEPSEEK_KEY=<key> python tests/e2e_frozen.py
+   PBC_E2E_LLM_KEY=<key> python tests/e2e_frozen.py
    ```
-   未设置时 e2e 会把 LLM 步骤如实降级并打印提示，不会伪造通过。
+   变量名是 **provider-agnostic** 的（配 `PBC_E2E_LLM_PROVIDER` 使用，默认
+   `siliconflow`）；不要把某一家的名字当变量名。旧名 `PBC_E2E_DEEPSEEK_KEY`
+   仍可读但会打印弃用提示，**新名优先**。
+   未设置时 e2e 会把 LLM 步骤如实降级并打印提示，不会伪造通过 —— 降级会记入
+   覆盖清单（见下一条）。
+
+5b. **发版/验收冒烟：必须要求 LLM 链路被真实覆盖**（B9-7）
+   ```bash
+   PBC_E2E_LLM_KEY=<key> PBC_E2E_PADDLE_TOKEN=<token> \
+     PBC_E2E_REQUIRE_LLM=1 python tests/e2e_frozen.py
+   ```
+   - `PBC_E2E_REQUIRE_LLM=1` ⇒ **配置**与**成功终态**两条 LLM 覆盖项只要有一条
+     不是 `covered`，整体即 **FAIL**（退出码 1），并在末尾打印
+     `UNMET HARD REQUIREMENTS`。**默认不开启**。
+   - ⚠️ **"默认不开启"≠"无凭据也能跑绿"**（2026-09-23 实测）：产品自身在未配置
+     LLM 时会**直接拒绝上传**（`api/jobs/upload.py` 返回 400）⇒ 冒烟的 `upload`
+     断言当场失败。也就是说**没有可用凭据时，这轮冒烟本来就是红的**。
+     覆盖硬要求是**在它之上再加一道显式的门**：拦住"其它全绿、只差 LLM 链路"
+     这种看起来成功的发版冒烟。
+   - 不设该开关时，脚本仍会把每轮的覆盖情况**落盘**：
+     `devlogs/e2e_coverage_<时间戳>.json`（可用 `PBC_E2E_COVERAGE_JSON` 改路径）。
+     每条记为 `covered / skipped / failed` 并带上原因，用于回答
+     "**这轮到底验到了什么**"。
+   - ⚠️ **`skipped` 绝不等于 `covered`**：缺凭据时哪怕流水线走到了成功终态，
+     LLM 链路也只记 `skipped`（成功的终态**不蕴含** LLM 被调用过）。
+     这正是"22 条断言全绿、但最贵的那条链路从没跑过"不再能冒充发版通过的机制。
 6. 旧版 `.env` 已弃用，若仍有残留可直接删除
 
 ## 故障排查

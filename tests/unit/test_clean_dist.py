@@ -7,6 +7,8 @@
   `extraResources` 的输入，删了下次打包要先重跑 PyInstaller；
 - CLI 默认 dry-run，不加 `--apply` 不落盘。
 """
+import ast
+import ctypes
 import json
 import os
 import sys
@@ -207,96 +209,213 @@ def test_cli_apply_skips_locked_dirs(tmp_path, capsys, monkeypatch):
     assert "跳过" in out and "dist-electron-m8" in out
 
 
-# ── 认锁探测的复杂度（2026-09-17 实测的性能修复） ────────────────────
+# ── 占锁判据（B9-9：**只读**） ──────────────────────────────────────
 #
-# 实测：无条件逐文件"改名再改回"，在本机 3 GB / 数万文件的待清理目录上
-# 跑了 **>10 分钟仍无任何结论**（每次改名都被安全软件拦一道）。而 NTFS
-# 拒绝重命名含被占用子项的目录 ⇒ **目录级改名成功即证明内部无占用者**，
-# 一次 syscall 就能定案。下面三条锁住这个性质。
+# 两条核心性质，缺一不可：
+#   ① 探测**不写任何东西** —— 门禁（release_gate）会调用它，于是"检查"动作
+#      本身不得改动仓库（旧实现"改名再改回"违反这条，2026-09-23 淘汰）。
+#   ② 判据精确对应"能否删除/替换"，而不是"有没有人打开" —— 用**真实句柄**
+#      做正负对照来钉住：以 share=0 打开的句柄会挡住删除（应报锁定）；
+#      以 FILE_SHARE_DELETE 打开的句柄**不挡**删除（应报可删）。
+#      跑真实内核语义比 monkeypatch 硬，也不会随实现细节漂移。
+#
+# ⚠️ 还有一条**方向**上的性质（2026-09-23 实测得到）：只读探针对**目录**会
+#   低估锁定（目录自身的 DELETE 权限 ≠ 子项可删）⇒ 实现**必须**全树遍历、
+#   不得短路。`test_descent_is_never_short_circuited` 就是它的回归钉子。
+
+_WIN_ONLY = pytest.mark.skipif(sys.platform != "win32",
+                               reason="文件锁语义是 Windows 专有的")
+
+_FILE_SHARE_READ = 0x00000001
+_FILE_SHARE_DELETE = 0x00000004
+_GENERIC_READ = 0x80000000
+_OPEN_EXISTING = 3
 
 
-def test_rename_probe_leaves_path_intact(tmp_path):
-    """探针成功时必须把对象改回原名（不能把目录留在探针名下）。"""
+def _open_real_handle(path, share_mode):
+    """用**真实内核句柄**持有 ``path``（调用方负责 CloseHandle）。"""
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.CreateFileW.restype = ctypes.c_void_p
+    k32.CloseHandle.argtypes = [ctypes.c_void_p]
+    handle = k32.CreateFileW(str(path), _GENERIC_READ, share_mode, None,
+                             _OPEN_EXISTING, 0, None)
+    if not handle or handle == ctypes.c_void_p(-1).value:
+        raise OSError(f"无法打开测试句柄 winerror={ctypes.get_last_error()}")
+    return k32, handle
+
+
+def _calls_of(func_names: set[str]) -> set[str]:
+    """收集这些函数（含其内部调用）里出现的**被调用名**（AST，不查字面量）。
+
+    用 AST 而不是正则：注释/文档字符串里提到 ``os.rename`` 不该被判红，
+    而真实调用必须判红。
+    """
+    import scripts.clean_dist as cd
+    tree = ast.parse(Path(cd.__file__).read_text(encoding="utf-8"))
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in func_names:
+            for sub in ast.walk(node):
+                if isinstance(sub, ast.Call):
+                    f = sub.func
+                    names.add(f.attr if isinstance(f, ast.Attribute)
+                              else getattr(f, "id", ""))
+    return names
+
+
+def test_lock_probe_never_writes_by_construction():
+    """机检：锁探测路径上**不存在**改名/删除/写入类调用（结构性保证）。
+
+    为什么不只靠行为测试：行为测试只能证明"这次没改到那个文件"。实现若在
+    别处改名（或对**未纳入断言**的对象动手），行为测试看不见。这里直接把
+    "允许的调用面"钉死：锁探测只允许读（scandir / stat / CreateFileW / CloseHandle）。
+    """
+    forbidden = {"rename", "replace", "remove", "unlink", "rmdir", "rmtree",
+                 "mkdir", "makedirs", "write_text", "write_bytes", "open",
+                 "shutil", "move", "CopyFile", "DeleteFile"}
+    calls = _calls_of({"can_delete", "_scan_locked", "locked_files"})
+    assert calls, "AST 没抽到任何调用 —— 函数名漂移了，判据已失效"
+    bad = forbidden & calls
+    assert not bad, (
+        f"锁探测路径出现了写操作 {sorted(bad)} —— 检查动作不得改动被检对象"
+        "（B9-9：这正是淘汰「改名再改回」的原因）")
+
+
+@_WIN_ONLY
+def test_probe_does_not_write_anything(tmp_path):
+    """行为层：探测前后，目录项集合 / 文件内容 / mtime **逐项不变**。"""
     import scripts.clean_dist as cd
     d = tmp_path / "dist-electron-x"
-    d.mkdir()
-    (d / "a.txt").write_text("x", encoding="utf-8")
-    assert cd._rename_probe(d) is None
-    assert d.is_dir() and not (tmp_path / "__lockprobe__.dist-electron-x").exists()
-
-
-def test_probe_name_is_not_mistakable_for_a_variant(tmp_path):
-    """探针目录名不得以 ``dist`` 开头 —— 否则中途被打断会被误认成真实变体。"""
-    import scripts.clean_dist as cd
-    (tmp_path / "dist-electron-real").mkdir()
-    (tmp_path / "__lockprobe__.dist-electron-real").mkdir()
-    names = {p.name for p in cd.discover(tmp_path)}
-    assert names == {"dist-electron-real"}, (
-        f"discover 把探针目录也算进来了：{names} —— 探针名必须避开 dist 前缀"
-    )
-
-
-def test_clean_dir_probe_short_circuits_the_descent(tmp_path, monkeypatch):
-    """目录级探测通过时**不得**再做下钻（这是 >10min → O(1) 的关键）。"""
-    import scripts.clean_dist as cd
-    d = tmp_path / "dist-electron-clean"
     (d / "win-unpacked").mkdir(parents=True)
+    f = d / "win-unpacked" / "a.bin"
+    f.write_bytes(b"payload")
 
-    def _boom(*a, **k):
-        raise AssertionError("目录级探测已通过，不该再下钻")
+    before_entries = sorted(p.relative_to(d).as_posix() for p in d.rglob("*"))
+    before_stat = (f.stat().st_size, f.stat().st_mtime_ns, f.read_bytes())
 
-    monkeypatch.setattr(cd, "_find_locked", _boom)
     assert cd.locked_files(d) == []
 
+    after_entries = sorted(p.relative_to(d).as_posix() for p in d.rglob("*"))
+    after_stat = (f.stat().st_size, f.stat().st_mtime_ns, f.read_bytes())
+    assert before_entries == after_entries, "探测改动了目录项（写操作！）"
+    assert before_stat == after_stat, "探测改动了文件内容或 mtime（写操作！）"
 
-def test_locked_file_is_named_when_dir_probe_fails(tmp_path, monkeypatch):
-    """目录级被拒时要下钻并**指名**挡路的文件（加白名单要的是文件名）。
 
-    注意 fake 必须符合物理现实：NTFS 拒绝重命名含被占用子项的目录，所以
-    被占用文件的**全部祖先目录**也必然改名失败。若 fake 只让文件本身失败、
-    却让它的父目录改名成功，那是自相矛盾的状态，测不出真实行为。
-    """
+@_WIN_ONLY
+def test_locked_when_holder_withholds_delete_sharing(tmp_path):
+    """被「不给删除共享」的句柄持有 ⇒ 必须报锁定，且**指名到文件**。"""
     import scripts.clean_dist as cd
     d = tmp_path / "dist-electron-locked"
     (d / "win-unpacked" / "resources").mkdir(parents=True)
     locked = d / "win-unpacked" / "resources" / "app.asar"
-    locked.write_text("x", encoding="utf-8")
-    (d / "win-unpacked" / "ok.txt").write_text("x", encoding="utf-8")
+    locked.write_bytes(b"x")
+    (d / "win-unpacked" / "ok.txt").write_bytes(b"x")
 
-    real = cd._rename_probe
+    k32, handle = _open_real_handle(locked, _FILE_SHARE_READ)
+    try:
+        out = cd.locked_files(d)
+    finally:
+        k32.CloseHandle(handle)
+
+    assert len(out) == 1, f"只应指名被持有的那一个文件，实得 {out}"
+    assert "win-unpacked/resources/app.asar" in out[0]
+    assert "winerror=32" in out[0], f"应报 SHARING_VIOLATION，实得 {out[0]}"
+    assert cd.locked_files(d) == [], "句柄关闭后必须恢复为可删（判据是时点事实）"
+
+
+@_WIN_ONLY
+def test_not_locked_when_holder_allows_delete_sharing(tmp_path):
+    """**对照**：句柄给了 ``FILE_SHARE_DELETE`` ⇒ 不挡删除 ⇒ 不得报锁定。
+
+    这条防的是"把判据写成只要有人打开就报警"——那种判据会让可替换的产物
+    被误报成不可替换，进而把门禁的可行动项**误降级**。
+    """
+    import scripts.clean_dist as cd
+    d = tmp_path / "dist-electron-parallel"
+    (d / "win-unpacked").mkdir(parents=True)
+    f = d / "win-unpacked" / "app.asar"
+    f.write_bytes(b"x")
+
+    k32, handle = _open_real_handle(f, _FILE_SHARE_READ | _FILE_SHARE_DELETE)
+    try:
+        out = cd.locked_files(d)
+    finally:
+        k32.CloseHandle(handle)
+
+    assert out == [], (
+        f"持有者允许删除共享时不该判为锁定，实得 {out} —— 判据退化成「有人打开就报锁」")
+
+
+def test_descent_is_never_short_circuited(tmp_path, monkeypatch):
+    """**回归**：不得因目录自身探针通过就跳过下钻（旧实现的目录级短路）。
+
+    2026-09-23 实测：目录的 DELETE 权限 **≠** 目录可删 —— 含被占用子项的目录，
+    其自身探针照样放行（NTFS 只在**递归删除时**才检查子项句柄）。所以让
+    **根目录**探针放行、子文件探针报锁，实现仍必须指名到文件；短路实现会漏报。
+    """
+    import scripts.clean_dist as cd
+    d = tmp_path / "dist-electron-nested"
+    (d / "win-unpacked" / "resources").mkdir(parents=True)
+    locked = d / "win-unpacked" / "resources" / "app.asar"
+    locked.write_bytes(b"x")
 
     def fake(p):
-        p = Path(p)
-        if p == locked or locked.is_relative_to(p):   # p 是 locked 自身或其祖先
-            return OSError(13, "locked")
-        return real(p)
+        if Path(p) == locked:
+            return False, 32
+        return True, 0                      # 所有目录（含根）都"能删"
 
-    monkeypatch.setattr(cd, "_rename_probe", fake)
+    monkeypatch.setattr(cd, "can_delete", fake)
     out = cd.locked_files(d)
-    assert len(out) == 1 and "app.asar" in out[0], (
-        f"只应指名被占用的那一个文件，实得 {out}"
-    )
+    assert any("app.asar" in one for one in out), (
+        f"目录级探针通过就短路了 ⇒ 漏报被持有的文件（实得 {out}）")
 
 
-def test_dir_level_denial_without_a_locked_file_is_reported_honestly(
-        tmp_path, monkeypatch):
-    """目录级被拒但找不到任何被占用项时，不得返回空表（那会被读成"可以删"）。"""
+def test_dir_self_denial_is_reported_honestly(tmp_path, monkeypatch):
+    """目录自身拿不到删除权时必须**如实报出**（空表会被读成"可以删"）。"""
     import scripts.clean_dist as cd
     d = tmp_path / "dist-electron-denied"
     (d / "win-unpacked").mkdir(parents=True)
-    (d / "win-unpacked" / "BatchSentry.exe").write_text("x", encoding="utf-8")
+    (d / "win-unpacked" / "BatchSentry.exe").write_bytes(b"x")
 
-    real = cd._rename_probe
-
-    def fake(p):
-        if Path(p) == d:                 # 只有目录本身被拒，内部文件都能改名
-            return OSError(13, "denied")
-        return real(p)
-
-    monkeypatch.setattr(cd, "_rename_probe", fake)
+    monkeypatch.setattr(cd, "can_delete",
+                        lambda p: (False, 5) if Path(p) == d else (True, 0))
     out = cd.locked_files(d)
-    assert out, "不得返回空表 —— 空表会被下游读成'无占用、可删除'"
-    assert "目录级" in out[0]
+    assert out, "不得返回空表 —— 空表会被下游读成「无占用、可删除」"
+    assert out[0].startswith("("), "必须是伪条目（下游据此跳过具名）"
+    assert "目录自身不可删" in out[0]
+    assert out[0].split("(", 1)[0].strip() == "", (
+        "伪条目不得带路径 —— 否则下游会拿它去查持有者（查不到）")
+
+
+@_WIN_ONLY
+def test_locked_files_handles_a_file_target(tmp_path):
+    """``path`` 直接是**文件**时也要如实判定（调用方可能传单文件目标）。"""
+    import scripts.clean_dist as cd
+    f = tmp_path / "app.asar"
+    f.write_bytes(b"x")
+    assert cd.locked_files(f) == []
+
+    k32, handle = _open_real_handle(f, _FILE_SHARE_READ)
+    try:
+        out = cd.locked_files(f)
+    finally:
+        k32.CloseHandle(handle)
+    assert len(out) == 1 and "app.asar" in out[0], out
+
+
+def test_variant_discovery_only_accepts_the_dist_prefix(tmp_path):
+    """``discover`` 只认 ``dist`` 前缀的目录（临时/探针名不得被误认成变体）。
+
+    旧实现曾因此踩坑：探针名若带 ``dist`` 前缀，中途被打断就会留下一个
+    "身份不明的新变体"并把体检结论带偏。探针本身已改成只读（不再产生
+    临时名），但这条**发现规则**仍要钉住 —— 它防的是将来再出现同类临时名。
+    """
+    import scripts.clean_dist as cd
+    (tmp_path / "dist-electron-real").mkdir()
+    (tmp_path / "__lockprobe__.dist-electron-real").mkdir()
+    (tmp_path / "tmp-scratch").mkdir()
+    names = {p.name for p in cd.discover(tmp_path)}
+    assert names == {"dist-electron-real"}, f"discover 收进了非变体目录：{names}"
 
 
 # ── 持有者具名（Restart Manager）─────────────────────────────────────

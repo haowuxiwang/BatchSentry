@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 # 仓库根目录（本文件位于 <root>/tests/）。**不要把产物路径写成绝对盘符** ——
@@ -35,7 +36,15 @@ DEFAULT_EXE = REPO_ROOT / "dist" / "pbc-server" / "pbc-server.exe"
 # LLM 密钥**绝不入库**：曾经把真实 key 硬编码在 3 个 e2e 脚本里，随提交进入
 # 历史且已推送（删掉文件也删不掉历史，只能轮换）。改用环境变量注入；
 # 未提供时不阻断（LLM 步骤降级），但会明确提示。
-LLM_KEY_ENV = "PBC_E2E_DEEPSEEK_KEY"
+#
+# ⚠️ 变量名**不得绑定某一提供方**（B9-7 命名债，2026-09-21 实测）：
+# 语义是 provider-agnostic 的（配 :data:`LLM_PROVIDER_ENV` 使用），旧名却叫
+# DEEPSEEK —— 本轮实际往里塞的是**硅基流动**的 key，等于把"名字骗人"固化进
+# 发布流程。改名为 PBC_E2E_LLM_KEY；**旧名保留兼容**（先读新名，再回退旧名并
+# 提示弃用），避免已写好的发版脚本一夜之间静默失效（静默失效 = LLM 步骤降级
+# 而冒烟照绿，正是本项目反复踩的坑）。
+LLM_KEY_ENV = "PBC_E2E_LLM_KEY"
+LLM_KEY_ENV_LEGACY = "PBC_E2E_DEEPSEEK_KEY"
 
 # LLM 提供方：冒烟必须把密钥发给**与该密钥匹配**的那一家。
 # 反例（2026-09-17 实测）：`e2e_frozen.py` 曾写死
@@ -75,12 +84,34 @@ def resolve_exe(default=None) -> str:
 
 
 def llm_key(default: str = "") -> str:
-    """返回 e2e 用的 LLM 密钥（来自 ``PBC_E2E_DEEPSEEK_KEY``）。
+    """返回 e2e 用的 LLM 密钥。
 
-    未设置时返回空串 —— 调用方据此把 LLM 步骤降级（不上报凭据），
+    取值顺序：``PBC_E2E_LLM_KEY``（当前名）> ``PBC_E2E_DEEPSEEK_KEY``（旧名，
+    仍兼容但会打印弃用提示）> ``default``。
+
+    未设置时返回空串 —— 调用方据此把 LLM 步骤**如实降级**（并记入覆盖清单），
     而不是让整条流水线假装"已配置"。
+
+    ⚠️ 旧名兼容是**过渡**而非长期特性：它存在的唯一理由是防止已写好的发版命令
+    静默失效。读到旧名时提示一次，便于尽快完成迁移。
     """
-    return os.environ.get(LLM_KEY_ENV) or default
+    new = os.environ.get(LLM_KEY_ENV)
+    if new:
+        return new
+    legacy = os.environ.get(LLM_KEY_ENV_LEGACY)
+    if legacy:
+        print(
+            f"[WARN] 环境变量 {LLM_KEY_ENV_LEGACY} 已弃用，请改用 {LLM_KEY_ENV}"
+            f"（两者等价；旧名将在一个发布周期后移除）",
+            file=sys.stderr,
+        )
+        return legacy
+    return default
+
+
+def llm_key_env_display() -> str:
+    """给人类看的变量名说明（驱动脚本的提示文案统一用它，避免三处各写一份）。"""
+    return f"{LLM_KEY_ENV}（兼容旧名 {LLM_KEY_ENV_LEGACY}）"
 
 
 def spawn_server(cmd, *, log_path, cwd=None, env=None, extra=None):
