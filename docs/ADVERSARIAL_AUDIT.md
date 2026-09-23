@@ -1392,7 +1392,7 @@ Electron/33.4.11   Chrome/130.0.6723.191   node.js/v20.18.3
 | 签名 URL | `redact_urls()` 覆盖"完整 URL"与"requests 异常回显的相对路径带 query"两种形态 | ✅ 考虑周全 |
 | 上传校验 | 扩展名白名单 + **魔术字节**双检；文件名 `Path(...).name` 去路径穿越；多页 TIFF/动画 WEBP **明确拒绝**而非静默截首帧 | ✅ GMP 场景"宁缺勿滥"取向正确 |
 | 绑定 | 默认 `127.0.0.1`（`config.py::APP_HOST`），非 `0.0.0.0` | ✅ 无局域网暴露 |
-| 本地守卫覆盖面 | `is_local_request` 在 **19 处**端点被调用 | ✅ 覆盖面完整（问题只在**时序**，S1）|
+| 本地守卫覆盖面 | `is_local_request` 在 **26 处**端点被调用（`if request is not None and not is_local_request(...)`）| ✅ 覆盖面完整（问题只在**时序**，S1）|
 
 **模板注入**：`templates/*.html` 中 `|safe` / `Markup(` / `innerHTML` **零命中**
 （grep 核实）⇒ 未发现服务端模板或前端 DOM 注入面。

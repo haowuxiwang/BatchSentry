@@ -43,7 +43,7 @@
 **同时复核为「正确」的加固（不推翻，见 §17.3.4）**：`contextIsolation: true` +
 `nodeIntegration: false`（splash 与主窗口都设）、`setWindowOpenHandler` 仅放行 `http(s)`、
 `will-navigate` 白名单、SSRF 防护**含非点分 IP 字面量**、签名 URL 脱敏、
-上传扩展名+魔术字节双检、默认绑定 `127.0.0.1`、19 处端点有本地守卫；
+上传扩展名+魔术字节双检、默认绑定 `127.0.0.1`、26 处端点有本地守卫；
 `templates/*.html` 中 `|safe` / `innerHTML` **零命中**。
 
 **性能面（实测，无日常问题）**：后端冷启动 **2.85 s**、完整应用 → `/health` **5.53 s**、
