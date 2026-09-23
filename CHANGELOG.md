@@ -13,6 +13,10 @@
 > **B11 分发就绪清单**（W1 段已完成记录 + 证据表）；硬约束教训 → `docs/PROJECT_PITFALLS.md` **§四十**。
 > **W1 = 6 项"不碰产物、不依赖用户"的工作**，全部完成；护栏合计 **63 条用例**、
 > 变异验证 **20/20 CAUGHT**（`devlogs/mutate_b11_1_control.txt` 等四份对照表）。
+>
+> **门禁实测（`fb29999`，11 项）**：`OVERALL: fail (pass=8 fail=3 warn=0 skip=0)`。
+> `tests_coverage` = **3223 passed / 0 failed / coverage 95.04%**；
+> 3 条 FAIL **全部是预期且具名**的（见下方 Known Issues），**无意外的红**。
 
 **Fixed（真缺陷，前四轮审查均未覆盖）**
 

@@ -2647,6 +2647,18 @@
 >    但列为 `dependencies` ⇒ `app.asar` 含 **201 个 `node_modules` 条目 ≈6 MB** 死代码
 >    （含永久供应链面）→ **新登记 B11-17**。
 > 4. 🟡 **两条 magic 用例断言过弱**（只断言 `"图片"`，摘掉闸门照样绿）→ 改断言 `"文件头"`。
+>
+> **门禁实测（提交 `fb29999` 后跑，11 项）**：`OVERALL: fail (pass=8 fail=3 warn=0 skip=0)`。
+> - ✅ **8 PASS**：`worktree_clean`、`no_build_outputs`、
+>   **`dist_variants` —— 1 份完整产物（`-160111`）+ 残壳 2 个（**具名**：`dist-electron`、
+>   `-153526`，缺内嵌后端/PROVENANCE）**（＝ B11-3 新判据生效；旧判据在此状态**静默 PASS 且不具名**）、
+>   `packaging_files`、`rules_wired`、`kb_corpus`、`kb_packaging`、
+>   **`tests_coverage` = 3223 passed / 0 failed / coverage 95.04%**。
+> - 🔴 **3 FAIL 全部是"预期且具名"**（非回归，**不得隐藏**）：
+>   `artifact_freshness`（`main.py`+`api/jobs/upload.py` 已改、产物未重建 ⇒ **W2 重建后转绿**）｜
+>   `dependency_vulns`（**24 条唯一公告 / 4 包**，原始条目 47）｜
+>   `runtime_eol`（Electron **33.4.11** 不在支持线 `[41,42,43]`）。
+> - 报告：`devlogs/gate_report_20260923_130306.json`。
 
 - [x] **B11-1 守卫前移到 ASGI 中间件 + 请求体大小硬上限**（对应 **D3**／**P1**／计划 §SEC-1）
   **定位已定**：`api/jobs/upload.py:29-33` 的签名要求 `UploadFile = File(...)`
