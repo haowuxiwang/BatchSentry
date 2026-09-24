@@ -19,8 +19,14 @@
      **锁定的版本就是用户机上跑的那个版本**，所以"清单里的版本"才是判据的输入；
   2. 仅当锁定版本 **>= 该弃用开始生效的版本**（`_DEPRECATED` 登记）时，才要求
      产品源码不得调用被弃用 API；
-  3. 低于该阈值时本护栏**有意惰性通过**，且**用断言把"惰性"与"失效"分开**
-     （见 `test_guard_is_inert_below_threshold_on_purpose`）。
+  3. 低于该阈值时本护栏**有意惰性通过** —— 这条性质由
+     `judge((11, 99, 99), …) == []` 直接钉住（见 `test_guard_discriminates_high_vs_low_pinned_version`），
+     与"当前锁定版本已达标后源码必须真的干净"
+     （`test_no_deprecated_usage_once_threshold_is_reached`）**成对**，缺一即失效。
+  4. 🔴 **本护栏的由来（B11-18）已达成**：`requirements.txt` 现锁 `Pillow==12.3.0`，
+     且 `core/pipeline/self_heal.py` 已改用 `get_flattened_data()`（实测两者
+     在 mode "L" + `resize(BOX)` 下逐元素完全一致）。故**新增弃用要重新走一遍
+     第 1–3 步**（把新 API 补进 `_DEPRECATED`），本护栏不会自动发现。
 
 ⚠️ **本护栏的诚实边界**（不写成"已覆盖全部弃用"）：
   - `_DEPRECATED` 是**具名登记表**，不是自动发现。**发现新弃用的方法**：
@@ -33,6 +39,7 @@ from __future__ import annotations
 
 import ast
 import re
+import sys
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -191,22 +198,38 @@ def test_no_deprecated_pillow_api_under_pinned_version():
     )
 
 
-def test_scan_actually_sees_known_call_sites():
-    """防"空转即全绿"：扫描器必须**确实扫到**已知调用点。
+def test_scan_actually_sees_known_call_sites(tmp_path, monkeypatch):
+    """防"空转即全绿"：扫描→判定这条**完整链路**必须仍能报出 `getdata()`。
 
-    `core/pipeline/self_heal.py` 的两处 `getdata()` 是本护栏的**由来**。
-    若扫描器坏掉（范围写错 / AST 提取失效），`find_deprecated_usage()`
-    会返回空 —— 那是"看不见"而不是"干净"。这条断言把两者分开。
+    ⚠️ B11-18 修完后，产品源码里**已无** `getdata()`，于是"扫到了调用点"这件事
+    **不能再靠真实源码来证明** —— 原实现正是靠 `self_heal.py` 里的两处真实调用，
+    修完后它会永远找不到，从而把本护栏变成恒真断言。
+    改为**注入一个合成的产品源文件**，端到端跑一遍"扫描 + 判定"。
     """
-    sites: list[str] = []
+    fake = tmp_path / "fake_mod.py"
+    fake.write_text("v = img.getdata()\n", encoding="utf-8")
+    M = sys.modules[__name__]
+    monkeypatch.setattr(
+        M, "_iter_source_files",
+        lambda: iter([(Path("api/fake_mod.py"), fake)]),
+    )
+    problems = M.find_deprecated_usage()
+    assert any("fake_mod.py" in p for p in problems), problems
+    assert any("get_flattened_data" in p for p in problems), problems
+
+
+def test_scan_reaches_product_dirs_and_extracts_real_calls():
+    """**真实源码**阳性对照（与上一条成对）：扫描器确实走进了产品目录并取到调用。
+
+    锚点选 `resize` —— 它与原来的两处 `getdata()` 在**同一行**，不会随 B11-18 消失。
+    """
+    seen: dict[str, set[str]] = {}
     for rel, p in _iter_source_files():
         src = p.read_text(encoding="utf-8-sig", errors="replace")
-        for api in _DEPRECATED:
-            if api in collect_calls(rel, src):
-                sites.append(f"{rel.as_posix()}:{sorted(collect_call_sites(rel, src)[api])}")
-    assert any(s.startswith("core/pipeline/self_heal.py") for s in sites), (
-        "扫描器没扫到 self_heal.py 的 getdata() —— 范围或 AST 提取坏了，"
-        f"本护栏已失去判别力。实测扫到：{sites}"
+        seen[rel.as_posix()] = collect_calls(rel, src)
+    assert "core/pipeline/self_heal.py" in seen, "扫描器没走进 core/pipeline/"
+    assert "resize" in seen["core/pipeline/self_heal.py"], (
+        "AST 提取在真实源码上取不到调用 —— 提取器坏了，本护栏已失去判别力"
     )
 
 
@@ -246,20 +269,23 @@ def test_guard_discriminates_high_vs_low_pinned_version():
     assert judge((12, 3, 0), {}) == []
 
 
-def test_guard_is_inert_below_threshold_on_purpose():
-    """把"有意惰性"与"失效"分开：当前清单（Pillow 10.x）下**预期为空**。
+def test_no_deprecated_usage_once_threshold_is_reached():
+    """B11-18 落地后：锁定版本已 >= 12，产品源码必须**真的干净**。
 
-    条目一旦被误删/改坏，这条会红；而扫描器坏掉由
-    `test_scan_actually_sees_known_call_sites` 负责兜住。两条**成对**才成立。
+    ⚠️ 本条的前身是 `test_guard_is_inert_below_threshold_on_purpose`
+    （"当前锁 10.x ⇒ 有意惰性"）。B11-7/B11-18 同一提交改完后**前提变了**，
+    故按原注释的要求**改写而不是删掉**：
+    - 现在断言"锁定版本已达阈值 **且** 源码真的干净"；
+    - "阈值下侧惰性"这条性质仍由 `judge((11, 99, 99), …) == []` 单独守着
+      （见 `test_guard_discriminates_high_vs_low_pinned_version`）。
     """
     pinned = _pinned_version("pillow")
-    assert pinned is not None and pinned < (12,), (
-        f"锁定版本已是 {pinned} —— 若你刚做完 B11-7，本测试的**前提**变了："
-        "此时 `test_no_deprecated_pillow_api_under_pinned_version` 应当已经在拦，"
-        "请把这条惰性断言改掉（而不是删掉）"
+    assert pinned is not None and pinned >= (12,), (
+        f"锁定版本是 {pinned}，低于弃用生效阈值 —— 若你回退了 B11-7，"
+        "请连同 `core/pipeline/self_heal.py` 的 `get_flattened_data()` 一起回退"
     )
     assert find_deprecated_usage() == [], (
-        "锁定版本仍 <12 却报出了问题 —— 阈值判定坏了（或清单被改）"
+        "锁定版本 >=12 却仍报出问题 —— 产品源码还在调用被弃用 API"
     )
 
 

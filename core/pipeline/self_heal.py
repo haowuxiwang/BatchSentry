@@ -180,10 +180,16 @@ def _projection_variances(pdf_path: str, page_no: int) -> tuple[float, float]:
         pix = page.get_pixmap(dpi=_PRESCREEN_DPI, colorspace=fitz.csGRAY)
         w, h = pix.width, pix.height
         img = Image.frombytes("L", (w, h), pix.samples[: w * h])
+    # ⚠️ 用 `get_flattened_data()` 而非 `getdata()`：后者自 Pillow 12 起弃用，
+    # Pillow 14（2027-10-15）移除。**必须与 `requirements.txt` 的 Pillow 升版同一提交**
+    # —— Pillow 10 没有 `get_flattened_data`，提前改会让旧环境直接 AttributeError。
+    # 等价性为**实测**结论（非按 API 名推测）：mode "L" + `resize(BOX)` 下两者
+    # 逐元素完全一致、`get_flattened_data` 零警告、投影方差完全相同。
+    # 判据与登记表在 `tests/unit/test_pillow_api_compat.py`（变异 7/7 CAUGHT）。
     row_means = [float(v) for v in
-                 img.resize((1, h), Image.Resampling.BOX).getdata()]
+                 img.resize((1, h), Image.Resampling.BOX).get_flattened_data()]
     col_means = [float(v) for v in
-                 img.resize((w, 1), Image.Resampling.BOX).getdata()]
+                 img.resize((w, 1), Image.Resampling.BOX).get_flattened_data()]
     return _variance(row_means), _variance(col_means)
 
 

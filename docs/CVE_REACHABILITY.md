@@ -1,5 +1,22 @@
 # CVE 可达性表（B11-4）
 
+> ## ⚠️ 本表已退役（2026-09-23）
+>
+> **原因**：`docs/DEPENDENCY_AUDIT.json` 现为 **0 条公告** —— 表中 4 个包
+> （`python-multipart` / `pillow` / `python-dotenv` / `requests`）已按 **B11-7（W2）**
+> 全部升级到安全版本，**已经没有公告需要判定可达性**。**§5** 的 npm/Electron 侧同理：
+> `electron-builder` 升到 **26.15.3** 后 `npm audit` **0 条**（B11-21）。
+>
+> **下表是历史记录，不再维护** —— 保留它作为"当时是怎么判的"审计留痕。
+>
+> **退役 ≠ 可以忽略**：门禁 `dependency_vulns` 的判据**仍是"有公告即 FAIL"**。
+> 一旦重扫出现新公告，`tests/unit/test_gate_supply_chain.py::
+> test_cve_reachability_table_covers_snapshot` 会**立刻变红**
+> （`snap_ids` 非空 ⇒ 要求本表**逐条覆盖**）⇒ 强制重新判定可达性。
+> 该护栏**同时**钉住本文件必须保有上面这段"已退役"声明 ——
+> 否则"**表没人管了**"与"**表已按流程退役**"在文件层面**无法区分**
+> （PITFALLS §二十六 的恒真退化）。
+
 > **Python 侧**：数据源 `docs/DEPENDENCY_AUDIT.json`（pip-audit 快照，`generated_at` 见该文件）
 > ｜**24 条唯一公告**（pip-audit 原始列了 47 条 —— 同一条被重复列 2 份，脚本已按 id 去重）
 > ｜4 个包：`python-multipart` / `pillow` / `python-dotenv` / `requests`

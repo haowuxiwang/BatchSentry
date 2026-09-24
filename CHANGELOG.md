@@ -7,6 +7,75 @@
 
 ## [Unreleased]
 
+### 分发就绪 **W2 收尾**（2026-09-24 — 重建 + 新 key e2e + 门禁 10/11 绿）
+
+> W2 批次重建为 **Electron 43.7.4 便携包**（475.1 MB，`dist-electron/win-unpacked`），
+> 残壳收敛后磁盘上**只此一份**可分发产物（`dist/` 为打包中间产物，按设计保留）。
+> 新 key 真验：LLM `deepseek-ai/DeepSeek-V3.2`（连通性 1691ms + 读回断言一致）+
+> OCR paddle 真实后端；冻结版 e2e pdf/rot 双轮全绿（rot 轮 288s，p2/p3 均
+> rotation@90° 恢复，gmp_basis 16/16）。门禁 **10 PASS / 1 FAIL**（唯一 FAIL =
+> `worktree_clean`，本提交即修）。过程中修掉两处真缺陷：
+
+**Fixed（真缺陷）**
+
+- 🔴 **PROVENANCE 契约断裂 —— 标准路径产物被门禁判"残壳"**（`build.ps1`）：
+  门禁 `count_complete_artifacts` 把 `win-unpacked/PROVENANCE.txt` 列为完整产物
+  三件套之一，而 build.ps1 **只在备用目录**（被锁自愈时）写该文件 ⇒ 标准路径
+  构建的产物**永远被判残壳**、`runtime_eol` 永远 SKIP。旧轮次未暴露只因当时
+  完整产物恰好来自备用目录。**已修**：PROVENANCE **无条件**写入（内容区分
+  standard/fallback 出处）。
+  ⚠️ 修复过程两课：① Edit 工具会**丢 UTF-8 BOM** —— PowerShell 5.1 对无 BOM
+  的中文脚本按 ANSI 解析 ⇒ 满屏语法错（提交前必须核对 BOM）；② PowerShell
+  语句位的**裸 `{...}` 是 scriptblock 表达式（被输出、不执行）**——首版修复
+  "看似成功实则从未写入"，必须平铺语句。
+- 🟠 **门禁自测的环境耦合**（`tests/unit/test_release_gate.py`）：
+  `test_child_receives_raised_threshold` 隐含假设宿主（CodeBuddy 沙箱）必有
+  `CODEBUDDY_SAFE_DELETE_BULK_THRESHOLD`，在无该变量的环境（TRAE/CI）恒红。
+  **已修**：前置条件由测试**自己注入**（monkeypatch），并补反向对照
+  `test_child_not_injected_when_host_has_no_threshold`（宿主未设 ⇒ 不得凭空注入）。
+- 文档一致性：CHANGELOG 的 Electron 升级条目误写 `43.7.5`（该版本 win32 二进制
+  四家镜像全部 404，实际钉 `43.7.4`），已更正。
+
+### 分发就绪 **W2 落地**（Round 59，2026-09-23 — 升依赖/工具链 + 残壳收敛 + 一处「恒假判据」修复）
+
+> **W2 从"预演通过"转为"真落地"**：4 个 Python 依赖、Electron、npm 构建工具链同时升级，
+> 残壳收敛到 1 份完整产物；过程中发现并修掉一个**让清理工具永远报失败**的判据缺陷。
+> 教训 → `docs/PROJECT_PITFALLS.md` **§四十四**；条目 → `docs/TODO.md` 的 **B11-7 / B11-8 / B11-9 / B11-17 / B11-18**。
+
+**Fixed（真缺陷）**
+
+- 🔴 **清理工具的判据恒假**（`scripts/clean_dist.py::to_recycle_bin`）：
+  判定用的是 `SHFileOperationW` 的返回值，而**本机该函数删除成功时也返回 `rc=2`**
+  （`ERROR_FILE_NOT_FOUND`）⇒ `if rc != 0: return False` **永远报 FAIL**。
+  本轮**真实踩到**：`clean_dist --apply` 打印两个残壳 `FAIL`，而磁盘上它们**已经消失**。
+  ⚠️ **假失败比假成功更危险**：它把操作者/自动化推向 `rm -rf`（本项目明令禁止）。
+  **已修**：判据改为**可观测事实**（删前存在 ⇒ 删后必须不存在）；
+  `rc` / `fAnyOperationsAborted` 只降级为说明文字。**变异验证 4/4 CAUGHT**
+  （`devlogs/_verify/mutate_clean_dist.py`：回退 rc 判据 / 恒 True / 丢中止诊断 / 不存在也报成功）。
+
+**Changed**
+
+- `requirements.txt`：`Pillow` 10.1.0 → **12.3.0**｜`python-multipart` 0.0.21 → **0.0.31**
+  ｜`requests` → **2.33.0**｜`python-dotenv` → **1.2.2**（后两个为顺手，均零调用）。
+- `electron`：**33.4.11 → 43.7.4**（33 已 EOL 17 个月；支持线 `[41,42,43]`）。
+  ⚠️ 钉**精确版本** `43.7.4` 而非 `^43`：43.7.5 的 win32 二进制在 npmmirror/
+  华为云/腾讯云/清华四家镜像全部 404（npm 包存在 ≠ 二进制可得，见 B11-21）。
+- `electron-builder`：**25.1.8 → 26.15.3**（major）。这消掉了 npm 树里
+  **16 条公告（15 high + 1 critical，`tar`）** ⇒ `npm audit` **found 0 vulnerabilities**。
+  ⚠️ 说明：本项目 `dependencies` 为**空**，npm 包**全部是构建期 devDependencies**，
+  **不随包分发** ⇒ 这 16 条**本就不在 D1 的判据范围内**（D1 = "**产物依赖树**里没有已知漏洞"，
+  由 `pip-audit` 对 `requirements.txt` 度量）。此升级属**额外卫生收益**，不是门禁要求。
+- `package.json`：删除零消费依赖 `docx`（B11-17，全仓零引用已核）。
+
+**Added**
+
+- `tests/unit/test_clean_dist.py`：`to_recycle_bin` 的**成对**护栏（走真实实现，
+  只替换 Win32 调用）——正例 `rc=2 + 已删除 ⇒ 成功`、反例 `rc=0 + 仍在 ⇒ 失败`、
+  中止诊断不在说明里丢失、路径不存在不得报"已清理"。
+  ⚠️ 旧用例一律把 `to_recycle_bin` **整个 stub 掉** ⇒ 判定分支**从未被真实执行**，
+  这是缺陷能潜伏至今的直接原因。
+- `devlogs/_verify/mutate_clean_dist.py`：上述护栏的变异验证（4 个变异，覆盖两个方向）。
+
 ### 分发就绪 **W3**（Round 59，2026-09-23 — D4 真实成功路径真验通过）
 
 > **D4 从"从未真验"变为"三层互证通过"。** 过程中连抓两个真缺陷，**都在验收方法上**

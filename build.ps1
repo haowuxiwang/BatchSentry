@@ -357,6 +357,23 @@ Write-OK "dist/pbc-server/build_manifest.json 已生成并自校验通过"
 if (-not $SkipElectron) {
     Write-Step "Step 3/3: Building Electron installer with electron-builder"
 
+    # ── 3.0 Electron 二进制获取通道（2026-09-23 实测新增，必须）─────────
+    # electron-builder 打包**必须**拿到 `electron-v<ver>-win32-x64.zip`。
+    # 本机实测三条事实：
+    #   · 官方 GitHub releases **不可达** —— 直连 curl=000；走系统代理 =502 Bad Gateway
+    #     （同刻 registry.npmjs.org 可达 ⇒ 只有 GitHub 被挡，不是断网）。
+    #   · 可达的镜像是 npmmirror ⇒ 显式指向它，否则本步**必然失败**
+    #     （实测：不加该变量跑冒烟即 `⨯ Response code 502 (Bad Gateway)`）。
+    #   · 外部若已设 ELECTRON_MIRROR（自建镜像/企业代理）⇒ **不覆盖**。
+    # ⚠️ 版本只能选镜像上**确实存在**的：43.7.5 在 npmmirror / 华为云 / 腾讯云 / 清华
+    #    全部 404，43.7.4 全部 200 ⇒ `electron` 已按**精确版本**钉在 `43.7.4`
+    #    （**不能**写 `^43.7.4` —— 那会解析回 43.7.5，又变成"拿不到的版本"）。
+    #    教训见 docs/PROJECT_PITFALLS.md §四十五。
+    if (-not $env:ELECTRON_MIRROR) {
+        $env:ELECTRON_MIRROR = "https://npmmirror.com/mirrors/electron/"
+        Write-Host "  [info] ELECTRON_MIRROR=$env:ELECTRON_MIRROR （GitHub 不可达，走镜像）"
+    }
+
     # Ensure electron + electron-builder are installed
     if (-not (Test-Path "node_modules/electron") -or -not (Test-Path "node_modules/electron-builder")) {
         Write-Host "  Installing electron + electron-builder..."
@@ -472,35 +489,43 @@ if (-not $SkipElectron) {
     }
 
     # dir target produces win-unpacked/ folder (not a single exe)
-    # 3.2 变体目录留痕（round-27 卫生规则 R2）：凡最终产物不在标准路径
-    # dist-electron/win-unpacked（外部进程锁 app.asar 时自愈到带时间戳的
-    # 备用目录且归位失败），就地写 PROVENANCE.txt —— 出处（HEAD/时间/版本）
-    # + 收敛指引。没有出身的变体目录会被下一个会话当成"身份不明垃圾"，
-    # 判定成本（哈希比对/健康探测/时间线推理）远高于写这个文件的成本。
-    if ($finalUnpacked -ne $stdUnpacked) {
-        $gitHead = ""
-        try { $gitHead = (& git rev-parse --short HEAD) 2>$null } catch {}
-        $appVer = ""
-        try {
-            $appVer = (Select-String -Path "main.py" -Pattern 'APP_VERSION = "(.+)"').Matches[0].Groups[1].Value
-        } catch {}
-        $prov = Join-Path $finalUnpacked "PROVENANCE.txt"
-        @(
-            "fallback output: standard dist-electron was locked at build time"
-            "built_at: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
-            "git_head: $gitHead"
-            "version:  $appVer"
-            "verify:   `$env:PBC_E2E_EXE = '<this dir>\resources\pbc-server\pbc-server.exe'; python tests/e2e_frozen.py"
-            "cleanup:  python scripts/clean_dist.py  (dry-run first; --apply sends to recycle bin)"
-            "unblock:  fully EXIT the process holding resources\app.asar, then re-run"
-            "          'python scripts/clean_dist.py --apply'. Measured on this host"
-            "          (2026-09-17): the holder is the WorkBuddy host process - it opens"
-            "          .asar as a package and keeps a handle without FILE_SHARE_DELETE."
-            "          An antivirus allow-list does NOT help (the holder is not AV)."
-            "          Details: docs/PROJECT_PITFALLS.md section 22."
-        ) -join "`r`n" | Set-Content -Path $prov -Encoding UTF8
-        Write-Host "  [INFO] PROVENANCE.txt written to $prov" -ForegroundColor DarkGray
+    # 3.2 产物出处留痕（round-27 卫生规则 R2 + D5「唯一产物能自证出处」）：
+    # **无条件**写 PROVENANCE.txt —— 出处（HEAD/时间/版本）+ 收敛指引。
+    # ⚠️ 曾只在备用目录写（`if ($finalUnpacked -ne $stdUnpacked)`），2026-09-24
+    # 实测暴露契约断裂：`release_gate.py::count_complete_artifacts` 把
+    # 「win-unpacked/PROVENANCE.txt 存在」当作完整产物的三件套之一 ⇒
+    # 标准路径构建的产物**永远被判残壳**、`runtime_eol` 永远 SKIP —— 门禁在
+    # 「产物最标准的状态」上反而最瞎。旧轮次未暴露只因当时完整产物恰好
+    # 来自被锁时的备用目录（天然带 PROVENANCE）。
+    # ⚠️ 语句必须平铺，不得包裸 `{...}`：PowerShell 语句位的 scriptblock 是
+    # **表达式**（被输出、不执行）—— 首版修复即因此"看似成功实则从未写入"。
+    $gitHead = ""
+    try { $gitHead = (& git rev-parse --short HEAD) 2>$null } catch {}
+    $appVer = ""
+    try {
+        $appVer = (Select-String -Path "main.py" -Pattern 'APP_VERSION = "(.+)"').Matches[0].Groups[1].Value
+    } catch {}
+    $prov = Join-Path $finalUnpacked "PROVENANCE.txt"
+    $origin = if ($finalUnpacked -ne $stdUnpacked) {
+        "fallback output: standard dist-electron was locked at build time"
+    } else {
+        "standard output: dist-electron was NOT locked at build time"
     }
+    @(
+        $origin
+        "built_at: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+        "git_head: $gitHead"
+        "version:  $appVer"
+        "verify:   `$env:PBC_E2E_EXE = '<this dir>\resources\pbc-server\pbc-server.exe'; python tests/e2e_frozen.py"
+        "cleanup:  python scripts/clean_dist.py  (dry-run first; --apply sends to recycle bin)"
+        "unblock:  fully EXIT the process holding resources\app.asar, then re-run"
+        "          'python scripts/clean_dist.py --apply'. Measured on this host"
+        "          (2026-09-17): the holder is the WorkBuddy host process - it opens"
+        "          .asar as a package and keeps a handle without FILE_SHARE_DELETE."
+        "          An antivirus allow-list does NOT help (the holder is not AV)."
+        "          Details: docs/PROJECT_PITFALLS.md section 22."
+    ) -join "`r`n" | Set-Content -Path $prov -Encoding UTF8
+    Write-Host "  [INFO] PROVENANCE.txt written to $prov" -ForegroundColor DarkGray
 
     $exePath = Join-Path $finalUnpacked "BatchSentry.exe"
     if (Test-Path $exePath) {

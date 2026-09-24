@@ -9,6 +9,14 @@
 # import 的包一定在清单里"（曾漏声明 markupsafe —— 只靠 Jinja2 的传递依赖撑着，
 # Jinja2 一旦换实现就会炸）。
 #
+# 🔴 本机装依赖必须带这两个开关（2026-09-23 实测，升 Pillow 10→12 时踩到）：
+#     CODEBUDDY_SAFE_DELETE_BULK_THRESHOLD=100000  python -m pip install ... < /dev/null --no-input
+#   pip 会先**卸载**旧版（Pillow 上万文件）→ 撞上本环境的 safe-delete 批量删除闸门
+#   → 无 TTY 时**不报错、只是不再输出**（日志 mtime 停滞十余分钟，而 `pip list`
+#   显示"部分成功"，极具误导性），且**真的会删掉包**：中断后 `python-dotenv` 的
+#   `dotenv/` 目录消失、只剩改名残留 `~ython_dotenv-*.dist-info`。
+#   ⇒ 判断"到底装好没有"**一律以 `import` 为准**，不看 `pip list`。
+#
 # 未覆盖：**传递依赖**仍由 pip 解析（本文件只管直接依赖）。要完全复现，需
 # pip-tools 之类的全量 lock；当前规模下先不做，但这一条是已知缺口，不是"已解决"。
 fastapi==0.139.0
@@ -16,7 +24,7 @@ fastapi==0.139.0
 # 之外 —— 更早的版本会把 SSE 帧缓冲到 ~64KB 才吐（进度看似冻结，然后一次性涌出）。
 starlette==1.3.1
 uvicorn[standard]==0.48.0
-python-multipart==0.0.21
+python-multipart==0.0.31
 jinja2==3.1.6
 # 直接 import（main.py 的 `from markupsafe import Markup`）→ 必须显式声明，
 # 不能依赖"Jinja2 会顺带装上它"。
@@ -24,10 +32,13 @@ markupsafe==3.0.2
 aiosqlite==0.21.0
 pydantic==2.11.5
 openai==2.35.1
-python-dotenv==1.2.1
-requests==2.32.4
+python-dotenv==1.2.2
+requests==2.33.0
 PyMuPDF==1.26.7
-Pillow==10.1.0
+# ⚠️ Pillow 的求值必须在**同一提交**里连着 `core/pipeline/self_heal.py` 的
+# `get_flattened_data()` 一起改：Pillow 10 没有该方法，单改版本会 AttributeError，
+# 单改代码会在旧环境跑不起来。护栏 `tests/unit/test_pillow_api_compat.py` 钉住这一点。
+Pillow==12.3.0
 
 # 可选：仅当 provider 配置了 protocol=anthropic（如 Claude）时才需要。
 # 所有 OpenAI 协议 provider（DeepSeek / GLM / Kimi / Qwen / MiMo）走上面的

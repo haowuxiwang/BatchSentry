@@ -2911,6 +2911,47 @@
   **改动范围**：仅 `tests/`（`BUNDLE_SOURCES` 不含 `tests/`）⇒ **不触发重建**。
   教训 → **PITFALLS §四十二**（"成功终态 ≠ 链路已验"的假绿五类纪律）。
 
+- [x] **B11-20 清理工具的判据「恒假」**（新增／W2 实跑抓出／**已修 + 变异 4/4**／2026-09-23）
+  **事实**：`clean_dist.py --apply` 对两个残壳打印
+  `FAIL — SHFileOperationW rc=2 (0x00000002)`，而**磁盘上它们已经消失**。
+  隔离实验：对**刚建的小目录**调用同样 `ok=False` 但**目录也没了**
+  ⇒ 本机 `SHFileOperationW` **删除成功时亦返回 2** ⇒ 旧实现 `if rc != 0: return False`
+  **恒假**（§二十六：恒真与恒假一样零判别力）。
+  ⚠️ **假失败比假成功更危险** —— 它把操作者/自动化推向 `rm -rf`（本项目明令禁止）。
+  **修**：判据改为**可观测事实**（删前存在 ⇒ 删后必须不存在）；`rc` /
+  `fAnyOperationsAborted` 只降级为说明文字。
+  **验**：变异 **4/4 CAUGHT**（`devlogs/_verify/mutate_clean_dist.py`：回退 rc 判据 /
+  恒 `True` / 丢中止诊断 / 不存在也报成功）；端到端复跑 `--apply` ⇒ **`OK`** 且目录消失。
+  ⚠️ 缺陷潜伏至今的**直接原因**：旧用例把 `to_recycle_bin` **整个 stub 掉**，
+  判定分支**从未被真实执行** ⇒ 新护栏**只替换 Win32 调用**，让真实实现被走到。
+  教训 → **PITFALLS §四十四 A/B**。
+
+- [x] **B11-21 Electron 二进制下载通道 + npm 构建工具链归零**（新增／W2 实跑抓出／2026-09-23）
+  **背景**：`electron` 升到 `43.7.5`（B11-8 的一部分）后，打包**必然失败**。
+  两条独立事实：
+  1. **下载源够不着** —— 官方 GitHub releases 本机**不可达**：直连 `curl=000`、
+     走代理 `502 Bad Gateway`（同刻 `registry.npmjs.org` **可达**、`npm install`
+     455 包成功 ⇒ 只有 GitHub 被挡）。electron-builder 抛的就是那个 `502`。
+  2. **版本拿不到** —— 打包要 `electron-v43.7.5-win32-x64.zip`，它在
+     **npmmirror / 华为云 / 腾讯云 / 清华 全部 404**，而 **43.7.4 在四家全部 200**
+     （互为阳性对照）。⚠️ npm 上 43.7.5 的**包**是存在的 ⇒ "包在" ≠ "二进制可得"。
+  **做**：
+  - `build.ps1` 新增 **Step 3.0**：未设 `ELECTRON_MIRROR` 时指向
+    `https://npmmirror.com/mirrors/electron/`（**不覆盖**外部已设值，保留自建镜像/企业代理口子）。
+  - `package.json` 的 `electron` 钉**精确版本 `43.7.4`**
+    （⚠️ **不能**写 `^43.7.4` —— 那会解析回 43.7.5，又变成拿不到的版本）。
+  - `electron-builder` **25.1.8 → 26.15.3**（major）：消掉 npm 树里
+    **16 条公告（15 high + 1 critical `tar`）** ⇒ `npm audit` **found 0 vulnerabilities**。
+    ⚠️ 说明：本项目 `dependencies` 为**空**，npm 包全是**构建期 devDependencies**、
+    **不随包分发** ⇒ 这 16 条**本就不在 D1 判据范围内**
+    （D1 = "**产物依赖树**里没有已知漏洞"，由 `pip-audit` 对 `requirements.txt` 度量）。
+    此升级属**额外卫生收益**，**不是**门禁要求。
+  **验**：冒烟 `--dir` **RC=0**（配置 schema 兼容）；从产物二进制读回
+  **Electron 43.7.4 / Chrome 150.0.7871.250 / Node 24.21.0**
+  （旧产物为 33.4.11 / Chrome 130 / Node 20.18.3 ⇒ Chromium 前进 20 个大版本）。
+  **验收**：产物内版本落在 `docs/RUNTIME_SUPPORT.json` 的支持线 `[41,42,43]` 内（门禁 `runtime_eol`）。
+  教训 → **PITFALLS §四十五**（"包在"≠"二进制可得"；"网络通"要分域判；绕法要固化进构建入口）。
+
 > **最小分发路径**：`B11-1 → B11-7 → B11-2 → 一次重建 → B11-11`
 > ⇒ D1/D2/D3/D4/D5 全绿 ⇒ 允许分发。
 >

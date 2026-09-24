@@ -693,3 +693,91 @@ def test_docstring_documents_the_partial_convergence_semantics():
     assert "部分收敛" in doc and "--converge-locked" in doc
     assert "残壳" in doc, "必须给出「残壳」这个可辨识的名字"
 
+
+# ── 回收站判据：以「路径是否还在」为准，**不采信** SHFileOperationW 返回值 ──
+#
+# 背景（2026-09-23 Round 59 W2 实测）：本机 SHFileOperationW **删除成功时也返回
+# rc=2**（ERROR_FILE_NOT_FOUND）—— 同一刻 `path` 已消失，用刚建的小目录做对照
+# 同样如此。旧实现 `if rc != 0: return False` 因此**恒报 FAIL**（零判别力，
+# 同"恒真"，PITFALLS §二十六）。危害方向最坏：操作者以为残壳没删掉 ⇒ 升级成
+# `rm -rf`（本项目明令禁止；实际发生在本轮：`--apply` 报 FAIL 但目录已消失）。
+#
+# 这一组用例**必须走真实的 to_recycle_bin**（只替换 Win32 调用）。
+# 旧用例一律 `monkeypatch.setattr(cd, "to_recycle_bin", …)` 把它整个 stub 掉，
+# 正是这个缺陷能潜伏至今的原因 —— 判据从未被真实执行过。
+
+
+def _fake_shellop(monkeypatch, *, rc, delete_target=None, aborted=False):
+    """替换 `shell32.SHFileOperationW`：可选真删目标、返回指定 rc / aborted。
+
+    返回 ``calls`` 列表用于断言**调用确实发生了**（否则用例可能因为压根没走到
+    调用点而假绿 —— PITFALLS §E 的"变异脚本自己掩盖 MISS"同类）。
+    """
+    import shutil
+    import scripts.clean_dist as cd
+    calls = []
+
+    def _fn(ptr):
+        calls.append(ptr)
+        if aborted:
+            st = ctypes.cast(ptr, ctypes.POINTER(cd.SHFILEOPSTRUCTW)).contents
+            st.fAnyOperationsAborted = True
+        if delete_target is not None:
+            shutil.rmtree(delete_target, ignore_errors=True)
+        return rc
+
+    monkeypatch.setattr(ctypes.windll.shell32, "SHFileOperationW", _fn)
+    return calls
+
+
+def test_rc_nonzero_but_path_gone_is_reported_as_success(tmp_path, monkeypatch):
+    """🔴 本缺陷的正例：rc=2 但目标已消失 ⇒ 必须报**成功**。
+
+    这是实测形态（本机 rc 恒 2）。旧实现会报 FAIL —— 这条用例就是为它立的。
+    """
+    import scripts.clean_dist as cd
+    victim = tmp_path / "dist-electron"
+    (victim / "win-unpacked").mkdir(parents=True)
+    calls = _fake_shellop(monkeypatch, rc=2, delete_target=victim)
+
+    ok, msg = cd.to_recycle_bin(victim)
+    assert calls, "未走到 SHFileOperationW 调用点 ⇒ 用例没有判别力"
+    assert ok is True, f"路径已消失就应判成功，实际 {ok}: {msg}"
+    assert not victim.exists()
+
+
+def test_rc_zero_but_path_still_there_is_failure(tmp_path, monkeypatch):
+    """成对的反例：rc=0 但目标**仍在** ⇒ 必须报失败。
+
+    没有这一条，"永远返回 True" 也能让正例通过（判据无判别力）。
+    """
+    import scripts.clean_dist as cd
+    victim = tmp_path / "dist-electron"
+    victim.mkdir()
+    calls = _fake_shellop(monkeypatch, rc=0, delete_target=None)
+
+    ok, msg = cd.to_recycle_bin(victim)
+    assert calls, "未走到 SHFileOperationW 调用点 ⇒ 用例没有判别力"
+    assert ok is False, f"路径仍在就应判失败，实际 {ok}: {msg}"
+    assert "仍存在" in msg
+
+
+def test_aborted_with_path_still_there_is_failure_and_says_why(tmp_path, monkeypatch):
+    """中止也是失败的一种，且**说明里要能看出是中止**（诊断信息不许丢）。"""
+    import scripts.clean_dist as cd
+    victim = tmp_path / "dist-electron"
+    victim.mkdir()
+    _fake_shellop(monkeypatch, rc=0, delete_target=None, aborted=True)
+
+    ok, msg = cd.to_recycle_bin(victim)
+    assert ok is False
+    assert "中止" in msg, f"应指出是被中止，实际: {msg}"
+
+
+def test_missing_path_is_not_claimed_as_cleaned(tmp_path):
+    """路径本来就不存在 ⇒ 不得报"已清理"（否则会把"没删过"读成"删掉了"）。"""
+    import scripts.clean_dist as cd
+    ok, msg = cd.to_recycle_bin(tmp_path / "never-existed")
+    assert ok is False
+    assert "不存在" in msg
+

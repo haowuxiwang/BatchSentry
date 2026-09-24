@@ -600,10 +600,29 @@ class TestSandboxDeleteIsolation:
               "'CODEBUDDY_SAFE_DELETE_BULK_THRESHOLD',''))")
     _PROBE_OTHER = "import os;print(os.environ.get('PBC_GATE_PROBE',''))"
 
-    def test_child_receives_raised_threshold(self):
+    def test_child_receives_raised_threshold(self, monkeypatch):
+        """宿主已设置阈值（CodeBuddy 沙箱给 50）⇒ run_cmd 必须强制抬到放宽值。
+
+        ⚠️ 前置条件由测试**自己注入**（monkeypatch），不依赖宿主恰好设置过
+        该变量 —— 否则本用例在"无该变量的环境"（CI / 其它 agent 沙箱）恒红：
+        2026-09-24 实测（TRAE 环境）`assert '' == '100000'` 失败，即此因。
+        """
+        monkeypatch.setenv("CODEBUDDY_SAFE_DELETE_BULK_THRESHOLD", "50")
         rc, out = rg.run_cmd([sys.executable, "-c", self._PROBE])
         assert rc == 0
         assert out.strip() == str(rg.SANDBOX_BULK_DELETE_THRESHOLD)
+
+    def test_child_not_injected_when_host_has_no_threshold(self, monkeypatch):
+        """宿主未设置该变量（CI / 无沙箱环境）⇒ **不得凭空注入**。
+
+        run_cmd 的覆盖分支是"存在才强制抬"。宿主没给时注入反而会改变子进程
+        语义（从"无预算限制环境"变成"带 100000 预算"）。锁住这条分界，
+        防止有人把 `if ... in merged` 改成无条件赋值。
+        """
+        monkeypatch.delenv("CODEBUDDY_SAFE_DELETE_BULK_THRESHOLD", raising=False)
+        rc, out = rg.run_cmd([sys.executable, "-c", self._PROBE])
+        assert rc == 0
+        assert out.strip() == "", "宿主未设时不应注入该变量"
 
     def test_threshold_far_above_the_measured_peak(self):
         """"抬高"必须真的高过实测量级（峰值 847），否则是形式主义。"""

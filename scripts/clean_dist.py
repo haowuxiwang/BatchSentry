@@ -561,23 +561,41 @@ class SHFILEOPSTRUCTW(ctypes.Structure):
 def to_recycle_bin(path: Path) -> tuple[bool, str]:
     """把目录移入回收站。返回 ``(成功?, 说明)``。
 
-    本机实测：新建目录可用；但只要目录里有一个被占用的文件，整个操作就会以
-    ``DE_INVALIDFILES(0x7C)`` 失败 —— 所以必须**先认锁再动手**，否则会连
-    "能删的部分"也一起失败。
+    ⚠️ **判据是"路径是否还在"，不是 `SHFileOperationW` 的返回值。**
+
+    2026-09-23（Round 59 W2）实测：本机该函数**删除成功时仍返回 `rc=2`**
+    （`ERROR_FILE_NOT_FOUND`）—— 同一刻 `path` 已消失；用一个**刚建的小目录**
+    做对照同样如此。也就是说这个返回值在此环境下**恒假**，与"恒真"一样
+    **零判别力**（PITFALLS §二十六）。照它报 FAIL 的后果是**最危险的误判方向**：
+    操作者以为残壳没删掉，进而升级成 `rm -rf`（本项目明令禁止）。
+
+    改用语义判据（删前在 ⇒ 删后必须不在）：无法被误读，也不会被 API 怪癖带偏。
+    返回值仍**如实带进说明**，作为诊断信息保留，不再作为判定依据。
+
+    本机实测：新建目录可用；但只要目录里有一个被占用的文件，整个操作就会失败 ——
+    所以必须**先认锁再动手**（见 `main()` 的 `locks`），否则会连"能删的部分"
+    也一起失败。（此情形下 `path` 仍在，语义判据照样能识别为失败。）
     """
     if sys.platform != "win32":
         return False, "仅实现 Windows 回收站"
+    if not path.exists():
+        return False, "路径不存在（无需清理）"
     src = ctypes.create_unicode_buffer(str(path) + "\0\0")
     op = SHFILEOPSTRUCTW()
     op.wFunc = FO_DELETE
     op.pFrom = ctypes.cast(src, wintypes.LPCWSTR)
     op.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI
     rc = ctypes.windll.shell32.SHFileOperationW(ctypes.byref(op))
-    if rc != 0:
-        return False, f"SHFileOperationW rc={rc} (0x{rc & 0xFFFFFFFF:08X})"
-    if op.fAnyOperationsAborted:
-        return False, "操作被中止 (fAnyOperationsAborted)"
-    return True, "已送入回收站"
+
+    # 唯一的判定：目标还在不在。rc / fAnyOperationsAborted 只用于**说明**，
+    # 不参与判定（理由见上：本机 rc 恒 2）。
+    if not path.exists():
+        note = "" if rc == 0 else f"（rc={rc} 已忽略：本机实测删除成功时亦返回 2）"
+        return True, f"已送入回收站{note}"
+    reason = ("操作被中止 (fAnyOperationsAborted)"
+              if op.fAnyOperationsAborted
+              else f"SHFileOperationW rc={rc} = 0x{rc & 0xFFFFFFFF:08X}")
+    return False, f"删除失败：路径仍存在（{reason}）"
 
 
 # ── CLI ────────────────────────────────────────────────────────────
