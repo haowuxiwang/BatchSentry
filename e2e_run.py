@@ -529,13 +529,21 @@ def run_upload(c, path, mime, expect_types, force, timeout_s=None, page_chars=Fa
     if timeout_s is None:
         timeout_s = _round_budget_s(path, budget_kind)
     t0 = time.time()
+    size_mb = os.path.getsize(path) / (1024 * 1024)
     with open(path, "rb") as f:
         files = {"file": (path, f, mime)}
+        t_up0 = time.time()
         r = c.post(f"{API}/api/jobs" + ("?force=1" if force else ""), files=files, timeout=600)
+    up_s = time.time() - t_up0
+    # 吞吐打点（B11-5 基准的采集口径）：上传墙钟含 multipart 编码与本地回环
+    # 传输，是"上传链路"的端到端吞吐下界（不含 OCR/规范化）。结果 dict 必带
+    # ``upload_mbps``——门禁/基准汇总按此键取数（护栏见
+    # tests/unit/test_e2e_upload_benchmark.py）。
+    upload_mbps = round(size_mb / up_s, 1) if up_s > 0 else 0.0
     if r.status_code not in (200, 201):
         return {"ok": False, "err": f"upload {r.status_code}: {r.text[:300]}"}
     job_id = r.json().get("job_id") or r.json().get("id")
-    print(f"[e2e] upload {path} -> job {job_id}")
+    print(f"[e2e] upload {path} ({size_mb:.1f} MB in {up_s:.2f}s = {upload_mbps} MB/s) -> job {job_id}")
     # SSE 流式输出证据采集：全程订阅进度流，记录事件数/phase 覆盖
     sse_stats = {"events": 0, "transitions": [], "last_phase": None, "last": None}
     # 证据文件按 **job_id** 分文件：同一轮复跑会产生新 job，若按 stem 命名且 append，
@@ -602,6 +610,7 @@ def run_upload(c, path, mime, expect_types, force, timeout_s=None, page_chars=Fa
     return {"ok": ok, "status": st, "duration_s": dur,
             "pages": d.get("total_pages"), "findings": len(fs),
             "findings_declared_total": declared_total,
+            "upload_mbps": upload_mbps,
             "job_id": job_id,
             "ocr_backend_used": used_backend,
             "backend_mismatch": backend_err,
@@ -622,13 +631,18 @@ def run_cancel(c, path, mime="application/pdf"):
     import sqlite3  # noqa: F401  (parity with other runners' imports)
 
     t0 = time.time()
+    size_mb = os.path.getsize(path) / (1024 * 1024)
     with open(path, "rb") as f:
+        t_up0 = time.time()
         r = c.post(f"{API}/api/jobs?force=1",
                    files={"file": (path, f, mime)}, timeout=600)
+    up_s = time.time() - t_up0
+    upload_mbps = round(size_mb / up_s, 1) if up_s > 0 else 0.0
     if r.status_code not in (200, 201):
         return {"ok": False, "err": f"upload {r.status_code}: {r.text[:300]}"}
     job_id = r.json().get("job_id") or r.json().get("id")
-    print(f"[e2e] upload {path} -> job {job_id}")
+    print(f"[e2e] upload {path} ({size_mb:.1f} MB in {up_s:.2f}s = "
+          f"{upload_mbps} MB/s) -> job {job_id}")
     sse_stats = {"events": 0, "transitions": [], "last_phase": None, "last": None}
     sse_log = os.path.join("devlogs", f"e2e_sse_cancel_{job_id}.jsonl")
     sse_thread = _sse_recorder(job_id, sse_log, sse_stats)
@@ -658,6 +672,7 @@ def run_cancel(c, path, mime="application/pdf"):
     print(f"[e2e] cancel round: SSE events={sse_stats['events']} "
           f"phases={sse_stats['transitions']}")
     return {"ok": ok, "status": st, "duration_s": dur,
+            "upload_mbps": upload_mbps,
             "entered_at_cancel": entered, "job_id": job_id,
             "sse_events": sse_stats["events"], "sse_phases": phases}
 
