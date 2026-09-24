@@ -75,9 +75,11 @@
                 </button>
                 {% endif %}
                 {% if status in ['review', 'partial_review', 'done'] %}
-                <a href="/api/jobs/{{ job_id }}/report.md"
+                {# round-61：改为站内报告查看页（裸链 .md 端点会脱离外壳、无法返回）；
+                   .md API 端点保留供 e2e/集成测试断言 #}
+                <a href="/jobs/{{ job_id }}/report"
                    class="btn-press focus-ring text-[12px] text-muted-foreground hover:text-foreground">
-                    下载报告
+                    查看报告
                 </a>
                 {% endif %}
                 <a href="/settings"

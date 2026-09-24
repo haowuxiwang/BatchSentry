@@ -7,6 +7,42 @@
 
 ## [Unreleased]
 
+### v1.2.1 — 报告查看页与优雅返回（Round 61，2026-09-24）
+
+> **问题**：主流程复核页点"下载报告"后浏览器直接导航到裸 Markdown 端点
+> （`/api/jobs/{id}/report.md`），脱离站点外壳（顶栏消失），只能靠浏览器
+> 后退返回。**本轮**：下载入口改为站内"查看报告"页（SSR 渲染 + 顶栏
+> "← 返回复核 / 设置 / 首页"优雅返回），`.md` API 端点保留（e2e 与下游
+> 消费者契约不变）。零新依赖（便携包离线分发，不引入 markdown 库）。
+
+**Added**
+
+- 页面路由 `GET /jobs/{job_id}/report`（`main.py::report_page`）：未知
+  job 404；非终态（仍在跑/出错/取消）303 回复核页；终态（review /
+  partial_review / done）SSR 渲染报告。md 内容与 `.md` 端点共用同一缓存
+  函数（`_generate_report_md_cached`，复核状态变化自动失效），不走第二套
+  生成逻辑。
+- `templates/report.html`：与 review 页同构顶栏（job 身份 + 状态点 +
+  优雅返回按钮组），单栏阅读版式，打印样式（`@media print` 去外壳约束）。
+- `core/md_render.py`：零依赖 md→HTML 渲染器（标题/两级嵌套列表/粗体/
+  行内代码/hr 子集）。**安全模型**：信任生成端 `esc()` 前置转义，实体
+  原样透传；超子集输入（表格/引用块等）按段落降级，永不抛错。
+
+**Changed**
+
+- `templates/review.html`：顶栏按钮"下载报告"→"查看报告"，链接指向
+  站内页 `/jobs/{id}/report`；状态门（review/partial_review/done）不变。
+
+**Tests**
+
+- 单测 `tests/unit/test_md_render.py` 37 条（子集精确断言 + 实体透传
+  安全模型 + 真实报告片段端到端；变异验证 CAUGHT：删粗体处理 → 5 红）。
+- 集成 `tests/integration/test_report_page.py` 19 条（路由状态机 ×
+  参数化 / 优雅返回按钮 / 内容渲染 / review 入口替换完整性 / `.md`
+  端点契约保留；变异验证 CAUGHT：拆掉非终态重定向 → 5 红）。
+- 版本一致性机检 4 条通过（APP_VERSION / package.json / package-lock
+  双处）。
+
 ### 分发就绪 **W2 收尾**（2026-09-24 — 重建 + 新 key e2e + 门禁 10/11 绿）
 
 > W2 批次重建为 **Electron 43.7.4 便携包**（475.1 MB，`dist-electron/win-unpacked`），

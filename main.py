@@ -1,4 +1,4 @@
-﻿"""BatchSentry — FastAPI entry point."""
+"""BatchSentry — FastAPI entry point."""
 import logging
 import sys
 from contextlib import asynccontextmanager
@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.responses import HTMLResponse, FileResponse, RedirectResponse
 from markupsafe import Markup
 
 from config import config, UPLOAD_LIMITS
@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 # Application version — single source of truth.
 # Avoids duplicate hardcoded "1.1.0" in FastAPI(app=...) and /health endpoint.
 # 与 package.json 的 version 必须一致（tests/unit/test_version_consistency.py 机检）。
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.2.1"
 
 
 # Phase 5B: resolve resource paths under both dev and PyInstaller frozen mode.
@@ -921,6 +921,43 @@ async def review_page(job_id: str, request: Request, page: int = 1):
             zh_ocr_backend(job["ocr_backend_used"])
             if ("ocr_backend_used" in job.keys() and job["ocr_backend_used"]) else None
         ),
+    })
+
+
+@app.get("/jobs/{job_id}/report", response_class=HTMLResponse)
+async def report_page(job_id: str, request: Request):
+    """报告查看页（round-61）：站内渲染 Markdown 报告 + 优雅返回。
+
+    旧入口是复核页的"下载报告"裸链 `/api/jobs/{id}/report.md` —— 浏览器
+    直接导航到纯文本端点，脱离站点外壳（顶栏消失），只能靠浏览器后退。
+    本页把同一份 md（同一缓存函数，不走第二套生成逻辑）经 core.md_render
+    渲染在站内外壳里，顶栏提供"返回复核 / 首页 / 设置"。
+
+    安全模型：`_generate_report_md_cached` 的 esc() 已把 HTML 与 md 元字符
+    转为实体，md_render 只在其上包结构性标签 —— Markup 免转义注入的前提
+    与 render_page_links 相同（先转义后注入，见该函数注释）。
+    """
+    db = await get_db()
+    cursor = await db.execute("SELECT * FROM jobs WHERE id = ?", (job_id,))
+    job = await cursor.fetchone()
+    if not job:
+        raise HTTPException(404, "任务不存在")
+
+    # 非终态（仍在跑/出错/取消）没有可看的报告 —— 回复核页看进度/原因
+    if job["status"] not in ("review", "partial_review", "done"):
+        return RedirectResponse(f"/jobs/{job_id}/review", status_code=303)
+
+    # 与 /api/jobs/{id}/report.md 同一份缓存（复核状态变化自动失效）
+    from api.report import _generate_report_md_cached
+    from core.md_render import md_to_html
+    md = await _generate_report_md_cached(job_id)
+
+    return templates.TemplateResponse(request, "report.html", {
+        "job_id": job_id,
+        "filename": job["filename"],
+        "status": job["status"],
+        "status_dot_class": status_dot_class(job["status"]),
+        "report_html": Markup(md_to_html(md)),
     })
 
 
