@@ -398,7 +398,7 @@ The probe does NOT submit real OCR/LLM work — it just verifies auth + connecti
 > round-30 补记：仓库根目录一度堆到 **8 个 `dist-electron-*`**（≈2.9 GB）。**定位结论与表象不同**——它们**全部**已被 `.gitignore` 覆盖、**从未入库**（`git log --diff-filter=A` 为空，`.git` 内最大 blob 仍是 554 KB 的发布说明 PDF），所以"仓库被污染"是**误判**；真正的问题是 **(a)** 磁盘堆积无人收敛、**(b)** **规则与忽略清单不一致**（规则 2 让 agent 归档到 `release-archive/`，而忽略清单里没有它）。因此本节新增的第 7–8 条盯的是"**规则自身闭合**"，不是加审批。
 
 1. **产物唯一入口**：可分发包只有 `dist-electron/win-unpacked/`。任何 `dist-electron-*` 变体都是过程产物或历史留存，**不是分发候选**；宣称"可分发"必须指向标准路径（或带 PROVENANCE.txt 的变体）。
-2. **变体必须带出身**：build.ps1 自愈到备用目录且归位失败时自动写 `PROVENANCE.txt`（HEAD/时间/版本/验证命令/清理命令）。人为留存历史版本 → 打包 zip 到 `release-archive/`（命名含版本+日期），不散放目录。
+2. **变体必须带出身**：build.ps1 **无条件**写 `PROVENANCE.txt`（HEAD/时间/版本/验证命令/清理命令，内容区分 standard/fallback 出处——round-60 修复"只在备用目录写"导致的契约断裂：标准路径产物永远被判残壳、`runtime_eol` 恒 SKIP）。人为留存历史版本 → 打包 zip 到 `release-archive/`（命名含版本+日期），不散放目录。
 3. **dist 收敛**：会话中产生/发现多余 dist* 目录时，收尾跑 `python scripts/clean_dist.py`（先 dry-run；`--apply` 走回收站）。它保留"最新且完整"的一个 + `dist/`（PyInstaller 输出是 electron-builder 的输入，不可删）。
 4. **版本提升原子性**：`main.APP_VERSION` / `package.json` / `package-lock.json` / CHANGELOG 必须同一提交改齐（`test_version_consistency.py` 机检）。**禁止在 WIP 里提前 bump 版本** —— 版本号只属于发布提交；门禁红了只允许"修完再发"，不允许跳过。
 5. **WIP 隔日必收敛**：未提交改动过夜 → 下次会话开工先 `git status`，读懂 WIP 再决定"续作收尾 / 拆分提交"，**不在 WIP 上叠加无关新需求**；提交前跑 `python scripts/release_gate.py --skip-tests`（秒级结构检查，含 worktree_clean）。
