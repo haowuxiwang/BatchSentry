@@ -145,6 +145,23 @@
 
 **Fixed（真缺陷）**
 
+- 🔴 **测试里的「模块名 + 冒号 + 行号」指路会静默腐坏**。拆分后 `tests/` 留下 5 处
+  行号锚点（`settings.js:990`、`upload.js:397`、`review.js:343` 这类形态），指向的行
+  早已换了内容 —— 而注释不参与执行、`grep` 不报错、门禁也看不见。**R63 拆 `review.js`
+  时同样腐坏过一批**，说明这是会复发的类别，不是一次性疏漏。
+  修法：① 5 处改为**符号引用**（`upload-jobs.js` 的 `buildMetaLine` / `renderJobRow`、
+  `review-pageinfo.js` 的 `updatePageLevelUI`、`review.js` 里那句
+  `R.safeAutoReload = R.progress.safeAutoReload` 赋值）；② 新增护栏
+  `tests/unit/test_repo_hygiene.py::TestNoLineNumberRefsIntoFrontend`（5 条）。
+  · **只扫 `tests/`** —— `docs/` 里的行号是**历史审查证据**（`docs/ADVERSARIAL_AUDIT.md`
+    记的是 2026-09-16 的事实），回改等于篡改证据；测试是**可执行契约**，应引用符号。
+  · 排除 **URL/端口**：判定看**本行**匹配点之前有没有 `://`。首版写成"匹配点前 12 字符"
+    ⇒ 实测两条 URL 用例全红（`://` 在 12 字符之外）。
+  · ⚠️ 护栏**自己**也受这条约束：说明文字与夹具都不得写出字面量形态
+    （夹具用 `"upload-jobs.js" + ":" + "518"` 拼接）—— 首轮实测就因注释里写了字面量
+    而**自我命中 3 条红**。
+  · 变异 `devlogs/_verify/mutation_line_ref_guard.py`：**7/7 CAUGHT**
+    （含"只植入 URL 端口**不得**报"的阴性对照）。
 - 🔴 **产物出处 `git_head` 为空时全链路静默绿灯**。`build.ps1` 用
   `try { & git rev-parse --short HEAD } catch {}` 取 HEAD，**异常被吞**；在 git 不可解析的
   宿主上写出的是 `git_head: `（**空值**）—— 而 `release_gate.count_complete_artifacts`
@@ -173,6 +190,8 @@
   变异 `devlogs/_verify/mutation_provenance_git_head.py` **10/10 CAUGHT**
   （其中 M2 首轮 MISSED 是**真断言缺口**：真值护栏只断言「判定函数说不是 empty」⇒
   判定函数一宽松就跟着瞎；修法是**独立于判定函数再查一遍原始字节**）。
+- 行号引用护栏：`tests/unit/test_repo_hygiene.py` **39 passed**（原 34 + 新增 5），
+  受影响四文件合计 **84 passed**；变异 `mutation_line_ref_guard.py` **7/7 CAUGHT**。
 - `bundle_manifest`：`version=1.2.1 files=116`（拆分前 111，+5 个新模块），
   `--check` 报「产物新鲜：清单与源码/产物逐字节一致」。
 
