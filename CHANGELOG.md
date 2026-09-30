@@ -42,7 +42,20 @@
 
 - `#144` 又动 `core/` ⇒ 按 `docs/ADVERSARIAL_REVIEW_2026-09-30.md` §5.2 的规矩，上一批的门禁
   结论对本树失效：重建两份产物（PyInstaller → `bundle_manifest --write/--check` →
-  electron-builder → `gen_provenance.py`）并重跑门禁，结论见报告 §5.2 / §11.5。
+  electron-builder → `gen_provenance.py`，四步全绿）并重跑门禁 ⇒
+  **`overall=pass`、11/11、3889 passed / 0 failed、coverage 95.09%**
+  （`devlogs/gate_report_20260930_134900.json`，树 `7d53aed`）。
+  对账：`3883 + 6 = 3889`，那 6 条即本批用例。
+- ⚠️ 构建时工作区是脏的（docs 未提交）⇒ 清单落 `dirty=True`。docs 不在入包集合里，
+  提交后**重跑了一次 `--write`** 把它转成 `False`。**`--write` 是断言、不是证据**
+  （它在当下计算，构建后再跑不可能与构建矛盾）；结论只引用 `--check`
+  —— 两份产物**逐字节一致**。详见报告 §11.5。
+
+**Docs**
+
+- `#144` 条目尾注曾写「见 §0 的 0-6」，而 **0-6 行并不存在** ⇒ **悬空引用**
+  （F1/F2 同类缺陷，由本批修复自身引入）。已补上 **0-6**（job 级 `error_kind` 列），
+  并登记 **0-7**（给 `§N 的 M-K` 交叉引用加解析护栏 —— 目前无此护栏）。见报告 §11.6。
 
 ### 错误文案脱敏 + 产物重建 + 门禁复绿（Round 66 第四批，2026-09-30）
 

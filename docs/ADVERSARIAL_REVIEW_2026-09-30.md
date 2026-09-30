@@ -15,7 +15,7 @@
 | 上一轮（R65）完成情况 | **已完成**。6 个提交 `11e8e03`…`28bda0d`，工作区干净 |
 | 是否做了多次端到端测试 | **做了，但只有两层**：`e2e_frozen` 今日 2 次、`e2e_unpacked` 多次 —— **后者每次都崩**（见 §三） |
 | 应用边界有无界定 | **有，且分层清晰**；但**分散在 4 份文档**，且"未验证边界"此前只活在 agent 记忆里 → 本轮补进 `docs/TODO.md` §0 |
-| 测试情况 | 门禁 **11/11 pass**（`overall=pass`）、**3879 passed / 0 failed**、覆盖率 **95.09%**（门禁 95%）—— 在最终 HEAD `2787f29` 上跑出，逐树对照见 §5.2 |
+| 测试情况 | 门禁 **11/11 pass**（`overall=pass`）、**3889 passed / 0 failed**、覆盖率 **95.09%**（门禁 95%）—— 在最终 HEAD `7d53aed` 上跑出，逐树对照见 §5.2 |
 | 前后端是否模块化 / 单一职责 | **是**。前端两轮大文件拆分已完成（`review.js` R63、`settings.js` R65）；后端 68 文件 24.9K 行、无神模块 |
 | 可维护性 | **强**。测试 63,009 行 vs 生产 34,928 行 ≈ **1.8 : 1**；门禁 11 项全自动 |
 | 仓库卫生 | **好**。375 个跟踪文件，工作区干净，`.gitignore` 有解释性注释且被机检锁定 |
@@ -121,14 +121,19 @@ $ git status --porcelain
 | **R66 终验（12:10）** | **`dd33330`** | **3875** | **0 failed** | `gate_report_20260930_121027.json` |
 | **R66 第三批终验（12:43）** | **`2787f29`** | **3879** | **0 failed** | `gate_report_20260930_124300.json` |
 | **R66 第四批终验（13:07）** | **`8d5848d`** | **3883** | **0 failed** | `gate_report_20260930_130757.json` |
+| **R66 第五批终验（13:49）** | **`7d53aed`** | **3889** | **0 failed** | `gate_report_20260930_134900.json` |
+
+**第四段对账**：`3883 → 3889` = **+6**，正是 §11.4 新增的 6 条用例
+（`test_sliced_path_escalates_config_error` 1 条 + `TestSlicedPathSharesConfigErrorContract` 5 条）
+⇒ **数字自洽**。
 
 **第三段对账**：`3879 → 3883` = **+4**，正是 F5 新增的 4 条用例
 （`TestPageLevelErrorTextIsSanitized`）⇒ **数字自洽**。
 
-⚠️ **第四批与前三批有一处结构性差别：它改了 `core/` 字节**（前三批全是 docs/tests）。
-`artifact_freshness` 是**逐字节**比对源码与产物副本 ⇒ 改完 `core/pipeline/stage2.py`
-该项立刻转红（`bundle_manifest.py --check` 实测：`1 个源文件与清单不符`）。
-⇒ 必须**重建产物**才能复绿 —— 见 §十一。**这正是前三批能靠"docs-only"免于复跑、本批不能的原因。**
+⚠️ **第四、五批与前三批有一处结构性差别：它们改了 `core/` 字节**（前三批全是 docs/tests）。
+`artifact_freshness` 是**逐字节**比对源码与产物副本 ⇒ 改完 `core/pipeline/stage2.py`（第四批）
+或 `core/pipeline/engine.py`（第五批）该项立刻转红。⇒ 必须**重建产物**才能复绿 ——
+见 §十一。**这正是前三批能靠"docs-only"免于复跑、后两批不能的原因。**
 
 **第二段对账**：`3875 → 3879` = **+4**，正是 §十 新增的 4 条用例
 （`TestCheckoffLedger` 2 条 + `TestNoDeadFrontendAnchors` 2 条）⇒ **数字自洽**。
@@ -143,22 +148,25 @@ $ git status --porcelain
 最终结果：
 
 ```
-$ python scripts/release_gate.py          # 工作区干净，HEAD = dd33330
+$ python scripts/release_gate.py          # 工作区干净，HEAD = 7d53aed（R66 第五批）
 [PASS] worktree_clean   工作区干净
 [PASS] no_build_outputs 378 个已跟踪文件中无构建产物
 [PASS] dist_variants    1 份完整产物（dist-electron）
-[PASS] artifact_freshness 2 份产物与源码逐字节一致
+[PASS] artifact_freshness 2 份产物与源码逐字节一致（dist/pbc-server, dist-electron/win-unpacked/resources/pbc-server）
 [PASS] packaging_files  5 个前置文件就位
 [PASS] rules_wired      29 个 _check_* 规则函数（下限 14）
-[PASS] kb_corpus        知识库 441 条（下限 200）
+[PASS] kb_corpus        知识库 441 条（另有章节标题元数据 36 条，无正文且检索器不索引，不计入）（下限 200）
 [PASS] kb_packaging     6 个 KB 源经 core/kb/data glob 自动入包
 [PASS] dependency_vulns 0 条公告（快照 6 天前，扫描 43 个条目）
 [PASS] runtime_eol      在支持线 [41, 42, 43] 内：dist-electron: Electron/43.7.4
-[PASS] tests_coverage   3875 passed, 0 failed, coverage=95.09% (门禁 95%)
+[PASS] tests_coverage   3889 passed, 0 failed, coverage=95.09% (门禁 95%)
 
 OVERALL: pass  (pass=11 fail=0 warn=0 skip=0)
-报告: devlogs/gate_report_20260930_121027.json
+报告: devlogs/gate_report_20260930_134900.json
 ```
+
+> 上面这份是**最新一次**全量门禁（第五批树）。历史各树的逐项输出在各自的
+> `devlogs/gate_report_*.json` 里；**别把这里的数字当成别的树的结论**。
 
 ⚠️ **`worktree_clean` 是 11 项里的第 1 项**，它在 pytest 之前跑 —— 所以门禁结果
 对**当时那一份字节**有效；跑完门禁后若再改任何文件，该结论即失效，须重跑。
@@ -617,3 +625,43 @@ shim 只在 `CODEBUDDY_SAFE_DELETE_BULK_STATE_DIR` + `CODEBUDDY_TOOL_CALL_ID` �
 
 **定向回归**：`test_pipeline.py` + `test_config_error_visibility.py` +
 `test_import_graph_contract.py` + `test_config_import_order_contract.py` ⇒ **167 passed**。
+
+### 11.5 第五批：产物重建 + 门禁复跑（`7d53aed`）
+
+`#144` **又动了 `core/` 字节**（`core/pipeline/engine.py`）⇒ 按 §5.2 的终止规则，
+上一批的门禁结论**对本树失效**，必须重跑；且 `artifact_freshness` 需先重建产物。
+
+**重建**（与 §11.2 同一链条，四步全绿）：
+
+```
+1/4 PyInstaller                        Build complete! → dist
+2/4 bundle_manifest --write/--check    files=116，逐字节一致
+3/4 electron-builder --win --x64       OK
+4/4 gen_provenance.py                  git_head=172957c BOM=True crlf=11 lf=0
+```
+
+⚠️ **一次刻意的"重盖章"，必须写清楚**：构建时工作区**是脏的**（三份 docs 未提交），
+故清单落的是 `dirty=True`。docs 不在入包集合里，这个标记是噪音 ⇒ 提交 docs 之后
+**重跑了一次 `--write`**，`dirty` 转为 `False`。
+
+> **`--write` 是断言，不是证据。** 它在**当下**计算清单，所以构建之后再跑，它**不可能**
+> 与构建相互矛盾 —— `git_dirty=False` 从此是**我们的声明**，不再是构建的观测。
+> 真正可验证、也真正要紧的那部分是**入包文件的逐字节一致性**，而那由 **`--check`** 给出
+> （两份产物都过）。⇒ 结论只应引用 `--check`；`dirty` 字段须按"声明"读，不得当作
+> "构建跑在干净树上"的证据。
+
+**门禁复跑（13:49，`7d53aed`）**：`overall=pass`、**11/11**、**3889 passed / 0 failed**、
+coverage **95.09%**（`devlogs/gate_report_20260930_134900.json`）。
+对账：`3883 + 6 = 3889`，那 6 条正是 §11.4 的用例。
+
+### 11.6 本批（第五批）暴露的自身缺陷：一处**悬空引用**
+
+`#144` 的条目尾注写「仍开放，见 §0 的 0-6」，而 **§0 表里没有 0-6 这一行** ——
+引用指向不存在的行。**没有任何用例变红**，因为"看起来像引用"的文字不会被机检拦下。
+
+这**正是本轮 F1/F2 的同一类缺陷**（文档与事实脱节），而且**由本轮自己的修复引入**。
+已就地补上 0-6 行（job 级 `error_kind` 列，即 `#144` 条目所称"更稳的做法"）。
+
+⚠️ **这一类目前没有护栏**：`test_todo_freshness.py` 只锁"核销台账 1:1"与
+"无失效行号锚点"，**不检查 `§N 的 M-K` 形式的交叉引用能否解析到真实条目**。
+⇒ 已登记 **0-7**（给交叉引用加解析护栏）。
