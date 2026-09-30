@@ -54,6 +54,10 @@
   **+9 条**正是本轮两个新护栏（5+4），**2 条红**正是上面两条已修项。
   ⚠️ `worktree_clean` 是 11 项里的**第 1 项**、先于 pytest 跑 ⇒ 门禁结论只对**当时那份字节**有效，
   跑完再改文件即失效、须重跑。
+- **待办核销批的门禁已在提交 `2787f29` 上重跑：`overall=pass`、`pass=11 fail=0 warn=0`、
+  `tests_coverage` = 3879 passed / 0 failed / coverage 95.09%**
+  （`devlogs/gate_report_20260930_124300.json`）。与 `dd33330` 的 3875 对账：
+  **+4** 正是本批新增的 4 条用例（`TestCheckoffLedger` 2 + `TestNoDeadFrontendAnchors` 2）。
 - 本地 `main` 领先 `origin/main` **9 个提交**（截至 HEAD `dd33330`）—— **尚未推送**。
   ⚠️ 该数是**快照**、每提交 +1；**取当前值请运行** `git rev-list --left-right --count origin/main...HEAD`，
   不要引用本文里的数字（"文档复述会变的代码事实"正是本轮 F1/F2 的病根）。
