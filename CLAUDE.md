@@ -111,18 +111,31 @@ pytest
 #    scope:turn}` → SystemExit(1) inside a test's cleanup → "1 failed, 2800 passed".
 #    Decisive evidence (2026-09-20): same code, only this env change → 2803 passed /
 #    0 failed. The env var name is CODEBUDDY_SAFE_DELETE_BULK_THRESHOLD — verified in
-#    the shim source (`cli/vendor/shim/safe-delete-bulk-guard.cjs`). The older docs'
+#    the shim source (`cli/vendor/shim/safe-delete-bulk-guard.cjs`). ⚠️ 该路径**不在本仓库**
+#    （本树没有 `cli/`，它是宿主 WorkBuddy 的安装目录）—— 别在仓库里找它。
+#    The older docs'
 #    `BULK_THRESHOLD` is NOT a real variable name. Raising the threshold keeps
 #    safe-delete ON (deletes still go to the recycle bin); it only removes the
 #    per-turn tripwire. `release_gate.py` injects it into its own pytest child
 #    automatically, so the gate can no longer false-red for this reason.
+#    ⚠️ 两个**不同**的旋钮，别混（R66 更正）：`CODEBUDDY_SAFE_DELETE_BULK_THRESHOLD`
+#    = 抬高阈值、**安全网仍开**（删除仍进回收站）—— 本仓库的既定做法，`release_gate.py`
+#    走的就是它（见该文件 `SANDBOX_BULK_DELETE_THRESHOLD` 与 `run_all` 的 env 注入）；
+#    `CODEBUDDY_SAFE_DELETE_ENABLED=0` = **整个关掉**垫片（删除不再进回收站）—— 更钝，
+#    只在 PyInstaller/清理这类命令里用。**别再把它写成"唯一开关"。**
 CODEBUDDY_SAFE_DELETE_BULK_THRESHOLD=100000 \
   "$PY" -m pytest tests/unit tests/integration -o addopts="" -q -p no:cacheprovider
 
 # Release gate (packaging signal) — offline; THE authoritative check
 # structure checks + tests + coverage; writes devlogs/gate_report_<ts>.json
-# 9 items: worktree_clean / no_build_outputs / dist_variants / artifact_freshness /
-#          packaging_files / rules_wired / kb_corpus / kb_packaging / tests_coverage
+# 11 items = 10 structural + tests_coverage, listed in `run_all()` order:
+#   worktree_clean / no_build_outputs / dist_variants / artifact_freshness /
+#   packaging_files / rules_wired / kb_corpus / kb_packaging /
+#   dependency_vulns / runtime_eol / tests_coverage
+# ⚠️ 本清单必须与 `scripts/release_gate.py::run_all()` 逐项一致 —— 机检见
+#    `tests/unit/test_gate_inventory_doc.py`。此前这里写成 "9 items"，把
+#    `dependency_vulns` 与 `runtime_eol`（B11-2 加的供应链/运行时检查）漏了，
+#    而这两项正是 Round 58 查出 50 条公告 / Electron EOL 的那两项。
 python scripts/release_gate.py                 # full
 python scripts/release_gate.py --skip-tests    # structure checks only (seconds)
 

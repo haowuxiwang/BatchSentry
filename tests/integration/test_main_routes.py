@@ -179,29 +179,45 @@ class TestServePdf:
         assert r.status_code == 404
 
     @pytest.mark.asyncio
-    async def test_pdf_non_local_host_returns_403(self, test_db, test_client):
+    async def test_pdf_non_local_host_returns_403(self, test_db, test_client, tmp_path):
         """对抗审查 P1 回归：serve_pdf 是最后一个无守卫的读端点。
 
         最敏感资产（原始 PDF）此前是唯一没有 is_local_request 守卫的
         GET 读端点，与"所有读端点统一守卫"策略不一致。
+
+        ⚠️ **fixture 放在 `tmp_path`（生命周期交给 pytest），且用例内不再显式 `unlink`。**
+        原因（2026-09-30 R66 定位）：沙箱的 safe-delete 垫片把删除路由到回收站，
+        回收站不可用时抛 `SAFE_DELETE_FAIL_CLOSED`（实测两个方向都出现过：
+        `...\\output\\guard_probe.pdf` 的 `SHFileOperationW 失败: 0x2`，以及
+        `%TEMP%\\pytest-of-*\\garbage-*` 的 `[Errno 53] 找不到网络路径`）。
+        **显式 `unlink` 会让这个 OSError 逃出 `finally`，把已经断言通过的用例判红**；
+        而 `tmp_path` 的清理由 pytest 负责，它对同类失败**只记 warning、不判红**
+        （见上面的 `PytestWarning: (rm_rf) error removing ...`）。
+        实测全量跑复现、单独跑与整文件跑**都不复现**（顺序相关）⇒
+        **触发条件未完全定位**，但"不显式删、交给 pytest"整体移除了这个失败模式。
+
+        ⚠️ **并且断言 403 的「理由」**：host 守卫在 `main.py::serve_pdf` 里**先于**
+        路径守卫（`is_local_request` 在 DB 查询与 `relative_to(output_root)` 之前）。
+        只断言状态码的话，将来顺序一变就会"因为路径越界而 403" ——
+        **测了 A、得到 B**，而状态码完全相同、看不出来。
         """
-        output_dir = Path("output")
-        output_dir.mkdir(parents=True, exist_ok=True)
-        pdf_path = output_dir / "guard_probe.pdf"
+        pdf_path = tmp_path / "guard_probe.pdf"
         pdf_path.write_bytes(b"%PDF-1.4\n")
-        try:
-            await test_db.execute(
-                "INSERT INTO jobs (id, filename, pdf_path, status, total_pages) "
-                "VALUES (?, ?, ?, ?, ?)",
-                ("guarded-pdf", "g.pdf", str(pdf_path.resolve()), "review", 1),
-            )
-            await test_db.commit()
-            r = await test_client.get(
-                "/api/jobs/guarded-pdf/pdf", headers={"Host": "evil.com:80"}
-            )
-            assert r.status_code == 403
-        finally:
-            pdf_path.unlink(missing_ok=True)
+        await test_db.execute(
+            "INSERT INTO jobs (id, filename, pdf_path, status, total_pages) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("guarded-pdf", "g.pdf", str(pdf_path.resolve()), "review", 1),
+        )
+        await test_db.commit()
+        r = await test_client.get(
+            "/api/jobs/guarded-pdf/pdf", headers={"Host": "evil.com:80"}
+        )
+        assert r.status_code == 403
+        # 必须是被 **host 守卫** 挡下的，而不是路径越界守卫（两者都是 403）
+        assert "non-local" in r.text, (
+            f"403 的理由不是 host 守卫，实际响应：{r.text[:200]!r} —— "
+            "该用例可能因别的原因通过（空断言）"
+        )
 
     @pytest.mark.asyncio
     async def test_pdf_path_traversal_blocked(self, test_db, test_client):

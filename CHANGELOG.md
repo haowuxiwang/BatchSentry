@@ -7,6 +7,42 @@
 
 ## [Unreleased]
 
+### 文档契约护栏 + 待办清单复核（Round 66，2026-09-30）
+
+> 本轮的**发现方式**是"文档 vs 代码/事实"：三条缺陷都不是功能 bug，而是**文档与事实脱节**
+> —— 它们不会让任何用例变红，只能靠人工比对发现。报告 → `docs/ADVERSARIAL_REVIEW_2026-09-30.md`。
+
+**Fixed**
+
+- `CLAUDE.md` 的 release gate 清单写成 **"9 items"**，实际 `run_all()` 跑 **11** 项 ——
+  漏掉 `dependency_vulns` 与 `runtime_eol`（B11-2 加的供应链 / 运行时检查，**正是 Round 58
+  查出 50 条公告与 Electron EOL 的那两项**）。已补全为 11 项，并注明必须与 `run_all()` 一致。
+- `CLAUDE.md` 提到的垫片源码路径 `cli/vendor/shim/safe-delete-bulk-guard.cjs` **不在本仓库**
+  （本树无 `cli/`），已注明它是宿主路径；并澄清两个**不同**旋钮：
+  `CODEBUDDY_SAFE_DELETE_BULK_THRESHOLD`（抬阈值、**安全网仍开**，`release_gate.py` 走的就是它）
+  vs `CODEBUDDY_SAFE_DELETE_ENABLED=0`（**整个关掉**垫片）。
+- `docs/TODO.md` 头部自称"唯一且最新的待办清单"**是错的**：它停在 Round 59 而 `CHANGELOG.md`
+  已到 Round 65；含"自述已解除却仍是 `[ ]`"的条目（`A4`、`#162`）；且仍含 `settings.js:46`
+  这类**拆分后已失效**的行号锚点。已更正头部、加**复核戳**、新增 **§0 实核 backlog**，
+  并明确标注 §A 及以下为**未复核快照**。
+
+**Added**
+
+- `tests/unit/test_gate_inventory_doc.py`（5 条）—— 机检 `CLAUDE.md` gate 清单 ↔
+  `release_gate.py::run_all()`：条数一致、`CheckResult` 名字不漏、调用点无悬空。
+- `tests/unit/test_todo_freshness.py`（4 条）—— 机检 `docs/TODO.md` 复核戳不得落后于
+  `CHANGELOG.md` 的最新 Round，且"未复核"免责声明不得被删。
+- `devlogs/_verify/mutation_doc_contract_guards.py` —— **9/9**（7 条变异全被抓 + 2 条阴性对照保持绿）。
+  ⚠️ 首版用进程内 `pytest.main()`，**基线即红**：同名测试模块跨临时目录被再次导入，触发 pytest
+  `import file mismatch`、rc=2 —— 而 rc≠0 会被误读成"变异被抓"，即**假的 100%**。
+  已改为**每例一个子进程** + **退出码严格分诊**（只有 rc==1 算 CAUGHT，rc==2 记 INVALID）。
+
+**Notes**
+
+- 本地 `main` 领先 `origin/main` **8 个提交**（截至 HEAD `28bda0d`）—— **尚未推送**。
+- Electron 应用层 e2e 在本 agent 环境**仍取不到证据**（沙箱内 Chromium GPU 崩溃，
+  `exitCode=0x80000003`）；**不得读成已通过**，须在真实终端复跑。
+
 ### 对抗性审查批次 + 重打包验收（Round 62–64，2026-09-30）
 
 > 本批次对应两份审查记录：`docs/ADVERSARIAL_REVIEW_2026-09-28.md`（FIX-1..FIX-11）
