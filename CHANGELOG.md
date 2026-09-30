@@ -103,6 +103,87 @@
   ⇒ 须在**非沙箱**终端复跑，而不是加开关。
 - **他机验证 / 判定准确性 / 精度召回** 的口径同 v1.1.9 基线，未变化（见 `DEPLOYMENT.md`）。
 
+### `settings.js` 全量拆分 + 产物出处护栏（Round 65，2026-09-30）
+
+> 承接 `docs/ADVERSARIAL_REVIEW_2026-09-28.md` §维度 4 的既定计划：`static/settings.js`
+> 是**单个 IIFE 闭包、1861 行 / 77.6 KB（CRLF + BOM）**，一处改动的风险面覆盖整页。
+> 本轮按计划全量拆为 6 个模块并重打包。**无行为变更**：渲染逻辑逐行保持，只做文件
+> 组织与状态宿主收敛。
+
+**Added**
+
+- `static/settings-state.js`（104 行）—— settings 页共享状态的**唯一宿主**，与
+  `review-state.js` 同款 `window.PbcSettings` 命名空间模式；`current` / `activeProvider` /
+  `pendingAdds` / `removedProviders` 收进 `S.state`，纯工具（`log` / `display` / `esc` /
+  `statusBadge` / `ocrDisplay` / `showBackendForm` / `BUILTIN` / `DISPLAY_NAMES` /
+  `OCR_DISPLAY`）经 `Object.assign` 导出。
+- `static/settings-llm.js`（460 行）/ `settings-ocr.js`（466）/ `settings-feishu.js`（267）/
+  `settings-rules.js`（330）—— 按职责拆出。入口**保留原文件名** `static/settings.js`
+  （339 行，模板/清单/测试均引用它），只做事件接线 + 底部「保存全部/测试连接」，
+  末尾 `S.load()` 启动初始渲染。
+- `tests/unit/test_settings_js_modules.py`（11 条）—— 三组结构护栏：**加载顺序**
+  （模板引全 / 无孤儿 / 依赖序 / state 最先 / 入口最后）、**状态宿主唯一性**
+  （他人不得自建同名变量、消费方真的走 `S.state.`）、**命名空间契约**
+  （每模块绑定 `window.PbcSettings`、导出非空、每个 `S.<fn>(` 调用都对应真实导出）。
+- `tests/e2e_frozen.py` 新增两条**产物级**检查：`settings_modules_served`（6 个模块都必须
+  能从**打包产物**取到且非空）+ `settings_entry_calls_load`（入口必须真的调用
+  `S.load();`，不能只查 `load()` —— 文件头注释里也有该词，那是空断言）。
+- `tests/e2e_proc.py`：`classify_provenance_git_head()` 纯函数（`ok` / `missing` / `empty`）；
+  `tests/unit/test_provenance_git_head.py`（19 条）配套护栏。
+
+**Changed**
+
+- `templates/settings.html`：脚本块按**依赖序**加载（`settings-state.js` 最先、
+  `settings.js` 最后），附顺序说明与护栏指向。
+- `tests/js_harness.py`：新增 `js_sources(*patterns)` —— 取「整页源码面」。**口径类断言
+  （限额字面量、端点名、共享常量）不得锚在单个文件上**，否则一次拆分/改名就静默失效
+  （本仓已两次踩到「锚错文件」）。pattern 打错时 `assert files` **立刻红**，不退化空断言；
+  按 `utf-8-sig` 读，防 BOM 污染行首锚点。
+- `tests/unit/test_settings_js.py`、`test_settings_auto_activate.py`、`test_kb_multisource.py`：
+  7 处文本锚点解耦为 `js_sources("settings*.js")`；两条状态名锚点改为容忍
+  `(?:S\.state\.)?` 前缀（它们是**调用点**断言，不是字面量相等）。
+
+**Fixed（真缺陷）**
+
+- 🔴 **产物出处 `git_head` 为空时全链路静默绿灯**。`build.ps1` 用
+  `try { & git rev-parse --short HEAD } catch {}` 取 HEAD，**异常被吞**；在 git 不可解析的
+  宿主上写出的是 `git_head: `（**空值**）—— 而 `release_gate.count_complete_artifacts`
+  只查该文件**存在**、`e2e_unpacked` 的 D2 只比对 `version`，于是「唯一产物能自证出处」
+  这条写在注释里的契约**没有任何东西守着**。本轮 agent 环境的 PowerShell 宿主正好
+  git 不可解析 ⇒ 直接复现。修法：新增纯函数判定 + `e2e_unpacked` 的 **D2b** 具名检查。
+  ⚠️ 判据**只要求非空**，不要求等于当前 HEAD —— PROVENANCE 是**构建期**写的，而构建
+  通常发生在提交**之前**（本次拆分即：先打包后 commit，产物里是父提交）⇒ 用相等判会假红。
+
+**拆分正确性的三条改写规则（实测得出，别凭直觉）**
+
+1. **不可变**的纯工具/常量 → 模块顶部解构（调用点零改动）；
+2. **可变**状态 → 一律 `S.state.<name>` 属性访问。**解构别名会在重赋值后变陈旧**
+   （实测 `current` 39 处、`activeProvider` 20、`pendingAdds` 15、`removedProviders` 7）；
+3. **跨模块函数** → `S.<fn>(...)` 属性查找在**调用期**解析 ⇒ 即便存在 ocr↔feishu、
+   ocr↔rules 循环依赖也成立，加载顺序只需「state 最先、入口最后」。
+
+**Tests**
+
+- 前端全部 26 个测试文件 **501 passed**（其中 `test_settings_js.py` 31 条）。
+- 新增结构护栏 11 条通过；变异 `devlogs/_verify/mutation_settings_modules.py` **9/9 CAUGHT**。
+- 产物级 e2e（针对**重打包后**的 `dist-electron/win-unpacked` 内嵌后端）：
+  **26 passed / 2 failed**，两条新增 settings 检查均 OK；2 条失败是**账户欠费**
+  （402 / `code=30001`），归因文案已判「**非产品缺陷**」，非本次改动引入。
+- 出处护栏：单测 19 条 + 受影响子集 166 条 + `test_e2e_unpacked_guard.py` 23 条全绿；
+  变异 `devlogs/_verify/mutation_provenance_git_head.py` **10/10 CAUGHT**
+  （其中 M2 首轮 MISSED 是**真断言缺口**：真值护栏只断言「判定函数说不是 empty」⇒
+  判定函数一宽松就跟着瞎；修法是**独立于判定函数再查一遍原始字节**）。
+- `bundle_manifest`：`version=1.2.1 files=116`（拆分前 111，+5 个新模块），
+  `--check` 报「产物新鲜：清单与源码/产物逐字节一致」。
+
+**已知限制（不得当作已通过）**
+
+- **Electron 应用层 e2e 本轮未取得证据**：`e2e_unpacked --runs 2` 两次都在
+  `D1_startup` 失败（Chromium GPU 进程起不来）。本轮**额外实测**：即使请求关闭
+  沙箱隔离，结果不变 ⇒ 该层在**当前 agent 执行环境**下不可复现，须在真实终端复跑。
+  归因文案已判「宿主环境问题，非产品缺陷」。**不得**把这一层读成已通过。
+- 上游账户余额仍耗尽，`PBC_E2E_REQUIRE_LLM=1` 本轮**正确地**判 FAIL（fail-closed）。
+
 ### v1.2.1 — 报告查看页与优雅返回（Round 61，2026-09-24）
 
 > **问题**：主流程复核页点"下载报告"后浏览器直接导航到裸 Markdown 端点

@@ -788,6 +788,49 @@ pending ─► ocr_running ─► ocr_done ─► analyzing ─┬─► review 
 **建议**：先拆 `settings-llm.js`（最大、最独立），并同步在 `templates/settings.html`
 按依赖序引入 + 加脚本顺序护栏（复用 `test_review_js_modules.py` 的 `TestScriptOrder` 模式）。
 
+#### ✅ 已完成（Round 65，2026-09-30）
+
+全量拆分为 6 个模块，与上面的方案**唯一差异**：入口**不叫** `settings-wiring.js`，
+而是**保留原文件名 `settings.js`** —— 模板、`bundle_manifest` 清单、多个测试都引用
+这个路径，改名会额外制造一次「锚错文件」的机会（本轮正因这类锚点失效改了 7 处断言）。
+文件名不是收益点，锚点稳定性才是。
+
+| 实际文件 | 行数 | 职责 |
+|---|---|---|
+| `static/settings-state.js` | 104 | 共享状态**唯一宿主** + 纯工具（`window.PbcSettings`） |
+| `static/settings-llm.js` | 460 | provider 渲染 + 动作绑定 |
+| `static/settings-ocr.js` | 466 | Section 导航 + KB 面板 + OCR 配置 + `load()` |
+| `static/settings-feishu.js` | 267 | 飞书通知 |
+| `static/settings-rules.js` | 330 | 规则编辑器 + 模板面板 |
+| `static/settings.js`（入口） | 339 | 事件接线 + 保存全部/测试连接 + 末尾 `S.load()` |
+
+**实测得到的三条改写规则**（方案里预判到了"必须先抽状态"，但**没预判到量级与形态**）：
+
+1. **不可变**的纯工具/常量 → 模块顶部解构，调用点零改动；
+2. **可变**状态必须走 `S.state.<name>` **属性访问** —— 解构别名会在重赋值后变陈旧。
+   实测出现频次：`current` 39 / `activeProvider` 20 / `pendingAdds` 15 / `removedProviders` 7；
+3. **跨模块函数**用 `S.<fn>(...)`：属性查找在**调用期**解析 ⇒ 源码里真实存在的
+   `ocr↔feishu`、`ocr↔rules` 循环依赖**不需要**被打散，加载顺序只需
+   「state 最先、入口最后」。方案里"先拆最独立的 llm"这条反而次要 ——
+   真正的前置条件是状态宿主先落地。
+
+**坑（写下来，别再踩）**：
+
+- 入口尾部原来写的是裸 `load();`，而 `load` 已迁到 `settings-ocr.js` ⇒ 必须写
+  `S.load();`。**e2e 断言也不能只查 `load()`** —— 入口文件头注释里也有该词，
+  只查子串是**空断言**（已实测）。
+- 拆分让 7 处「锚在 `static/settings.js` 单文件」的文本断言**静默失效**。
+  根治办法是 `tests/js_harness.py::js_sources("settings*.js")`：口径类断言一律取
+  「整页源码面」，并让 pattern 打错时**立刻红**。
+- 状态名锚点（`showAutoActivateNotice(current.llm.auto_activated)`、
+  `display(activeProvider)`）在加 `S.state.` 前缀后不再匹配 ⇒ 改为容忍
+  `(?:S\.state\.)?`。**这类断言是「调用点存在性」，不是字面量相等**，写死字面量
+  等于把实现细节焊进测试。
+
+**验收**：前端 26 个测试文件 501 passed；结构护栏 11 条 + 变异 **9/9 CAUGHT**；
+重打包后产物级 e2e 26 passed / 2 failed（2 条为账户欠费，非产品缺陷）；
+`bundle_manifest` `files=116` 且 `--check` 逐字节一致。
+
 **`upload-jobs.js`（933 行）**：职责（列表渲染/SSE 聚合/归档删除）相对内聚，
 **建议暂不拆**；若后续增长，按"行渲染（`renderJobRow`/`buildMetaLine`/
 `buildRowFromSnapshot`）"与"实时订阅（`startLiveTracking`/`startFallbackPolling`）"切开。
