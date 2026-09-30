@@ -580,6 +580,15 @@
 
     <script src="/static/pbc-fallback.js?v={{ asset_ver('pbc-fallback.js') }}" defer></script>
     <script src="/static/confirm-dialog.js?v={{ asset_ver('confirm-dialog.js') }}" defer></script>
+    {# settings 页按职责拆为多模块（docs/ADVERSARIAL_REVIEW_2026-09-28.md §维度 4）。
+       defer 保证按**文档顺序**执行 ⇒ 顺序即依赖序：
+       state 必须最先（状态宿主），settings.js 必须最后（入口，末尾调用 load()）。
+       顺序护栏：tests/unit/test_settings_js_modules.py::TestScriptOrder #}
+    <script src="/static/settings-state.js?v={{ asset_ver('settings-state.js') }}" defer></script>
+    <script src="/static/settings-llm.js?v={{ asset_ver('settings-llm.js') }}" defer></script>
+    <script src="/static/settings-ocr.js?v={{ asset_ver('settings-ocr.js') }}" defer></script>
+    <script src="/static/settings-feishu.js?v={{ asset_ver('settings-feishu.js') }}" defer></script>
+    <script src="/static/settings-rules.js?v={{ asset_ver('settings-rules.js') }}" defer></script>
     <script src="/static/settings.js?v={{ asset_ver('settings.js') }}" defer></script>
   </body>
 </html>

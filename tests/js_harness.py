@@ -46,6 +46,24 @@ REPO = Path(__file__).resolve().parents[1]
 STATIC = REPO / "static"
 
 
+def js_sources(*patterns: str) -> str:
+    """把 `static/` 下匹配的全部 JS 按文件名排序拼接成一段文本。
+
+    **口径类断言（限额字面量、端点名、共享常量）不得锚在"某个具体文件"上** ——
+    一次拆分或改名就会让它静默失效（本仓已两次踩到这类"锚错文件"）。
+    用本函数取"整页的源码面"，从而对文件拆分免疫。
+
+    防空转：pattern 打错时**立刻**红（`assert files`），而不是让断言恒真。
+    """
+    files: list[Path] = []
+    for pat in patterns:
+        files.extend(STATIC.glob(pat))
+    files = sorted(set(files))
+    assert files, f"static/ 下没有文件匹配 {patterns} —— 断言会变成空断言"
+    # utf-8-sig：static/settings.js 等 5 个文件带 BOM，BOM 会污染行首锚点
+    return "\n".join(p.read_text(encoding="utf-8-sig") for p in files)
+
+
 # ── 假 DOM / 定时器 / 网络 stub（在目标 JS 之前注入） ────────────────────
 DOM_STUB = r"""
 globalThis.window = globalThis;

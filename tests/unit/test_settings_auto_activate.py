@@ -18,10 +18,12 @@
 from __future__ import annotations
 
 import ast
+import re
 from pathlib import Path
 
+from tests.js_harness import js_sources
+
 REPO = Path(__file__).resolve().parents[2]
-SETTINGS_JS = REPO / "static" / "settings.js"
 READ_PY = REPO / "api" / "settings" / "read.py"
 CONFIG_PY = REPO / "config.py"
 
@@ -33,6 +35,16 @@ _JUDGE_SYMBOL = "_resolve_active_provider"
 
 def _read(p: Path) -> str:
     return p.read_text(encoding="utf-8")
+
+
+def _settings_src() -> str:
+    """settings 页前端**全部模块**的拼接文本。
+
+    不得只读 `static/settings.js`：该文件已按职责拆分（见
+    `docs/ADVERSARIAL_REVIEW_2026-09-28.md` §维度 4），锚在单个文件上
+    会在拆分时静默失效。
+    """
+    return js_sources("settings*.js")
 
 
 def _func_source(name: str, path: Path = CONFIG_PY) -> str:
@@ -91,7 +103,7 @@ def test_requires_no_explicit_choice():
 
 
 def test_frontend_consumes_notice_and_has_no_second_switch():
-    js = _read(SETTINGS_JS)
+    js = _settings_src()
 
     # ── 正向对照：用户显式切换必须**仍然存在** ────────────────────────
     assert "setActiveProvider" in js, (
@@ -101,7 +113,11 @@ def test_frontend_consumes_notice_and_has_no_second_switch():
     assert "auto_activated" in js, "前端必须消费后端回传的 auto_activated"
     assert "showAutoActivateNotice" in js, "必须存在渲染该事实的函数"
     # ⚠️ 只断言"函数存在"是**空断言**（定义了不调用照样过）⇒ 必须钉**调用点**。
-    assert "showAutoActivateNotice(current.llm.auto_activated)" in js, (
+    # ⚠️ 状态已收敛到 settings-state.js 的 `S.state` ⇒ 锚点必须容忍该前缀，
+    #    否则一次模块拆分就让这条断言静默失效（本轮拆分实测踩到）。
+    assert re.search(
+        r"showAutoActivateNotice\(\s*(?:S\.state\.)?current\.llm\.auto_activated\s*\)", js
+    ), (
         "必须在 load() 里实际调用渲染（定义了不调用 = 提示永远不显示）"
     )
     # ── 反向：不得再有第二份本地自动切换实现 ─────────────────────────
@@ -115,7 +131,7 @@ def test_frontend_consumes_notice_and_has_no_second_switch():
 
 def test_frontend_notice_is_display_only():
     """渲染函数不得再发起切换请求（只显示，不决策）。"""
-    js = _read(SETTINGS_JS)
+    js = _settings_src()
     start = js.index("function showAutoActivateNotice(")
     end = js.index("\n  }", start)
     body = js[start:end]
@@ -146,13 +162,13 @@ def test_badge_has_single_writer_per_flow():
 
     ⇒ 钉死：加载期写入点收敛到 `showAutoActivateNotice` 内，`fillOcrForm` 内不得有。
     """
-    js = _read(SETTINGS_JS)
+    js = _settings_src()
     badge = 'getElementById("llm-provider-badge")'
 
     # ── 正向：提示函数必须自己渲染徽标，且覆盖"无通知"的常态分支 ──────
     notice = _js_func_body(js, "function showAutoActivateNotice(")
     assert badge in notice, "加载期徽标必须由 showAutoActivateNotice 写入"
-    assert "display(activeProvider)" in notice, (
+    assert re.search(r"display\(\s*(?:S\.state\.)?activeProvider\s*\)", notice), (
         "无自动改写时也要写回纯名称 —— 否则徽标无人渲染（信息丢失）"
     )
 
@@ -183,7 +199,7 @@ def test_badge_write_is_unconditional_and_reachable():
     ⇒ 改为**结构化**判据：看写入语句**之前**有什么（提前返回？），
       以及它所在 `if` 的**条件表达式**里有没有 `info`。
     """
-    js = _read(SETTINGS_JS)
+    js = _settings_src()
     notice = _js_func_body(js, "function showAutoActivateNotice(")
 
     write_at = notice.find("badgeEl.textContent")

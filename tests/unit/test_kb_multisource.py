@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from core.kb import retriever, store
+from tests.js_harness import js_sources
 
 _ROOT = Path(__file__).resolve().parents[2]
 _GOLDEN = _ROOT / "docs" / "KB_GOLDEN_QUERIES.json"
@@ -436,7 +437,16 @@ class TestKbSettingsFrontend:
     """前端契约机检 —— 后端接口齐了但前端没接线，验收同样不成立。"""
 
     _HTML = _ROOT / "templates" / "settings.html"
-    _JS = _ROOT / "static" / "settings.js"
+
+    @staticmethod
+    def _settings_js() -> str:
+        """settings 页前端**全部模块**的拼接文本。
+
+        不得只读 `static/settings.js`：该文件已按职责拆分（见
+        `docs/ADVERSARIAL_REVIEW_2026-09-28.md` §维度 4），锚在单个文件上
+        会在拆分时静默失效。
+        """
+        return js_sources("settings*.js")
 
     def test_html_has_multisource_controls(self):
         html = self._HTML.read_text(encoding="utf-8")
@@ -450,19 +460,19 @@ class TestKbSettingsFrontend:
         assert "来源变更需更新应用内置数据" not in html
 
     def test_js_wires_sources_endpoint(self):
-        js = self._JS.read_text(encoding="utf-8")
+        js = self._settings_js()
         assert "/api/settings/kb/sources" in js
         assert re.search(r'"/api/settings/kb/sources"\s*,\s*\{[^}]*method:\s*"PUT"',
                          js, re.S), "来源开关必须走 PUT"
 
     def test_js_reads_disabled_state_and_guards_last_source(self):
-        js = self._JS.read_text(encoding="utf-8")
+        js = self._settings_js()
         # 回填开关状态依赖后端返回的 disabled_sources（否则重载后全显"已启用"）
         assert "disabled_sources" in js
         # 前端也要拦"停用全部来源"，避免无谓请求 + 口径与后端一致
         assert "至少保留一个来源" in js
 
     def test_js_shows_version_and_per_source_meta(self):
-        js = self._JS.read_text(encoding="utf-8")
+        js = self._settings_js()
         assert "kb_version" in js
         assert "s.version" in js and "s.entries" in js

@@ -677,6 +677,28 @@ try:
     except Exception as e:
         fail("review_js_127", str(e))
 
+    # 13d. settings 页拆分模块 —— 必须**全部**能从产物里取到。
+    #      拆分后入口只做接线，任何模块漏进包 ⇒ 页面静默失去对应职责
+    #      （无任何报错，与"测了 A 发了 B"同宗）。见
+    #      docs/ADVERSARIAL_REVIEW_2026-09-28.md §维度 4。
+    section("Frontend settings modules (shipped bundle)")
+    try:
+        mods = ["settings-state.js", "settings-llm.js", "settings-ocr.js",
+                "settings-feishu.js", "settings-rules.js", "settings.js"]
+        _served_js([f"/static/{m}" for m in mods])  # 取到空内容即抛（防空转）
+        ok("settings_modules_served", f"{len(mods)} 个模块均可取且非空")
+    except Exception as e:
+        fail("settings_modules_served", str(e))
+
+    try:
+        # 入口必须真的启动初始渲染；拆分后是 `S.load()`（load 定义在 settings-ocr.js）。
+        # ⚠️ 不能只查 `load()` —— 入口文件头注释里也有该词，那是**空断言**。
+        entry = requests.get(f"{BASE}/static/settings.js", timeout=5).text
+        assert "S.load();" in entry, "入口未调用 S.load() —— 设置页永不渲染"
+        ok("settings_entry_calls_load", "S.load()")
+    except Exception as e:
+        fail("settings_entry_calls_load", str(e))
+
     # 14. API docs
     section("API Docs")
     try:

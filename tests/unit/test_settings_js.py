@@ -30,13 +30,24 @@ from pathlib import Path
 
 import pytest
 
-from tests.js_harness import run_js_async
+from tests.js_harness import js_sources, run_js_async
 
 REPO = Path(__file__).resolve().parents[2]
-SETTINGS_JS = REPO / "static" / "settings.js"
 RULES_PY = REPO / "api" / "settings" / "rules.py"
 
-FILES = ["settings.js"]
+#: settings 页按依赖序加载的全部模块（拆分见
+#: docs/ADVERSARIAL_REVIEW_2026-09-28.md §维度 4）。
+#: ⚠️ 顺序即依赖序：settings-state.js 必须最先（状态宿主），
+#: settings.js 必须最后（入口，末尾调用 load()）。顺序护栏见
+#: tests/unit/test_settings_js_modules.py::TestScriptOrder。
+FILES = [
+    "settings-state.js",
+    "settings-llm.js",
+    "settings-ocr.js",
+    "settings-feishu.js",
+    "settings-rules.js",
+    "settings.js",
+]
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -648,17 +659,17 @@ class TestRuleLimitParityWithBackend:
     def test_total_chars_limit_matches_backend(self):
         from api.settings.rules import _USER_RULES_TOTAL_MAX
 
-        src = SETTINGS_JS.read_text(encoding="utf-8")
+        src = js_sources("settings*.js")
         assert f"const MAX = {_USER_RULES_TOTAL_MAX};" in src, (
-            "settings.js 的总字数上限必须等于后端 _USER_RULES_TOTAL_MAX"
+            "settings 页前端的总字数上限必须等于后端 _USER_RULES_TOTAL_MAX"
         )
 
     def test_per_rule_maxlength_matches_backend(self):
         from api.settings.rules import _USER_RULES_TEXT_MAX
 
-        src = SETTINGS_JS.read_text(encoding="utf-8")
+        src = js_sources("settings*.js")
         assert f"textarea.maxLength = {_USER_RULES_TEXT_MAX};" in src, (
-            "settings.js 的单条规则 maxLength 必须等于后端 USER_RULES_TEXT_MAX"
+            "settings 页前端的单条规则 maxLength 必须等于后端 USER_RULES_TEXT_MAX"
         )
 
     def test_backend_still_enforces_both_limits(self):
