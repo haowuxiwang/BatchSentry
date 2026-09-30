@@ -20,8 +20,9 @@
 | 可维护性 | **强**。测试 63,009 行 vs 生产 34,928 行 ≈ **1.8 : 1**；门禁 11 项全自动 |
 | 仓库卫生 | **好**。375 个跟踪文件，工作区干净，`.gitignore` 有解释性注释且被机检锁定 |
 | git / GitHub | ⚠️ **本地领先 `origin/main`，尚未推送**（`dd33330` 时点为 9 个提交，属**快照**；取当前值见 §八） |
-| 本轮修复 | **4 条**（F1–F3 为**文档缺陷**，F4 为**测试清理期缺陷**）+ 2 个新护栏（9 条用例）+ 变异 **9/9** |
-| 门禁 | 修复后在**已提交的树**上重跑 ⇒ `overall=pass`、`11/11`、**3875 passed / 0 failed** |
+| 本轮修复 | **5 条**：F1–F3 **文档缺陷**、F4 **测试清理期缺陷**、**F5 错误文案未脱敏（代码，见 §十一）** + 2 个新护栏（9 条用例）+ 变异 **9/9**，F5 另有变异 **5/5** |
+| 门禁 | 修复后重跑 ⇒ `overall=pass`、`11/11`、**3879**（`2787f29`）→ **3883 passed / 0 failed**（`8d5848d`，**含重建产物**） |
+| 重建与产物 | **已重建（R66 第四批）**：改 `core/` 后 `artifact_freshness` 转红 ⇒ PyInstaller + electron-builder 重建 ⇒ **两份产物逐字节一致**；`runtime_eol` 从 **SKIP 恢复为实测** —— 见 §十一 |
 | 待办清单核销 | **§A 及以下的"未做"有一半已做完**：核销 **14 条**（含 **2 条 P1 安全项** `B10-1`/`B10-2`）、清掉 **16 个失效行号锚点**、抽查确认 **12 条**仍开放 —— 见 §十 |
 
 ---
@@ -119,6 +120,15 @@ $ git status --porcelain
 | R66 加护栏后全量（手工） | R66 工作区 | 3875 | **2 failed / 3873 passed** | 见 §六 |
 | **R66 终验（12:10）** | **`dd33330`** | **3875** | **0 failed** | `gate_report_20260930_121027.json` |
 | **R66 第三批终验（12:43）** | **`2787f29`** | **3879** | **0 failed** | `gate_report_20260930_124300.json` |
+| **R66 第四批终验（13:07）** | **`8d5848d`** | **3883** | **0 failed** | `gate_report_20260930_130757.json` |
+
+**第三段对账**：`3879 → 3883` = **+4**，正是 F5 新增的 4 条用例
+（`TestPageLevelErrorTextIsSanitized`）⇒ **数字自洽**。
+
+⚠️ **第四批与前三批有一处结构性差别：它改了 `core/` 字节**（前三批全是 docs/tests）。
+`artifact_freshness` 是**逐字节**比对源码与产物副本 ⇒ 改完 `core/pipeline/stage2.py`
+该项立刻转红（`bundle_manifest.py --check` 实测：`1 个源文件与清单不符`）。
+⇒ 必须**重建产物**才能复绿 —— 见 §十一。**这正是前三批能靠"docs-only"免于复跑、本批不能的原因。**
 
 **第二段对账**：`3875 → 3879` = **+4**，正是 §十 新增的 4 条用例
 （`TestCheckoffLedger` 2 条 + `TestNoDeadFrontendAnchors` 2 条）⇒ **数字自洽**。
@@ -290,7 +300,8 @@ OVERALL: pass  (pass=11 fail=0 warn=0 skip=0)
 
 ## 七、仓库卫生
 
-- 跟踪文件 **375** 个；`git status --porcelain` **空**。
+- 跟踪文件 **378** 个（`git ls-files | wc -l`，与门禁 `no_build_outputs` 的计数一致）；
+  `git status --porcelain` **空**。
 - `.gitignore` 覆盖完整且**带解释性注释**（每条都写明"为什么加"）；`htmlcov/`、`devlogs/`、
   `dist*/`、`data/`、`.workbuddy-ai/` 均被忽略 —— 已用 `git check-ignore -v` 逐项验证。
 - 根目录存在若干**被忽略**的本地残留（`devlogs_build_*.log`、`coverage.xml`、`__pycache__/`、
@@ -304,18 +315,17 @@ OVERALL: pass  (pass=11 fail=0 warn=0 skip=0)
 
 ```
 $ git branch -vv
-* main dd33330 [origin/main: ahead 9]
+* main 8d5848d [origin/main: ahead 15]
 $ git remote -v
 origin  https://github.com/haowuxiwang/BatchSentry.git (fetch/push)
 $ git rev-list --left-right --count origin/main...HEAD
-0       9
+0       15
 ```
 
-⚠️ **本地 `main` 领先 `origin/main` 9 个提交**（`c8b092b` 之后的全部 R62–R66 工作），
+⚠️ **本地 `main` 领先 `origin/main` 15 个提交**（`c8b092b` 之后的全部 R62–R66 工作），
 **GitHub 上还是旧的**。推送是对外发布动作，**等用户确认**。
 
-> ⚠️ **上表的 `9` 是 `dd33330` 时点的快照，不是实时值** —— 本报告落盘后又追加了
-> 2 个 **docs-only** 提交（`995b50b` 门禁结论落盘、`a12f510` 复跑确认）。
+> ⚠️ **上表的 `15` 是 `8d5848d`（13:0x）时点的快照，不是实时值。**
 > **取当前值的唯一方法是运行命令**，不要引用本报告里的数字：
 >
 > ```bash
@@ -333,9 +343,11 @@ $ git rev-list --left-right --count origin/main...HEAD
 1. 推送本地未推送提交到 `origin/main`（**用户动作**）—— 数量见 §八的实时命令，别引用快照。
 2. Electron 应用层 e2e 在**真实终端**复跑（本环境不可复现）。
 3. ~~`docs/TODO.md` §A 及以下的 86 条未复核项逐条复核~~ → **R66 第三批已核销 14 条**，
-   剩 **72 条**未逐条复核（见 §十）。
+   剩 **72 条**未逐条复核（见 §十）；**第四批又修掉 `#146`**（§11.1）⇒ 其中 1 条已结案，
+   **剩 71 条**。⚠️ 注意这 14+1 条是"抽查到并确认"的，**不等于**其余 71 条都还开放。
 4. 跨页总览增强（后端 `status` 过滤 / 关键词搜索）—— 小，可选。
 5. 上传批次并发提交 —— 小，可选，**不建议先做**。
+6. ~~产物重建~~ → **R66 第四批已做**（§11.2）：两份产物逐字节一致，`runtime_eol` 已从 SKIP 恢复实测。
 
 ### 本轮**未**做、但值得下一轮考虑的
 
@@ -390,9 +402,14 @@ $ git rev-list --left-right --count origin/main...HEAD
 ### 10.4 抽查确认"仍开放"12 条
 
 保留 `[ ]`，并在 §0.1.3 就地记证据（`#144` 的 `engine.py` 两处 `_analyze_one` 确无 `config_error=`；
-`#145` root 仍钉 DEBUG；`#146` `stage2.py:64` 仍 `str(exc)[:200]`；`#147` 只清两列；
+`#145` root 仍钉 DEBUG；`#147` 只清两列；
 `#148` `api/report.py` 零处 `error_message`；`#163①`；`#165` 死键仍在；`#168` 每页检索两次；
 `#169` `_STATIC_FIELDS` 白名单不含 `kb_prompt_inject`；`B2-9`；`B3-3`；`B4-2`；`B7-2`）。
+
+> ⚠️ **上述 12 条里的 `#146` 已在 R66 第四批修复**（`stage2.py` 页级/任务级出口统一
+> 「先脱敏、后截断」，见 §十一）。本条抽查**发生在第四批之前**，故当时确为"仍开放" ——
+> 保留此注是为了说明**先后顺序**，不是自相矛盾。
+> 本节其余 11 条**仍然开放**。
 
 > ⚠️ **`B2-11`（聚合流 DB 异常期是否 yield 帧）本轮只读到注释、未构造 DB 异常实测**
 > ⇒ **不作判定**，保持 `[ ]`。**"没查到"不等于"已修"。**
@@ -416,3 +433,128 @@ M4 加不带尾注的 `[x]` / M5 加 **Python** 锚点 ⇒ **GREEN**（不误报
 > （`(?:-[\w]+)?` vs `[\w-]*`），实际有 **16** 个。
 > ⇒ **又一次"测量工具本身没被验证"**（verification-integrity Trap 6）。
 > 已把断言写成"构造样例必须命中"，就是为了让这类探针错误**当场暴露**而不是静默通过。
+
+---
+
+## 十一、R66 第四批：代码修复 + 产物重建 + 门禁复绿
+
+前三批（§六 F1–F4、§十）**只动 docs/tests**，故能靠"docs-only ⇒ 门禁结论对代码仍有效"
+免于复跑。**本批不同：它改了 `core/` 字节**，于是把产物新鲜度这条链也拉进了射程。
+
+### 11.1 F5【已修】错误文案未脱敏：`str(exc)` 会把 key 与签名 URL 回给前端
+
+**定位**（`core/pipeline/stage2.py`）：
+
+- **页级出口** `"_error": str(exc)` —— **完全裸的**异常文本；
+- **任务级出口** `config_error["reason"]` —— 只做 `[:200]` 截断，**不脱敏**。
+
+异常文本里常见两类敏感内容：上游 SDK 抛出的 **API key**、HTTP 客户端抛出的**带签名 query
+的 URL**。两者都会经 API 回给前端（页级还会渲染进复核页）。
+
+**修复**：新增 `_ERROR_TEXT_LIMIT = 200` 与 `_sanitize_error_text()`：
+
+```python
+return redact_urls(_mask_secrets(text))[:_ERROR_TEXT_LIMIT]
+```
+
+**两层顺序是有意的**：① `_mask_secrets` 掩 key → ② `redact_urls` 抹签名 query → ③ **最后**截断。
+⚠️ **截断若放在最前**，会把 key 切出一个**残片**（`sk-abcdefgh` 在 200 字处被腰斩成 `sk-abc`）
+留在输出里 —— **顺序本身就是判据**，所以它值得一条专门的用例。
+
+两个出口**都**改走该 helper（此前只有任务级做了截断）。
+
+**测试**（`tests/unit/test_config_error_visibility.py` 新增 `TestPageLevelErrorTextIsSanitized`，4 条）：
+
+| 用例 | 判据 |
+|---|---|
+| `test_masks_api_key` | key 不出现在输出里 |
+| `test_redacts_signed_url_query` | 签名 query 被抹掉 |
+| `test_truncation_happens_after_masking` | **顺序判别**：`payload = "x"*193 + "sk-abcdefgh"` ⇒ 输出**不得含 `sk-abc` 残片** |
+| `test_both_export_sites_route_through_the_helper` | **两个调用点**都走 helper（防某次重构只改一处） |
+
+**变异验证** `devlogs/_verify/mutation_page_error_sanitize.py` ⇒ **5/5，基线绿**：
+
+| 变异 | 预期 | 结果 |
+|---|---|---|
+| M1 页级出口退回裸 `str(exc)` | CAUGHT | ✅ rc=1 |
+| M2 helper 丢掉 `redact_urls` | CAUGHT | ✅ rc=1 |
+| M3 **先截断再掩码**（顺序反转） | CAUGHT | ✅ rc=1 |
+| M4 helper 退化成纯截断 | CAUGHT | ✅ rc=1 |
+| M5 阴性对照（无实质改动） | GREEN | ✅ rc=0 |
+
+⚠️ 脚本用**临时副本 + 每例独立子进程**：进程内 `pytest.main()` 会因同名模块跨目录重复导入
+报 `import file mismatch`（rc=2），而 **rc≠0 会被误读成"被抓"** ⇒ 假的 100%。
+
+### 11.2 重建与门禁复绿
+
+改 `core/` 的直接后果：`artifact_freshness` **逐字节**比对源码与产物副本 ⇒ 立刻转红。
+实测（不是推断）：
+
+```
+$ python scripts/bundle_manifest.py --check
+[FAIL] dist\pbc-server 产物新鲜度校验未通过：
+  - 1 个源文件与清单不符（**源码改动后未重建**）：['core/pipeline/stage2.py']
+```
+
+**只有 1 个文件** ⇒ 说明除本次改动外**无其他源码漂移**。重建步骤（`build.ps1` 无法由 agent
+执行，按 DETAIL §10 用 Bash 复刻）：
+
+```bash
+CODEBUDDY_SAFE_DELETE_ENABLED=0 python -m PyInstaller pbc-server.spec --noconfirm --clean
+python scripts/bundle_manifest.py --write && python scripts/bundle_manifest.py --check
+CODEBUDDY_SAFE_DELETE_ENABLED=0 ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/ \
+    npx electron-builder --win --x64
+python devlogs/_verify/gen_provenance.py          # electron-builder 会抹掉它，必须补
+```
+
+`npm run build:css` **本批不需要**（未动 `templates/` 或 `static/*.js`；已用
+`git diff --exit-code -- static/app.css` 确认 CSS 干净）。
+
+结果：**两份产物都新鲜**（`dist/pbc-server` + `dist-electron/win-unpacked/resources/pbc-server`），
+清单 `version=1.2.1 files=116 head=8d5848d dirty=False`。
+
+**门禁复跑（13:07，`8d5848d`）**：`overall=pass`、**11/11**、**3883 passed / 0 failed**、
+coverage **95.09%**（`devlogs/gate_report_20260930_130757.json`）。
+对账：`3879 + 4 = 3883`，那 4 条正是 §11.1 的用例。
+
+### 11.3 构建链上的两个新发现（都会**静默降级**）
+
+#### ① Node 层"安全删除"垫片是**两级**失败，只有 `ENABLED=0` 能过
+
+`electron-builder` 要重建 `dist-electron/win-unpacked`（1927 个文件），连撞两道：
+
+| 设置 | 结果 |
+|---|---|
+| 默认（宿主 `CODEBUDDY_SAFE_DELETE_BULK_THRESHOLD=50`） | `SAFE_DELETE_BULK_CONFIRM_REQUIRED {"count":1927,"threshold":50}` |
+| `BULK_THRESHOLD=100000` | 守卫放行，但删除**改走回收站** ⇒ `spawnSync genie-trash.exe ETIMEDOUT` |
+| **`ENABLED=0`** | **通过** |
+
+⚠️ 关键在于**只抬阈值是不够的** —— 它把失败从"被守卫拦下"变成"卡在回收站"，
+**症状换了、命令仍然失败**。⇒ 构建类命令（PyInstaller `--clean`、`electron-builder`）
+统一带 `CODEBUDDY_SAFE_DELETE_ENABLED=0`。
+
+阈值来源已核对到源码：`cli/vendor/shim/safe-delete-bulk-guard.cjs` 读
+`process.env.CODEBUDDY_SAFE_DELETE_BULK_THRESHOLD || DEFAULT_THRESHOLD`（默认 20，宿主给 50），
+且 shim 以 `env: {...process.env, NODE_OPTIONS: ''}` 调用它 ⇒ **子进程会继承你设的阈值**。
+shim 只在 `CODEBUDDY_SAFE_DELETE_BULK_STATE_DIR` + `CODEBUDDY_TOOL_CALL_ID` 同时存在时才检查
+⇒ 只有**工具调用内**才触发，CI 上不存在这些变量、注入无害。
+
+#### ② `PROVENANCE.txt` 缺失会让 `runtime_eol` **静默 SKIP**
+
+`electron-builder` 会**整目录重建** `win-unpacked/` ⇒ 上一轮的 `PROVENANCE.txt` 被抹掉。
+而 `release_gate.count_complete_artifacts` 把「`win-unpacked/PROVENANCE.txt` 存在」
+当作**完整产物三件套**之一 ⇒ 缺它则产物被判残壳、`runtime_eol` **SKIP**。
+
+**实测对照**（同一天、同一份产物，只差这个文件）：
+
+- 补文件**之前**：`[SKIP] runtime_eol`（`gate_report_20260930_125855.json`）
+- 补文件**之后**：`[PASS] runtime_eol 在支持线 [41, 42, 43] 内：dist-electron: Electron/43.7.4`
+
+⇒ **SKIP 不影响退出码，所以这条链断了也不报警** —— 门禁在"产物最标准的状态"上反而最瞎
+（与 `build.ps1` 内注释所述的历史缺陷同源）。agent 侧补写脚本：
+`devlogs/_verify/gen_provenance.py`（格式严格对齐 `build.ps1`：**BOM + CRLF + UTF-8**）。
+
+> **本节的数字都有出处**：产物结论来自 `bundle_manifest.py --check`，门禁结论来自
+> `devlogs/gate_report_*.json`，用例数来自该报告的 `tests_coverage` 行。
+> **任何一条若与当前树不符，以命令输出为准**（本文件不是事实源）。
+

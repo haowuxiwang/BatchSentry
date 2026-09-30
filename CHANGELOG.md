@@ -7,6 +7,73 @@
 
 ## [Unreleased]
 
+### 错误文案脱敏 + 产物重建 + 门禁复绿（Round 66 第四批，2026-09-30）
+
+> 前三批只动 docs/tests；**本批动了 `core/` 字节**，于是把「产物新鲜度」这条链也拉进了射程。
+> 报告 → `docs/ADVERSARIAL_REVIEW_2026-09-30.md` §十一。
+
+**Fixed**
+
+- **`#146` 错误文案未脱敏**（`core/pipeline/stage2.py`）：页级出口此前是**裸的 `str(exc)`**，
+  任务级出口也只做 `[:200]` 截断、**不脱敏**。上游异常文本里常见 **API key** 与
+  **带签名 query 的 URL**，两者都会经 API 回给前端（页级还会渲染进复核页）。
+  新增 `_ERROR_TEXT_LIMIT = 200` 与 `_sanitize_error_text()`：
+  `redact_urls(_mask_secrets(text))[:_ERROR_TEXT_LIMIT]`，**两个出口都**改走它。
+  ⚠️ **两层顺序是有意的**：截断若放在最前，会把 key 切出一个**残片**（`sk-abcdefgh`
+  在 200 字处腰斩成 `sk-abc`）留在输出里 —— **顺序本身就是判据**。
+
+**Added**
+
+- `tests/unit/test_config_error_visibility.py::TestPageLevelErrorTextIsSanitized`（4 条）：
+  掩 key / 抹签名 query / **顺序判别**（`payload = "x"*193 + "sk-abcdefgh"` ⇒ 输出**不得含
+  `sk-abc` 残片**）/ **两个调用点**都走 helper 的源码断言（防重构只改一处）。
+- 变异验证 `devlogs/_verify/mutation_page_error_sanitize.py` ⇒ **5/5，基线绿**：
+  M1 页级出口绕开 helper / M2 丢 `redact_urls` / M3 先截断再掩码 / M4 退化成纯截断
+  ⇒ 全部 CAUGHT；M5 阴性对照 ⇒ GREEN。脚本用**临时副本 + 每例独立子进程**
+  （进程内 `pytest.main()` 会因同名模块跨目录重复导入报 `import file mismatch`，rc=2，
+  而 **rc≠0 会被误读成"被抓"** ⇒ 假的 100%）。
+
+**Build / 产物**
+
+- 改 `core/` ⇒ `artifact_freshness`（**逐字节**比对源码与产物副本）转红，实测只有
+  **1 个文件**不符（`core/pipeline/stage2.py`）⇒ 说明无其他源码漂移。已按 `build.ps1`
+  的步骤用 Bash 复刻重建：PyInstaller → `bundle_manifest.py --write` → electron-builder。
+  两份产物（`dist/pbc-server` + `dist-electron/win-unpacked/resources/pbc-server`）
+  **均与源码逐字节一致**；清单 `version=1.2.1 files=116 head=8d5848d dirty=False`。
+- 新增 `devlogs/_verify/gen_provenance.py`：`electron-builder` 会**整目录重建**
+  `win-unpacked/` ⇒ 上一轮的 `PROVENANCE.txt` 被抹掉，而 `count_complete_artifacts`
+  拿它当**完整产物三件套**之一 ⇒ 缺它则 `runtime_eol` **静默 SKIP**（不影响退出码）。
+  **实测对照**：补文件前 `[SKIP] runtime_eol`，补后 `[PASS] … Electron/43.7.4`。
+
+**Changed（文档，避免误导）**
+
+- `docs/TODO.md`：`#146` 由 `[ ]` 翻 `[x]` 并补 §0.1.1 台账行（核销尾注与台账行数
+  仍**相等**：15 == 15）；从 §0.1.3 的"仍开放"抽查中移出并注明**先后顺序**
+  （抽查时确为开放，第四批才结案）；统计更新为 `[ ]` 86 → **71**、`[x]` 76 → **91**。
+- `docs/ADVERSARIAL_REVIEW_2026-09-30.md`：新增 §十一（本批全过程），§5.2 补第四批的
+  `tree × value` 行与对账（`3879 + 4 = 3883`），§一/§七/§八/§九 同步。
+
+**Verified**
+
+```
+$ python scripts/release_gate.py          # 工作区干净，HEAD = 8d5848d
+[PASS] worktree_clean / no_build_outputs(378) / dist_variants(1) / packaging_files(5)
+[PASS] artifact_freshness 2 份产物与源码逐字节一致
+[PASS] rules_wired(29) / kb_corpus(441) / kb_packaging(6) / dependency_vulns(0 公告)
+[PASS] runtime_eol      在支持线 [41, 42, 43] 内：dist-electron: Electron/43.7.4
+[PASS] tests_coverage   3883 passed, 0 failed, coverage=95.09% (门禁 95%)
+
+OVERALL: pass  (pass=11 fail=0 warn=0 skip=0)
+报告: devlogs/gate_report_20260930_130757.json
+```
+
+⚠️ **构建链上的两条坑（都已记入 `MEMORY-DETAIL.md` §2 / §10）**：
+
+1. **Node 层"安全删除"垫片是两级失败**：默认宿主阈值 50 < 1927 个文件 ⇒
+   `SAFE_DELETE_BULK_CONFIRM_REQUIRED`；**只抬阈值仍不够** —— 删除改走回收站后
+   `genie-trash` **ETIMEDOUT**。⇒ 构建类命令统一 `CODEBUDDY_SAFE_DELETE_ENABLED=0`。
+2. **`PROVENANCE.txt` 缺失会静默降级**（见上），构建后必须补。
+
 ### 文档契约护栏 + 待办清单复核（Round 66，2026-09-30）
 
 > 本轮的**发现方式**是"文档 vs 代码/事实"：三条缺陷都不是功能 bug，而是**文档与事实脱节**

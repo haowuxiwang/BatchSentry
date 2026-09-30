@@ -41,7 +41,7 @@
 |---|---|---|---|---|---|
 | **0-1** | 推送本地未推送提交到 `origin/main` | **P1** | **用户决策** —— 推送是对外发布，agent 不擅自做 | `git rev-list --left-right --count origin/main...HEAD` ⇒ `0	0` | R66 复核时 `0	9`（HEAD `dd33330`）；**该数每提交 +1，是快照、不追求实时** —— 取当前值请跑左侧命令 |
 | **0-2** | Electron 应用层 e2e 在**真实终端**复跑 | **P1** | 需**非沙箱**终端（本 agent 环境做不到） | `tests/e2e_unpacked.py` 两跑均 `health` 非 `null` 且 `exitCode == 0` | `devlogs/e2e_unpacked_20260930_104144.json`：`health: null`、`exitCode=2147483651`（`0x80000003`） |
-| **0-3** | 逐条复核 §A 及以下的未复核项 | **P2 → 进行中** | 无（纯复核工作） | 每条要么 `[x]` + 证据，要么移入"已确认仍开放"并注明为何仍未做 | **R66 已核销 15 条**（见 §0.1）；统计 `[ ]` **86 → 72**、`[x]` 76 → 90。**剩余 72 条未逐条复核** |
+| **0-3** | 逐条复核 §A 及以下的未复核项 | **P2 → 进行中** | 无（纯复核工作） | 每条要么 `[x]` + 证据，要么移入"已确认仍开放"并注明为何仍未做 | **R66 已核销 15 条**（见 §0.1，其中 1 条 `#146` 为**第四批**修复）；统计 `[ ]` **86 → 71**、`[x]` **76 → 91**。**剩余 71 条未逐条复核** |
 | **0-4** | 跨页总览增强（后端 `status` 过滤 / 关键词搜索） | P3 | 无 | 后端支持 `status` 查询参数；前端可筛选且空态文案正确 | R65 backlog（可选） |
 | **0-5** | 上传批次并发提交 | P3 | 后端配额 3 | 单例进度条拆为每文件一条后，3 路并发且不撞配额 | **不建议先做**：当前串行不撞配额，无实测收益 |
 
@@ -55,6 +55,8 @@
 > 结论：**15 条证实已完成 ⇒ 就地翻 `[x]`**；**1 条（`#163`）只部分完成 ⇒ 保持 `[ ]` 并加注**。
 > 其余 70 条**无解决类标记**，抽查其中 12 条（`#144`/`#145`/`#146`/`#147`/`#148`/`#163①`/
 > `#165`/`#168`/`#169`/`B2-9`/`B3-3`/`B4-2`/`B7-2`）**均确认仍开放**，故保留 `[ ]`。
+> ⚠️ 其中 **`#146` 已在 R66 第四批修复**（`8d5848d`）—— 抽查时它**确为开放**，
+> 但本批已结案 ⇒ 已移出 §0.1.3、并入 §0.1.1。**这不是"抽查错了"，是先后顺序。**
 
 ### 0.1.1 已核销（15 条）
 
@@ -73,6 +75,7 @@
 | **#166** 2 个规范类型无词表 | P2 | 同上护栏**显式**把 `user_rule`/`uncategorized` 列为开放桶并写明理由 ⇒ **设计如此，不是缺口**（实测 `TYPE_QUERIES` 21 键、`CANONICAL_TYPES` 21 项） |
 | **#162** TODO 内远端值自相矛盾 | P2 | 已修；且"每轮只改一处更新行"已升级为**机检** `tests/unit/test_todo_freshness.py`（复核戳不得落后于 CHANGELOG 的 Round） |
 | **A4** 硅基流动 402 阻塞 | P1（阻塞） | 阻塞已解除（2026-09-18，条目内已记）；**其解锁的"含真实 findings 的多轮 e2e"是另一件事**，见 B1 |
+| **#146** 页级失败原因未脱敏 | P2 | **R66 第四批**修：`stage2.py` 新增 `_sanitize_error_text()` = `redact_urls(_mask_secrets(text))[:200]`，**两个出口都**改走它（截断在脱敏之后）。护栏 `test_config_error_visibility.py::TestPageLevelErrorTextIsSanitized`（4 条），变异 `mutation_page_error_sanitize.py` ⇒ **5/5** |
 | **B4-1** SSE 断点续传与心跳 | P3 | 条目自述两项**均不成立**、残余已拆出为 `B2-11`，且明写"**本条无需再做**" |
 
 ### 0.1.2 只部分完成（保持 `[ ]`，已就地加注）
@@ -82,13 +85,14 @@
 | **#163②** `rule_doc.py` 注释称 R8 是 `low_confidence` | ✅ 实测该处注释已不存在；现存 `_check_low_confidence_params` 是**另一条规则**，非误标 | — （故未翻 `[x]`：同一条目的 ① 仍未做，见下一行） |
 | **#163①** | ② 已修 | `core/kb/retriever.py:5` 注释仍写 "at **29K chars** of corpus"，与当前语料规模不符 |
 
-### 0.1.3 抽查确认"仍开放"（12 条，保留 `[ ]`）
+### 0.1.3 抽查确认"仍开放"（**11 条**保留 `[ ]`）
+
+> 原抽查 12 条；其中 **`#146` 已在 R66 第四批修复** ⇒ 已移入 §0.1.1，故本节剩 **11 条**。
 
 | 条目 | R66 实测证据 |
 |---|---|
 | **#144** 分片路径不传 `config_error` | `core/pipeline/engine.py` 两处 `_analyze_one(`（L572、L698）**均无 `config_error=` 实参** |
 | **#145** root 钉在 DEBUG | `logging_config.py:119` `root.setLevel(logging.DEBUG)`；`:141` file handler 亦 DEBUG |
-| **#146** 页级失败原因未脱敏 | `core/pipeline/stage2.py:64` 仍是 `"_error": str(exc)[:200]`（同文件 `:57` 的 job 级**有** `_mask_secrets` ⇒ 口径不一致成立） |
 | **#147** 重试不清 `failed_pages` | `api/jobs/actions.py:83` 只 `SET error_message = NULL, finished_at = NULL` |
 | **#148** 报告不带失败信息 | `api/report.py` **零处** `error_message` |
 | **#165** `TYPE_QUERIES` 2 个死键 | 实测死键 = `['batch_logic', 'low_confidence']`（不在 `CANONICAL_TYPES`） |
@@ -492,10 +496,16 @@
       Electron 侧 `electron/main.js:59-61` 的 `backend-boot.log` **无大小上限**。
       **修法**：显式 `setLevel(WARNING)` 给第三方 logger；抽 `PBC_LOG_LEVEL` 供 file handler 用；
       raw 只记长度/摘要哈希；`backend-boot.log` 加轮转。
-- [ ] **#146【P2】页级失败原因未脱敏，直达复核 UI（job 级已脱敏，口径不一致）。**
+- [x] **#146【P2】页级失败原因未脱敏，直达复核 UI（job 级已脱敏，口径不一致）。** —— **R66 已核销**（证据见 §0.1）
       `stage2.py:61-66` 的 `"_error": str(exc)[:200]` 未过 `_mask_secrets`/`redact_urls`；
       而 job 级 `engine.py:366-370` 做了两层脱敏。该字段经 `review.js` 直接上屏，
       并随报告/DB 长期留存。**修法**：改为 `redact_urls(_mask_secrets(str(exc)))[:200]`。
+      → **R66 第四批已修（`8d5848d`）**：新增 `_sanitize_error_text()` =
+      `redact_urls(_mask_secrets(text))[:200]`，**页级与任务级两个出口都**改走它。
+      ⚠️ 顺序有意：**截断必须在脱敏之后**，否则会漏出 key 残片。护栏
+      `tests/unit/test_config_error_visibility.py::TestPageLevelErrorTextIsSanitized`（4 条），
+      变异 `devlogs/_verify/mutation_page_error_sanitize.py` ⇒ **5/5**（基线绿）。
+      详见 `docs/ADVERSARIAL_REVIEW_2026-09-30.md` §11.1。
 - [ ] **#147【P2】重试不清 `failed_pages` / 阶段耗时 ⇒ 重跑期间 UI 展示上一轮失败页。**
       `actions.py:85-88`（只清 `error_message`/`finished_at`）、`engine.py:165-169`（只清三列），
       而 `failed_pages` 要到 `stage3.py:328-339` 才覆盖。
