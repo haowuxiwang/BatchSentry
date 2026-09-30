@@ -26,7 +26,7 @@
 
 | # | 事项 | 优先级 | 阻塞 / 依赖 | 验收判据（可机检） | 本轮证据 |
 |---|---|---|---|---|---|
-| **0-1** | 推送本地未推送提交到 `origin/main` | **P1** | **用户决策** —— 推送是对外发布，agent 不擅自做 | `git rev-list --left-right --count origin/main...HEAD` ⇒ `0	0` | 实测 `0	8`；HEAD `28bda0d` |
+| **0-1** | 推送本地未推送提交到 `origin/main` | **P1** | **用户决策** —— 推送是对外发布，agent 不擅自做 | `git rev-list --left-right --count origin/main...HEAD` ⇒ `0	0` | 实测 `0	9`；HEAD `dd33330` |
 | **0-2** | Electron 应用层 e2e 在**真实终端**复跑 | **P1** | 需**非沙箱**终端（本 agent 环境做不到） | `tests/e2e_unpacked.py` 两跑均 `health` 非 `null` 且 `exitCode == 0` | `devlogs/e2e_unpacked_20260930_104144.json`：`health: null`、`exitCode=2147483651`（`0x80000003`） |
 | **0-3** | 逐条复核 §A 及以下的 **86 条**未复核项 | P2 | 无（纯复核工作） | 每条要么 `[x]` + 证据，要么移入"已确认仍开放"并注明为何仍未做 | 本轮统计：`[ ]` 86 / `[x]` 76；`A4`、`#162` 自述已解除却仍 `[ ]` |
 | **0-4** | 跨页总览增强（后端 `status` 过滤 / 关键词搜索） | P3 | 无 | 后端支持 `status` 查询参数；前端可筛选且空态文案正确 | R65 backlog（可选） |

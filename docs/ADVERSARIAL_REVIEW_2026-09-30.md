@@ -15,12 +15,13 @@
 | 上一轮（R65）完成情况 | **已完成**。6 个提交 `11e8e03`…`28bda0d`，工作区干净 |
 | 是否做了多次端到端测试 | **做了，但只有两层**：`e2e_frozen` 今日 2 次、`e2e_unpacked` 多次 —— **后者每次都崩**（见 §三） |
 | 应用边界有无界定 | **有，且分层清晰**；但**分散在 4 份文档**，且"未验证边界"此前只活在 agent 记忆里 → 本轮补进 `docs/TODO.md` §0 |
-| 测试情况 | 门禁 **11/11 pass**、**3866 passed / 0 failed**、覆盖率 **95.09%**（门禁 95%） |
+| 测试情况 | 门禁 **11/11 pass**（`overall=pass`）、**3875 passed / 0 failed**、覆盖率 **95.09%**（门禁 95%）—— 在**已提交的树** `dd33330` 上跑出，见 §5.2 |
 | 前后端是否模块化 / 单一职责 | **是**。前端两轮大文件拆分已完成（`review.js` R63、`settings.js` R65）；后端 68 文件 24.9K 行、无神模块 |
 | 可维护性 | **强**。测试 63,009 行 vs 生产 34,928 行 ≈ **1.8 : 1**；门禁 11 项全自动 |
 | 仓库卫生 | **好**。375 个跟踪文件，工作区干净，`.gitignore` 有解释性注释且被机检锁定 |
-| git / GitHub | ⚠️ **本地领先 `origin/main` 8 个提交，尚未推送** |
-| 本轮修复 | 3 条（全部为文档缺陷）+ 2 个新护栏（9 条用例）+ 变异 **9/9** |
+| git / GitHub | ⚠️ **本地领先 `origin/main` 9 个提交，尚未推送** |
+| 本轮修复 | **4 条**（F1–F3 为**文档缺陷**，F4 为**测试清理期缺陷**）+ 2 个新护栏（9 条用例）+ 变异 **9/9** |
+| 门禁 | 修复后在**已提交的树**上重跑 ⇒ `overall=pass`、`11/11`、**3875 passed / 0 failed** |
 
 ---
 
@@ -82,10 +83,14 @@ $ git status --porcelain
 4. **Electron 应用层 e2e 在本环境不可复现**（§三）。
 5. **`build.ps1` 从未被 agent 执行过**（PS 工具跑不了原生程序），只能 Bash 复刻其步骤。
 6. 上游凭据真机连通性未验；`llm_pipeline` / `ocr_pipeline` 因**账户欠费**未真正覆盖。
+7. **垫片 `SAFE_DELETE_FAIL_CLOSED` 的触发条件未完全定位** —— 本轮把
+   `test_pdf_non_local_host_returns_403` 从"未定 flaky"降到"**已知机制的清理期红**"
+   （详见 §六-F4），但**为什么偏偏在全量跑的某一位次触发**仍未定位
+   ⇒ 其他用例的 `finally`/teardown 里若还有手写 `unlink`，**同类红可能复发**。
 
-> ⚠️ **本轮之前，这 6 条只存在于 agent 的记忆文件里**，仓库文档中没有一处集中陈述
+> ⚠️ **本轮之前，前 6 条只存在于 agent 的记忆文件里**，仓库文档中没有一处集中陈述
 > —— 一个只读仓库的人会误以为 Electron 层已验收。本轮已把 1/2/3/4/5 写进
-> `docs/TODO.md` §0，并在 §六-F1 补了 gate 清单的机检。
+> `docs/TODO.md` §0，并在 §六-F1 补了 gate 清单的机检；第 7 条是本轮**新查出**的。
 
 ---
 
@@ -103,10 +108,45 @@ $ git status --porcelain
 
 **测试 : 生产 ≈ 1.8 : 1**（63,009 / 34,928）—— 对"规则密集 + 有合规要求"的项目，这是健康的比例。
 
-### 5.2 门禁（11/11）
+### 5.2 门禁（11/11）—— 最终证据在**已提交的树**上
 
-`devlogs/gate_report_20260930_112739.json`：`overall=pass`、`pass=11 fail=0 warn=0`、
-`tests_coverage` = **3866 passed / 0 failed / coverage 95.09%**。
+三个数**别混**，各自属于不同的树：
+
+| 时点 | 树 | 用例数 | 结果 | 报告 |
+|---|---|---|---|---|
+| R65 终验（11:27） | `28bda0d` | 3866 | 0 failed | `gate_report_20260930_112739.json` |
+| R66 加护栏后全量（手工） | R66 工作区 | 3875 | **2 failed / 3873 passed** | 见 §六 |
+| **R66 终验（12:10）** | **`dd33330`** | **3875** | **0 failed** | `gate_report_20260930_121027.json` |
+
+⚠️ 上表第 1 行的 `3866` 是 **R65 的**终验数，**不是** R66 的"修复前"数 —— 曾一度记错，已更正。
+**对账**：`3866 + 9 = 3875`，那 **9** 条正是本轮两个新护栏
+（`test_gate_inventory_doc.py` 5 条 + `test_todo_freshness.py` 4 条）。
+第 2 行那 **2 条红** = ① 新护栏**自我命中**了既有的 `test_repo_hygiene.py` 行号引用护栏
+（新文件 docstring 里引了 `settings.js` 的**行号字面量**）；② §六-F4 的顺序相关红。
+两条均已修 ⇒ 第 3 行 **0 failed**。**门禁全绿是"修复后"的状态**，不是红着也全绿。
+
+最终结果：
+
+```
+$ python scripts/release_gate.py          # 工作区干净，HEAD = dd33330
+[PASS] worktree_clean   工作区干净
+[PASS] no_build_outputs 378 个已跟踪文件中无构建产物
+[PASS] dist_variants    1 份完整产物（dist-electron）
+[PASS] artifact_freshness 2 份产物与源码逐字节一致
+[PASS] packaging_files  5 个前置文件就位
+[PASS] rules_wired      29 个 _check_* 规则函数（下限 14）
+[PASS] kb_corpus        知识库 441 条（下限 200）
+[PASS] kb_packaging     6 个 KB 源经 core/kb/data glob 自动入包
+[PASS] dependency_vulns 0 条公告（快照 6 天前，扫描 43 个条目）
+[PASS] runtime_eol      在支持线 [41, 42, 43] 内：dist-electron: Electron/43.7.4
+[PASS] tests_coverage   3875 passed, 0 failed, coverage=95.09% (门禁 95%)
+
+OVERALL: pass  (pass=11 fail=0 warn=0 skip=0)
+报告: devlogs/gate_report_20260930_121027.json
+```
+
+⚠️ **`worktree_clean` 是 11 项里的第 1 项**，它在 pytest 之前跑 —— 所以门禁结果
+对**当时那一份字节**有效；跑完门禁后若再改任何文件，该结论即失效，须重跑。
 
 ### 5.3 覆盖率热点（数据来自 `coverage.xml`，**该文件为 09:39 产物，早于 HEAD**，仅作指示）
 
@@ -174,6 +214,41 @@ $ git status --porcelain
   （曾自称"唯一开关"），一并更正。
 - **测试**：无新护栏（属描述性更正）；已用 `release_gate.py` 源码逐行核对。
 
+### F4【已修】`test_pdf_non_local_host_returns_403`：红在**清理期**，不在断言
+
+- **定位**：该用例**在全量跑里红、单独跑与整文件跑都绿**（本轮为第 2 次观察到）。
+  原始证据（不是推断）：
+
+  ```
+  [safe-delete][SAFE_DELETE_FAIL_CLOSED] {"target": "...\\output\\guard_probe.pdf",
+   "reason": "trash-failed", "detail": "SHFileOperationW 失败: 0x2"}
+  ```
+
+  ⇒ 根因是**测试自己**的 `finally: pdf_path.unlink()`：垫片在回收站不可用时**失败即关闭**
+  （fail-closed）并抛 `OSError`，该异常**逃出 `finally`**，把一条**断言已经通过**的用例染红。
+  它不是 flaky 的逻辑，是**清理期红**。
+- **为什么此前查不出来**：`pytest` 自己清 `tmp_path` 时**只记 `PytestWarning` 并继续**
+  （`(rm_rf) error removing ...`）；**手写 `unlink` 没有这层容忍** —— 同样的 OSError，
+  一个吞、一个炸。差别不在"临时目录"，在**谁来删**。
+- **修复**：改用 `tmp_path` 夹具 + **删掉手写 `unlink`**；同时把断言**收紧** ——
+  加 `assert "non-local" in r.text`。因为 host 守卫与路径越界守卫**都返回 403**，
+  不锁理由的话，夹具一挪位就可能"因别的原因通过"（空断言）。
+- **测试**：`TestServePdf` 整组重跑 **52 passed**（含本仓库卫生与两个新护栏文件）。
+- **机制当场被复现**：本轮最后一次重跑（61 passed）里，pytest **自己**清 `tmp_path` 时也撞上了
+  同一个垫片故障，但**只是警告、不红**：
+
+  ```
+  [safe-delete][SAFE_DELETE_FAIL_CLOSED] {"target": "...\\Temp\\pytest-of-wusitan\\garbage-bca47a85-…",
+   "reason": "trash-failed", "detail": "[Errno 53] 找不到网络路径。"}
+  ...\_pytest\pathlib.py:96: PytestWarning: (rm_rf) error removing \\?\C:\Users\...\garbage-bca47a85-…
+  ```
+
+  ⇒ 同一次故障、同一个 `OSError`，**在 pytest 手里是警告，在手写 `finally` 里是红**。
+  这就是 F4 的全部机制，可复现。
+- ⚠️ **我第一版 docstring 写的是"临时目录可避开垫片"，紧接着一次运行就打脸** ——
+  `%TEMP%\pytest-of-*` 路径**照样**报 `SAFE_DELETE_FAIL_CLOSED [Errno 53] 找不到网络路径`。
+  已按实测改写，并把**触发条件标注为未完全定位**（见 §4.2-7）。
+
 ### 6.1 变异验证
 
 `devlogs/_verify/mutation_doc_contract_guards.py` ⇒ **9/9**（基线绿）：
@@ -214,21 +289,21 @@ $ git status --porcelain
 
 ```
 $ git branch -vv
-* main 28bda0d [origin/main: ahead 8]
+* main dd33330 [origin/main: ahead 9]
 $ git remote -v
 origin  https://github.com/haowuxiwang/BatchSentry.git (fetch/push)
 $ git rev-list --left-right --count origin/main...HEAD
-0       8
+0       9
 ```
 
-⚠️ **本地 `main` 领先 `origin/main` 8 个提交**（`c8b092b` 之后的全部 R62–R66 工作），
+⚠️ **本地 `main` 领先 `origin/main` 9 个提交**（`c8b092b` 之后的全部 R62–R66 工作），
 **GitHub 上还是旧的**。推送是对外发布动作，**等用户确认**。
 
 ---
 
 ## 九、遗留 backlog（详见 `docs/TODO.md` §0）
 
-1. 推送本地 8 个未推送提交到 `origin/main`（**用户动作**）。
+1. 推送本地 9 个未推送提交到 `origin/main`（**用户动作**）。
 2. Electron 应用层 e2e 在**真实终端**复跑（本环境不可复现）。
 3. `docs/TODO.md` §A 及以下的 **86 条**未复核项逐条复核（自述已解除的 2 条优先）。
 4. 跨页总览增强（后端 `status` 过滤 / 关键词搜索）—— 小，可选。

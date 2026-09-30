@@ -10,7 +10,8 @@
 ### 文档契约护栏 + 待办清单复核（Round 66，2026-09-30）
 
 > 本轮的**发现方式**是"文档 vs 代码/事实"：三条缺陷都不是功能 bug，而是**文档与事实脱节**
-> —— 它们不会让任何用例变红，只能靠人工比对发现。报告 → `docs/ADVERSARIAL_REVIEW_2026-09-30.md`。
+> —— 它们不会让任何用例变红，只能靠人工比对发现。第四条（F4）是**测试自身的清理期缺陷**。
+> 报告 → `docs/ADVERSARIAL_REVIEW_2026-09-30.md`。
 
 **Fixed**
 
@@ -25,6 +26,14 @@
   已到 Round 65；含"自述已解除却仍是 `[ ]`"的条目（`A4`、`#162`）；且仍含 `settings.js:46`
   这类**拆分后已失效**的行号锚点。已更正头部、加**复核戳**、新增 **§0 实核 backlog**，
   并明确标注 §A 及以下为**未复核快照**。
+- `tests/integration/test_main_routes.py::TestServePdf::test_pdf_non_local_host_returns_403` ——
+  此前被记为"未定 flaky"（全量跑红、单跑绿）。**根因不是逻辑，是清理期**：用例自己的
+  `finally: pdf_path.unlink()` 撞上宿主垫片的 fail-closed（`SAFE_DELETE_FAIL_CLOSED` /
+  `SHFileOperationW 失败: 0x2`），`OSError` 逃出 `finally`，把一条**断言已通过**的用例染红。
+  pytest 自清 `tmp_path` 只记 `PytestWarning` 并继续，**手写 `unlink` 没有这层容忍** —— 差别在"谁来删"。
+  已改用 `tmp_path` 夹具并删掉手写 `unlink`；同时**收紧断言** `assert "non-local" in r.text`
+  （host 守卫与路径越界守卫**都**返回 403，不锁理由就可能因别的原因通过）。
+  ⚠️ 触发条件（为何只在全量跑的某一位次触发）**仍未完全定位**，见报告 §4.2-7。
 
 **Added**
 
@@ -39,7 +48,13 @@
 
 **Notes**
 
-- 本地 `main` 领先 `origin/main` **8 个提交**（截至 HEAD `28bda0d`）—— **尚未推送**。
+- **发布门禁已在提交 `dd33330` 上重跑：`overall=pass`、`pass=11 fail=0 warn=0`、
+  `tests_coverage` = 3875 passed / 0 failed / coverage 95.09%**（报告
+  `devlogs/gate_report_20260930_121027.json`）。与修复前 `3866 passed / 2 failed` 对账：
+  **+9 条**正是本轮两个新护栏（5+4），**2 条红**正是上面两条已修项。
+  ⚠️ `worktree_clean` 是 11 项里的**第 1 项**、先于 pytest 跑 ⇒ 门禁结论只对**当时那份字节**有效，
+  跑完再改文件即失效、须重跑。
+- 本地 `main` 领先 `origin/main` **9 个提交**（截至 HEAD `dd33330`）—— **尚未推送**。
 - Electron 应用层 e2e 在本 agent 环境**仍取不到证据**（沙箱内 Chromium GPU 崩溃，
   `exitCode=0x80000003`）；**不得读成已通过**，须在真实终端复跑。
 
