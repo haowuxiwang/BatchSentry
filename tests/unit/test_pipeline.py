@@ -3930,6 +3930,103 @@ class TestConfigErrorVisibility:
         assert "配置级故障" in (row["error_message"] or ""), (
             "原因未提升到 job 级 → 前端仍无原因可显（#127 回归）"
         )
+
+    @pytest.mark.asyncio
+    async def test_sliced_path_escalates_config_error(self, pipeline_db, tmp_path):
+        """#144：**分片路径**同样必须把配置级首因提升到 job 级。
+
+        为什么单独立一条：上面两条走的是**整份路径**。分片路径
+        （`ocr_slices > 1` + 支持分片的后端）此前**不传** `config_error`
+        ⇒ `_handle_page_failure` 收到 `None` ⇒ 不提升到 job 级 ⇒
+        `jobs.error_message` 保持 NULL。而**大文档正是走分片路径** ——
+        凭据失效时呈现「0 条 finding + 无原因」，与「记录确实无异常」
+        不可区分。即 #127 要消灭的 GMP 假阴性，却只修了整份路径。
+
+        同时锁住"确诊后被闸门跳过的页必须补记 failed_pages"：不补记的话
+        复核者会以为页数齐了（实测正是本修复引入该风险的：闸门一旦生效，
+        未尝试的页既无产出也不进 failed_pages）。
+        """
+        from llm.client import LLMConfigError
+        import core.mineru_client as mineru_client
+
+        job_id = await _insert_job(pipeline_db, status="pending")
+        pdf_path = str(tmp_path / "fake.pdf")
+        Path(pdf_path).write_bytes(b"%PDF-1.4 fake")
+
+        fake_pages = [{"markdown": {"text": f"page {i}"}} for i in range(1, 5)]
+        calls = {"n": 0}
+        # 防空转：必须证明**分片分支真的被走到了**。若 ocr_slices/后端能力
+        # 没生效，流程会静默回退整份路径 —— 而整份路径**本来就**提升 job 级
+        # 首因 ⇒ 本用例会在没测到 #144 的情况下变绿。
+        sliced_calls = {"n": 0}
+        # 自愈必须是**行为级**判据：只断言源码里有 "skip self-heal" 这行日志
+        # 是空断言（那句日志本身不会因为守卫失效而消失）。改为观察是否真调用。
+        heal_calls = {"n": 0}
+
+        async def _spy_heal(*args, **kwargs):
+            heal_calls["n"] += 1
+            return []
+
+        async def _boom(*args, **kwargs):
+            calls["n"] += 1
+            raise LLMConfigError(
+                "LLM call failed (non-retryable): 401 Token is invalid"
+            )
+
+        def _fake_sliced(pdf, slice_pages, on_batch, progress_cb=None, job_id=None):
+            sliced_calls["n"] += 1
+            on_batch(1, fake_pages, len(fake_pages))
+            return True
+
+        orig = (
+            config["app"].ocr_slices,
+            config["app"].ocr_backend,
+            config["app"].llm_concurrency,
+        )
+        # 并发=1 → "确诊后不再补刀"是确定性行为，不靠调度碰运气
+        config["app"].ocr_slices = 2
+        config["app"].ocr_backend = "mineru"  # 能力表里唯一 supports_slicing
+        config["app"].llm_concurrency = 1
+        try:
+            with patch.object(mineru_client, "run_ocr_sliced", new=_fake_sliced), \
+                 patch("core.procpool.run_cpu",
+                       new=AsyncMock(return_value=(pdf_path, 0))), \
+                 patch("core.pipeline.analyze_page", new=_boom), \
+                 patch("core.pipeline._self_heal_empty_pages", new=_spy_heal), \
+                 patch("core.pipeline.analyze_cross_page",
+                       new=AsyncMock(return_value=[])):
+                await run_pipeline(job_id, pdf_path)
+        finally:
+            (
+                config["app"].ocr_slices,
+                config["app"].ocr_backend,
+                config["app"].llm_concurrency,
+            ) = orig
+
+        cursor = await pipeline_db.execute(
+            "SELECT status, failed_pages, error_message FROM jobs WHERE id = ?",
+            (job_id,),
+        )
+        row = await cursor.fetchone()
+        assert sliced_calls["n"] == 1, (
+            "分片 OCR 桩未被调用 ⇒ 流程回退到了整份路径，本用例**没测到**"
+            " #144（整份路径本来就提升 job 级首因，会假绿）"
+        )
+        assert "配置级故障" in (row["error_message"] or ""), (
+            "分片路径未把首因提升到 job 级（#144）—— 大文档凭据失效时"
+            f"前端无原因可显，error_message={row['error_message']!r}"
+        )
+        assert sorted(json.loads(row["failed_pages"])) == [1, 2, 3, 4], (
+            "被闸门跳过的页未补记 failed_pages ⇒ 复核者以为页数齐了："
+            f"{row['failed_pages']}"
+        )
+        assert calls["n"] == 1, (
+            f"确诊后仍在死 key 上重试 {calls['n']} 次（#127 早停语义回归）"
+        )
+        assert heal_calls["n"] == 0, (
+            "配置级故障下仍跑了空页自愈 —— 自愈走同一条 LLM 链路必然同样"
+            "失败，还要先白跑一遍 MinerU OCR（#144 的守卫失效）"
+        )
         assert "401" in row["error_message"]
         assert calls["n"] == 1, (
             f"配置级故障下仍调用了 {calls['n']} 次 LLM —— 早停失效"

@@ -32,6 +32,7 @@ from core.pipeline.stage2 import config_error_job_message
 REPO = Path(__file__).resolve().parents[2]
 CLIENT_PY = REPO / "llm" / "client.py"
 STAGE2_PY = REPO / "core" / "pipeline" / "stage2.py"
+ENGINE_PY = REPO / "core" / "pipeline" / "engine.py"
 UPLOAD_JS = REPO / "static" / "upload.js"
 # R63 P2-1 拆分：历史行渲染/SSE 快照消费（failed_pages / error 分支）已
 # 平移至 upload-jobs.js，前端消费断言随迁
@@ -557,4 +558,77 @@ class TestPageLevelErrorTextIsSanitized:
         assert '"_error": str(exc)' not in src, "页级 _error 又变回裸 str(exc)"
         assert 'config_error["reason"] = _mask_secrets(' not in src, (
             "job 级首因绕过了 helper（口径会再次分叉）"
+        )
+
+
+class TestSlicedPathSharesConfigErrorContract:
+    """#144：**分片路径**必须与整份路径同口径地提升配置级首因。
+
+    失效模式：分片路径此前**不传** `config_error` ⇒ `_handle_page_failure`
+    收到 `None` ⇒ 不提升到 job 级 ⇒ `jobs.error_message` 保持 NULL。而
+    **大文档正是走分片路径**：凭据失效时呈现「0 条 finding + 无原因」，
+    与「记录确实无异常」不可区分 —— 正是 #127 要消灭的 GMP 假阴性。
+
+    行为级护栏在 `tests/unit/test_pipeline.py::TestConfigErrorVisibility::
+    test_sliced_path_escalates_config_error`（真跑分片分支）。本类只补
+    **调用点**判据：行为测试跑一次就够，但一次重构可以把某个出口悄悄
+    改回不传 —— 那种回归不会被行为测试抓到（漏传的那个出口在行为测试里
+    可能恰好不是被触发的那条路径）。
+    """
+
+    def _src(self) -> str:
+        return ENGINE_PY.read_text(encoding="utf-8-sig")
+
+    def test_the_detector_is_not_vacuous(self):
+        """防空转：`_analyze_one` 的**调用点**必须恰好 2 处（多了要同步改）。"""
+        n = self._src().count("_analyze_one(")
+        assert n == 2, (
+            f"engine.py 里 `_analyze_one(` 调用点实测 {n} 处（预期 2：首次入队"
+            " + 自愈重分析）。新增调用点时必须同时更新本护栏与下面的计数断言。"
+        )
+
+    def test_both_call_sites_pass_config_error(self):
+        src = self._src()
+        assert src.count("config_error=config_error,") == 2, (
+            "分片路径的 _analyze_one 调用点未全部传入 config_error —— "
+            "漏传的那个出口不会把首因提升到 job 级（#144 回归）"
+        )
+
+    def test_sliced_path_declares_a_shared_config_error_dict(self):
+        assert "config_error: dict = {}" in self._src(), (
+            "分片路径没有共享的 config_error 暂存 ⇒ 并发页各自为战，"
+            "首因无法「只写一次」，job 级原因可能被后到的页覆盖"
+        )
+
+    def test_skipped_pages_are_backfilled(self):
+        """确诊后被闸门跳过的页必须补记，否则「页数齐了」是假的。
+
+        这是本修复**引入**的风险面：`_analyze_one` 的闸门一旦生效，未尝试
+        的页既无产出也不进 failed_pages。整份路径早有这个收尾
+        （`stage2._run_stage2_analysis`），分片路径必须做同一件事。
+        """
+        src = self._src()
+        assert "early-stop on config error" in src, "分片路径缺早停收尾日志"
+        assert "succeeded = await _get_analyzed_pages(db, job_id)" in src, (
+            "补记未复用 _get_analyzed_pages（单一真值源，排除 _parse_error）"
+        )
+
+    def test_self_heal_is_skipped_on_config_error(self):
+        """守卫必须**挂在 `config_error` 上**，而不是只留一句日志。
+
+        ⚠️ 只断言 `"skip self-heal" in src` 是**空断言**：把守卫改成
+        `if False:` 之后那句日志仍在（M3 变异实测）。故锁住结构。
+        **行为**判据在 `test_pipeline.py::TestConfigErrorVisibility::`
+        `test_sliced_path_escalates_config_error` 的 `heal_calls` 断言。
+        """
+        norm = self._src().replace("\r\n", "\n")
+        assert (
+            "    if config_error:\n        # #144：自愈走的是同一条 LLM 链路"
+            in norm
+        ), (
+            "自愈守卫不再挂在 config_error 上 ⇒ 配置级故障下仍会白跑一遍"
+            "MinerU OCR + 必然同样失败的重分析"
+        )
+        assert "        recovered = []\n" in norm, (
+            "config_error 分支未把 recovered 置空 ⇒ 自愈会照跑"
         )

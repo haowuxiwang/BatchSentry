@@ -476,6 +476,13 @@ async def _run_sliced_stage1_2(
     state_lock = asyncio.Lock()
     failed_pages: list[int] = []
     completed = {"n": 0}
+    # #144：配置级故障暂存 —— 与整份路径（stage2._run_stage2_analysis）同口径。
+    # 此前分片路径**不传** config_error ⇒ _handle_page_failure 收到 None ⇒
+    # 不提升到 job 级 ⇒ jobs.error_message 保持 NULL。而大文档正是走分片路径：
+    # 凭据失效时呈现「0 条 finding + 无原因」，与「记录确实无异常」不可区分
+    # —— 正是 #127 要消灭的 GMP 假阴性，却只修了整份路径。
+    # 并发页共用同一 dict，首因由 _handle_page_failure 写入并充当「只写一次」守卫。
+    config_error: dict = {}
     # #140：分片路径的页分析子任务全部经 `children.spawn` 登记 ——
     # 父 task 被取消时由 run_pipeline 的 finally 级联取消，不再游离。
     if children is None:
@@ -572,6 +579,7 @@ async def _run_sliced_stage1_2(
                     _analyze_one(
                         db, job_id, page_num, page, sem, failed_pages,
                         state_lock, completed, total_pages,
+                        config_error=config_error,
                     )
                 )
             )
@@ -655,6 +663,28 @@ async def _run_sliced_stage1_2(
     stage2_start = time.time()
     await asyncio.gather(*analysis_tasks)
 
+    if config_error:
+        # #144：确诊后 _analyze_one 的闸门会让**尚未尝试**的页直接跳过
+        # （不再发起 LLM 调用）。那些页既没有产出、也没进 failed_pages ——
+        # 不补记会让复核者以为「页数齐了」（与 Stage 1 缺页同口径）。
+        # 成功集取自 _get_analyzed_pages（单一真值源，排除 _parse_error），
+        # 与整份路径的早停收尾（stage2._run_stage2_analysis）做同一件事。
+        succeeded = await _get_analyzed_pages(db, job_id)
+        async with state_lock:
+            for pn in range(1, total_pages + 1):
+                if pn not in failed_pages and pn not in succeeded:
+                    failed_pages.append(pn)
+        logger.warning(
+            f"[{job_id}] Stage 2 (sliced): early-stop on config error "
+            f"(first cause at page {config_error.get('page')}): "
+            f"{config_error.get('reason')}"
+        )
+        await _audit_log(
+            db, job_id, "stage2_config_error",
+            f"sliced: first_cause_page={config_error.get('page')} "
+            f"failed={len(failed_pages)}/{total_pages}",
+        )
+
     # 空页自愈（分片路径补齐 — 与整份路径同机制）。skip_pages 只排除
     # "已成功分析"的页：其警告前缀会命中缺失标记，不自愈前排除会清掉
     # 已有 structured_json 触发无谓重跑。_ocr_empty / _parse_error /
@@ -676,9 +706,19 @@ async def _run_sliced_stage1_2(
         if data.get("_ocr_empty") or data.get("_parse_error"):
             continue  # 空页短路/解析失败 → 自愈后补分析
         heal_skip.add(row["page"])
-    recovered = await _run_heal(
-        db, job_id, pdf_path, [], "mineru", skip_pages=heal_skip
-    )
+    if config_error:
+        # #144：自愈走的是同一条 LLM 链路 ⇒ 必然同样失败；而 _run_heal
+        # 还要先跑一遍 MinerU OCR（昂贵且无用）。与整份路径同口径：
+        # 确诊后不再做后续阶段。未产出的页已在上方 backfill 计入。
+        logger.warning(
+            f"[{job_id}] Stage 2 (sliced): skip self-heal "
+            f"(config error: {config_error.get('reason')})"
+        )
+        recovered = []
+    else:
+        recovered = await _run_heal(
+            db, job_id, pdf_path, [], "mineru", skip_pages=heal_skip
+        )
     if recovered:
         logger.info(
             f"[{job_id}] Sliced self-heal recovered {len(recovered)} pages "
@@ -698,6 +738,7 @@ async def _run_sliced_stage1_2(
                     _analyze_one(
                         db, job_id, row["page"], page_dict, sem,
                         failed_pages, state_lock, completed, total_pages,
+                        config_error=config_error,
                     )
                 )
             )
