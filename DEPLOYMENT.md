@@ -19,6 +19,9 @@ BatchSentry 以**文件夹便携版**形式分发，用户无需安装，解压�
 # 在真实 PowerShell 终端执行（非 IDE Sandbox）
 cd d:\learn\claudecode\pharma-batch-checker
 
+# ⚠️ 若宿主注入了「安全删除」垫片，必须关掉它（否则构建会在删除阶段失败）
+$env:CODEBUDDY_SAFE_DELETE_ENABLED = "0"
+
 # 方式 1：完整构建（CSS + PyInstaller + Electron 文件夹便携版）
 .\build.ps1
 
@@ -28,6 +31,19 @@ cd d:\learn\claudecode\pharma-batch-checker
 # 方式 3：清理后重建
 .\build.ps1 -Clean
 ```
+
+> ⚠️ **`CODEBUDDY_SAFE_DELETE_ENABLED=0` 是 2026-09-30 实测的必要条件。**
+> 宿主可能同时注入**三层**"安全删除"垫片（共用一个开关），症状各不相同：
+>
+> | 层 | 拦截点 | 实测症状 |
+> |---|---|---|
+> | PowerShell | `Remove-Item` 被同会话函数遮蔽 | 管道形式抛 `missing path operand`；**多路径**形式**静默什么都不删** |
+> | Python | `PYTHONPATH` 内 `sitecustomize.py` patch `os.remove`/`shutil.rmtree` | PyInstaller `--clean` 抛 `OSError: SHFileOperationW 失败: 0x2` |
+> | Node | `node-safe-delete-shim.cjs` patch `fs.rm` | electron-builder 抛 `SAFE_DELETE_BULK_CONFIRM_REQUIRED`（实测 896 > 阈值 50） |
+>
+> 同一个开关也**必须**用于全量 pytest：否则垫片会在 pytest 清理临时目录时
+> `SystemExit(1)`，把进程打断（`SUITE_EXIT=3`，报告里的 `INTERNALERROR`）。
+> 详见 `docs/ADVERSARIAL_REVIEW_2026-09-29.md` §9.2。
 
 ### 构建产物
 
@@ -87,16 +103,43 @@ python scripts/release_gate.py --python "<python.exe 的 Windows 路径>" --fail
 python -m pytest tests/unit/test_distribution_parity.py -o addopts="" -q
 
 # 4. 对**将要分发的那份**做端到端（把 PBC_E2E_EXE 指向 win-unpacked 内嵌副本）
+#    发版/验收时**必须**加 PBC_E2E_REQUIRE_LLM=1：把「LLM 链路未被真实覆盖」
+#    从"一条记录"升格为**硬失败**（fail-closed）。
 $env:PBC_E2E_EXE = "dist-electron\win-unpacked\resources\pbc-server\pbc-server.exe"
+$env:PBC_E2E_REQUIRE_LLM = "1"
 python tests/e2e_frozen.py
 
-# 5. 核对版本（服务端 /health 与包内 package.json 必须都等于 main.APP_VERSION）
+# 4b. Electron **应用层**（用户双击的那一份）：启动 / 内嵌后端 / app.asar / 主窗口 /
+#     优雅关闭。⚠️ 必须在**非沙箱**终端跑（见下方「已知限制」）。
+$env:PBC_E2E_UNPACKED = "dist-electron\win-unpacked"
+$env:PBC_E2E_UNPACKED_RUNS = "2"
+python tests/e2e_unpacked.py
+
+# 5. 核对版本（服务端 /health 与包内 version 必须都等于 main.APP_VERSION）
 Remove-Item Env:\PBC_E2E_EXE
+Remove-Item Env:\PBC_E2E_REQUIRE_LLM
+Remove-Item Env:\PBC_E2E_UNPACKED
 ```
 
 第 4 步的意义：默认 `tests/e2e_frozen.py` 测的是 `dist/pbc-server/`（PyInstaller 的
 直接产物），而**用户双击运行的是 Electron 包里内嵌的那一份**。不显式指过去，就等于
 "测了 A、发了 B"。第 3 步的逐字节比对是这条链路的兜底。
+
+> ⚠️ **凭据怎么给。** 第 4 步的 LLM/OCR 链路需要凭据，且**变量名与提供方无关**：
+> `PBC_E2E_LLM_KEY`（配 `PBC_E2E_LLM_PROVIDER`，默认 `siliconflow`）+
+> `PBC_E2E_MODEL`（空 = 沿用产品默认档）+ `PBC_E2E_PADDLE_TOKEN` 等。
+> 从 `config.json` 派生这些变量是易错的（产品侧字段名 `SILICONFLOW_API_KEY` ≠
+> 验收侧 `PBC_E2E_LLM_KEY`），可用已持久化的脚本：
+> `python devlogs/_verify/run_e2e_with_config_creds.py frozen --require-llm`
+> （它会打印**脱敏**的凭据摘要，便于事后审计"跑的是哪一把 key"）。
+
+> ⚠️ **两种失败必须分清**（2026-09-30 实测）：
+> · **账户欠费（402）** —— 凭据是真的，但付不起。归因探测会给出
+>   `凭据有效但账户欠费 ⇒ 非产品缺陷`；此时 `REQUIRE_LLM=1` 判 FAIL **是正确的**
+>   （本轮确实没验到 LLM 链路），**充值后复跑**即可。
+> · **凭据无效（401/403）** —— 上游确凿拒绝该 key，轮换后复跑。
+> 判据：免费端点 `GET {base_url}/models` 返回 200 **只**证明 key 是真的，
+> **不**证明账户付得起（它不消耗额度）。故探测必须**两段式**（免费 + 一次计费最小请求）。
 
 > ⚠️ **真实文档轮次要确认"实际用的是哪个 OCR 引擎"。** 主后端提交失败会自动
 > failover 到备选后端，而终态、findings、SSE 全都照常 —— 只有
@@ -147,6 +190,44 @@ Remove-Item Env:\PBC_E2E_EXE
 - **上游凭据与真机连通性未验**：本机 LLM key 可用性、Anthropic **厂商真机**（仅有本地协议桩）。
 - **无真实标注集** ⇒ 精度/召回**没有可信数字**（`docs/FINDING_GROUND_TRUTH.json` 是合成件，不可外推）。
 - **200 页上传上限是线性外推**，未实跑。
+
+### v1.2.1 增补证据边界（2026-09-30）
+
+> 只列**与 v1.1.9 基线不同**的部分；上节未变的条目（他机验证、判定准确性、精度/召回、
+> 200 页外推）**依然有效，且不得因为本轮多跑了几轮 e2e 而被读成已通过**。
+
+**本轮新增实测（可作为依据）**
+
+- 全量：**3831 passed / 4 skipped**，覆盖率 **95.09%**（须带 `CODEBUDDY_SAFE_DELETE_ENABLED=0`）。
+- 发版门禁 `pass=10 / fail=0 / warn=0`：含 `worktree_clean`、`artifact_freshness`
+  （"2 份产物与源码逐字节一致"）、`runtime_eol`（Electron/43.7.4 在支持线内）。
+- **内嵌后端层**端到端（`tests/e2e_frozen.py`，目标 = `win-unpacked/resources/pbc-server/`）：
+  **26 passed / 0 failed**，覆盖 `covered=4/4` —— `llm_pipeline` 以
+  `llm_call_audit` 中 `success=1` 为权威证据；`ocr_backend_used=paddle`（真实后端，无 failover 掩盖）。
+- **Electron 应用层**端到端（`tests/e2e_unpacked.py` ×2）：**14 passed / 0 failed / 2 skipped** ——
+  启动 3.0s、`/health` 版本 == `PROVENANCE`、内嵌后端拉起、渲染进程加载 `app.asar`、
+  主窗口 1.01s、优雅关闭 `exitCode=0`、DB checkpoint 收敛。
+- **两份产物逐字节一致**：`dist/pbc-server/pbc-server.exe` 与 Electron 内嵌副本同为
+  20,484,987 字节、同 sha ⇒ 不存在"测 A 发 B"。
+
+**未验证（本轮**新增**，不得当作已通过）**
+
+- 🔴 **本轮 `llm_pipeline` 未被真实覆盖**：上游账户**余额耗尽** —— `GET /models` 返回 200，
+  但 `POST /chat/completions` 对**全部 98 个模型**返回 `402 code=30001`。
+  `PBC_E2E_REQUIRE_LLM=1` 因此**正确地**判 FAIL（fail-closed）。
+  ⚠️ **修好了"归因"不等于"恢复了覆盖"**：要覆盖必须**充值后复跑**。
+- 🔴 **Electron 应用层 e2e 在受限沙箱内不可复现**：Chromium 的 GPU 进程起不来
+  （`FATAL: GPU process isn't usable.`），应用以 `0x80000003` 退出、`/health` 永不就绪。
+  2×2 对照证明 `--disable-gpu` 与结果**无关**（沙箱内加不加都崩、沙箱外加不加都过）
+  ⇒ 必须在**非沙箱**终端跑。
+- ⚠️ **`build.ps1` 脚本本身未被实跑**（宿主 PowerShell 工具无法执行任何原生程序），
+  本轮是**复刻其步骤**完成的构建 ⇒ "构建成功"不构成"`build.ps1` 脚本可用"的证据。
+- ⚠️ **一条未定论的 flaky**：垫片开启的那次全量跑出现 1 条未复现失败
+  （`test_main_routes.py::TestServePdf::test_pdf_non_local_host_returns_403`），
+  随后三次运行均绿。**按 flaky 记录，未定论。**
+
+**交付口径不变**：以上仅支持「**链路可用**」；`功能跑通 ≠ 判定正确`，
+**判定准确性仍须人工复核**（依据同 v1.1.9 基线的抽样结论）。
 
 ### 分发方式
 

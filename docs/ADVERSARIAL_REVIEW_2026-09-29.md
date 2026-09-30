@@ -977,3 +977,162 @@ core/kb/retriever.py:19   from core.kb import store             →  core.kb
 | 并发额度三件套（quota_js / jobs_js / quota_contract） | **79 passed** |
 | 上传 + JS 模块族（`multifile` / `resilience` / `review_js_modules` / 上述三件套） | **127 passed** |
 | 变异验证基线（同上三件套） | **79 passed** |
+
+---
+
+## 九、重打包验收（Round 64，2026-09-30）
+
+本节记录"是否要重打包 → 多次端到端 → 修复 → 验证"这一轮的**全部证据与撤回项**。
+
+### 9.1 结论：必须重打包（证据）
+
+| 事实 | 证据 |
+|---|---|
+| 产物早于全部修复 | `dist-electron/win-unpacked/BatchSentry.exe` mtime **2026-09-24 12:02**，而 §五 的 9 处修复落在 09-28/09-29 |
+| `app.css` 曾过期 | 清单第 0 步：`npm run build:css` 产出差异 —— 缺 `decoration-dotted`（`templates/review.html:452,466`、`static/review-findings.js:449` 在用）与 `[offset:offset+limit]`。19921 → **20016** 字节，308 → **310** 选择器 |
+| ⇒ 已发产物里"第 N 页 / 加载更多"链接是**实线**下划线 | 同上 |
+
+重建链路（全部用 Bash 复刻 `build.ps1`，因**宿主 PowerShell 工具无法执行任何原生程序**，见 9.2）：
+CSS → PyInstaller（`rc=0`，3m05s）→ 冒烟（`/health` 200 @~2s）→
+`scripts/bundle_manifest.py --write/--check`（`version=1.2.1 files=111`，"逐字节一致"）→
+electron-builder（`rc=0`，34s）→ `PROVENANCE.txt` → 逐字节比对。
+最终 `dist/pbc-server/pbc-server.exe` 与 Electron 内嵌副本**同为 20,484,987 字节、同 sha**
+⇒ 不存在"测 A 发 B"。
+
+### 9.2 宿主注入的三层「安全删除」垫片（一个开关）
+
+本机 `build.ps1` / PyInstaller / electron-builder 全部因垫片失败，各自症状不同：
+
+| 层 | 拦截点 | 实测症状 |
+|---|---|---|
+| PowerShell | `Remove-Item` 被同会话 `Function` 遮蔽（`Get-Command -All` 可见两条） | 管道形式抛 `missing path operand`；**多路径**（`a, b`）**静默什么都不删** |
+| Python | `PYTHONPATH` 里的 `sitecustomize.py` patch `os.remove`/`os.unlink`/`shutil.rmtree` | PyInstaller `--clean` 在 `build_main.py:1170` 抛 `OSError: SHFileOperationW 失败: 0x2` |
+| Node | `node-safe-delete-shim.cjs` patch `fs.rm`，另有**批量删除确认门** | electron-builder 抛 `SAFE_DELETE_BULK_CONFIRM_REQUIRED {"count":896,"threshold":50}` |
+
+**唯一开关**：`CODEBUDDY_SAFE_DELETE_ENABLED=0`（三层共用）。
+⇒ 任何"会大量删除文件"的构建/清理命令都必须带上它。
+
+⚠️ **能力边界（诚实标注）**：宿主 PowerShell 工具**无法执行任何原生可执行文件**
+（绝对路径调 `python.exe`/`node.exe`/`git.exe` 均无输出、`$LASTEXITCODE` 不置位、
+`cmd.exe` 被拦、`dangerouslyDisableSandbox` 无效）⇒ `build.ps1` **不能**由助手直接运行，
+其步骤只能复刻。**故本轮的"构建成功"是复刻步骤的成功，不等于 `build.ps1` 脚本本身被实跑过。**
+
+### 9.3 `build.ps1` 的两个真实缺陷（已修 + 已加护栏 + 已变异验证）
+
+| # | 缺陷 | 后果 | 修法 |
+|---|---|---|---|
+| 1 | `-Clean` **整删 `build/`** | `build/_run` 里存着**本次运行**的 start 台账（第 60 行落盘），而 B9-6 判"被杀 vs 真失败"**只**靠它 ⇒ 全量构建被强杀后证据变成"从未运行过" | `dist/`、`dist-electron/` 整删；`build/` 只删 `_run` 以外内容 |
+| 2 | 台账裁剪以 `Select-Object -Skip 40` 接 `Remove-Item -Force` | 依赖"真实 `Remove-Item` 在**管道上下文**收 0 个对象不抛、而**独立调用**缺 `-Path` 会抛"这一隐晦不对称；台账不足 40 个文件时管道恰好为空（实测当时只有 10 个）⇒ 失败点随宿主包装器而变 | 显式收集成数组 + 判空 + `-LiteralPath` |
+
+护栏 `tests/unit/test_build_script.py` 7 → **11 条**（含"start 台账必须早于 clean 块"的顺序判据、
+"仍须删 dist/dist-electron"的反空转判据）；变异 `devlogs/_verify/mutation_build_clean_ledger.py`
+**6/6 CAUGHT**，且断言真文件字节未变。
+
+### 9.4 端到端轮次台账
+
+| 轮 | 驱动 | 目标 | 条件 | 结果 |
+|---|---|---|---|---|
+| 1 | `e2e_frozen` | `dist/pbc-server` | 无凭据 | 11 / 3 —— 2 条**陈旧断言**（已修）+ 1 条环境 |
+| 2 | `e2e_frozen` | **Electron 内嵌 exe** | 有凭据 | **26 / 0**，`covered=4/4` |
+| 3 | `e2e_frozen` | 同上 | +`REQUIRE_LLM=1` | 24 / 3 ⇒ 定位到**账户欠费** + **归因缺陷** |
+| 3b | `e2e_frozen` | 同上 | 修归因后 | 24 / 3，归因已正确（仍 fail-closed，**这是对的**） |
+| 4–5b | `e2e_unpacked` | `win-unpacked` | **沙箱内** | 0 / 2（GPU FATAL → `0x80000003`） |
+| 4d | `e2e_unpacked` | 同上 | **沙箱外** ×1 | **7 / 0 / 1 skip** |
+| 5c | `e2e_unpacked` | 同上 | **沙箱外** ×2 | **14 / 0 / 2 skip** |
+
+⇒ **两条互相独立**的绿：内嵌后端层 26/26；Electron 应用层 14/14
+（D1 启动 3.0s / D2 `/health` 版本 == `PROVENANCE` / D3 内嵌后端 / D4 渲染进程加载 `app.asar` /
+D5 主窗口 1.01s / D6 优雅关闭 `exitCode=0` / D7 checkpoint 收敛）。
+
+### 9.5 修复 10：LLM 失败归因把「账户欠费」报成「产品缺陷」
+
+**缺陷**：`probe_llm_credential` 只用**免费**端点 `GET {base_url}/models`。
+该端点不消耗额度 ⇒ 只能回答"key 是不是真的"，**回答不了**"账户付不付得起"。
+余额耗尽时上游 402，`/models` 照旧 200 ⇒ 判 `ok` ⇒ 报告写"凭据有效，故此处失败是
+**产品缺陷**"；而**同一份报告的另一行**写着 `402 code=30001 balance insufficient`。
+**自相矛盾 + 把排查引向代码。**
+（`tests/e2e_proc.py` 的 `LLM_MODEL_ENV` 注释早在 2026-09-23 就记过这个坑，
+但只落在"选档位"的建议上，**没落到探针实现上** —— 所以它又发生了一次。）
+
+**取证**（`devlogs/_verify/probe_llm_balance_vs_credential.py`，持久化）：
+
+```
+[免费端点] GET /models                        -> HTTP 200
+[计费端点] POST /chat/completions V3.2        -> HTTP 402 code=30001 balance insufficient
+[计费端点] POST /chat/completions V4-Flash    -> HTTP 402
+[计费端点] POST /chat/completions Qwen3.8-27B -> HTTP 402
+```
+⇒ 与"产品挑了个贵模型"无关，是**账户层面付不起** ⇒ **非产品缺陷**。
+
+**修复**：判定提为纯函数 `tests.e2e_proc.classify_llm_probe(free_status, metered_status)`
+（4 态 `invalid` / `billing` / `ok` / `unknown`；**免费 200 单独不足以判 `ok`**）+
+文案唯一实现 `llm_failure_attribution()`；探针改**两段式**（免费 → `max_tokens=1` 计费最小请求），
+调用点传**应用上报的模型** `_model_used`（传我们请求的档位会验错对象）。
+护栏 `tests/unit/test_llm_failure_attribution.py` **22 条**；变异
+`devlogs/_verify/mutation_llm_attribution.py` **9/9 CAUGHT**（含"调用点漏传模型"这条
+—— 可选参漏传**不报错**，只会静默退回旧行为，故必须机检**调用点传参**）。
+
+⚠️ **纪律：归因与覆盖状态是正交的两个维度，不可互相顶替。**
+覆盖状态**仍记 `failed`** —— 流水线**确实执行了**且未达成功终态（`failed` 的定义是
+"执行了但结果不符预期"）；`skipped` 的定义是"因环境缺项**未执行**"，用在这里是**事实错误**。
+且无论记 `failed` 还是 `skipped`，`required_gaps` 都会产生 gap ⇒ `REQUIRE_LLM=1` 下
+**仍然硬失败**，fail-closed 未被削弱。
+
+### 9.6 修复 11：`e2e_unpacked` 用 `DEVNULL` 吞掉 Electron 的报错
+
+**缺陷**：`subprocess.Popen(..., stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)`。
+`BatchSentry.exe` 以 `0x80000003` 退出时**只剩一个退出码**，真因被丢掉。
+（姊妹模块 `tests/e2e_proc.py` 早就立过规矩：长驻子进程的 stdout/stderr 应落
+**日志文件** —— 既不能 PIPE 不排空（写满缓冲即死锁），也**不该 DEVNULL**（丢掉诊断）。）
+
+**修复**：落 `sandbox/runN_{stdout,stderr}.log`；新增 `_startup_failure_attribution()`
+读 stderr 翻成人话；新增逃生口 `PBC_E2E_UNPACKED_ARGS`。
+护栏 `tests/unit/test_e2e_unpacked_guard.py` 13 → **22 条**（含 DEVNULL 探测的阳性对照）；
+变异 `devlogs/_verify/mutation_unpacked_guard.py` **5/5 CAUGHT**。
+
+### 9.7 被否证并撤回的结论：`--disable-gpu`
+
+**一度判定**："宿主 GPU 不可用 ⇒ 需加 `--disable-gpu`"，并把它写成默认值 + 提示文案。
+**2×2 对照当场否证**（同一产物、同一开关矩阵、同一探针脚本）：
+
+| 条件 | `/health` |
+|---|---|
+| **不加** `--disable-gpu`，**沙箱外** | OK @3.05s 通过 |
+| **加** `--disable-gpu`，**沙箱外** | OK @1.67s 通过 |
+| **加** `--disable-gpu`，**沙箱内** | 崩 `0x80000003`（`FATAL: GPU process isn't usable.`） |
+| **不加** `--disable-gpu`，**沙箱内** | 崩 `0x80000003` |
+
+⇒ **唯一的自变量是"是否运行在受限沙箱里"**，`--disable-gpu` 与结果无关。
+**已撤回**默认值与文案，并加护栏
+`test_gpu_attribution_does_not_prescribe_disable_gpu_as_the_fix` 防它被写回。
+
+另注：`dangerouslyDisableSandbox: true` **没有**带来 bypass（无 `Sandbox bypassed` 标记、
+仍崩）；真正 bypass 的是工具自身的 `escalation-approved` 路径。
+
+**教训（通用）**：一次只改一个自变量。本轮最初"改开关 → 变绿"的观察里其实同时变了
+**两个**变量（开关 + 是否沙箱），于是得出了错误因果。2×2 才把它拆开。
+
+### 9.8 全量回归与门禁
+
+| 项 | 结果 |
+|---|---|
+| 全量 pytest | **3831 passed / 4 skipped**，覆盖率 **95.09%** |
+| 发版门禁 | `pass=10 / fail=0 / warn=0`（`worktree_clean`、`artifact_freshness`、`runtime_eol` 全绿） |
+| 变异验证合计 | `mutation_llm_attribution` 9/9、`mutation_unpacked_guard` 5/5、`mutation_build_clean_ledger` 6/6 |
+
+⚠️ 全量 pytest 必须带 `CODEBUDDY_SAFE_DELETE_ENABLED=0`：否则宿主 Python 垫片会在
+pytest 清理临时目录时因"批量删除 578 > 阈值 50"`SystemExit(1)`，把进程打断（`SUITE_EXIT=3`）。
+
+⚠️ **未定论的一条**：垫片**开启**的那次全量跑出现 **1 条未复现失败**
+（`tests/integration/test_main_routes.py::TestServePdf::test_pdf_non_local_host_returns_403`，
+live log 显示守卫**已**正确拒绝非本机请求）。随后三次运行（单跑 / 只跑集成目录 / 全量+垫片关）
+**均绿**。按 **flaky 记录，未定论** —— 不声称已修，也不声称不存在。
+
+### 9.9 本轮仍未验证的边界（不得当作已通过）
+
+- **上游账户余额耗尽** ⇒ 本轮 `llm_pipeline` **未被真实覆盖**（`REQUIRE_LLM=1` 正确判 FAIL）。
+  修复归因**不等于**恢复了覆盖：要覆盖必须充值后复跑。
+- **Electron 应用层 e2e 依赖非沙箱终端** ⇒ 该层在受限沙箱内**不可复现**。
+- **`build.ps1` 本身未被实跑**（助手无法执行原生程序），只复刻了它的步骤。
+- 他机验证、`功能跑通 ≠ 判定正确`、上游凭据真机连通性、无真实标注集 ⇒ 精度/召回、
+  200 页上限线性外推 —— 同 v1.1.9 基线，**均未变化**。

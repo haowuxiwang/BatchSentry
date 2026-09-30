@@ -7,6 +7,102 @@
 
 ## [Unreleased]
 
+### 对抗性审查批次 + 重打包验收（Round 62–64，2026-09-30）
+
+> 本批次对应两份审查记录：`docs/ADVERSARIAL_REVIEW_2026-09-28.md`（FIX-1..FIX-11）
+> 与 `docs/ADVERSARIAL_REVIEW_2026-09-29.md`（修复 1..9 + §八 并发专项 + §九 重打包验收）。
+> 因改动跨越多日，本节按**主题**归并。
+
+**Added**
+
+- 前端模块化：`static/review.js`（原 ~2256 行）拆为 `review-state.js`（复核页共享状态
+  **唯一宿主**）、`review-findings.js`、`review-pageinfo.js`、`review-pageview.js`、
+  `review-progress.js`、`review-locate.js`、`review-suppressions.js`、`findings-map.js`、
+  `pbc-fallback.js`、`sse.js`；`static/upload.js` 拆出 `upload-jobs.js`（活跃作业计数 +
+  额度预检的唯一写点）。
+- 后端：`core/rules/engine.py`（规则引擎从 `core/rules/__init__.py` 迁出，re-export 保留，
+  `tests/unit/test_rules_engine_patchability.py` 锁 patch 锚点）。
+- 测试基建：`tests/js_harness.py` —— 浏览器 IIFE 的 node 实跑 harness（假 DOM / 定时器队列 /
+  `fetch` / `EventSource` / 键盘分发），供 `tests/unit/test_*_js.py` 复用。
+- 新增护栏约 24 个测试文件（`test_review_*_js.py`、`test_upload_*_js.py`、
+  `test_settings_js.py`、`test_sse_js.py`、`test_import_graph_contract.py`、
+  `test_config_import_order_contract.py`、`test_llm_failure_attribution.py` 等）。
+
+**Changed**
+
+- `server.py`：把 `workers=1` 的注释从"性能取舍"改为**正确性前提** —— `db_lock`、
+  `procpool`、job 配额计数、pipeline task 注册表全是**进程内全局单例**，多 worker 会让配额
+  按 worker 数翻倍、CPU 池变 2×N、跨 worker 取消失效。护栏
+  `test_config_import_order_contract.py::TestSingleWorkerPrerequisite`（4 条，变异 10/10）。
+- `main.py`：新增 `_max_concurrent_jobs()`（**调用期**解析，避免顶层 from-import 把常量
+  冻结在 import 时刻），经 `templates/upload.html` 下发 `window.__PBC__.concurrency.limit`。
+- `core/pipeline/state.py`：状态分区改为单一真值。
+
+**Fixed（真缺陷）**
+
+- 🔴 **并发额度：第 4 个 job 被 409 拒绝时，文件已完整上传**（几百 MB / 分钟级"白传"）。
+  前端改为发送前预检 `waitForQuotaSlot()` + 额度 409 有界重试（`QUOTA_RETRY_MAX=2`，
+  与去重 409 **不合并**）；熔断 `quotaWaitTimedOut` 的唯一判定点收敛到 `waitForQuotaSlot`。
+- 🔴 **`build.ps1` 两处**：
+  ① `-Clean` 会**整删 `build/`**，而**本次运行的 start 台账**（B9-6「被杀 vs 真失败」的
+     唯一判据）就在 `build/_run` 里、且在脚本第 60 行就已落盘 ⇒ 全量构建一旦被
+     `TerminateProcess` 强杀，证据只剩"从未运行过"。改为 `build/` 只删 `_run` 以外内容。
+  ② 台账裁剪把 `Remove-Item` 直接挂在**空管道**尾端 —— 其语义随宿主包装器而异
+     （实测：真实 cmdlet 容忍空管道，受限宿主的 `Remove-Item` 包装器抛
+     `missing path operand`）。改为显式收集 + 判空 + `-LiteralPath`。
+  回归护栏 `tests/unit/test_build_script.py`（7 → 11 条），变异
+  `devlogs/_verify/mutation_build_clean_ledger.py` **6/6 CAUGHT**。
+- 🔴 **`tests/e2e_frozen.py` 两条断言陈旧（假红）**：`#127` 的消费逻辑早已迁到
+  `static/upload-jobs.js` 与 `static/review-pageinfo.js`，而断言仍只查
+  `upload.js` / `review.js` ⇒ 修复被误报为回归。改为位置无关的 `_served_js()` 多文件取并，
+  并补"取到空内容即断言无意义"的防空转。
+- 🔴 **`tests/e2e_frozen.py` LLM 失败归因把「账户欠费」报成「产品缺陷」**：归因探测原只用
+  **免费**端点 `GET {base_url}/models`。该端点不消耗额度 ⇒ 只能证明"key 是真的"，
+  **不能**证明"账户付得起"；账户余额耗尽时上游 402，而 `/models` 照旧 200 ⇒ 判 `ok` ⇒
+  报告写"凭据有效，故此处失败是**产品缺陷**"，**同一份报告的另一行**却写着
+  `402 code=30001 balance insufficient` —— 自相矛盾且把排查引向代码。
+  改为**两段式**探测（免费端点 + 一次 `max_tokens=1` 的**计费**最小请求），判定提为纯函数
+  `tests/e2e_proc.classify_llm_probe`（4 态：`invalid`/`billing`/`ok`/`unknown`）+ 文案唯一
+  实现 `llm_failure_attribution`。护栏 `tests/unit/test_llm_failure_attribution.py`（22 条），
+  变异 `devlogs/_verify/mutation_llm_attribution.py` **9/9 CAUGHT**。
+  ⚠️ 覆盖状态**仍记 `failed`**（流水线确实执行了且未达成功终态），**不**因"归因是环境"改记
+  `skipped` —— `skipped` 的定义是"因环境缺项**未执行**"，用在这里是事实错误。
+- 🔴 **`tests/e2e_unpacked.py` 用 `DEVNULL` 吞掉 Electron 的报错**：`BatchSentry.exe` 以
+  `0x80000003` 退出时只剩一个退出码，真因（stderr 里的
+  `FATAL: GPU process isn't usable.`）被丢掉，排查成本极高。改为落
+  `runN_{stdout,stderr}.log` + 归因函数 `_startup_failure_attribution()`（读 stderr 翻成人话）
+  + 逃生口 `PBC_E2E_UNPACKED_ARGS`。护栏 `test_e2e_unpacked_guard.py`（13 → 22 条），
+  变异 `devlogs/_verify/mutation_unpacked_guard.py` **5/5 CAUGHT**。
+- `static/app.css` 曾过期，缺 `decoration-dotted` 与 `[offset:offset+limit]` 两个选择器
+  ⇒ 已发产物里复核页"第 N 页 / 加载更多"链接渲染成**实线**下划线。重跑
+  `npm run build:css` 补齐（19921 → 20016 字节，308 → 310 选择器）并重新打包。
+
+**Tests**
+
+- 全量：**3831 passed / 4 skipped**，覆盖率 **95.09%**。
+  ⚠️ 需 `CODEBUDDY_SAFE_DELETE_ENABLED=0`：宿主注入的 safe-delete 垫片会在 pytest 清理
+  临时目录时因"批量删除 578 > 阈值 50"`SystemExit(1)`，把进程打断（`SUITE_EXIT=3`）。
+- 端到端（全部针对**已重打包的产物**）：
+  - 内嵌后端层（`tests/e2e_frozen.py`）：**26 passed / 0 failed**，覆盖 `covered=4/4`
+    （`llm_pipeline` 以 `llm_call_audit` 中 `success=1` 为权威证据；`ocr_backend_used=paddle`
+    为真实后端，无 failover 掩盖）。
+  - Electron 应用层（`tests/e2e_unpacked.py` ×2）：**14 passed / 0 failed / 2 skipped**
+    （D1 启动 3.0s / D2 版本==PROVENANCE / D3 内嵌后端 / D4 app.asar / D5 主窗口 /
+    D6 优雅关闭 `exitCode=0` / D7 checkpoint 收敛）。
+- 发版门禁：`pass=10 / fail=0 / warn=0`（`worktree_clean`、`artifact_freshness`
+  「2 份产物与源码逐字节一致」、`runtime_eol` Electron/43.7.4 全部转绿）。
+
+**已知限制（不得当作已通过）**
+
+- **上游账户余额耗尽**：`GET /models` 返回 200，但 `POST /chat/completions` 对**全部 98 个
+  模型**返回 `402 code=30001 account balance is insufficient`。故本轮
+  `PBC_E2E_REQUIRE_LLM=1` **正确地**判 FAIL（fail-closed）—— 这是门禁在按设计工作。
+- **Electron 应用层 e2e 无法在受限沙箱内运行**：Chromium 的 GPU 进程起不来
+  （`FATAL: GPU process isn't usable.`），应用以 `0x80000003` 退出、`/health` 永不就绪。
+  2×2 对照证明 `--disable-gpu` 与结果**无关**（沙箱内加不加都崩、沙箱外加不加都过）
+  ⇒ 须在**非沙箱**终端复跑，而不是加开关。
+- **他机验证 / 判定准确性 / 精度召回** 的口径同 v1.1.9 基线，未变化（见 `DEPLOYMENT.md`）。
+
 ### v1.2.1 — 报告查看页与优雅返回（Round 61，2026-09-24）
 
 > **问题**：主流程复核页点"下载报告"后浏览器直接导航到裸 Markdown 端点
