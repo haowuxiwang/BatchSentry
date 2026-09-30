@@ -227,6 +227,44 @@ def llm_failure_attribution(verdict, detail):
             "（fail-closed：判不了 ≠ 通过）。")
 
 
+# ── 产物出处（PROVENANCE.txt 的 `git_head`）──────────────────────────────────
+# 由来（2026-09-30 实测）：`build.ps1` 用 `try { & git rev-parse --short HEAD }`
+# 取 HEAD，**异常被吞**。在一台 git 不在 PATH 的宿主上执行时，写出来的
+# `PROVENANCE.txt` 是 `git_head: `（**空值**）—— 而全文没有任何地方校验它。
+# 于是产物**声称**能自证出处，实际证不了；`release_gate.count_complete_artifacts`
+# 只查文件**存在**，`e2e_unpacked` 的 D2 只比对 `version` ⇒ 空 git_head 一路绿灯。
+# 判据：字段缺失（老产物）⇒ SKIP（不判定，非缺陷）；字段在但**为空** ⇒ FAIL。
+PROV_OK = "ok"           # git_head 有值 ⇒ 产物能自证由哪次提交构建
+PROV_MISSING = "missing"  # 整个字段都没有（早于本契约的产物）⇒ 不判定
+PROV_EMPTY = "empty"     # 字段在但值为空 ⇒ 无法自证出处（build.ps1 静默失败）
+
+
+def classify_provenance_git_head(text):
+    """判定 `PROVENANCE.txt` 的 `git_head:` 是否**真的承载了出处**。**纯函数**。
+
+    返回 ``(status, detail)``，``status`` 为 :data:`PROV_OK` /
+    :data:`PROV_MISSING` / :data:`PROV_EMPTY` 之一；``detail`` 为取值或说明。
+
+    ⚠️ 这里**不**校验"git_head == 当前 HEAD"：`PROVENANCE.txt` 是**构建期**写的，
+    而构建通常发生在"提交之前"（本次拆分就是：先打包、后 commit）⇒ 两者**本来
+    就会不同**。用相等做判据会制造假红。能自证"由某个真实提交构建"即可，
+    所以只判"非空"。回归护栏：``tests/unit/test_provenance_git_head.py``。
+    """
+    value = None
+    for ln in (text or "").splitlines():
+        if ln.lower().startswith("git_head:"):
+            value = ln.split(":", 1)[1].strip()
+            break
+    if value is None:
+        return PROV_MISSING, "PROVENANCE.txt 无 git_head 字段（早于本契约的产物，不判定）"
+    if not value:
+        return PROV_EMPTY, (
+            "git_head 字段存在但**为空** ⇒ 产物无法自证由哪次提交构建"
+            "（`build.ps1` 的 `& git rev-parse` 被 try/catch 吞掉时会这样；"
+            "确认构建宿主的 PATH 上有 git，然后重新打包）")
+    return PROV_OK, value
+
+
 def spawn_server(cmd, *, log_path, cwd=None, env=None, extra=None):
     """启动服务子进程，stdout/stderr 追加写入 ``log_path``。
 

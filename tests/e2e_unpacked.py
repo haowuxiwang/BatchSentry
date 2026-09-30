@@ -42,6 +42,9 @@ from tests.e2e_coverage import (  # noqa: E402
     ENTRY_OCR_PIPELINE, ENTRY_LLM_PIPELINE, STATUS_COVERED, STATUS_FAILED,
     STATUS_SKIPPED, Coverage,
 )
+from tests.e2e_proc import (  # noqa: E402
+    PROV_EMPTY, PROV_MISSING, classify_provenance_git_head,
+)
 
 # ── 环境变量（命名与 e2e_proc 风格一致）────────────────────────────────────
 UNPACKED_ENV = "PBC_E2E_UNPACKED"        # 直接指向 win-unpacked 目录
@@ -346,11 +349,12 @@ def run_once(unpacked: Path, sandbox: Path, run_idx: int, cov: Coverage) -> dict
 
     # ── D2 版本自证（与 PROVENANCE 比对，不写死字面量）──
     prov = unpacked / "PROVENANCE.txt"
+    prov_text = (prov.read_text(encoding="utf-8", errors="replace")
+                 if prov.exists() else "")
     expected = None
-    if prov.exists():
-        for ln in prov.read_text(encoding="utf-8", errors="replace").splitlines():
-            if ln.lower().startswith("version:"):
-                expected = ln.split(":", 1)[1].strip()
+    for ln in prov_text.splitlines():
+        if ln.lower().startswith("version:"):
+            expected = ln.split(":", 1)[1].strip()
     rec["provenance_version"] = expected
     if expected is None:
         skip(f"run{run_idx}.D2_version", "PROVENANCE.txt 无 version 字段（不判定，非缺陷）")
@@ -359,6 +363,21 @@ def run_once(unpacked: Path, sandbox: Path, run_idx: int, cov: Coverage) -> dict
     else:
         bad(f"run{run_idx}.D2_version",
             f"/health version={h.get('version')} != PROVENANCE={expected}（测了 A 发了 B？）")
+
+    # ── D2b 出处自证：`git_head` 必须**真的有值** ──
+    # 为什么单独判：上面只比对 `version`（产品版本号），而"这一份产物由**哪次提交**
+    # 构建"靠的是 `git_head`。2026-09-30 实测过 `build.ps1` 在 git 不可解析的宿主上
+    # 会写出 `git_head: `（空值）而**全链路绿灯** ⇒ 产物声称能自证出处、实际证不了。
+    # ⚠️ 判据只要求"非空"，**不**要求等于当前 HEAD：PROVENANCE 是构建期写的，
+    # 而构建常发生在提交之前（本次拆分即如此）⇒ 用相等判会制造假红。
+    prov_status, prov_detail = classify_provenance_git_head(prov_text)
+    rec["provenance_git_head"] = prov_detail
+    if prov_status == PROV_MISSING:
+        skip(f"run{run_idx}.D2b_provenance_git_head", prov_detail)
+    elif prov_status == PROV_EMPTY:
+        bad(f"run{run_idx}.D2b_provenance_git_head", prov_detail)
+    else:
+        ok(f"run{run_idx}.D2b_provenance_git_head", f"git_head={prov_detail}")
 
     # ── D3 拉起的是**内嵌**后端（不是系统 python、不是别的目录）──
     kids = child_processes(proc.pid)
