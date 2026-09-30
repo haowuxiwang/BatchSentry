@@ -35,6 +35,10 @@ yarn-error.log*
 *.swo
 .mimocode/
 .workbuddy/
+# AI 助手的工作区数据（memory/ 等），非源码。与 `.workbuddy/` 是两个不同目录，
+# 少了这条 `tests/unit/test_repo_hygiene.py::TestNoShadowDirectories` 会红
+# （影子目录：既无被跟踪文件、又未被忽略）。
+.workbuddy-ai/
 .trae/
 .npm-cache/
 

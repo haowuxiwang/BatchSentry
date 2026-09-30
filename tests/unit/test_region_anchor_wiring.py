@@ -21,7 +21,10 @@ STAGE1 = REPO / "core" / "pipeline" / "stage1.py"
 REVIEW_PY = REPO / "api" / "review.py"
 MAIN_PY = REPO / "main.py"
 MINERU = REPO / "core" / "mineru_client.py"
-REVIEW_JS = REPO / "static" / "review.js"
+# R63 拆分：ctx 状态注入在 review-state.js；区域锚/缩放/页码导航在
+# review-pageview.js（入口 review.js 不再持有这些实现）。
+REVIEW_STATE_JS = REPO / "static" / "review-state.js"
+REVIEW_JS = REPO / "static" / "review-pageview.js"
 REVIEW_HTML = REPO / "templates" / "review.html"
 SCHEMA_SQL = REPO / "db" / "schema.sql"
 
@@ -87,7 +90,7 @@ class TestReadPath:
             '"region_refs": region_refs,' in main_src
         html = REVIEW_HTML.read_text(encoding="utf-8")
         assert "region_refs: {{ region_refs | tojson }}" in html
-        js = REVIEW_JS.read_text(encoding="utf-8")
+        js = REVIEW_STATE_JS.read_text(encoding="utf-8")
         assert "ctx.region_refs" in js
 
 
@@ -96,7 +99,7 @@ class TestSurface:
         html = REVIEW_HTML.read_text(encoding="utf-8")
         assert 'id="region-overlay"' in html
         assert 'id="pdf-page-wrap"' in html, "overlay 需要定位基准包装层"
-        assert "locateFinding(event," in html, "SSR 首屏也要有定位入口"
+        assert "locateRegion(event," in html, "SSR 首屏也要有定位入口"
         assert "{% if f.region_ref %}" in html, "锚不上时不得显示入口"
 
     def test_js_overlay_positioned_from_image_pixels_not_percent(self):
@@ -138,7 +141,7 @@ class TestSurface:
 
     def test_js_exports_locate_finding(self):
         js = REVIEW_JS.read_text(encoding="utf-8")
-        assert "window.locateFinding = locateFinding;" in js, (
+        assert "global.locateRegion = locateRegion;" in js, (
             "按钮是内联 onclick，必须挂到 window"
         )
 

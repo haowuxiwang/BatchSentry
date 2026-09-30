@@ -139,10 +139,11 @@ class TestWiringGuards:
         )
 
     def test_frontend_renders_the_banner(self):
-        js = (_SRC_ROOT / "static" / "review.js").read_text(encoding="utf-8")
+        # R63 拆分：SSE 进度渲染（stall 横幅）已移入 review-progress.js
+        js = (_SRC_ROOT / "static" / "review-progress.js").read_text(encoding="utf-8")
         html = (_SRC_ROOT / "templates" / "review.html").read_text(encoding="utf-8")
         assert "stall-banner" in html and "stall-text" in html
-        assert re.search(r"\bd\.stall\b", js), "review.js 未消费 stall 字段"
+        assert re.search(r"\bd\.stall\b", js), "review-progress.js 未消费 stall 字段"
         # 文案里必须同时出现"原因"与"出路"（否则用户不知道能做什么）
         assert "可取消后重试" in js
         assert 'aria-live' in html.split("stall-banner")[1][:400]

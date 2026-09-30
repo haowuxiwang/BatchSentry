@@ -228,3 +228,105 @@ def test_reap_only_kills_when_confirmed_alive():
 def test_driver_functions_present(name):
     """防"顺手改名"：护栏与被护对象必须同名，否则整份护栏静默失效。"""
     _func(name)
+
+
+# ── 启动失败必须留下 stderr（2026-09-30：DEVNULL 把真因吞了）─────────────
+def _popen_kwargs() -> dict:
+    """`run_once` 里 `subprocess.Popen(...)` 的关键字实参（结构化取，不查文案）。"""
+    for n in ast.walk(_func("run_once")):
+        if (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                and n.func.attr == "Popen"):
+            return {kw.arg: kw.value for kw in n.keywords}
+    raise AssertionError("run_once 里找不到 subprocess.Popen（结构变了？）")
+
+
+def _is_devnull(node: ast.AST) -> bool:
+    return (isinstance(node, ast.Attribute) and node.attr == "DEVNULL")
+
+
+def test_popen_does_not_discard_stderr():
+    """**不得**再把子进程 stdout/stderr 丢进 DEVNULL。
+
+    为什么：2026-09-30 排查 `BatchSentry.exe` 以 `0x80000003` 退出时，
+    Electron 自己的报错（`FATAL: GPU process isn't usable.`）**全被 DEVNULL
+    吞掉**，只剩一个退出码，真因无从查起。改用日志文件后当场定位。
+    判据用 AST（看真实的实参节点），不看注释 —— 本文件注释里就写着 DEVNULL。
+    """
+    kw = _popen_kwargs()
+    for stream in ("stdout", "stderr"):
+        assert stream in kw, f"Popen 必须显式给 {stream}（默认继承，会污染报告）"
+        assert not _is_devnull(kw[stream]), (
+            f"Popen 的 {stream} 仍是 DEVNULL ⇒ 启动失败时真因被吞，只剩退出码")
+
+
+def test_devnull_detector_is_not_vacuous():
+    """阳性对照：证明上面那条判据**真的会报**，而不是恒绿。"""
+    bad = ast.parse("subprocess.Popen([x], stdout=subprocess.DEVNULL)").body[0].value
+    assert _is_devnull(bad.keywords[0].value), "DEVNULL 探测对 DEVNULL 零反应"
+    good = ast.parse("subprocess.Popen([x], stdout=fo)").body[0].value
+    assert not _is_devnull(good.keywords[0].value), "误报普通变量"
+
+
+def test_startup_failure_is_attributed_not_just_reported():
+    """D1 失败必须调用归因函数（只丢退出码 = 把排查成本转嫁给读者）。"""
+    assert "_startup_failure_attribution" in _called_names(_func("run_once")), (
+        "run_once 未调用 _startup_failure_attribution")
+    assert "_startup_failure_attribution" in {n.name for n in ast.walk(_tree())
+                                              if isinstance(n, ast.FunctionDef)}, (
+        "归因函数不存在（被删了？）")
+
+
+def test_attribution_reads_the_stderr_log():
+    """归因必须**读证据**（stderr 日志），不得凭退出码猜。"""
+    seg = _source_of("_startup_failure_attribution")
+    assert "read_text" in seg, "归因未读取 stderr 日志"
+    assert "_GPU_FATAL" in seg, "归因未使用 GPU 致命行常量"
+
+
+def test_gpu_attribution_does_not_prescribe_disable_gpu_as_the_fix():
+    """🔴 **不得**把 `--disable-gpu` 说成解法 —— 它已被 2×2 对照否证。
+
+    2026-09-30 实测（同一产物、同一开关矩阵）：
+      不加 + 非沙箱 → 3.05s 就绪；加 + 非沙箱 → 1.67s 就绪；
+      加 + **沙箱内** → 崩 0x80000003；不加 + **沙箱内** → 崩 0x80000003。
+    ⇒ 唯一自变量是"是否运行在受限沙箱里"，开关与结果无关。曾据此误判为
+    "GPU 开关问题"并写进提示文案，被否证后撤回。本护栏防止它再被写回去。
+    """
+    seg = _source_of("_startup_failure_attribution")
+    assert "沙箱" in seg, "归因文案必须点明真正的自变量（受限沙箱）"
+    # 反面：不得出现"设 ARGS_ENV=--disable-gpu 后复跑"这类处方
+    assert "设 {ARGS_ENV}=--disable-gpu" not in seg, (
+        "归因又把 --disable-gpu 当解法了（已被 2×2 否证）")
+    assert "PBC_E2E_UNPACKED_ARGS=--disable-gpu" not in seg, (
+        "归因又把 --disable-gpu 当解法了（已被 2×2 否证）")
+
+
+def test_extra_app_args_reads_the_documented_env_var():
+    """逃生口必须从常量读，不得写死变量名（改名后静默失效）。
+
+    ⚠️ 锚点必须落在**调用点** ``os.environ.get(ARGS_ENV)``，不能只查裸标识符
+    ``ARGS_ENV`` —— ``ast.get_source_segment`` **会把 docstring 一起返回**，
+    而本函数的 docstring 里就写着 ``:data:`ARGS_ENV```。只查子串时，把调用点改成
+    字面量后断言**照样成立**（变异验证实测 MISSED，本文件已第三次踩这个坑）。
+    """
+    seg = _source_of("_extra_app_args")
+    assert "os.environ.get(ARGS_ENV)" in seg, (
+        "_extra_app_args 必须用常量 ARGS_ENV 取环境变量（写死名字会在改名后静默失效）")
+    consts = {}
+    for n in ast.walk(_tree()):
+        if isinstance(n, ast.Assign) and isinstance(n.targets[0], ast.Name):
+            try:
+                consts[n.targets[0].id] = ast.literal_eval(n.value)
+            except Exception:  # noqa: BLE001
+                pass
+    assert consts.get("ARGS_ENV") == "PBC_E2E_UNPACKED_ARGS"
+
+
+def test_args_env_guard_is_anchored_on_the_call_site():
+    """防空转：把调用点换成字面量后，锚点必须**不再命中**。"""
+    anchor = "os.environ.get(ARGS_ENV)"
+    seg = _source_of("_extra_app_args")
+    assert anchor in seg
+    mutated = seg.replace(anchor, 'os.environ.get("PBC_E2E_UNPACKED_ARGS")')
+    assert mutated != seg, "锚点未命中源码"
+    assert anchor not in mutated, "锚点其实落在 docstring 上 ⇒ 护栏空转"

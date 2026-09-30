@@ -1839,7 +1839,7 @@
             parts.push(`✓ ${display(name)}${lat}${tag}`);
           } else {
             const reason = data.reason || data.detail || "失败";
-if (reason.includes("未配置") || reason.includes("密钥")) {
+            if (reason.includes("未配置") || reason.includes("密钥")) {
               parts.push(`○ ${display(name)}：未配置${tag}`);
             } else {
               parts.push(`✗ ${display(name)}:${reason}${tag}`);

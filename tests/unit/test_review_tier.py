@@ -27,7 +27,8 @@ from core.finding_quality import (
 
 REPO = Path(__file__).resolve().parents[2]
 REVIEW_HTML = REPO / "templates" / "review.html"
-REVIEW_JS = REPO / "static" / "review.js"
+# R63 拆分：renderFindings（tier 消费方）已移入 review-findings.js
+REVIEW_JS = REPO / "static" / "review-findings.js"
 REVIEW_CSS = REPO / "static" / "review.css"
 
 

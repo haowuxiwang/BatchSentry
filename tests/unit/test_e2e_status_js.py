@@ -120,3 +120,93 @@ def test_unknown_state_does_not_crash_and_differs():
     m = status_dot_classes(STATUS_JS, states=("review", "__no_such_state__"))
     assert set(m) == {"review", "__no_such_state__"}
     assert m["__no_such_state__"] != m["review"]
+
+
+# ── #127 可见性判据：必须与**文件位置无关**（2026-09-30 实测新增）──────
+#
+# 背景：`e2e_frozen.py` 的 13b/13c 段原本只在 `upload.js` / `review.js` 里
+# 找 #127 修复标记。但消费逻辑随后被**纯模块化重构**拆走：
+#   · `job.failed_pages`            → `static/upload-jobs.js:518`
+#   · `["error","partial_review"].includes(st)` → `static/upload-jobs.js:583`
+#   · `structured._error`           → `static/review-pageinfo.js:88`
+# ⇒ 发版冒烟 `upload_js_127` / `review_js_127` **假红**（本轮实测 11 passed / 3 failed）。
+# 判据要证明的是它自己注释里写明的**分发事实**——"要分发的那份东西带着修复"——
+# 而不是"修复住在哪个文件里"。把位置写进判据，等于让一次纯重构把门禁变成噪声。
+
+E2E_FROZEN = (ROOT / "tests" / "e2e_frozen.py").read_text(encoding="utf-8")
+
+
+def _location_independence_problems(src: str) -> list[str]:
+    """判据的"与位置无关"体检。返回问题清单（空 = 合格）。
+
+    ⚠️ 本体检是**结构性**的（读源码文本），不是行为性的 —— 它没法在没有活服务端
+    的情况下跑那条判据。故判据锚定**代码**（`assert not _empty`）而不是**文案**：
+    改提示语不会误红，删掉守卫则必红。
+    """
+    problems = []
+    if '_served_js(["/static/upload.js", "/static/upload-jobs.js"])' not in src:
+        problems.append("upload 判据未同时扫 upload.js 与 upload-jobs.js")
+    if '_served_js(["/static/review.js", "/static/review-pageinfo.js"])' not in src:
+        problems.append("原因判据未同时扫 review.js 与 review-pageinfo.js")
+    if "assert not _empty" not in src:
+        problems.append("缺防空转守卫（取到空内容时会静默通过）")
+    return problems
+
+
+def test_positive_control_real_e2e_frozen_passes():
+    """未变异的真实 `e2e_frozen.py` 必须合格 —— 否则体检本身恒红。"""
+    assert _location_independence_problems(E2E_FROZEN) == []
+
+
+def test_catches_single_file_judge_regression():
+    """变异：把 upload 判据改回"只扫 upload.js"，体检必须红。"""
+    mutated = _sub(
+        E2E_FROZEN,
+        '_served_js(["/static/upload.js", "/static/upload-jobs.js"])',
+        'requests.get(f"{BASE}/static/upload.js", timeout=5).text',
+    )
+    problems = _location_independence_problems(mutated)
+    assert problems and "upload" in problems[0], problems
+
+
+def test_catches_missing_anti_noop_guard():
+    """变异：删掉防空转守卫整行，体检必须红。
+
+    （只改提示语、保留 `assert not _empty` 时**不应**红 —— 那是文案改动，不是回归。）
+    """
+    mutated = _sub(
+        E2E_FROZEN,
+        '        assert not _empty, f"静态资源取到空内容，标记断言无意义: {_empty}"\n',
+        "",
+    )
+    problems = _location_independence_problems(mutated)
+    assert problems and "防空转" in problems[0], problems
+
+
+def test_rephrasing_the_message_does_not_false_red():
+    """对照：仅改提示语文案，体检**不得**红（防"判据锚文案"这类假失败）。"""
+    mutated = _sub(
+        E2E_FROZEN,
+        'f"静态资源取到空内容，标记断言无意义: {_empty}"',
+        'f"served js empty: {_empty}"',
+    )
+    assert _location_independence_problems(mutated) == []
+
+
+def _marker_hits(marker: str, sources: dict[str, str]) -> list[str]:
+    return [name for name, text in sources.items() if marker in text]
+
+
+def test_marker_hits_is_not_vacuous():
+    """防空转：给一份不含标记的源码，`_marker_hits` 必须返回空。"""
+    assert _marker_hits("job.failed_pages", {"a.js": "x"}) == []
+    assert _marker_hits("job.failed_pages", {"a.js": "job.failed_pages"}) == ["a.js"]
+
+
+@pytest.mark.parametrize("marker", ["job.failed_pages", "structured._error"])
+def test_127_markers_still_exist_somewhere_in_static(marker):
+    """#127 的修复必须**仍在源码树里**（否则产物断言红得没意义 —— 那才是真回归）。"""
+    sources = {p.name: p.read_text(encoding="utf-8")
+               for p in (ROOT / "static").glob("*.js")}
+    hits = _marker_hits(marker, sources)
+    assert hits, f"{marker} 在任何 static/*.js 里都找不到 ⇒ #127 修复被删了？"

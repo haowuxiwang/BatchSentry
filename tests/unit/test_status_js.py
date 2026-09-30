@@ -37,7 +37,10 @@ from core.zh_map import (  # noqa: E402
 
 STATUS_JS = REPO / "static" / "status.js"
 REVIEW_HTML = REPO / "templates" / "review.html"
-REVIEW_JS = REPO / "static" / "review.js"
+# R63 拆分：SSE 进度/状态徽章/错误帧分流已从 review.js 移入 review-progress.js
+# （入口 review.js 只剩编排与数据层），护栏随之改读新宿主文件。
+REVIEW_JS = REPO / "static" / "review-progress.js"
+SSE_JS = REPO / "static" / "sse.js"
 UPLOAD_JS = REPO / "static" / "upload.js"
 
 # 状态枚举全集 = 后端中文映射的键（core/zh_map.py 是 Python 侧单一真值）。
@@ -266,17 +269,30 @@ def _job_status_map_literals(src: str) -> list[str]:
 
 
 def _review_error_branch_block() -> str:
-    """抠出 review.js 里 `if (d.type === "error") { ... }` 的**完整块**。
+    """抠出 review-progress.js 里错误帧处置回调的**完整块**。
 
-    只查"全文有没有 es.close()"是盲的（它同时出现在 done/onerror 分支）
-    —— 必须落在**包围条件**上，故这里做配对提取后再判相对位置。
+    R63 拆分后 `if (d.type === "error")` 分支不复存在：错误帧先由共享件
+    sse.js 经 PbcStatus.sseErrorAction 判定 terminal/transient，再分派到
+    review-progress.js 的 onTerminalError / onTransientError 回调。
+
+    只查"全文有没有 close()"是盲的（它同时出现在 done/onerror 分支）
+    —— 必须落在**回调块内部**上，故这里做配对提取后再判内容。
     """
     src = REVIEW_JS.read_text(encoding="utf-8")
-    anchor = 'if (d.type === "error")'
-    assert anchor in src, "review.js 里找不到错误帧分支（被改名/删除了？）"
+    assert "onTerminalError" in src and "onTransientError" in src, (
+        "review-progress.js 缺少错误帧处置回调（terminal/transient 分流落空）"
+    )
+    return src
+
+
+def _error_callback_block(name: str) -> str:
+    """配对提取 `onTerminalError: (d) => {...}` / `onTransientError: ...` 的块。"""
+    src = REVIEW_JS.read_text(encoding="utf-8")
+    anchor = f"{name}: (d) => {{"
+    assert anchor in src, f"review-progress.js 里找不到 {name} 回调（被改名？）"
     i = src.index(anchor)
     blk = _braced_block_at(src, src.index("{", i))
-    assert blk is not None, "错误帧分支花括号未配平（解析失败）"
+    assert blk is not None, f"{name} 回调花括号未配平（解析失败）"
     return blk
 
 
@@ -386,38 +402,46 @@ class TestReviewJsHasNoSecondStatusTruth:
 
 
 class TestReviewJsErrorBranchGuardsStreamClose:
-    """B2-10 ①：`es.close()` 必须被 terminal 判定**包围**，不得裸调。
+    """B2-10 ①：错误帧分流必须经 terminal 判定，瞬态不得断流。
 
-    判据落在"包围条件 + 相对位置"（§二十八：文本在 ≠ 运行期可达）：
-    单看"全文含 es.close()"区分不出它到底在终态分支还是瞬态分支。
+    R63 拆分后的结构：sse.js 内部先经 PbcStatus.sseErrorAction 判定
+    terminal/transient（行为判据在 test_sse_js.py），再分派到
+    review-progress.js 的回调。本护栏锁**应用侧回调的语义**：
+    terminal 才清理轮询兜底，transient 什么都不关。
     """
 
     def test_close_happens_after_terminal_decision(self):
-        blk = _review_error_branch_block()
-        assert "sseErrorAction" in blk, "错误帧分支未使用共享判定函数"
-        assert "es.close()" in blk
-        assert blk.index("terminal") < blk.index("es.close()"), (
-            "es.close() 出现在 terminal 判定**之前** ⇒ 瞬态抖动仍会断流"
+        _review_error_branch_block()  # 两个回调必须存在（缺一即分流落空）
+        sse_src = SSE_JS.read_text(encoding="utf-8")
+        # 判定单一真值：sse.js 的错误帧分流必须走共享件 sseErrorAction
+        assert "sseErrorAction" in sse_src, (
+            "sse.js 错误帧判定未走共享件 PbcStatus.sseErrorAction"
         )
-        assert 'if (action !== "terminal")' in blk, (
-            "缺少显式的瞬态分支（瞬态必须保持长连）"
+        blk = _error_callback_block("onTerminalError")
+        assert "clearInterval(pollTimer)" in blk, (
+            "terminal 回调应清掉轮询兜底定时器（连接与轮询一体收敛）"
         )
 
     def test_transient_branch_does_not_close_stream(self):
-        blk = _review_error_branch_block()
-        head = blk[: blk.index("es.close()")]
-        transient = head[head.index('if (action !== "terminal")'):]
-        assert "es.close()" not in transient
-        assert "clearInterval(pollTimer)" not in transient, (
+        blk = _error_callback_block("onTransientError")
+        assert "clearInterval(pollTimer)" not in blk, (
             "瞬态分支不得清掉轮询兜底定时器"
+        )
+        assert "stopElapsedTimer()" not in blk, (
+            "瞬态分支不得停掉阶段计时器（下一帧正常数据会自动还原）"
         )
 
     def test_branch_does_not_match_on_message_text(self):
-        """反向断言：错误帧分支里不得出现服务端的 message 文案字面量。"""
-        blk = _review_error_branch_block()
-        assert "进度查询失败" not in blk, (
-            "错误帧分支按 message 文案判定 ⇒ 改文案会静默改变控制流"
-        )
+        """反向断言：回调不得按 message 文案判定（改文案会静默改变控制流）。
+
+        回调里**出现**提示文案是合法的（如"进度查询异常，重试中…"），
+        但**判定**必须依赖 sse.js 的 terminal 字段分流，而不是 message。
+        """
+        for name in ("onTransientError", "onTerminalError"):
+            blk = _error_callback_block(name)
+            assert not re.search(r"d\.message\s*(===|\.includes)", blk), (
+                f"{name} 回调按 message 文案判定 ⇒ 改文案会静默改变控制流"
+            )
 
 
 class TestReviewJsSurfacesErrorReason:

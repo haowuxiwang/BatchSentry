@@ -28,7 +28,8 @@ from core.rules.spec_guard import (  # noqa: E402
 STAGE2 = REPO / "core" / "pipeline" / "stage2.py"
 REVIEW_PY = REPO / "api" / "review.py"
 REVIEW_HTML = REPO / "templates" / "review.html"
-REVIEW_JS = REPO / "static" / "review.js"
+# R63 拆分：抑制台账渲染已移入 review-suppressions.js
+REVIEW_JS = REPO / "static" / "review-suppressions.js"
 SCHEMA_SQL = REPO / "db" / "schema.sql"
 
 
@@ -269,6 +270,6 @@ def test_review_surface_renders_and_reverts():
     assert 'id="suppression-list"' in html
     js = REVIEW_JS.read_text(encoding="utf-8")
     assert "renderSuppressions" in js and "loadSuppressions" in js
-    assert "window.revertSuppression = revertSuppression" in js, (
+    assert "global.revertSuppression = revertSuppression" in js, (
         "回退按钮是内联 onclick，必须挂到 window"
     )

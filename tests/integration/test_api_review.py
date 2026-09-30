@@ -507,7 +507,8 @@ class TestFailedPageIsNotRenderedAsClean:
         行为用例只覆盖 SSR 首屏；翻页走的是 renderFindings（JS），
         必须同样区分 —— 否则翻到失败页又会显示"本页无问题"。
         """
-        src = (Path(__file__).resolve().parents[2] / "static" / "review.js").read_text(
+        # R63 拆分：emptyFindingsNote（AJAX 空态文案）已移入 review-findings.js
+        src = (Path(__file__).resolve().parents[2] / "static" / "review-findings.js").read_text(
             encoding="utf-8")
         assert "function emptyFindingsNote" in src, (
             "AJAX 空态必须走统一文案函数（单一副本）")

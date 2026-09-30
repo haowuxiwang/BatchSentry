@@ -17,6 +17,40 @@
 
   window.PBC = window.PBC || {};
 
+  // === 滚动锁（计数器，非布尔）===
+  // 弹窗可以叠加：例如设置页在"删除 provider"确认框之上又弹了"未保存"提示，
+  // 或删除确认框里点"前往设置"触发第二个框。旧实现每处都直接
+  // `document.body.style.overflow = ""`，于是**先关闭的那个**会把锁解掉，
+  // 而另一个仍在显示 —— 用户看到弹窗还开着，背后的页面却能滚，视觉上
+  // 像弹窗"飘"了。用计数器：只有最后一个弹窗关闭时才真正解锁。
+  let scrollLocks = 0;
+  function lockScroll() {
+    scrollLocks += 1;
+    document.body.style.overflow = "hidden";
+  }
+  function unlockScroll() {
+    // 兜底 max(0, ...)：万一某条路径重复解锁，宁可少锁也不要把计数打成负数
+    // （负数会让之后所有弹窗都无法恢复滚动）。
+    scrollLocks = Math.max(0, scrollLocks - 1);
+    if (scrollLocks === 0) document.body.style.overflow = "";
+  }
+
+  // === 「当前是否有弹窗打开」===
+  // 供**消费方**在页面级键盘/快捷键处理里做隔离。为什么需要：
+  // 弹窗的 onKey 只处理 Esc / Enter / Tab，其余按键会继续冒泡到页面级的
+  // document keydown（如复核页的 ← → 翻页）。而两个监听器**都挂在 document 上**，
+  // 且页面级监听器注册更早 —— 事件按注册序触发，弹窗里再 `stopPropagation()`
+  // 也已经晚了（同 target 的监听器不受 stopPropagation 影响）。所以只能由
+  // 消费方**主动查询**，而不是指望事件传播被拦住。
+  //
+  // 实现取 DOM 作单一真值（`role="dialog"` 是 APG dialog 规范标记，本文件
+  // 两个弹窗都用它），**不新增计数器**：计数器必须与 lockScroll/unlockScroll
+  // 保持同步，多一份状态就多一处漂移点（本项目"单一真值"约定）。
+  // 注：关闭动画期间 overlay 仍在 DOM 里，故此时仍返回 true —— 弹窗确实还看得见。
+  function isDialogOpen() {
+    return document.querySelector('[role="dialog"]') !== null;
+  }
+
   // focus trap：Tab 键焦点循环限制在弹窗内（APG dialog pattern）
   function trapTab(modal, e) {
     const focusables = modal.querySelectorAll(
@@ -35,15 +69,20 @@
   }
 
   // === Toast 提示（替代原生 alert() 的轻量方案）===
+  // WCAG 4.1.3 状态消息 —— live region 放在**每条 toast**上，而不是容器。
+  // 一个容器只能有一种 politeness，而"已保存"（polite 足够）与"删除失败"
+  // （必须尽快播报；polite 会等读屏用户停下手上的操作才念）语义不同：
+  //   err  → role="alert"（隐式 assertive）
+  //   其他 → role="status"（隐式 polite）
+  // 容器因此不再是 live region，只承担布局与定位。
   function showToast(msg, type = "info") {
     let container = document.getElementById("toast-container");
     if (!container) {
       container = document.createElement("div");
       container.id = "toast-container";
       container.className = "fixed bottom-4 right-4 z-[70] flex flex-col gap-2";
-      // WCAG 4.1.3 状态消息：读屏用户需感知 toast 通知（保存成功/失败等）
-      container.setAttribute("role", "status");
-      container.setAttribute("aria-live", "polite");
+      container.setAttribute("role", "region");
+      container.setAttribute("aria-label", "通知");
       document.body.appendChild(container);
     }
     const color =
@@ -54,6 +93,7 @@
           : "text-info";
     const toast = document.createElement("div");
     toast.className = `bg-card border border-border rounded-md px-4 py-2.5 text-[12px] ${color} shadow-md max-w-sm`;
+    toast.setAttribute("role", type === "err" ? "alert" : "status");
     toast.style.cssText = "animation: fade-in-up 0.2s ease-out both;";
     toast.textContent = msg;
     container.appendChild(toast);
@@ -91,7 +131,7 @@
         setTimeout(() => {
           overlay.remove();
           document.removeEventListener("keydown", onKey);
-          document.body.style.overflow = "";
+          unlockScroll();
           resolve(val);
         }, 150);
       };
@@ -170,7 +210,7 @@
         if (e.target === overlay) settle(false);
       });
       document.body.appendChild(overlay);
-      document.body.style.overflow = "hidden";
+      lockScroll();
 
       const onKey = (e) => {
         if (e.key === "Escape") {
@@ -229,7 +269,7 @@
         setTimeout(() => {
           overlay.remove();
           document.removeEventListener("keydown", onKey);
-          document.body.style.overflow = "";
+          unlockScroll();
           resolve(val);
         }, 150);
       };
@@ -302,7 +342,7 @@
         if (e.target === overlay) settle(null);
       });
       document.body.appendChild(overlay);
-      document.body.style.overflow = "hidden";
+      lockScroll();
 
       const onKey = (e) => {
         if (e.key === "Escape") {
@@ -328,4 +368,7 @@
   window.PBC.showToast = showToast;
   window.PBC.confirmDialog = confirmDialog;
   window.PBC.promptDialog = promptDialog;
+  // 无条件赋值：与上面三个一致 —— pbc-fallback.js 先加载时会装一个恒 false 的
+  // 降级版，这里必须把它覆盖掉（降级版只在**本文件缺席**时留下）。
+  window.PBC.isDialogOpen = isDialogOpen;
 })();

@@ -144,6 +144,89 @@ def llm_key_env_display() -> str:
     return f"{LLM_KEY_ENV}（兼容旧名 {LLM_KEY_ENV_LEGACY}）"
 
 
+# ── LLM 失败归因：把「凭据无效」与「账户欠费」分开 ─────────────────────
+#
+# 由来（2026-09-30 实测，一次**真实的误归因**）：
+#   `tests/e2e_frozen.py::probe_llm_credential` 原本只用 **免费** 端点
+#   `GET {base_url}/models` 做"直连正向对照"。该端点不消耗额度，所以它只能
+#   回答"这把 key 是不是真的"，**回答不了**"这个账户还付得起钱吗"。
+#   于是上游返回 `402 code=30001 account balance is insufficient` 时：
+#     · `/models` 照旧 200 ⇒ 判 `ok` ⇒ 报告写"**凭据有效**，故此处失败是
+#       **产品缺陷**（优先查：凭据是否被发给了错误的提供方/端点）"；
+#     · 而**同一份报告的另一行**写着 `首条错误：402 ... balance insufficient`
+#       —— 自相矛盾，且把排查方向引向代码，真因却是账户余额。
+#   实测证据（`devlogs/_verify/probe_llm_balance_vs_credential.py`）：
+#   `GET /models` → 200；`POST /chat/completions`（max_tokens=1）→ 402；
+#   换 3 个模型（DeepSeek-V3.2 / V4-Flash / Qwen3.8-27B）**全部 402**
+#   ⇒ 与"产品挑了个贵模型"无关，是账户层面付不起。
+#   ⚠️ 本文件的 `LLM_MODEL_ENV` 注释里**早就记过这个坑**（2026-09-23：免费档
+#   账号用收费模型必得 402，而"同一把 key 的小请求探针仍返回 200"），但当时只
+#   落在"选档位"的建议上、没落到探针实现上 —— 所以它又发生了一次。
+#
+# 纪律：**判不了 ≠ 通过**。除 `ok` 外的任何 verdict 都不得被读成"产品没问题"，
+# 也不得被读成"产品有问题"；调用方须按 fail-closed 处理。
+
+VERDICT_INVALID = "invalid"   # 凭据确凿无效（401/403）⇒ 环境问题
+VERDICT_BILLING = "billing"   # 凭据有效但账户欠费（402）⇒ 环境问题
+VERDICT_OK = "ok"             # 凭据与额度都可用 ⇒ 此时失败才真是产品缺陷
+VERDICT_UNKNOWN = "unknown"   # 判不了 ⇒ fail-closed，按产品缺陷处理
+
+
+def classify_llm_probe(free_status, metered_status):
+    """由两次探测的 HTTP 状态推导归因。**纯函数**（不做 I/O），可直接单测。
+
+    参数是**事实**（两个 HTTP 状态码；``None`` 表示该项未取得/未尝试），返回
+    :data:`VERDICT_INVALID` / :data:`VERDICT_BILLING` / :data:`VERDICT_OK` /
+    :data:`VERDICT_UNKNOWN` 之一。
+
+    ``free_status``    —— ``GET /models``（**免费**，不消耗额度）。
+    ``metered_status`` —— ``POST /chat/completions``（``max_tokens=1``，**计费**），
+    用**应用自己上报的那个模型**发一次最小请求。**只有它能把 401 与 402 分开。**
+
+    | free | metered | 结论 |
+    |---|---|---|
+    | 401/403 | 任意 | invalid —— 上游确凿拒绝该凭据 |
+    | 200 | 402 | **billing** —— 凭据是真的，但账户付不起 |
+    | 200 | 200 | ok —— 两者都可用 ⇒ 流水线仍失败**才是**产品缺陷 |
+    | 200 | 401/403 | invalid |
+    | 200 | None/其它 | unknown（**不得**据"免费端点 200"就判 ok）|
+    | 其它 | 任意 | unknown |
+    """
+    if free_status in (401, 403) or metered_status in (401, 403):
+        return VERDICT_INVALID
+    if free_status == 200:
+        if metered_status == 402:
+            return VERDICT_BILLING
+        if metered_status == 200:
+            return VERDICT_OK
+        return VERDICT_UNKNOWN
+    return VERDICT_UNKNOWN
+
+
+def llm_failure_attribution(verdict, detail):
+    """把 verdict 翻成一句**给人看的归因**（文案的唯一实现）。
+
+    ⚠️ 措辞是**承重**的：``ok`` 分支写"产品缺陷"，``billing`` / ``invalid``
+    分支必须写"环境问题、非产品缺陷"。曾有一版把**欠费**报成产品缺陷，把排查
+    引向代码（见本节顶部由来）。回归护栏：
+    ``tests/unit/test_llm_failure_attribution.py``。
+    """
+    if verdict == VERDICT_INVALID:
+        return (f"归因：同一 base_url/凭据直连探测得 {detail} ⇒ "
+                "**上游确凿拒绝该凭据**（环境问题，轮换密钥后复跑）；"
+                "非产品缺陷，但本轮 LLM 链路因此未被覆盖。")
+    if verdict == VERDICT_BILLING:
+        return (f"归因：同一凭据计费探测得 {detail} ⇒ **凭据有效但账户欠费**"
+                "（上游 402 / code=30001，环境问题，充值后复跑）；"
+                "**非产品缺陷** —— 产品按设计把 LLM 调用失败降级成 finding 并继续。")
+    if verdict == VERDICT_OK:
+        return (f"归因：同一凭据（含一次**计费**最小请求）探测得 {detail} ⇒ "
+                "**凭据与额度均可用**，故此处失败是产品缺陷（优先查：凭据是否被"
+                "发给了错误的提供方/端点 —— 本项目发生过完全相同的 401 事故）。")
+    return (f"归因：凭据探测无法判定（{detail}）⇒ 按真实缺陷处理"
+            "（fail-closed：判不了 ≠ 通过）。")
+
+
 def spawn_server(cmd, *, log_path, cwd=None, env=None, extra=None):
     """启动服务子进程，stdout/stderr 追加写入 ``log_path``。
 

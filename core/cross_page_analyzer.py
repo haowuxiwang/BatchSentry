@@ -1,8 +1,10 @@
 """Stage 3 — cross-page analysis (module refactor shim).
 
 Split into the core/rules/ package (2026-08): parsing / base / rule_time /
-rule_spec / rule_doc / llm_checks, each ≤ ~400 lines, with the orchestration
-entry point analyze_cross_page living in core/rules/__init__.py.
+rule_spec / rule_doc / llm_checks, each ≤ ~400 lines. The orchestration entry
+point `analyze_cross_page` lives in `core/rules/engine.py` (moved out of
+`core/rules/__init__.py` in 2026-09 so the package `__init__` is just the
+export surface), and is re-exported by `core.rules`.
 
 This file exists only for backward compatibility — pipeline.py and existing
 tests import from core.cross_page_analyzer. New code should import from

@@ -133,7 +133,7 @@
                     {% endif %}
                     <span class="tabular-nums">第{{ p }}页</span>
                     {% if pfc.total > 0 %}
-                    <span class="flex items-center gap-1">
+                    <span data-dots="1" class="flex items-center gap-1">
                         {% if pfc.critical > 0 %}
                         <span data-dot="critical" class="w-1 h-1 rounded-full bg-destructive" title="{{ pfc.critical }} 严重"></span>
                         {% endif %}
@@ -443,8 +443,30 @@
                 <!-- 列表 header — 仅标题 + 计数，无卡片背景 -->
                 <div class="flex items-center justify-between px-1 py-1.5">
                     <h3 class="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">问题清单</h3>
-                    <span class="text-[11px] text-muted-foreground tabular-nums">{{ findings|length }}</span>
+                    <div class="flex items-center gap-2">
+                        {# 跨页总览入口（对抗审查 P1）：后端 /findings 早已支持**不带 page**
+                           的全量聚合 + 置信度排序 + offset 分页，而前端两处 fetch 恒带
+                           page= ⇒ 复核者只能逐页翻（300 页批次找 1 条 critical 要翻 300 次）。
+                           本按钮切到 #all-findings-panel（懒加载）。 #}
+                        <button id="all-findings-toggle" type="button"
+                                class="text-[11px] text-muted-foreground hover:text-foreground underline decoration-dotted underline-offset-2"
+                                aria-expanded="false" aria-controls="all-findings-panel">全部页</button>
+                        <span class="text-[11px] text-muted-foreground tabular-nums">{{ findings|length }}</span>
+                    </div>
                 </div>
+                {# 跨页问题总览（对抗审查 P1）—— **独立容器，不共用 #findings-list**：
+                   页内清单是 loadPageData / SSE refreshCurrentPageFindings 的重渲染目标，
+                   且 #tier-bar 的图例文案明确写着"本页"。给它加"全部"模式就要在所有刷新点
+                   插分支，图例还会显示全批数字却标着"本页"（误导）。独立容器是纯增量。
+                   offset 分页是**彻底**解法：只把 limit 提到 200 只是抬高天花板。 #}
+                <section id="all-findings-panel" class="hidden" aria-label="跨页问题总览">
+                    <div class="flex items-center justify-between gap-2 px-1 py-1.5">
+                        <span id="all-findings-summary" class="text-[11px] text-muted-foreground">按置信度升序（最需要人工关注的排在最前）</span>
+                        <button id="all-findings-more" type="button"
+                                class="hidden text-[11px] text-muted-foreground hover:text-foreground underline decoration-dotted underline-offset-2">加载更多</button>
+                    </div>
+                    <div id="all-findings-list" class="border-t border-border"></div>
+                </section>
                 {# 三色复核分级（M6/T6.4）— 按**检出来源**分层，与严重度正交：
                    红=规则命中（确定性判据，必须逐条看）/ 蓝=LLM 辅助（可信度较低，
                    可批量扫）/ 绿=系统校验通过（启用规则中未命中的类型，是覆盖面
@@ -535,7 +557,9 @@
                                        区域级而非单元格级：两后端都不回传单元格 bbox。 #}
                                     {% if f.region_ref %}
                                     <div class="mt-1.5 flex items-center gap-2">
-                                        <button onclick="locateFinding(event, {{ f.id }})"
+                                        {# R63：区域锚版改名 locateRegion（消除与 card 版
+                                           locateFinding 的同名遮蔽，见 review-locate.js 头注） #}
+                                        <button onclick="locateRegion(event, {{ f.id }})"
                                                 class="btn-press focus-ring text-[11px] font-medium text-muted-foreground hover:text-foreground"
                                                 title="在左侧页面上高亮该问题所在的 OCR 版面区域（区域级定位，非单元格级）">
                                             定位原图
@@ -690,9 +714,22 @@
         },
       };
     </script>
+    {# R63 拆分：review.js 按职责拆为 8 个模块，defer 按依赖序加载 —
+       review-state（命名空间）先行、共享件先于消费者、入口 review.js 最后。
+       完整性由 tests/unit/test_review_js_modules.py 机检锁定。 #}
     <script src="/static/eta.js?v={{ asset_ver('eta.js') }}" defer></script>
     <script src="/static/status.js?v={{ asset_ver('status.js') }}" defer></script>
+    <script src="/static/sse.js?v={{ asset_ver('sse.js') }}" defer></script>
+    <script src="/static/findings-map.js?v={{ asset_ver('findings-map.js') }}" defer></script>
+    <script src="/static/pbc-fallback.js?v={{ asset_ver('pbc-fallback.js') }}" defer></script>
     <script src="/static/confirm-dialog.js?v={{ asset_ver('confirm-dialog.js') }}" defer></script>
+    <script src="/static/review-state.js?v={{ asset_ver('review-state.js') }}" defer></script>
+    <script src="/static/review-locate.js?v={{ asset_ver('review-locate.js') }}" defer></script>
+    <script src="/static/review-pageview.js?v={{ asset_ver('review-pageview.js') }}" defer></script>
+    <script src="/static/review-pageinfo.js?v={{ asset_ver('review-pageinfo.js') }}" defer></script>
+    <script src="/static/review-findings.js?v={{ asset_ver('review-findings.js') }}" defer></script>
+    <script src="/static/review-suppressions.js?v={{ asset_ver('review-suppressions.js') }}" defer></script>
+    <script src="/static/review-progress.js?v={{ asset_ver('review-progress.js') }}" defer></script>
     <script src="/static/review.js?v={{ asset_ver('review.js') }}" defer></script>
 </body>
 </html>

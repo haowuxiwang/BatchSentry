@@ -92,13 +92,19 @@
             <h2 class="text-[14px] font-medium">上传文件</h2>
             <p class="text-[11px] text-muted-foreground mt-0.5">
               {# 限额由 config.UPLOAD_LIMITS 派生（单一真值）—— 不再手写死值 #}
-              支持 PDF 或图片（jpg/jpeg/png/webp/bmp/tif/tiff），最大 {{ (limits.max_bytes // 1024 // 1024) }}MB、{{ limits.max_pages }} 页
+              支持 PDF 或图片（jpg/jpeg/png/webp/bmp/tif/tiff），最大 {{ (limits.max_bytes // 1024 // 1024) }}MB、{{ limits.max_pages }} 页；可一次选择/拖入多份
             </p>
           </div>
           <div class="p-5">
+            {# `multiple`（对抗审查 P0）：此前无此属性且 change/drop 只取
+               `files[0]` ⇒ 拖入 3 份只有 1 份被处理，另 2 份**无提示地消失**。
+               注意：只加 `multiple` 不够 —— 多文件路径必须同时**不跳转**
+               （见 static/upload.js 的 submitFiles），否则第 1 份成功就跳走并
+               杀掉其余上传。 #}
             <input
               type="file"
               id="file-input"
+              multiple
               accept=".pdf,.jpg,.jpeg,.png,.webp,.bmp,.tif,.tiff"
               class="hidden"
             />
@@ -221,11 +227,24 @@
         {# 上传限额（单一真值 config.UPLOAD_LIMITS）—— upload.js 的预检与
            提示文案都读这里，不再各自写死 200MB #}
         limits: {{ limits | tojson }},
+        {# 并发额度（单一真值 api.jobs._MAX_CONCURRENT_JOBS）—— upload.js
+           在发送**之前**用它判断"还有没有空位"，避免把大文件白传一遍再吃
+           409。缺失/为 0 时前端视为"未知"⇒ 跳过预检（fail-open，后端仍权威）。 #}
+        concurrency: { limit: {{ concurrency_limit | tojson }} },
       };
     </script>
+    {# R63 P2-1 拆分：upload.js 只留上传交互，历史列表/SSE 聚合/归档
+       平移至 upload-jobs.js。依赖序：sse.js 依赖 status.js 的
+       PbcStatus.sseErrorAction；upload-jobs.js 依赖 PbcSse/PbcStatus/
+       PbcEta/__PBC__；upload.js 仅依赖 __PBC__/PbcStatus，与
+       upload-jobs.js 松耦合（refreshHistory 挂 window）。顺序由
+       tests/unit/test_review_js_modules.py 风格的机检锁定。 #}
     <script src="/static/eta.js?v={{ asset_ver('eta.js') }}" defer></script>
     <script src="/static/status.js?v={{ asset_ver('status.js') }}" defer></script>
+    <script src="/static/sse.js?v={{ asset_ver('sse.js') }}" defer></script>
+    <script src="/static/pbc-fallback.js?v={{ asset_ver('pbc-fallback.js') }}" defer></script>
     <script src="/static/confirm-dialog.js?v={{ asset_ver('confirm-dialog.js') }}" defer></script>
+    <script src="/static/upload-jobs.js?v={{ asset_ver('upload-jobs.js') }}" defer></script>
     <script src="/static/upload.js?v={{ asset_ver('upload.js') }}" defer></script>
   </body>
 </html>

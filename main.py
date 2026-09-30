@@ -529,6 +529,18 @@ app.include_router(report_router)
 app.include_router(settings_router)
 
 
+def _max_concurrent_jobs() -> int:
+    """并发额度（job 级）—— **单一真值在 api.jobs._MAX_CONCURRENT_JOBS**。
+
+    调用期解析（而非模块级 from-import）：该常量支持 `MAX_CONCURRENT_JOBS`
+    env 覆盖，且测试用 `patch("api.jobs._MAX_CONCURRENT_JOBS", n)` 改它 ——
+    顶层 from-import 会把值冻结在 import 时刻，测试与运行期都会读到旧值。
+    """
+    from api.jobs import _MAX_CONCURRENT_JOBS
+
+    return _MAX_CONCURRENT_JOBS
+
+
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request, page: int = 1):
     """Upload page with job list (excluding archived).
@@ -574,6 +586,12 @@ async def index(request: Request, page: int = 1):
             # 上传限额下发前端（单一真值 = config.UPLOAD_LIMITS）——
             # 前端的预检与提示文案不再各自写死，避免"前端放行、后端拒绝"漂移
             "limits": UPLOAD_LIMITS,
+            # 并发额度下发前端（单一真值 = api.jobs._MAX_CONCURRENT_JOBS）。
+            # 为什么必须下发：多文件上传是**串行**的，配额满时后端对第 4 份
+            # 直接 409 —— 而此刻文件已经**完整上传**（几百 MB、分钟级）才被
+            # 拒。前端拿到额度后可在发送**之前**等待空位，把"白传一次 + 红错"
+            # 变成"等待 + 成功"。见 static/upload.js 的 waitForQuotaSlot()。
+            "concurrency_limit": _max_concurrent_jobs(),
         },
     )
 

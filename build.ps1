@@ -43,10 +43,20 @@ Set-Location $projectRoot
 # 判定与解读见 scripts/build_status.py（唯一实现，支持 --json / --assert-state）。
 $runDir = Join-Path $projectRoot "build\_run"
 New-Item -ItemType Directory -Force -Path $runDir | Out-Null
-# 只保留最近 20 次运行（40 个文件），避免无限堆积
-Get-ChildItem $runDir -Filter "*.json" -ErrorAction SilentlyContinue |
-    Sort-Object Name -Descending | Select-Object -Skip 40 |
-    Remove-Item -Force -ErrorAction SilentlyContinue
+# 只保留最近 20 次运行（40 个文件），避免无限堆积。
+# ⚠️ 不要写成 `… | Select-Object -Skip 40 | Remove-Item -Force`。那依赖一个
+# 隐晦行为：「真实 Remove-Item 在**管道上下文**里收到 0 个对象时不抛，但**独立调用**
+# 缺 -Path 会抛『无法处理命令，因为一个或多个强制参数丢失: Path』」。
+# 台账不足 40 个文件时管道恰好为空（实测 2026-09-29：台账只有 10 个文件），
+# 于是失败点随调用方式/宿主包装器而异 —— 排查成本极高。改为显式收集 + 判空 +
+# `-LiteralPath`，语义清晰，且与「不足 40 个 = 无可裁剪」的意图直接对应。
+$staleLedger = @(
+    Get-ChildItem $runDir -Filter "*.json" -ErrorAction SilentlyContinue |
+        Sort-Object Name -Descending | Select-Object -Skip 40
+)
+if ($staleLedger.Count -gt 0) {
+    Remove-Item -LiteralPath $staleLedger.FullName -Force -ErrorAction SilentlyContinue
+}
 $runId = "$(Get-Date -Format 'yyyyMMdd-HHmmss')-$PID"
 $startFile = Join-Path $runDir "$runId.start.json"
 $finishFile = Join-Path $runDir "$runId.finish.json"
@@ -188,8 +198,25 @@ Write-OK "Pre-flight passed"
 # ── 0. Clean ────────────────────────────────────────────────────────
 if ($Clean) {
     Write-Step "Cleaning previous build artifacts"
-    Remove-Item -Recurse -Force dist, dist-electron, build -ErrorAction SilentlyContinue
-    Write-OK "Cleaned dist/, dist-electron/, build/"
+    # ⚠️ 不能整删 build/ —— 运行台账 build/_run 就在里面，而**本次运行的
+    # start.json 在脚本开头（第 60 行）就已落盘**。整删会把「本次运行的开始记录」
+    # 一并抹掉 ⇒ 之后若被 TerminateProcess（Windows 强杀不展开 finally），
+    # 证据只剩「从未运行过」，B9-6「被杀 vs 真失败」的判据当场失效 ——
+    # 而 `-Clean` 恰恰是最需要该判据的全量构建。
+    # 故：dist/ 与 dist-electron/ 整删；build/ 只删 _run 以外的内容
+    # （PyInstaller 的 workpath build/pbc-server 与各 .log 都会被清掉，语义不变）。
+    # 回归护栏：tests/unit/test_build_script.py::test_build_ps1_clean_preserves_run_ledger
+    # 逐条单路径删除（而不是 `dist, dist-electron` 一次传两个）：单路径形式在
+    # 「受限宿主环境」与正常 PowerShell 下行为一致，多路径形式则不然。
+    Remove-Item -Recurse -Force dist -ErrorAction SilentlyContinue
+    Remove-Item -Recurse -Force dist-electron -ErrorAction SilentlyContinue
+    $buildRootForClean = Join-Path $projectRoot "build"
+    if (Test-Path -LiteralPath $buildRootForClean) {
+        Get-ChildItem -LiteralPath $buildRootForClean -Force -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -ne "_run" } |
+            ForEach-Object { Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+    Write-OK "Cleaned dist/, dist-electron/, build/ (保留 build/_run 台账)"
 }
 
 # ── 1. Tailwind CSS build ────────────────────────────────────────────

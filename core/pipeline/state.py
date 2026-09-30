@@ -136,7 +136,24 @@ async def transition_status(db, job_id: str, new_status: str, detail: str = "") 
         return await _transition_status_unlocked(db, job_id, new_status, detail)
 
 
-_STUCK_STATUSES = ("pending", "ocr_running", "ocr_done", "analyzing", "cancelling")
+# ── 状态分区（**单一真值**）──────────────────────────────────────────────
+# 语义：非终态 = 仍在流水线里（占并发额度、崩溃后需收敛）；
+#       终态   = 流水线已结束（可归档 / 可重试）。
+# 注：`archived` 有出边（unarchive → review），但它仍属"已结束"，故列终态 ——
+#     判据是"pipeline 是否还在跑"，不是"有没有出边"。
+#
+# 不变量（由 tests/unit/test_pipeline_state_machine.py 锁定）：
+#   ACTIVE_STATUSES ∪ TERMINAL_STATUSES == VALID_TRANSITIONS.keys()，且两者不相交。
+#
+# 为什么必须单点定义：此前 `api/jobs/__init__.py` 与这里**各存一份逐元素相同的
+# 元组**，靠人工同步 —— 新增一个状态时必然漏改一处（"同一语义两处实现"的典型，
+# 与本仓库其他单一真值约束同类）。
+ACTIVE_STATUSES = ("pending", "ocr_running", "ocr_done", "analyzing", "cancelling")
+TERMINAL_STATUSES = ("review", "partial_review", "error", "cancelled", "archived")
+
+# 历史别名：启动期"卡死"的 job 就是"崩溃时仍停在非终态"的 job —— 与非终态**同集**。
+# 保留旧名，避免改动 `core/watchdog.py` 与既有测试的导入面。
+_STUCK_STATUSES = ACTIVE_STATUSES
 
 
 async def recover_stuck_jobs(process_started_at: str | None = None) -> int:
@@ -186,10 +203,16 @@ async def recover_stuck_jobs(process_started_at: str | None = None) -> int:
             f"[{job_id}] Recovering stuck job: status={old_status} "
             f"filename={filename} created_at={created_at}"
         )
-        # 直接 UPDATE 而非 transition_status：状态机不允许 ocr_running→error
-        # 之外的路径（如 pending→error 是允许的），但 ocr_done→error 不在
-        # VALID_TRANSITIONS 中。这里属于"崩溃恢复"场景，绕过状态机校验，
-        # 直接标记 + 审计日志记录。
+        # 直接 UPDATE 而非 transition_status，原因有两条（不是"状态机不允许
+        # 该转换"——实测 VALID_TRANSITIONS 里 5 个非终态**都**允许 → error）：
+        #   1. transition_status 只写 status 列，这里还需一并写 error_message
+        #      与 finished_at；
+        #   2. 这里是"崩溃恢复"场景：SELECT 快照与逐行 UPDATE 之间存在并发
+        #      窗口（用户可能已 retry 该 job），需要 `status IN (...)` 的
+        #      **条件更新**来避免把并发改写后的新状态打回 error —— 而
+        #      transition_status 内部是"先 SELECT 再无条件 UPDATE"，表达不了
+        #      该条件（见下方 rowcount==0 的跳过分支）。
+        # 绕过状态机校验仍写 `stuck_recovery` 审计日志，保持 GMP 可追溯。
         # 对抗审查（中文化收尾）：UPDATE 带 status IN (...) 条件 — SELECT
         # 快照与逐行 UPDATE 之间可能被并发路径改写状态（如用户 retry 已恢复
         # 的 job），无条件覆盖会把新状态打回 error。条件更新影响 0 行时跳过

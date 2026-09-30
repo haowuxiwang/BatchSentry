@@ -33,7 +33,11 @@ REPO = Path(__file__).resolve().parents[2]
 CLIENT_PY = REPO / "llm" / "client.py"
 STAGE2_PY = REPO / "core" / "pipeline" / "stage2.py"
 UPLOAD_JS = REPO / "static" / "upload.js"
-REVIEW_JS = REPO / "static" / "review.js"
+# R63 P2-1 拆分：历史行渲染/SSE 快照消费（failed_pages / error 分支）已
+# 平移至 upload-jobs.js，前端消费断言随迁
+UPLOAD_JOBS_JS = REPO / "static" / "upload-jobs.js"
+# R63 拆分：structured._error（页级 parse-error 横幅）已移入 review-pageinfo.js
+REVIEW_JS = REPO / "static" / "review-pageinfo.js"
 # #133：状态→颜色/中文的单一真值（upload.js 与 review.js 共同依赖）
 STATUS_JS = REPO / "static" / "status.js"
 REVIEW_HTML = REPO / "templates" / "review.html"
@@ -403,7 +407,7 @@ class TestFrontendVisibilityContract:
         `test_get_status_failed_pages_is_a_json_array`；此处同时锁住前端的
         类型预期，两端一起改才可能漂移。
         """
-        js = UPLOAD_JS.read_text(encoding="utf-8")
+        js = UPLOAD_JOBS_JS.read_text(encoding="utf-8")
         assert "job.failed_pages" in js, "failed_pages 未被前端消费"
         assert re.search(r"Array\.isArray\(\s*job\.failed_pages\s*\)", js), (
             "前端须按数组取用 failed_pages（接口契约是 list）；"
@@ -412,7 +416,7 @@ class TestFrontendVisibilityContract:
 
     def test_partial_review_shows_the_reason(self):
         """partial_review 下也必须显示 error_message（SSE + 历史行两处）。"""
-        js = UPLOAD_JS.read_text(encoding="utf-8")
+        js = UPLOAD_JOBS_JS.read_text(encoding="utf-8")
         assert '(st === "error" || st === "partial_review")' in js, (
             "SSE 实时更新仍只在 error 态显示原因"
         )

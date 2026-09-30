@@ -65,6 +65,17 @@ if __name__ == "__main__":
                 port=port,
                 log_level="info",
                 reload=False,
+                # ⚠️ **必须保持 1**（对抗审查 §3.6 的隐性耦合点，勿改）：
+                # 本进程的并发模型全部建立在「**单进程内全局单例**」之上 ——
+                #   · core/pipeline/locks.py:127  db_lock = asyncio.Lock()（进程内全局单锁）
+                #   · core/procpool.py:52/54      _pool / _POOL_MAX_WORKERS = 2（进程内单池）
+                #   · job 配额计数、pipeline task 注册表都在进程内存里
+                # 多 worker 时每个进程各有一把锁、各有一个池：配额会**按 worker 数翻倍**
+                # （“与 INSERT 同一把 db_lock 内的权威检查”不再权威），CPU 池上限也会变成 2×N，
+                # 且跨 worker 的取消与级联取消全部失效。
+                # 这不是“性能没调优”，而是**正确性前提**：要动它必须先换掉
+                # 单连接 + 进程内单例模型（见 docs/ADVERSARIAL_REVIEW_2026-09-29.md §3.6）。
+                # 守护护栏：tests/unit/test_config_import_order_contract.py::TestSingleWorkerPrerequisite
                 workers=1,
             )
         )

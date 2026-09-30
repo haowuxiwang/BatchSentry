@@ -9,8 +9,9 @@ from tests.e2e_coverage import (  # noqa: E402
     classify_pipeline, exit_code, required_gaps,
 )
 from tests.e2e_proc import (  # noqa: E402
-    EXE_ENV, LLM_KEY_ENV, llm_key, llm_key_env_display, llm_model,
-    llm_provider, resolve_exe, spawn_server, stop_server,
+    EXE_ENV, LLM_KEY_ENV, classify_llm_probe, llm_failure_attribution, llm_key,
+    llm_key_env_display, llm_model, llm_provider, resolve_exe, spawn_server,
+    stop_server,
 )
 from tests.e2e_status_js import (  # noqa: E402
     dot_semantics_problems, status_dot_classes,
@@ -41,38 +42,82 @@ def fail(name, detail=""):
 def section(title):
     print(f"\n=== {title} ===")
 
-def probe_llm_credential(base_url, key, timeout=15):
-    """对"应用自己上报的 base_url + 我们交给它的凭据"做一次**直连正向对照**。
+def probe_llm_credential(base_url, key, model="", timeout=15):
+    """对"应用自己上报的 base_url + 我们交给它的凭据"做**两段式**正向对照。
 
     用途只有一个：把"流水线以 error 收场"的**归因**说清楚，而不是一律贴
     "真实缺陷"的标签（Round 54 实测：一份已失效的 key 会让报告写成"真实缺陷"，
     把排查方向引到代码上）。
 
-    返回 `(verdict, detail)`，verdict ∈ {invalid, ok, unknown}：
+    🔴 **为什么必须两段（2026-09-30 实测的第二次误归因）**：
+    只用**免费**端点 `GET /models` 时，它不消耗额度 ⇒ 只能回答"这把 key 是不是
+    真的"，**回答不了**"这个账户还付得起钱吗"。于是上游 402 欠费时 `/models`
+    照旧 200 ⇒ 判 `ok` ⇒ 报告写"凭据有效，故此处失败是**产品缺陷**"，而同一份
+    报告的另一行写着 `402 ... balance is insufficient` —— 自相矛盾，且把排查
+    引向代码。故第二段改用**计费**端点（`POST /chat/completions`，`max_tokens=1`）
+    发一次最小请求，用**应用自己上报的模型**：只有它能把 401 与 402 分开。
+
+    返回 `(verdict, detail)`；verdict ∈ {invalid, billing, ok, unknown}，判定规则
+    **只此一处**（`tests/e2e_proc.classify_llm_probe` 的纯函数行为表）：
       * `invalid` —— 确凿的 401/403：**上游拒绝该凭据** ⇒ 环境问题。
-      * `ok`      —— 凭据可用。此时流水线仍 error **就是产品缺陷**；尤其能抓住
-                     "把凭据发给了错误提供方/端点"这一历史真实缺陷（见本文件
-                     第 155-163 行的 401 事故）。
-      * `unknown` —— 判不了（网络/异常/其它状态码）。**fail-closed**：调用方按
-                     真实缺陷处理，绝不因"探测不可用"而放行。
+      * `billing` —— 402：**凭据有效、账户欠费** ⇒ 环境问题（**非**产品缺陷）。
+      * `ok`      —— 凭据**与额度**均可用。此时流水线仍 error **就是产品缺陷**；
+                     尤其能抓住"把凭据发给了错误提供方/端点"这一历史真实缺陷
+                     （见本文件第 155-163 行的 401 事故）。
+      * `unknown` —— 判不了（网络/异常/其它状态码/未上报模型）。**fail-closed**：
+                     调用方按真实缺陷处理，绝不因"探测不可用"而放行。
 
     ⚠️ 不得改成"只要 error_message 里出现 401 就降级"：那是按**文案**判定，
     文案属展示层，改文案会静默改变控制流（本项目已因同类做法踩过坑）。
     """
     if not base_url:
-        return "unknown", "应用未上报 base_url"
-    url = base_url.rstrip("/") + "/models"
+        return VERDICT_UNKNOWN, "应用未上报 base_url"
+    root = base_url.rstrip("/")
+
+    # ── 第一段：免费端点。只回答"key 是不是真的"（余额为 0 时它照样 200）。
+    free_url = root + "/models"
     try:
-        req = urllib.request.Request(url, headers={"Authorization": "Bearer " + (key or "")})
+        req = urllib.request.Request(
+            free_url, headers={"Authorization": "Bearer " + (key or "")})
         with urllib.request.urlopen(req, timeout=timeout) as r:
-            return ("ok", f"HTTP {r.status} @ {url}") if r.status == 200 else \
-                   ("unknown", f"HTTP {r.status} @ {url}")
+            free_status = r.status
     except urllib.error.HTTPError as e:
-        if e.code in (401, 403):
-            return "invalid", f"HTTP {e.code} @ {url}"
-        return "unknown", f"HTTP {e.code} @ {url}"
+        free_status = e.code
     except Exception as e:  # noqa: BLE001 — 判不了 ≠ 通过
-        return "unknown", f"{type(e).__name__}: {str(e)[:80]}"
+        return VERDICT_UNKNOWN, f"{type(e).__name__}: {str(e)[:80]}"
+
+    # ── 第二段：仅在 key 被上游认下、且知道模型时，发一次**计费**最小请求。
+    #     没有它就无法把 401 与 402 分开 —— 这正是本函数存在两段的原因。
+    metered_status = None
+    metered_note = ""
+    if free_status != 200:
+        metered_note = "免费端点未通过，无需计费探测"
+    elif not model:
+        metered_note = "应用未上报模型，无法计费探测"
+    else:
+        metered_url = root + "/chat/completions"
+        try:
+            payload = json.dumps({
+                "model": model,
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 1,          # 最小化计费；只为一个状态码
+            }).encode("utf-8")
+            req = urllib.request.Request(
+                metered_url, data=payload, method="POST",
+                headers={"Authorization": "Bearer " + (key or ""),
+                         "Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                metered_status = r.status
+        except urllib.error.HTTPError as e:
+            metered_status = e.code
+        except Exception as e:  # noqa: BLE001 — 判不了 ≠ 通过
+            metered_note = f"计费探测异常 {type(e).__name__}"
+
+    verdict = classify_llm_probe(free_status, metered_status)
+    detail = (f"免费端点 HTTP {free_status} + 计费端点 "
+              f"HTTP {metered_status if metered_status is not None else '未取得'}"
+              f"{('（' + metered_note + '）') if metered_note else ''}")
+    return verdict, detail
 
 # --- Start server ---
 # 关键：stdout/stderr 落日志文件（不得用未排空的 PIPE —— 服务端日志写满
@@ -214,6 +259,10 @@ try:
     # 不是产品缺陷（详见 e2e_proc.LLM_MODEL_ENV 的实测记录）。
     _model = llm_model()
     _base_url = ""   # 由应用上报后回填（归因探测必须打**应用真正会用的那个端点**）
+    #: 应用**实际上报**的模型 —— 归因探测第二段（计费请求）必须用**同一个**模型。
+    #: 用 `_model`（我们请求的档位）会验错对象：应用可能没接受它。
+    #: 预置空串而非留未绑定：上面的 try 若早退，下面第 8 段仍会读它。
+    _model_used = ""
     _llm_ready = False   # 覆盖清单口径：凭据被应用**接受**才算就绪（不是"存在即可"）
     if not _key:
         print(f"    [WARN] 未设置 {llm_key_env_display()} —— 跳过 LLM 配置，"
@@ -410,17 +459,15 @@ try:
                 # 判据强度不变（仍是 FAIL，fail-closed）；这里只把**归因**说准。
                 # 原先把任何"已配 OCR 的 error"一律写成"真实缺陷"，实测会把一份
                 # 已失效的 key 报成产品缺陷，把排查引向代码（Round 54）。
-                verdict, why = probe_llm_credential(_base_url, _key)
-                attribution = {
-                    "invalid": f"归因：同一 base_url/凭据直连探测得 {why} ⇒ "
-                               "**上游确凿拒绝该凭据**（环境问题，轮换密钥后复跑）；"
-                               "非产品缺陷，但本轮 LLM 链路因此未被覆盖。",
-                    "ok": f"归因：同一凭据直连探测得 {why} ⇒ **凭据有效**，"
-                          "故此处失败是产品缺陷（优先查：凭据是否被发给了错误的"
-                          "提供方/端点 —— 本项目发生过完全相同的 401 事故）。",
-                    "unknown": f"归因：凭据探测无法判定（{why}）⇒ 按真实缺陷处理"
-                               "（fail-closed：判不了 ≠ 通过）。",
-                }[verdict]
+                # ⚠️ 2026-09-30 第二次同类事故：只探**免费**端点 ⇒ 账户欠费(402)
+                # 被报成"产品缺陷"。现改为两段式探测（免费 + 计费），归因文案的
+                # **唯一实现**在 `tests/e2e_proc.llm_failure_attribution`。
+                # ⚠️ 覆盖状态**仍记 failed**，不因"归因是环境"而改记 skipped ——
+                # 流水线**确实执行了**且没到成功终态，符合 failed 的定义
+                # （"执行了但结果不符预期"）；skipped 的定义是"因环境缺项**未执行**"，
+                # 用在这里是**事实错误**。归因与状态是两个正交维度，不可互相顶替。
+                verdict, why = probe_llm_credential(_base_url, _key, _model_used)
+                attribution = llm_failure_attribution(verdict, why)
                 fail("pipeline_terminal",
                      f"status=error（已配 OCR 仍失败）"
                      f"error_message={err_msg[:200]} ｜ {attribution}")
@@ -570,9 +617,29 @@ try:
     #     这才是"验产物而非验源码"的实质：修复有没有到达用户手上，是一个
     #     **分发事实**，源码树干净并不蕴含它。静态资源由冻结包直接提供，
     #     故这几条断言证明的正是"要分发的那份东西带着修复"。
+    #
+    #     ⚠️ 判据必须**与文件位置无关**（2026-09-30 修）。原实现只在
+    #     `upload.js` / `review.js` 里找标记，但 #127 的消费逻辑随后被拆进
+    #     `upload-jobs.js`（`job.failed_pages` 在 518 行、`["error",
+    #     "partial_review"].includes(st)` 在 583 行）与
+    #     `review-pageinfo.js`（`structured._error` 在 88 行）⇒ 断言**假红**。
+    #     要证明的是上面那条**分发事实**，不是"修复住在哪个文件里"；
+    #     把位置写进判据，等于让一次纯模块化重构把发版门禁变成噪声（"狼来了"）。
+    #     护栏：tests/unit/test_e2e_status_js.py::TestE2e127VisibilityJudgeIsLocationIndependent
+    def _served_js(paths):
+        out = {}
+        for _p in paths:
+            _r = requests.get(f"{BASE}{_p}", timeout=5)
+            _r.raise_for_status()
+            out[_p] = _r.text
+        # 防空转：必须真的取到非空内容；否则"没找到标记"其实只是"什么都没取到"
+        _empty = [_p for _p, _t in out.items() if not _t.strip()]
+        assert not _empty, f"静态资源取到空内容，标记断言无意义: {_empty}"
+        return "\n".join(out.values())
+
     section("Frontend #127 Visibility (shipped bundle)")
     try:
-        up = requests.get(f"{BASE}/static/upload.js", timeout=5).text
+        up = _served_js(["/static/upload.js", "/static/upload-jobs.js"])
         # upload 页必须真的消费失败页与失败原因（文本级，成立即说明控制流消费了它们）
         checks = {
             "failed_pages_rendered": "job.failed_pages" in up,
@@ -600,8 +667,12 @@ try:
         fail("status_dot_semantics", str(e))
 
     try:
-        rj = requests.get(f"{BASE}/static/review.js", timeout=5).text
-        assert "structured._error" in rj, "review.js 未消费 structured._error"
+        # 同 13b：`structured._error` 现由 `review-pageinfo.js` 消费（88 行），
+        # 而它原先住在 `review.js` ⇒ 判据同样必须与文件位置无关。
+        rj = _served_js(["/static/review.js", "/static/review-pageinfo.js"])
+        assert "structured._error" in rj, (
+            "复核页未消费 structured._error（页内横幅显不出真实原因）"
+        )
         ok("review_js_127", "页内横幅显真实原因")
     except Exception as e:
         fail("review_js_127", str(e))

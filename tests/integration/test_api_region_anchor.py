@@ -147,7 +147,7 @@ class TestSsrAnchor:
         assert r.status_code == 200
         html = r.text
         assert 'id="region-overlay"' in html
-        assert "locateFinding(event," in html, "首屏必须带定位入口"
+        assert "locateRegion(event," in html, "首屏必须带定位入口"
         assert "region_refs:" in html, "首屏锚点必须随 ctx 注入"
         # ctx 里的锚与 API 一致（同一推导函数）
         refs = _extract_json_object(html, "region_refs: ")
@@ -160,7 +160,7 @@ class TestSsrAnchor:
     async def test_ssr_page_without_regions_has_no_locate_button(self, anchor_client):
         r = await anchor_client.get("/jobs/anchor-job/review?page=2")
         assert r.status_code == 200
-        assert "locateFinding(event," not in r.text, "锚不上时不得显示入口"
+        assert "locateRegion(event," not in r.text, "锚不上时不得显示入口"
 
     @pytest.mark.asyncio
     async def test_ssr_tolerates_bad_kb_refs_json(self, anchor_client, test_db):

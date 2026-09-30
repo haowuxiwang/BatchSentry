@@ -16,7 +16,14 @@ import logging
 import math
 import re
 
-from core.kb import store
+# ⚠️ **必须是子模块直连，不能写 `from core.kb import store`** ——
+# `core/kb/__init__.py` 顶层 import 本模块，所以"本模块顶层 import 包"会形成
+# 全仓唯一的真环 `core.kb ⇄ core.kb.retriever`（实测 SCC，见
+# devlogs/_verify/probe_pipeline_hoistability.py）。当前它**能跑**只是因为
+# CPython 对部分初始化模块的 `IMPORT_FROM` 有 sys.modules 回退，
+# 属于"顺序恰好成立"的脆弱写法，不是设计。
+# `store.py` 本身是**刻意的零依赖叶子**（见其 docstring），直连子模块无环。
+from core.kb.store import entries, source_ids, sources
 
 logger = logging.getLogger(__name__)
 
@@ -79,7 +86,7 @@ def _bigrams(text: str) -> list[str]:
 
 class _Index:
     def __init__(self) -> None:
-        self.entries = store.entries()
+        self.entries = entries()
         self.docs: list[list[str]] = []
         self.inverted: dict[str, list[tuple[int, int]]] = {}
         # 多源（M5）：逐条记录归属源，供按源过滤与引用溯源。
@@ -231,7 +238,7 @@ def enabled_source_ids() -> set[str] | None:
         return None
     if not disabled:
         return None
-    keep = set(store.source_ids()) - set(disabled)
+    keep = set(source_ids()) - set(disabled)
     return keep or None  # never disable the whole corpus
 
 
@@ -314,7 +321,7 @@ def group_refs_by_source(refs: list[dict]) -> list[tuple[dict, list[dict]]]:
     resolves to a concrete regulation edition. Refs missing a source_id fall
     into a synthetic "unknown" bucket rather than being dropped.
     """
-    meta_by_id = {m["source_id"]: m for m in store.sources()}
+    meta_by_id = {m["source_id"]: m for m in sources()}
     buckets: dict[str, list[dict]] = {}
     for r in refs:
         buckets.setdefault(str(r.get("source_id") or ""), []).append(r)

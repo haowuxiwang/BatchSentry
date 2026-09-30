@@ -25,6 +25,14 @@ from core.pipeline import (
     launch_pipeline,
     transition_status,
 )
+# 状态集合的**单一真值**在 core.pipeline.state（与状态机 VALID_TRANSITIONS 同处，
+# 便于机检"分区 == 状态机键集"）。此处只做 re-export —— 消费方仍按
+# `from api.jobs import _ACTIVE_STATUSES` 在运行期解析，故 monkeypatch
+# （tests/integration/test_api_jobs.py）继续有效。
+from core.pipeline.state import (
+    ACTIVE_STATUSES as _ACTIVE_STATUSES,
+    TERMINAL_STATUSES as _TERMINAL_STATUSES,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
@@ -108,8 +116,8 @@ try:
     _MAX_CONCURRENT_JOBS = int(os.getenv("MAX_CONCURRENT_JOBS", "3"))
 except (TypeError, ValueError):
     _MAX_CONCURRENT_JOBS = 3
-_ACTIVE_STATUSES = ("pending", "ocr_running", "ocr_done", "analyzing", "cancelling")
-_TERMINAL_STATUSES = ("review", "partial_review", "error", "cancelled", "archived")
+# _ACTIVE_STATUSES / _TERMINAL_STATUSES 见文件顶部的 re-export（单一真值在
+# core.pipeline.state）—— 此处不再重复声明字面量。
 
 
 async def _count_active_jobs(db, active_statuses) -> int:

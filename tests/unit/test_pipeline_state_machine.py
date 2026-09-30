@@ -112,6 +112,123 @@ class TestValidTransitions:
         assert "pending" in VALID_TRANSITIONS["cancelled"]  # 允许重试
 
 
+class TestNoJobCanGetStuckForever:
+    """每个**非终态**都必须能走到 `error`（否则任务会永久卡死）。
+
+    这是 `recover_stuck_jobs` 崩溃恢复路径的**合法性前提**，也是对
+    `core/pipeline/state.py` 里那段被修正过的注释的机检：该注释曾声称
+    "ocr_done→error 不在 VALID_TRANSITIONS 中"，据此论证恢复路径"必须"
+    绕过状态机 —— 但实测五个非终态**都**允许 → error。真正的绕过理由是
+    "需要一并写 error_message/finished_at + 条件 UPDATE"，不是"转换非法"。
+    若哪天有人真的移除了某个 → error 边，任务将无法被恢复，本护栏会立刻红。
+    """
+
+    def test_every_stuck_status_can_transition_to_error(self):
+        from core.pipeline.state import _STUCK_STATUSES
+
+        missing = [s for s in _STUCK_STATUSES if "error" not in VALID_TRANSITIONS.get(s, set())]
+        assert not missing, (
+            f"这些非终态无法迁移到 error ⇒ 崩溃恢复会失败、任务永久卡死：{missing}"
+        )
+
+    def test_stuck_statuses_are_all_real_states(self):
+        """防空转：_STUCK_STATUSES 必须都出现在 VALID_TRANSITIONS 里。"""
+        from core.pipeline.state import _STUCK_STATUSES
+
+        assert _STUCK_STATUSES, "_STUCK_STATUSES 为空 —— 提取器/常量失效"
+        unknown = [s for s in _STUCK_STATUSES if s not in VALID_TRANSITIONS]
+        assert not unknown, f"_STUCK_STATUSES 含未定义状态：{unknown}"
+
+    def test_stuck_statuses_are_non_terminal(self):
+        """被恢复的必须是**非终态** —— 终态不该被启动恢复误标 error。"""
+        from core.pipeline.state import _STUCK_STATUSES
+
+        for terminal in ("review", "partial_review", "error", "cancelled", "archived"):
+            assert terminal not in _STUCK_STATUSES, (
+                f"终态 {terminal} 混进了 _STUCK_STATUSES —— 启动时会被误标 error"
+            )
+
+
+class TestStatusPartitionIsSingleTruth:
+    """状态分区必须**单点定义**，且恰好划分状态机的键集。
+
+    背景（本轮对抗性审查）：`api/jobs/__init__.py` 与 `core/pipeline/state.py`
+    曾**各存一份逐元素相同**的元组（`("pending", "ocr_running", ...)`），靠人工
+    同步。新增状态时必然漏改一处，而漏改的后果是**静默的**：
+      - 并发额度少算 ⇒ 超额启动流水线（3×200MB PDF 的 OCR 结果可吃 ~2GB）；
+      - 崩溃恢复少算 ⇒ 该状态的 job 永不收敛，成为"无终态黑洞"。
+    现已收敛为单一真值，本护栏锁住三件事。
+    """
+
+    def test_api_jobs_reexports_the_same_objects(self):
+        """必须是**同一对象**（`is`），不是内容相同的副本。"""
+        from api.jobs import _ACTIVE_STATUSES, _TERMINAL_STATUSES
+        from core.pipeline.state import ACTIVE_STATUSES, TERMINAL_STATUSES
+
+        assert _ACTIVE_STATUSES is ACTIVE_STATUSES, (
+            "api.jobs._ACTIVE_STATUSES 不是 core.pipeline.state 里那个对象 —— "
+            "又出现了第二份副本（单一真值被破坏）"
+        )
+        assert _TERMINAL_STATUSES is TERMINAL_STATUSES, (
+            "api.jobs._TERMINAL_STATUSES 是副本而非同一对象"
+        )
+
+    def test_partition_covers_the_state_machine_exactly(self):
+        """防空转 + 完整性：两集不相交，且并集**恰好等于** VALID_TRANSITIONS 键集。"""
+        from core.pipeline.state import ACTIVE_STATUSES, TERMINAL_STATUSES
+
+        states = set(VALID_TRANSITIONS)
+        assert states, "VALID_TRANSITIONS 为空 —— 提取器失效"
+        active, terminal = set(ACTIVE_STATUSES), set(TERMINAL_STATUSES)
+        assert not (active & terminal), (
+            f"状态同时被归为终态与非终态：{sorted(active & terminal)}"
+        )
+        assert active | terminal == states, (
+            f"分区与状态机键集不一致 —— "
+            f"漏: {sorted(states - (active | terminal))}，"
+            f"多: {sorted((active | terminal) - states)}"
+        )
+
+    def test_stuck_alias_stays_in_sync_with_the_active_set(self):
+        """`_STUCK_STATUSES` 必须与 `ACTIVE_STATUSES` **内容一致**。
+
+        ⚠️ 这里刻意**不**用 `is` 断言"是同一对象"：CPython 会对同一 code object
+        内**相等的常量元组做去重**（`_STUCK_STATUSES = (...)` 与
+        `ACTIVE_STATUSES = (...)` 写在同一模块里会拿到同一个对象），
+        于是 `is` 断言无论是否写成语义别名都通过 —— 那是一条**无法失败**的
+        断言（实测变异 M4 抓不到）。真正要防的是**漂移**：有人往
+        `ACTIVE_STATUSES` 里加了状态却忘了 `_STUCK_STATUSES`（或反之），
+        该状态的 job 崩溃后永不收敛。内容相等才是那条不变量。
+        """
+        from core.pipeline.state import ACTIVE_STATUSES, _STUCK_STATUSES
+
+        assert _STUCK_STATUSES, "_STUCK_STATUSES 为空 —— 提取器/常量失效"
+        assert set(_STUCK_STATUSES) == set(ACTIVE_STATUSES), (
+            f"_STUCK_STATUSES 与 ACTIVE_STATUSES 漂移 —— "
+            f"仅前者有: {sorted(set(_STUCK_STATUSES) - set(ACTIVE_STATUSES))}，"
+            f"仅后者有: {sorted(set(ACTIVE_STATUSES) - set(_STUCK_STATUSES))}"
+        )
+
+
+class TestRecoveryBypassIsAudited:
+    """崩溃恢复绕过状态机校验，但**必须**留下审计（GMP 可追溯）。"""
+
+    def test_recover_writes_stuck_recovery_audit(self):
+        import inspect
+
+        from core.pipeline import state as state_mod
+
+        src = inspect.getsource(state_mod.recover_stuck_jobs)
+        assert "stuck_recovery" in src, (
+            "recover_stuck_jobs 绕过状态机却不写 stuck_recovery 审计 —— "
+            "GMP 追溯要求记录该变更"
+        )
+        assert "status IN (" in src, (
+            "恢复 UPDATE 缺少 `status IN (...)` 条件 —— 与并发 retry 竞态时"
+            "会把新状态打回 error"
+        )
+
+
 class TestTransitionStatus:
     """transition_status 函数行为。"""
 

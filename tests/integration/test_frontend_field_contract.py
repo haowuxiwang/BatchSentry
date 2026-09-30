@@ -31,10 +31,32 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
 REPO = Path(__file__).resolve().parents[2]
-UPLOAD_JS = REPO / "static" / "upload.js"
 LISTINGS_PY = REPO / "api" / "jobs" / "listings.py"
-REVIEW_JS = REPO / "static" / "review.js"
+# R63 P2-1 拆分：upload.js 已按职责拆为 upload.js（上传交互）+
+# upload-jobs.js（历史行渲染/SSE 快照消费），行构建函数都在
+# upload-jobs.js —— 护栏按文件集聚合（与 review*.js 同一风格）。
+UPLOAD_JS_FILES = sorted((REPO / "static").glob("upload*.js"))
+# R63 拆分：review.js 已按职责拆为 review*.js 模块集（state/locate/
+# pageview/pageinfo/findings/suppressions/progress + 入口 review.js），
+# ctx 消费分散在多个模块 —— 护栏按文件集聚合。
+REVIEW_JS_FILES = sorted((REPO / "static").glob("review*.js"))
 REVIEW_HTML = REPO / "templates" / "review.html"
+
+
+def _upload_js_sources() -> str:
+    """upload*.js 模块集的合并源码（字段派生扫描用）。"""
+    assert UPLOAD_JS_FILES, "static/upload*.js 文件集为空 —— 拆分后文件丢失？"
+    return "\n".join(
+        p.read_text(encoding="utf-8") for p in UPLOAD_JS_FILES
+    )
+
+
+def _review_js_sources() -> str:
+    """review*.js 模块集的合并源码（ctx 消费扫描用）。"""
+    assert REVIEW_JS_FILES, "static/review*.js 文件集为空 —— 拆分后文件丢失？"
+    return "\n".join(
+        p.read_text(encoding="utf-8") for p in REVIEW_JS_FILES
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -70,7 +92,12 @@ def _consumed(body: str, prefix: str) -> set[str]:
     return set(re.findall(rf"\b{prefix}\.([a-zA-Z_][a-zA-Z0-9_]*)", body))
 
 
-_JS = UPLOAD_JS.read_text(encoding="utf-8")
+# R63 P2-1 拆分后，行构建函数散落在 upload*.js 文件集里 —— 派生扫描必须
+# 走聚合源码，不能再读单个 upload.js（该模块已只剩上传交互）。
+# 历史缺陷（本护栏自身）：拆分时把 `UPLOAD_JS` 常量删了却漏改本行，
+# 模块 import 期即 `NameError` ⇒ **整个文件静默不收集**（#171 桥接契约 +
+# 全部字段/类型契约一起失效）—— 正是本文件 docstring 警告的"空护栏"。
+_JS = _upload_js_sources()
 
 # 冷加载路径：列表响应直接喂给 renderJobRow（upload.js:397）
 # ⇒ 这些字段必须由 `GET /api/jobs` 提供。
@@ -415,8 +442,8 @@ def _ssr_bridge_keys() -> set[str]:
 
 
 def _ssr_consumed_keys() -> set[str]:
-    """review.js 里 `ctx.<字段>` 形式的消费点。"""
-    js = REVIEW_JS.read_text(encoding="utf-8")
+    """review*.js 模块集里 `ctx.<字段>` 形式的消费点（R63 拆分后跨文件）。"""
+    js = _review_js_sources()
     return set(re.findall(r"\bctx\.([a-zA-Z_][a-zA-Z0-9_]*)", js))
 
 
@@ -455,10 +482,10 @@ class TestSsrBridgeContract:
 
     def test_no_dynamic_ctx_access(self):
         """`ctx[expr]` 会让上面的静态派生静默漏字段 —— 一旦出现就必须改法。"""
-        js = REVIEW_JS.read_text(encoding="utf-8")
+        js = _review_js_sources()
         dyn = re.findall(r"\bctx\[[^\]]*\]", js)
         assert not dyn, (
-            f"review.js 出现动态 ctx 访问 {dyn} —— 本护栏只认 `ctx.字段` 形式，"
+            f"review*.js 出现动态 ctx 访问 {dyn} —— 本护栏只认 `ctx.字段` 形式，"
             f"动态访问会成为看不见的漏字段通道。请改为显式字段名（或同步扩展本护栏）"
         )
 

@@ -1,116 +1,390 @@
 /* ============================================================
-   Review page — interactions
-   依赖：服务端通过 Jinja2 注入全局变量到 window.__PBC__
+   Review 页 — 入口编排与数据层（R63 P1-A 拆分后瘦身为单一职责）
+
+   原文件 2037 行混杂 DOM 初始化/PDF 缩放/SSE 订阅/findings 渲染等
+   全部职责，现已按模块拆分（加载顺序见 templates/review.html）：
+     review-state.js        共享状态与工具（最先加载）
+     review-locate.js       OCR 面板文本定位 + htmlToText
+     review-pageview.js     PDF 页图/缩放/页码导航/区域锚
+     review-pageinfo.js     页面级 UI（置信度/横幅/参数矩阵/豁免区）
+     review-findings.js     findings 渲染与裁决
+     review-suppressions.js 抑制留痕面板
+     review-progress.js     SSE 实时进度（基于共享件 sse.js）
+   本文件只保留：页面编排（DOMContentLoaded）、翻页数据层
+   （loadPageData / refreshCurrentPageFindings）、上下文操作
+   （取消/重试）、复核反馈统计、全局导出。
    ============================================================ */
 (function () {
   "use strict";
 
-  // === PBC Review Page Logger ===
-  // 统一前缀 [PBC] 便于控制台过滤；level 用颜色区分便于视觉定位
-  const log = (...args) =>
-    console.log("%c[PBC]", "color:#0ea5e9;font-weight:bold", ...args);
-  log.warn = (...args) =>
-    console.warn("%c[PBC]", "color:#f59e0b;font-weight:bold", ...args);
-  log.err = (...args) =>
-    console.error("%c[PBC]", "color:#ef4444;font-weight:bold", ...args);
+  const R = window.PbcReview;
+  const log = R.log;
 
-  // 服务端注入的上下文（避免在 JS 中混写 Jinja2 语法）
-  const ctx = window.__PBC__ || {};
-  const jobId = ctx.job_id || "";
-  let currentPage = ctx.page || 1;
-  // 代际守卫：loadPageData / refreshCurrentPageFindings 的并发守卫_token。
-  // 快速翻页时旧请求晚返回会覆盖新页内容（对抗审查发现）——响应落地前
-  // 校验 token 与当前页，不匹配则丢弃。
-  let pageLoadToken = 0;
-  // total_pages=0 表示 OCR 尚未完成（真实页数未知），显示 "?" 而非 1
-  let totalPages = ctx.total_pages || 0;
-  // #136：**当前页**的页面级标记（由 updatePageLevelUI 每次刷新时写入）。
-  // 空 findings 的文案依赖它来区分"分析失败 / 空页 / 确实无问题"。
-  // 不能用 ctx：那是首屏 SSR 注入的，翻页后即过期（会把上一页的失败
-  // 标记套到新页上，反之亦然）。
-  let currentPageFlags = {
-    parseError: bool(ctx.page_parse_error),
-    ocrEmpty: bool(ctx.page_ocr_empty),
-  };
-  const pageFindingCounts = ctx.page_finding_counts || {};
-  // UX P1-4: PDF 预览缩放状态（1.0 = fit-width 原样）。渲染用 CSS width
-  // 百分比实现，滚动容器 #pdf-scroll 已有 overflow-auto 承接放大溢出。
-  let pdfZoom = 1.0;
-  const PDF_ZOOM_MIN = 0.5;
-  const PDF_ZOOM_MAX = 2.0;
+  // 终态集合：非终态才订阅 SSE
+  const TERMINAL_STATUSES = [
+    "review",
+    "partial_review",
+    "error",
+    "cancelled",
+    "archived",
+  ];
 
-  function applyZoom() {
-    const img = document.getElementById("pdf-page-img");
-    if (img) img.style.width = Math.round(pdfZoom * 100) + "%";
-    const label = document.getElementById("pdf-zoom-label");
-    if (label) label.textContent = Math.round(pdfZoom * 100) + "%";
-    // P0-3：区域框以图片像素尺寸定位，缩放后必须重算（否则框跑偏）
-    positionRegionOverlay();
-  }
+  // 本页 findings 的请求上限（单一真值：两处 fetch 共用，避免只改一处漂移）。
+  // 后端 `order=confidence` 分支先把该页全部 findings（≤2000 行）取回、按置信度
+  // 排序，再 `[offset:offset+limit]` 切片；**前端从不传 offset** ⇒ limit 就是
+  // 本页可见条数的硬上限。默认 50 会让"单页 >50 条"的后 50+ 条在 UI 里**完全
+  // 不可达**（且已裁决的 finding 只是变淡、不会移出列表，"处理后刷新"也救不回
+  // 来）—— GMP 漏检。取后端上限 200（`api/review.py` 内 `min(limit, 200)`）。
+  const FINDINGS_PAGE_LIMIT = 200;
 
-  function zoomPdf(delta) {
-    pdfZoom = Math.min(
-      PDF_ZOOM_MAX,
-      Math.max(PDF_ZOOM_MIN, Math.round((pdfZoom + delta) * 100) / 100),
-    );
-    applyZoom();
-    log("zoomPdf", { zoom: pdfZoom });
-  }
+  // ============================================================
+  // 数据层：AJAX 翻页 / 静默刷新
+  // ============================================================
 
-  function resetZoom() {
-    pdfZoom = 1.0;
-    applyZoom();
-  }
+  // AJAX 加载页面数据（findings + OCR + measurements + banners）
+  async function loadPageData(targetPage) {
+    const state = R.state;
+    const jobId = state.jobId;
+    const token = ++state.pageLoadToken;
+    log("loadPageData", { target: targetPage });
+    R.showPageLoading();
+    // 翻页期间禁用所有翻页按钮，防止重复点击
+    document
+      .querySelectorAll('[onclick^="goPage"], [onclick^="navPage"]')
+      .forEach((b) => (b.disabled = true));
+    try {
+      const r = await fetch(`/api/jobs/${jobId}/pages/${targetPage}`);
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      const pageData = await r.json();
+      if (token !== state.pageLoadToken) return; // 已翻到新页，丢弃过期响应
 
-  // UX P1-3: 终态自动刷新保护 — 分析完成时的自动 reload 不得打断用户
-  // 正在进行的输入（修正弹窗的 textarea / prompt 输入框）。检测焦点在
-  // 可编辑元素或对话框打开 → 跳过自动刷新，仅 toast 提示；否则延迟后刷新。
-  function safeAutoReload(delay) {
-    const a = document.activeElement;
-    const typing =
-      a &&
-      (a.tagName === "TEXTAREA" ||
-        a.tagName === "INPUT" ||
-        a.isContentEditable);
-    const dialogOpen = document.querySelector('[role="dialog"]:not([hidden])');
-    if (typing || dialogOpen) {
-      log.warn("safeAutoReload — user busy, skipping auto reload", {
-        typing: !!typing,
-        dialogOpen: !!dialogOpen,
-      });
-      window.PBC.showToast(
-        "分析已完成 — 当前有未完成的输入，请完成后手动刷新查看最终结果",
-        "info",
+      // 加载该页的 findings（按置信度排序：低置信度排前便于人工优先复核）
+      // limit 必须显式传：不传则后端默认 50，单页 >50 条时其余条目在 UI 里
+      // 不可达（详见 FINDINGS_PAGE_LIMIT 处注释）。
+      const fr = await fetch(
+        `/api/jobs/${jobId}/findings?page=${targetPage}&order=confidence&limit=${FINDINGS_PAGE_LIMIT}`,
       );
+      if (!fr.ok) throw new Error("HTTP " + fr.status);
+      const findingsData = await fr.json();
+
+      // 加载该页的 measurements 矩阵
+      const mr = await fetch(
+        `/api/jobs/${jobId}/pages/${targetPage}/measurements`,
+      );
+      const measurementsData = mr.ok ? await mr.json() : { measurements: [] };
+      if (token !== state.pageLoadToken) return; // 再校验一次（measurements 慢响应）
+
+      // 更新 URL（不刷新页面）
+      history.pushState(
+        { page: targetPage },
+        "",
+        `/jobs/${jobId}/review?page=${targetPage}`,
+      );
+
+      // 更新页码导航 + PDF + 翻页按钮
+      // 对抗审查：先落全局 currentPage 再刷 UI —— updatePdfDisplay 内的
+      // syncNavButtons 读取全局值，后置赋值会让中间态按旧页码计算
+      // （从末页回跳时 next 被错误禁用）。
+      state.currentPage = targetPage;
+      R.pageview.updatePageNavActive(targetPage);
+      R.pageview.updatePdfDisplay(targetPage);
+
+      // 更新 OCR 文本 — htmlToText 保留表格结构（行/列分隔），
+      // 纯字符串处理 + textContent，无 XSS 面
+      // P1 修复（cr-19）：无条件更新 — 空页 raw_html 为 ""（Paddle 空页）时
+      // 原条件 `if (ocrEl && pageData.raw_html)` 跳过赋值，OCR 面板残留
+      // 上一页文本，GMP 复核会误读；SSR 初次加载路径显示"无 OCR 数据"，
+      // 两条路径行为需一致。
+      const ocrEl = document.getElementById("ocr-text");
+      if (ocrEl) {
+        ocrEl.textContent = pageData.raw_html
+          ? R.locate.htmlToText(pageData.raw_html)
+          : "此页无 OCR 内容（空白页或扫描质量过低），未执行分析，请以 PDF 原图为准";
+      }
+
+      // 更新页面级 UI 元素：置信度 / parse-error / critical banner / measurements。
+      // ⚠️ 顺序不可颠倒：本调用是 `state.currentPageFlags` 的**唯一写点**，
+      // 而紧随其后的 renderFindings 在"清单为空"时经 emptyFindingsNote()
+      // **读**它来区分"分析失败 / 空页 / 确实无问题"。若先渲染后写标记，
+      // 翻页时会拿**上一页**的标记渲染本页空清单 —— 解析失败页被显示成
+      // "本页无问题"（GMP 假阴性，正是 #136 要消灭的形态）。
+      R.pageinfo.updatePageLevelUI(
+        pageData,
+        findingsData.findings || [],
+        measurementsData,
+      );
+
+      // 更新 findings 列表（重新渲染）— P2-3: has_more 提示（后端默认
+      // limit=50，超出部分静默截断会让复核者误以为全部问题就这些）。
+      // total 一并传入：截断提示要报出"共 N 条 / 还有 M 条未显示"的真实数字，
+      // 只给 hasMore 布尔值时文案只能含糊其辞。
+      R.findings.renderFindings(
+        findingsData.findings || [],
+        findingsData.has_more,
+        findingsData.total,
+      );
+
+      // P0-2：抑制台账随页切换（与 findings 同源同页，避免"问题清单已换页、
+      // 抑制清单还是上一页"的错位误导）
+      await R.suppressions.loadSuppressions(targetPage);
+
+      // currentPage 已在 UI 刷新前更新（见上）
+      log("loadPageData — success", {
+        page: targetPage,
+        findings: findingsData.count,
+      });
+    } catch (err) {
+      log.err("loadPageData failed", err);
+      // 降级：整页刷新
+      window.location.href = `/jobs/${state.jobId}/review?page=${targetPage}`;
+    } finally {
+      R.hidePageLoading();
+      // 恢复翻页按钮状态（仅当前代际，避免旧请求恢复已禁用状态）
+      if (token === state.pageLoadToken) {
+        R.pageview.updatePdfDisplay(state.currentPage);
+      }
+    }
+  }
+
+  // 流式输出：静默刷新当前页 findings（不显示 loading overlay）
+  // 在 SSE 收到 pages_analyzed 变化时调用，让用户在 Stage 2 进行中
+  // 就能看到已分析页的 findings 实时更新。
+  async function refreshCurrentPageFindings() {
+    const state = R.state;
+    const jobId = state.jobId;
+    const token = state.pageLoadToken;
+    const page = state.currentPage;
+    try {
+      const [pageRes, findingsRes] = await Promise.all([
+        fetch(`/api/jobs/${jobId}/pages/${page}`),
+        fetch(
+          `/api/jobs/${jobId}/findings?page=${page}&order=confidence&limit=${FINDINGS_PAGE_LIMIT}`,
+        ),
+      ]);
+      if (!pageRes.ok || !findingsRes.ok) return;
+      const pageData = await pageRes.json();
+      const findingsData = await findingsRes.json();
+      // 代际守卫：期间用户已翻页则丢弃（旧页数据渲染到新页会误导复核）
+      if (token !== state.pageLoadToken || page !== state.currentPage) return;
+      const findings = findingsData.findings || [];
+
+      // 先取 measurements 再渲染：updatePageLevelUI 必须在 renderFindings
+      // **之前**（它是 currentPageFlags 的唯一写点，空清单文案读它）——
+      // 与 loadPageData 同一条不变式，详见该函数内的顺序注释。
+      const mr = await fetch(
+        `/api/jobs/${jobId}/pages/${page}/measurements`,
+      );
+      const measurementsData = mr.ok ? await mr.json() : { measurements: [] };
+      if (token !== state.pageLoadToken || page !== state.currentPage) return;
+      R.pageinfo.updatePageLevelUI(pageData, findings, measurementsData);
+      // 重新渲染 findings 列表（total 用于截断提示的真实数字）
+      R.findings.renderFindings(findings, findingsData.has_more, findingsData.total);
+      log("refreshCurrentPageFindings — updated", {
+        page,
+        findings: findings.length,
+      });
+    } catch (err) {
+      log.warn("refreshCurrentPageFindings failed", err);
+    }
+  }
+
+  // ============================================================
+  // 翻页控制
+  // ============================================================
+
+  function goPage(p) {
+    const { currentPage, totalPages } = R.state;
+    log("goPage() called", {
+      target: p,
+      current: currentPage,
+      max: totalPages,
+    });
+    if (p < 1 || p > totalPages) {
+      log.warn("goPage — out of range, aborted", { p, max: totalPages });
       return;
     }
-    setTimeout(() => location.reload(), delay);
+    if (p === currentPage) {
+      log("goPage — same page, aborted");
+      return;
+    }
+    loadPageData(p);
   }
 
-  // 页面初始化信息（一次性 dump 上下文）
-  log("review.html loaded", {
-    job_id: jobId,
-    filename: ctx.filename,
-    status: ctx.status,
-    page: currentPage,
-    total_pages: totalPages,
-    findings_count: ctx.findings_count,
-    severity_counts: ctx.severity_counts,
-    has_measurements: ctx.has_measurements,
-    matrix_shape: ctx.matrix_shape,
-    page_parse_error: ctx.page_parse_error,
-    page_confidence: ctx.page_confidence,
-  });
+  // 箭头翻页：onclick 只携带固定 delta（-1/+1），目标页永远从 currentPage
+  // 实时计算 — 避免服务端渲染的 {{ page ± 1 }} 死值在 AJAX 翻页后失效/错跳
+  function navPage(delta) {
+    goPage(R.state.currentPage + delta);
+  }
+
+  // prev/next 箭头按钮 disabled 状态：与 currentPage/totalPages 实时同步
+  function syncNavButtons() {
+    const { currentPage, totalPages } = R.state;
+    const prev = document.getElementById("btn-prev-page");
+    const next = document.getElementById("btn-next-page");
+    if (prev) prev.disabled = currentPage <= 1;
+    if (next) next.disabled = currentPage >= totalPages;
+  }
+
+  // === Toast + 确认弹窗（共享实现 confirm-dialog.js）===
+  // P1-9: 薄别名（页面 API 名不变，调用点零改动）。`window.PBC.*` 的**可用性**
+  // 由 `pbc-fallback.js` 统一兜底（只补缺失方法，与加载顺序无关，见其头部注释），
+  // 因此这里不必再判存在 —— 降级语义只写一处，避免多份副本漂移。
+  function showToast(msg, type) {
+    return window.PBC.showToast(msg, type);
+  }
+  function confirmDialog(opts) {
+    return window.PBC.confirmDialog(opts);
+  }
+
+  // ============================================================
+  // 上下文操作: 取消 / 重试
+  // ============================================================
+
+  async function cancelJob(e) {
+    const ok = await confirmDialog({
+      title: "确定取消此任务？",
+      message: "处理中的数据会保留，可稍后重试。",
+      confirmText: "确认取消",
+      cancelText: "保留",
+      danger: true,
+    });
+    if (!ok) return;
+    log("cancelJob");
+    const btn = e && e.currentTarget ? e.currentTarget : null;
+    R.setButtonLoading(btn, true);
+    try {
+      const r = await fetch(`/api/jobs/${R.state.jobId}/cancel`, { method: "POST" });
+      const data = await r.json();
+      if (data.ok) {
+        log("cancelJob — success", data);
+        setTimeout(() => location.reload(), 800);
+      } else {
+        throw new Error(data.message || "取消失败");
+      }
+    } catch (err) {
+      log.err("cancelJob failed", err);
+      R.setButtonLoading(btn, false, "取消任务");
+      showToast("取消失败: " + err.message, "err");
+    }
+  }
+
+  async function retryJob(e) {
+    // P1-6: review 状态 = 全量重新分析（清空结果），其余状态 = 断点续跑
+    const fullRetry = e && e.currentTarget && e.currentTarget.dataset.fullRetry === "1";
+    const ok = await confirmDialog({
+      title: fullRetry ? "确定重新分析此任务？" : "确定重试此任务？",
+      message: fullRetry
+        ? "将清空现有分析结果并完整重新分析（OCR 结果复用，不重复消耗）。"
+        : "将从中断处继续处理。",
+      confirmText: fullRetry ? "确认重新分析" : "确认重试",
+      cancelText: "取消",
+    });
+    if (!ok) return;
+    log("retryJob");
+    const btn = e && e.currentTarget ? e.currentTarget : null;
+    R.setButtonLoading(btn, true);
+    try {
+      const r = await fetch(`/api/jobs/${R.state.jobId}/retry`, { method: "POST" });
+      const data = await r.json();
+      if (data.ok) {
+        log("retryJob — success", data);
+        setTimeout(() => location.reload(), 800);
+      } else {
+        throw new Error(data.detail || data.message || "重试失败");
+      }
+    } catch (err) {
+      log.err("retryJob failed", err);
+      R.setButtonLoading(btn, false, "重试");
+      showToast("重试失败: " + err.message, "err");
+    }
+  }
+
+  // ============================================================
+  // 复核反馈统计（round-23 C）
+  // ============================================================
+
+  // 确认/驳回率、高频驳回类型、按来源驳回率 — DOMContentLoaded 内调用；
+  // 载入失败静默（统计是增强项，不阻断主链路）。
+  async function loadReviewStats(jid) {
+    const brief = document.getElementById("review-stats-brief");
+    const body = document.getElementById("review-stats-body");
+    if (!brief && !body) return;
+    try {
+      const r = await fetch(`/api/jobs/${encodeURIComponent(jid)}/review-stats`);
+      if (!r.ok) return;
+      const s = await r.json();
+      if (brief) {
+        brief.textContent = s.adjudicated
+          ? `已裁决 ${s.adjudicated}/${s.total} · 确认率 ${(s.confirm_rate * 100).toFixed(0)}% · 驳回率 ${(s.reject_rate * 100).toFixed(0)}%`
+          : `待裁决 ${s.pending} 条`;
+      }
+      if (!body) return;
+      const parts = [];
+      parts.push(
+        `已裁决 ${s.adjudicated}/${s.total} 条（确认 ${s.by_status.confirmed} · 驳回 ${s.by_status.rejected} · 修正 ${s.by_status.corrected} · 待复核 ${s.pending}）`,
+      );
+      if (s.adjudicated) {
+        parts.push(
+          `确认率 ${(s.confirm_rate * 100).toFixed(1)}% · 驳回率 ${(s.reject_rate * 100).toFixed(1)}%`,
+        );
+      }
+      if (Array.isArray(s.top_rejected_types) && s.top_rejected_types.length) {
+        const tops = s.top_rejected_types
+          .map((t) => `${t.type_zh}（${t.count} 条，${(t.share * 100).toFixed(0)}%）`)
+          .join("、");
+        parts.push(`高频驳回类型: ${tops}`);
+      }
+      if (Array.isArray(s.by_source) && s.by_source.length) {
+        const srcs = s.by_source
+          .map((x) => {
+            const rate = (x.reject_rate * 100).toFixed(0);
+            const flag = x.reject_rate > 0.5 && x.total >= 4 ? "!" : "";
+            return `${x.source}: ${x.rejected}/${x.total}（${rate}%）${flag}`;
+          })
+          .join(" · ");
+        parts.push(`按来源驳回率: ${srcs}`);
+      }
+      body.textContent = parts.join("\n");
+      body.style.whiteSpace = "pre-line";
+    } catch (err) {
+      log.warn("review-stats fetch failed", err);
+    }
+  }
+
+  // ============================================================
+  // 挂载跨模块入口 + DOMContentLoaded 编排
+  // ============================================================
+
+  R.loadPageData = loadPageData;
+  R.refreshCurrentPageFindings = refreshCurrentPageFindings;
+  R.goPage = goPage;
+  R.syncNavButtons = syncNavButtons;
+  // progress 模块的 safeAutoReload（fallback 轮询/终态刷新共用）
+  R.safeAutoReload = R.progress.safeAutoReload;
+
+  // 暴露到全局（onclick 处理器需要）
+  window.goPage = goPage;
+  window.navPage = navPage;
+  window.cancelJob = cancelJob;
+  window.retryJob = retryJob;
 
   // DOM 就绪后探测 E2E-required 元素，方便快速排查模板渲染问题
   document.addEventListener("DOMContentLoaded", () => {
+    const state = R.state;
+    const ctx = state.ctx;
+    const jobId = state.jobId;
+
+    // 跨页总览的按钮监听（P1）。防御式：review-findings.js 缺席时不该连带
+    // 废掉整个 DOMContentLoaded（后面的 PDF 初始化 / SSE 订阅都要跑）。
+    if (R.findings && R.findings.initOverview) R.findings.initOverview();
+
     // #135：首屏也应用一次页面级 UI（此前只有 AJAX/SSE 路径会调
     // updatePageLevelUI，DOMContentLoaded 不触发）⇒ 直接打开或刷新终态
     // 任务的第一页时，parse-error 横幅只有模板里的**通用文案**，
     // 复核者看不到"401 凭据失效"这类**全局性**失败原因 ——
     // 与 #127（后端原因不透传）是同一缺陷的界面侧。
     // 数据来自 SSR 注入的 ctx（structured_json 已在服务端解析）。
-    applyInitialPageLevelUI();
+    R.pageinfo.applyInitialPageLevelUI();
 
     // 初始渲染当前页 PNG（替代 iframe 原生 PDF viewer —
     // 无浏览器打印/下载/更多操作按钮，缩放 fit-width 可控）
@@ -124,33 +398,24 @@
         pdfLoading.classList.add("is-loaded");
         // P0-3：区域框以图片实际像素尺寸定位，必须在图片加载完成后重算
         // （加载前 offsetWidth/offsetHeight 还是旧页/占位尺寸 → 框偏移）
-        positionRegionOverlay();
+        R.pageview.positionRegionOverlay();
       };
       pdfImg.onerror = () => {
         pdfLoading.classList.add("is-loaded");
         log.err("PDF page render failed");
       };
-      updatePdfDisplay(currentPage);
+      R.pageview.updatePdfDisplay(state.currentPage);
       // 兜底：6s 后强制隐藏（渲染失败/极慢时不永久遮挡）
       setTimeout(() => pdfLoading.classList.add("is-loaded"), 6000);
       // 窗口尺寸变化 → 图片 CT 尺寸变化 → 区域框需重算
-      window.addEventListener("resize", positionRegionOverlay);
+      window.addEventListener("resize", R.pageview.positionRegionOverlay);
     }
 
     // === SSE 实时进度订阅 ===
     // 非终态时订阅 /api/jobs/{id}/stream，每 3s 收到进度更新
     // 终态时服务端推送 done 事件并关闭流
-    const initialStatus = ctx.status;
-    const terminalStatuses = [
-      "review",
-      "partial_review",
-      "error",
-      "cancelled",
-      "archived",
-    ];
-
-    if (jobId && !terminalStatuses.includes(initialStatus)) {
-      subscribeProgress(jobId);
+    if (jobId && !TERMINAL_STATUSES.includes(ctx.status)) {
+      R.progress.subscribe(jobId);
     }
 
     // round-23 C：复核反馈统计面板（确认/驳回率、高频驳回类型、按来源
@@ -158,394 +423,6 @@
     // 增强项，不阻断复核主链路）。
     if (jobId) {
       loadReviewStats(jobId);
-    }
-
-    function subscribeProgress(jid) {
-      const bar = document.getElementById("progress-bar-container");
-      const txt = document.getElementById("progress-text");
-      const fill = document.getElementById("progress-fill");
-      if (!bar || !txt || !fill) return;
-
-      bar.classList.remove("hidden");
-      bar.classList.add("inline-flex");
-      txt.textContent = "连接中…";
-
-      let retryCount = 0;
-      const MAX_RETRIES = 3;
-      let pollTimer = null;
-      let es = null;
-
-      // S4（M6/T6.3）：阶段内已耗时 —— 秒级**本地**计时。
-      // 服务端 2s 推一帧，但 Stage 3 跨页语义分析单次调用可达数分钟、
-      // 帧间 cross_progress 不动 → 文案看着像卡死。本地 1s ticker 只刷新
-      // "已用 X"段，不依赖下一帧到达。阶段（phase）变化即重置起点。
-      //
-      // 注意作用域：计时器必须建在 connect() **之外** —— connect 会因断线
-      // 重试被多次调用，建在里面会导致定时器叠加（每次重连多一个 ticker）。
-      let phaseState = null;
-      let lastLabel = "";
-      let labelEditable = true; // 断开/错误提示期间不由 ticker 覆写
-      const elapsedSuffix = () => {
-        if (typeof PbcEta === "undefined" || !phaseState) return "";
-        if (!PbcEta.showElapsed(phaseState)) return "";
-        const t = PbcEta.fmtElapsed(phaseState.elapsedSec);
-        return t ? ` · 已用 ${t}` : "";
-      };
-      const renderProgressText = () => {
-        txt.textContent = lastLabel + elapsedSuffix();
-      };
-      // P2 停滞可见性（2026-09-16）：任务长时间无新进展时**先告知**用户 ——
-      // 停滞阈值经两轮抬高后（1800→4200s）最长约 70 分钟才会被看门狗收敛，
-      // 不能让用户在此期间毫无反馈、只能干等或盲目重启。
-      // 数据来自服务端**派生**的 stall 字段（空闲秒数 + 同一份阈值表），
-      // 无额外请求、不写库；overdue 时文案升级为"即将判定失败"。
-      const renderStall = (d) => {
-        const el = document.getElementById("stall-banner");
-        if (!el) return;
-        const st = d && d.stall;
-        if (!st || !st.warn) {
-          el.classList.add("hidden");
-          return;
-        }
-        const idleMin = Math.max(1, Math.round(st.idle_seconds / 60));
-        const limitMin = Math.max(1, Math.round(st.limit_seconds / 60));
-        const textEl = document.getElementById("stall-text");
-        if (textEl) {
-          textEl.textContent = st.overdue
-            ? `任务已 ${idleMin} 分钟无新进展（超过 ${limitMin} 分钟阈值），系统即将判定为失败 — 建议取消后重试`
-            : `任务已 ${idleMin} 分钟无新进展（阈值约 ${limitMin} 分钟）— 可取消后重试，或继续等待上游恢复`;
-        }
-        el.classList.remove("hidden");
-      };
-      // B2-10 ③：SSR 的错误横幅（#job-error-banner，见 templates/review.html）
-      // 只在**首屏** status=error 时渲染；而 SSE 把状态切到 error 时页面不会
-      // 重渲染 ⇒ 用户只看到"出错"，要等 1.5s 自动刷新后才知道原因。
-      // 这里按需创建/更新同一条横幅（幂等），让转态期即刻可见原因。
-      // 文案与 SSR 保持逐字一致；原因一律 textContent 注入（后端/LLM 文本不可信）。
-      const showJobErrorBanner = (reason) => {
-        if (!reason) return;
-        let banner = document.getElementById("job-error-banner");
-        if (!banner) {
-          banner = document.createElement("div");
-          banner.id = "job-error-banner";
-          banner.className =
-            "job-error-banner sticky top-0 z-20 rounded-md border-l-2 border-destructive bg-card px-3 py-3 flex items-start gap-2";
-          banner.innerHTML =
-            '<span class="w-1.5 h-1.5 rounded-full bg-destructive shrink-0 mt-1.5"></span>' +
-            '<div class="flex-1 min-w-0">' +
-            '<div class="text-[12px] font-semibold text-foreground mb-1">任务处理失败</div>' +
-            '<p class="text-[12px] text-muted-foreground leading-relaxed break-words"></p>' +
-            '<p class="text-[11px] text-muted-foreground mt-1.5">可点击右上角"重试"重新提交任务；如反复失败，请检查设置页面 LLM/OCR 配置或日志。</p>' +
-            "</div>";
-          // 与 SSR 同位置：右侧栏顶部、severity-summary 之前
-          const host = document.querySelector(".severity-summary");
-          if (host && host.parentElement) {
-            host.parentElement.insertBefore(banner, host);
-          } else {
-            document.body.appendChild(banner);
-          }
-        }
-        const p = banner.querySelector("p");
-        if (p) p.textContent = reason;
-        banner.classList.remove("hidden");
-      };
-      const elapsedTimer = setInterval(() => {
-        if (typeof PbcEta === "undefined" || !phaseState) return;
-        phaseState = PbcEta.tickPhase(phaseState, phaseState.phase);
-        if (labelEditable && lastLabel) renderProgressText();
-      }, 1000);
-      const stopElapsedTimer = () => clearInterval(elapsedTimer);
-
-      const connect = () => {
-        const url = `/api/jobs/${jid}/stream`;
-        log("SSE subscribe", url);
-        es = new EventSource(url);
-
-        es.onopen = () => {
-          // 成功连接后重置重试计数，断线重连时从头开始退避
-          retryCount = 0;
-        };
-
-        // 流式输出：跟踪 pages_analyzed 变化，当当前页被分析完成时
-        // 自动 AJAX 刷新该页 findings，让用户在 Stage 2 进行中就能看到
-        // 已分析页的结果，无需等全部页完成。
-        let lastPagesAnalyzed = -1;
-        // round-23 B：Stage 2 进度 ETA 采样池（5 分钟时间窗口速率）—
-        // 15 分钟级的逐页分析只有计数时用户无从判断"还要多久"。
-        const etaSamples = [];
-        const etaSuffix = (total) => {
-          if (typeof PbcEta === "undefined" || !total) return "";
-          const eta = PbcEta.analyzeEta(etaSamples, total);
-          if (!eta || eta.etaSec == null) return "";
-          // 注意：不要命名 txt —— 外层 txt 是 #progress-text 元素
-          const etaTxt = PbcEta.fmtEta(eta.etaSec);
-          return etaTxt ? ` · 剩余${etaTxt}` : "";
-        };
-
-        es.onmessage = (e) => {
-          try {
-            const d = JSON.parse(e.data);
-            // 应用级错误帧（服务端发 type=error 的 message 帧 — 见
-            // api/jobs/status.py stream_job_progress）。**两类帧语义不同**，
-            // 处置必须分开（B2-10 ①）：
-            //   - terminal=true 「任务不存在」→ 终态，关流。不关的话
-            //     EventSource 会按 SSE 语义无限重连一个已不存在的 job。
-            //   - terminal=false「进度查询失败」→ 瞬态 DB 抖动，服务端发完
-            //     仍会 continue 推帧 ⇒ **保持长连**、只提示不切终态。
-            // 旧实现只判 d.type === "error" ⇒ 一次抖动就永久断流，并把
-            // 瞬态谎报成"任务不存在或已被删除"（理由说谎 + 丢实时更新）。
-            // 判据由服务端 terminal 字段下发，禁止按 message 文案推断。
-            if (d.type === "error") {
-              log.err("SSE job error", d);
-              const action = window.PbcStatus
-                ? PbcStatus.sseErrorAction(d)
-                : (d.terminal === true ? "terminal" : "transient");
-              if (action !== "terminal") {
-                // 瞬态：不 close es / 不清 pollTimer / 不停计时器 ——
-                // 只把进度文案换成如实提示，下一帧正常数据会自动还原。
-                labelEditable = false;
-                txt.textContent = "进度查询异常，重试中…";
-                return;
-              }
-              es.close();
-              if (pollTimer) clearInterval(pollTimer);
-              labelEditable = false;
-              stopElapsedTimer();
-              const reason = d.message || "任务不存在或已被删除";
-              txt.textContent = reason;
-              const barEl = document.getElementById("progress-bar-container");
-              if (barEl) barEl.classList.add("opacity-60");
-              showJobErrorBanner(reason); // B2-10 ③：终态即刻给出原因
-              return;
-            }
-            const total = d.total_pages || 0;
-            // OCR 完成后 total_pages 从 0 → 51，同步标题栏（不重置 iframe）
-            if (total > 0 && total !== totalPages) {
-              totalPages = total;
-              const label = String(total);
-              const pageTotalEl = document.getElementById("page-total");
-              if (pageTotalEl) pageTotalEl.textContent = label;
-              const counterEl = document.getElementById("page-counter");
-              if (counterEl)
-                counterEl.textContent = `${currentPage} / ${label}`;
-              const navTotalEl = document.getElementById("page-nav-total");
-              if (navTotalEl) navTotalEl.textContent = label;
-              // 同步翻页按钮状态（totalPages 已知后允许翻页）
-              syncNavButtons();
-            }
-            // 流式：OCR 完成后若仍在占位态（total_pages=0 时进入页面），
-            // 重建页码导航；随后每页圆点随 findings 实时点亮
-            if (d.page_finding_counts) {
-              if (totalPages > 0 && !document.querySelector(".page-nav-item")) {
-                buildPageNav();
-              }
-              updatePageNavDots(d.page_finding_counts);
-            }
-            let pct = 0;
-            let label = d.status;
-
-            // 流式输出（所有状态，含分片 OCR 阶段）：pages_analyzed 增长时
-            // 若当前页已分析完成，静默刷新该页 findings。分片 OCR 下
-            // status 仍是 ocr_running 但分析已在进行（_analyze_one 每页
-            // 完成即写库），用户无需等全部页 OCR 完就看到结果。
-            const analyzedCount = d.pages_analyzed || 0;
-            // round-23 B：每帧追采样（SSE 3s 推送；n 回退自动清池重采）
-            if (typeof PbcEta !== "undefined" && analyzedCount > 0) {
-              PbcEta.pushSample(etaSamples, analyzedCount);
-            }
-            if (
-              analyzedCount > lastPagesAnalyzed &&
-              analyzedCount > 0 &&
-              currentPage <= analyzedCount
-            ) {
-              lastPagesAnalyzed = analyzedCount;
-              log(
-                "SSE stream — page analyzed, refreshing current page",
-                { currentPage, pagesAnalyzed: analyzedCount, status: d.status },
-              );
-              // 静默刷新当前页 findings（不显示 loading overlay，避免干扰）
-              refreshCurrentPageFindings();
-            }
-
-            // 计算进度百分比
-            if (d.status === "pending") {
-              pct = 0;
-              label = "排队中";
-            } else if (d.status === "ocr_running" || d.status === "ocr_done") {
-              // OCR 阶段：用 ocr_progress（轮询进度 extracted/total），
-              // 比 pages_ocr_done（OCR 完成后才写入 page_cache）实时得多。
-              // 分片 OCR 期间分析也在进行（pages_analyzed>0），显示双进度。
-              const prog = d.ocr_progress || {};
-              const ocrDone = prog.done || 0;
-              const ocrTotal = prog.total || 0;
-              const analyzePct =
-                33 +
-                (total > 0 ? Math.round((analyzedCount / total) * 60) : 0);
-              if (ocrTotal > 0) {
-                pct = Math.max(Math.round((ocrDone / ocrTotal) * 33), analyzePct);
-                const sh = d.self_heal_progress;
-                if (sh && sh.total > 0) {
-                  // 空页自愈阶段：主 OCR 进度已 done==total 但状态未前进 —
-                  // 不显示自愈进度的话用户会误判卡死
-                  label = `空页自愈 ${sh.done}/${sh.total}` + (
-                    analyzedCount > 0 ? ` · 分析 ${analyzedCount}/${total}` : ""
-                  );
-                } else {
-                  label = analyzedCount > 0
-                    ? `OCR ${ocrDone}/${ocrTotal} · 分析 ${analyzedCount}/${total}` + etaSuffix(total)
-                    : `OCR ${ocrDone}/${ocrTotal}`;
-                }
-              } else if (total > 0) {
-                pct = total > 0 ? Math.round((d.pages_ocr_done / total) * 33) : 0;
-                label = analyzedCount > 0
-                  ? `OCR ${d.pages_ocr_done}/${total} · 分析 ${analyzedCount}/${total}`
-                  : `OCR ${d.pages_ocr_done}/${total}`;
-              } else {
-                label = "OCR 处理中…";
-              }
-            } else if (d.status === "analyzing" && d.phase === "cross") {
-              // Todo 13: stage3 阶段指示 — analyzing 含 Stage 2+3，
-              // 页分析完成后推断已进入跨页语义分析
-              pct = 93;
-              // P1-6: Stage 3 子进度（规则校验/LLM 兜底/LLM 语义里程碑）
-              const cr = d.cross_progress;
-              label = cr && cr.total > 0
-                ? `跨页分析 ${cr.done}/${cr.total} · ${cr.label}`
-                : `跨页分析中（${analyzedCount}/${total} 页）`;
-            } else if (d.status === "analyzing") {
-              pct =
-                33 +
-                (total > 0 ? Math.round((analyzedCount / total) * 60) : 0);
-              // round-23 B：分析计数 + 时间窗口速率 ETA（首 ~8s 无速率，
-              // 只有计数 — 与旧行为一致，速率就绪后自动出现"剩余约 N 分钟"）
-              label = `分析 ${analyzedCount}/${total}` + etaSuffix(total);
-            } else if (d.status === "cancelling" || d.status === "cancelled") {
-              pct = 0;
-              label = d.status === "cancelling" ? "取消中…" : "已取消";
-            } else if (d.status === "error") {
-              pct = 0;
-              label = "出错";
-            } else {
-              // B2-10 ②：未知状态兜底此前显示**裸英文 token**（review /
-              // partial_review / done 都会落到这里），与同页中文徽章
-              // 自相矛盾（同一状态、同页两处文案不一致）。改走共享件
-              // static/status.js（状态中文的单一真值）。
-              label =
-                (window.PbcStatus ? PbcStatus.statusZh(d.status) : "") ||
-                d.status;
-            }
-
-            // cr-19：头栏状态徽章/取消按钮随 SSE 实时更新 — 旧实现是 SSR
-            // 一次性渲染：阶段切换（ocr_running→analyzing）徽章不变化；
-            // 终态后 done 事件与 1.5s reload 之间取消按钮仍可点（后端
-            // 400 Invalid transition）。
-            // B2-10 ④：此处曾自带第 3 份状态中文映射（status.js / upload.js
-            // 之外），而状态点颜色却又走共享件 PbcStatus.statusDotClass ⇒
-            // **文字与颜色不同源**（改一处改不动另一处）。统一走共享件。
-            const badgeEl = document.getElementById("status-badge");
-            // 修复：旧代码 `|| 未知()` 引用未定义函数，ReferenceError 被外层
-            // catch 吞掉 → 整个 SSE 帧更新中断；与上方 label 兜底逻辑对齐
-            if (badgeEl) {
-              badgeEl.textContent =
-                (window.PbcStatus ? PbcStatus.statusZh(d.status) : "") ||
-                d.status;
-            }
-            // #133(P0)：状态点颜色必须跟着状态走。旧实现只改 textContent，
-            // 点保持模板里硬编码的 bg-success ⇒ error/partial_review 显示
-            // "绿点 + 出错"，与"记录确实无异常"不可区分（GMP 假阴性）。
-            // 真值源 static/status.js（与 core/zh_map.py 由机检锁定一致）。
-            const dotEl = document.getElementById("status-dot");
-            if (dotEl && window.PbcStatus) {
-              dotEl.className =
-                "w-1.5 h-1.5 rounded-full " + window.PbcStatus.statusDotClass(d.status);
-            }
-            const cancelBtn = document.getElementById("cancel-btn");
-            if (cancelBtn) {
-              const canCancel = ["pending", "ocr_running", "ocr_done", "analyzing"].includes(d.status);
-              cancelBtn.disabled = !canCancel;
-              cancelBtn.classList.toggle("opacity-40", !canCancel);
-              cancelBtn.classList.toggle("pointer-events-none", !canCancel);
-            }
-            const ocrBadge = document.getElementById("ocr-backend-badge");
-            if (ocrBadge) {
-              if (d.ocr_backend_used) {
-                ocrBadge.textContent = d.ocr_backend_display || d.ocr_backend_used;
-                ocrBadge.classList.remove("hidden");
-              }
-            }
-
-            fill.style.width = pct + "%";
-            // S4（M6/T6.3）：阶段内已耗时 —— 以服务端 phase 为计时维度
-            // （analyzing 同时含 Stage 2/3，只有 phase 能区分）。phase 变化
-            // 即重置起点；随后由 1s ticker 持续刷新，不等下一帧。
-            const phase = d.phase || d.status;
-            if (typeof PbcEta !== "undefined") {
-              phaseState = PbcEta.tickPhase(phaseState, phase);
-            }
-            lastLabel = label;
-            labelEditable = true;
-            renderProgressText();
-            renderStall(d);
-            // B2-10 ③：status 切到 error 的帧本身带 error_message（见
-            // api/jobs/status.py 的进度快照负载）⇒ 转态期即可显示原因，
-            // 不必等 1.5s 自动刷新后由 SSR 横幅给出。
-            if (d.status === "error" && d.error_message) {
-              showJobErrorBanner(d.error_message);
-            }
-            log("SSE progress", { status: d.status, pct, label, phase });
-          } catch (err) {
-            log.warn("SSE parse error", err);
-          }
-        };
-
-        es.addEventListener("done", (e) => {
-          log("SSE done — closing stream, reloading page");
-          es.close();
-          stopElapsedTimer();
-          // 终态：1.5s 后自动刷新页面，加载最终 findings
-          safeAutoReload(1500);
-        });
-
-        es.onerror = () => {
-          log.warn("SSE connection error", { retryCount });
-          es.close();
-          labelEditable = false; // 提示文案不被 1s ticker 覆写
-          if (retryCount < MAX_RETRIES) {
-            // 指数退避重试：2s / 4s / 8s
-            const delay = 2000 * Math.pow(2, retryCount);
-            txt.textContent = `连接断开，${delay / 1000} 秒后重试…`;
-            retryCount++;
-            setTimeout(connect, delay);
-          } else {
-            // 重试耗尽：fallback 到 10s 轮询 /api/jobs/{id}
-            log.warn("SSE retries exhausted, fallback to polling");
-            stopElapsedTimer();
-            txt.textContent = "实时连接不可用，切换轮询…";
-            pollTimer = setInterval(async () => {
-              try {
-                const r = await fetch(`/api/jobs/${jid}`);
-                if (!r.ok) return;
-                const d = await r.json();
-                if (terminalStatuses.includes(d.status)) {
-                  clearInterval(pollTimer);
-                  safeAutoReload(500);
-                }
-              } catch (err) {
-                log.warn("poll failed", err);
-              }
-            }, 10000);
-          }
-        };
-      };
-
-      connect();
-
-      // 页面卸载时清理 SSE 连接 + 轮询/阶段计时定时器
-      window.addEventListener("beforeunload", () => {
-        if (es) es.close();
-        if (pollTimer) clearInterval(pollTimer);
-        stopElapsedTimer();
-      });
     }
 
     const probes = {
@@ -596,1524 +473,49 @@
     }
   });
 
-  // round-23 C：复核反馈统计（确认/驳回率、高频驳回类型、按来源驳回率）
-  // — DOMContentLoaded 内调用；载入失败静默（统计是增强项，不阻断主链路）。
-  async function loadReviewStats(jid) {
-    const brief = document.getElementById("review-stats-brief");
-    const body = document.getElementById("review-stats-body");
-    if (!brief && !body) return;
-    try {
-      const r = await fetch(`/api/jobs/${encodeURIComponent(jid)}/review-stats`);
-      if (!r.ok) return;
-      const s = await r.json();
-      if (brief) {
-        brief.textContent = s.adjudicated
-          ? `已裁决 ${s.adjudicated}/${s.total} · 确认率 ${(s.confirm_rate * 100).toFixed(0)}% · 驳回率 ${(s.reject_rate * 100).toFixed(0)}%`
-          : `待裁决 ${s.pending} 条`;
-      }
-      if (!body) return;
-      const parts = [];
-      parts.push(
-        `已裁决 ${s.adjudicated}/${s.total} 条（确认 ${s.by_status.confirmed} · 驳回 ${s.by_status.rejected} · 修正 ${s.by_status.corrected} · 待复核 ${s.pending}）`,
-      );
-      if (s.adjudicated) {
-        parts.push(
-          `确认率 ${(s.confirm_rate * 100).toFixed(1)}% · 驳回率 ${(s.reject_rate * 100).toFixed(1)}%`,
-        );
-      }
-      if (Array.isArray(s.top_rejected_types) && s.top_rejected_types.length) {
-        const tops = s.top_rejected_types
-          .map((t) => `${t.type_zh}（${t.count} 条，${(t.share * 100).toFixed(0)}%）`)
-          .join("、");
-        parts.push(`高频驳回类型: ${tops}`);
-      }
-      if (Array.isArray(s.by_source) && s.by_source.length) {
-        const srcs = s.by_source
-          .map((x) => {
-            const rate = (x.reject_rate * 100).toFixed(0);
-            const flag = x.reject_rate > 0.5 && x.total >= 4 ? "!" : "";
-            return `${x.source}: ${x.rejected}/${x.total}（${rate}%）${flag}`;
-          })
-          .join(" · ");
-        parts.push(`按来源驳回率: ${srcs}`);
-      }
-      body.textContent = parts.join("\n");
-      body.style.whiteSpace = "pre-line";
-    } catch (err) {
-      log.warn("review-stats fetch failed", err);
-    }
-  }
-
-  // 按钮加载状态管理 — 防止重复点击
-  function setButtonLoading(btn, loading, originalText) {
-    if (!btn) return;
-    if (loading) {
-      btn.dataset.originalText = btn.textContent;
-      btn.disabled = true;
-      btn.classList.add(
-        "opacity-50",
-        "cursor-not-allowed",
-        "pointer-events-none",
-      );
-      btn.textContent = "处理中…";
-    } else {
-      btn.disabled = false;
-      btn.classList.remove(
-        "opacity-50",
-        "cursor-not-allowed",
-        "pointer-events-none",
-      );
-      btn.textContent =
-        originalText || btn.dataset.originalText || btn.textContent;
-      delete btn.dataset.originalText;
-    }
-  }
-
-  // 翻页期间全局加载指示器
-  let pageLoadingOverlay = null;
-  function showPageLoading() {
-    if (pageLoadingOverlay) return;
-    // P0-2: 原 selector "section.flex-1.border-t" 与模板中列 class
-    // （flex flex-col gap-3 min-w-0）不匹配 → overlay 永不创建、翻页
-    // 无反馈且旧数据残留。改用 ID 定位，消除对 class 组合的脆弱依赖。
-    const center = document.getElementById("center-panel");
-    if (!center) return;
-    pageLoadingOverlay = document.createElement("div");
-    pageLoadingOverlay.className =
-      "absolute inset-0 flex items-center justify-center bg-background/60 z-20 transition-opacity";
-    // P3-2: 页面形骨架（形态 = 最终 PDF 页面形状）替代 spinner
-    pageLoadingOverlay.innerHTML =
-      '<div class="w-56 h-80 rounded-md bg-muted/70 animate-pulse"></div>';
-    center.style.position = "relative";
-    center.appendChild(pageLoadingOverlay);
-  }
-  function hidePageLoading() {
-    if (pageLoadingOverlay) {
-      pageLoadingOverlay.remove();
-      pageLoadingOverlay = null;
-    }
-  }
-
-  // 占位态重建页码导航 — OCR 完成前进入页面时 total_pages=0，
-  // sidebar 只有占位提示；OCR 完成后 SSE 推送 total_pages 时调用，
-  // 用 DOM 重建页码列表（与 Jinja 渲染结构一致），无整页刷新。
-  function buildPageNav() {
-    const nav = document.getElementById("page-nav");
-    if (!nav || totalPages <= 0) return;
-    log("buildPageNav", { totalPages });
-    nav.innerHTML = "";
-    for (let p = 1; p <= totalPages; p++) {
-      const a = document.createElement("a");
-      a.href = `/jobs/${jobId}/review?page=${p}`;
-      a.dataset.page = String(p);
-      a.className =
-        "page-nav-item group relative flex items-center justify-between " +
-        "px-3 py-1.5 text-[12px] transition-colors duration-150 rounded-sm " +
-        "text-muted-foreground hover:text-foreground hover:bg-muted/50";
-      a.addEventListener("click", (ev) => {
-        ev.preventDefault();
-        goPage(p);
-      });
-      const label = document.createElement("span");
-      label.className = "tabular-nums";
-      label.textContent = "第" + p + "页";
-      a.appendChild(label);
-      nav.appendChild(a);
-    }
-    updatePageNavActive(currentPage);
-  }
-
-  // 流式更新页码导航圆点 — SSE 推送 page_finding_counts 时调用，
-  // 每页 findings 生成后圆点立即点亮，无需等整批完成。
-  // 所有文本走 textContent，无 innerHTML（XSS 防御）。
-  function updatePageNavDots(counts) {
-    if (!counts) return;
-    document.querySelectorAll(".page-nav-item").forEach((el) => {
-      const p = parseInt(el.dataset.page);
-      const c = counts[p] || { critical: 0, warning: 0, info: 0, total: 0 };
-      // 对抗审查 P2：counts 无变化时跳过重建（SSE 每 3s 全量 tick，
-      // 51 页 × 每页删建 DOM 纯属浪费）；以 data-dots-sig 记录上次签名
-      const sig = `${c.critical}-${c.warning}-${c.info}`;
-      if (el.dataset.dotsSig === sig) return;
-      el.dataset.dotsSig = sig;
-      // 移除旧的圆点容器，重建当前值
-      el.querySelectorAll("[data-dots]").forEach((n) => n.remove());
-      const dotsEl = document.createElement("span");
-      dotsEl.setAttribute("data-dots", "1");
-      dotsEl.className = "flex items-center gap-1";
-      if (c.total > 0) {
-        if (c.critical > 0) {
-          const dot = document.createElement("span");
-          dot.className = "w-1 h-1 rounded-full bg-destructive";
-          dot.title = c.critical + " 严重";
-          dotsEl.appendChild(dot);
-        }
-        if (c.warning > 0) {
-          const dot = document.createElement("span");
-          dot.className = "w-1 h-1 rounded-full bg-warning";
-          dot.title = c.warning + " 警告";
-          dotsEl.appendChild(dot);
-        }
-        if (c.info > 0 && c.critical === 0 && c.warning === 0) {
-          const n = document.createElement("span");
-          n.className = "text-[11px] tabular-nums text-muted-foreground";
-          n.textContent = String(c.total);
-          dotsEl.appendChild(n);
-        }
-      }
-      el.appendChild(dotsEl);
-    });
-  }
-
-  // 更新页码导航选中态（无整页刷新）— 黑底白字（约束：选中页码必须黑底白字，非蓝/紫）
-  function updatePageNavActive(targetPage) {
-    document.querySelectorAll(".page-nav-item").forEach((el) => {
-      const pageNum = parseInt(el.dataset.page);
-      const isActive = pageNum === targetPage;
-      // 移除所有选中态 class
-      el.classList.remove("bg-foreground", "text-background", "font-medium");
-      el.classList.remove(
-        "text-muted-foreground",
-        "hover:text-foreground",
-        "hover:bg-muted/50",
-      );
-      // 添加对应 class
-      if (isActive) {
-        el.classList.add("bg-foreground", "text-background", "font-medium");
-        // 滚动到可见
-        el.scrollIntoView({ block: "nearest", behavior: "smooth" });
-      } else {
-        el.classList.add(
-          "text-muted-foreground",
-          "hover:text-foreground",
-          "hover:bg-muted/50",
-        );
-      }
-    });
-  }
-
-  // 更新 PDF 区域页码显示
-  function updatePdfDisplay(targetPage) {
-    // 对抗审查（分发实证）：syncNavButtons 必须无条件执行 —— 此前放在
-    // 函数末尾，而图片缓存命中（src 已是目标页）会提前 return 跳过它；
-    // 叠加 loadPageData 中间态用旧 currentPage 计算过一次禁用位，导致
-    // "从末页跳回任意页后 next 永久卡死"。箭头状态只依赖
-    // currentPage/totalPages，与图片是否重新渲染无关。
-    syncNavButtons();
-    const pageNumEl = document.getElementById("page-num");
-    if (pageNumEl) pageNumEl.textContent = targetPage;
-    // 更新标题栏 "第 N / M 页" 和计数器 "N / M"（totalPages=0 显示 "?"）
-    const totalLabel = totalPages > 0 ? String(totalPages) : "?";
-    const pageTotalEl = document.getElementById("page-total");
-    if (pageTotalEl) pageTotalEl.textContent = totalLabel;
-    const counterEl = document.getElementById("page-counter");
-    if (counterEl) counterEl.textContent = `${targetPage} / ${totalLabel}`;
-    // 渲染当前页 PNG（替代 iframe 原生 viewer — 无打印/下载/更多操作按钮，
-    // 缩放由 CSS width:100% 控制，页码与渲染页严格对应）
-    const img = document.getElementById("pdf-page-img");
-    const loading = document.getElementById("pdf-loading");
-    if (img) {
-      // 已缓存同一 URL（浏览器缓存/当前已加载）时不重复请求、不重置 loading
-      if (img.src.endsWith(`/page/${targetPage}`)) {
-        return;
-      }
-      // P0-3：翻页后旧的高亮框属于上一页，必须清掉（否则框会落在新页上）
-      clearRegionAnchor();
-      img.src = `/api/jobs/${jobId}/page/${targetPage}`;
-      if (loading) {
-        loading.classList.remove("is-loaded");
-        loading.querySelector("p").textContent = `正在渲染第 ${targetPage} 页 …`;
-      }
-    }
-  }
-
-  // AJAX 加载页面数据（findings + OCR + measurements + banners）
-  async function loadPageData(targetPage) {
-    const token = ++pageLoadToken;
-    log("loadPageData", { target: targetPage });
-    showPageLoading();
-    // 翻页期间禁用所有翻页按钮，防止重复点击
-    document
-      .querySelectorAll('[onclick^="goPage"], [onclick^="navPage"]')
-      .forEach((b) => (b.disabled = true));
-    try {
-      const r = await fetch(`/api/jobs/${jobId}/pages/${targetPage}`);
-      if (!r.ok) throw new Error("HTTP " + r.status);
-      const pageData = await r.json();
-      if (token !== pageLoadToken) return; // 已翻到新页，丢弃过期响应
-
-      // 加载该页的 findings（按置信度排序：低置信度排前便于人工优先复核）
-      const fr = await fetch(`/api/jobs/${jobId}/findings?page=${targetPage}&order=confidence`);
-      if (!fr.ok) throw new Error("HTTP " + fr.status);
-      const findingsData = await fr.json();
-
-      // 加载该页的 measurements 矩阵
-      const mr = await fetch(
-        `/api/jobs/${jobId}/pages/${targetPage}/measurements`,
-      );
-      const measurementsData = mr.ok ? await mr.json() : { measurements: [] };
-      if (token !== pageLoadToken) return; // 再校验一次（measurements 慢响应）
-
-      // 更新 URL（不刷新页面）
-      history.pushState(
-        { page: targetPage },
-        "",
-        `/jobs/${jobId}/review?page=${targetPage}`,
-      );
-
-      // 更新页码导航 + PDF + 翻页按钮
-      // 对抗审查：先落全局 currentPage 再刷 UI —— updatePdfDisplay 内的
-      // syncNavButtons 读取全局值，后置赋值会让中间态按旧页码计算
-      // （从末页回跳时 next 被错误禁用）。
-      currentPage = targetPage;
-      updatePageNavActive(targetPage);
-      updatePdfDisplay(targetPage);
-
-      // 更新 OCR 文本 — htmlToText 保留表格结构（行/列分隔），
-      // 纯字符串处理 + textContent，无 XSS 面
-      // P1 修复（cr-19）：无条件更新 — 空页 raw_html 为 ""（Paddle 空页）时
-      // 原条件 `if (ocrEl && pageData.raw_html)` 跳过赋值，OCR 面板残留
-      // 上一页文本，GMP 复核会误读；SSR 初次加载路径显示"无 OCR 数据"，
-      // 两条路径行为需一致。
-      const ocrEl = document.getElementById("ocr-text");
-      if (ocrEl) {
-        ocrEl.textContent = pageData.raw_html
-          ? htmlToText(pageData.raw_html)
-          : "此页无 OCR 内容（空白页或扫描质量过低），未执行分析，请以 PDF 原图为准";
-      }
-
-      // 更新 findings 列表（重新渲染）— P2-3: has_more 提示（后端默认
-      // limit=50，超出部分静默截断会让复核者误以为全部问题就这些）
-      renderFindings(findingsData.findings || [], findingsData.has_more);
-
-      // P0-2：抑制台账随页切换（与 findings 同源同页，避免"问题清单已换页、
-      // 抑制清单还是上一页"的错位误导）
-      await loadSuppressions(targetPage);
-
-      // 更新页面级 UI 元素：置信度 / parse-error / critical banner / measurements
-      updatePageLevelUI(
-        pageData,
-        findingsData.findings || [],
-        measurementsData,
-      );
-
-      // currentPage 已在 UI 刷新前更新（见上）
-      log("loadPageData — success", {
-        page: targetPage,
-        findings: findingsData.count,
-      });
-    } catch (err) {
-      log.err("loadPageData failed", err);
-      // 降级：整页刷新
-      window.location.href = `/jobs/${jobId}/review?page=${targetPage}`;
-    } finally {
-      hidePageLoading();
-      // 恢复翻页按钮状态（仅当前代际，避免旧请求恢复已禁用状态）
-      if (token === pageLoadToken) {
-        updatePdfDisplay(currentPage);
-      }
-    }
-  }
-
-  // 流式输出：静默刷新当前页 findings（不显示 loading overlay）
-  // 在 SSE 收到 pages_analyzed 变化时调用，让用户在 Stage 2 进行中
-  // 就能看到已分析页的 findings 实时更新。
-  async function refreshCurrentPageFindings() {
-    const token = pageLoadToken;
-    const page = currentPage;
-    try {
-      const [pageRes, findingsRes] = await Promise.all([
-        fetch(`/api/jobs/${jobId}/pages/${page}`),
-        fetch(`/api/jobs/${jobId}/findings?page=${page}&order=confidence`),
-      ]);
-      if (!pageRes.ok || !findingsRes.ok) return;
-      const pageData = await pageRes.json();
-      const findingsData = await findingsRes.json();
-      // 代际守卫：期间用户已翻页则丢弃（旧页数据渲染到新页会误导复核）
-      if (token !== pageLoadToken || page !== currentPage) return;
-      const findings = findingsData.findings || [];
-
-      // 重新渲染 findings 列表
-      renderFindings(findings, findingsData.has_more);
-      // 更新页面级 UI（置信度/critical banner 等）
-      const mr = await fetch(
-        `/api/jobs/${jobId}/pages/${page}/measurements`,
-      );
-      const measurementsData = mr.ok ? await mr.json() : { measurements: [] };
-      if (token !== pageLoadToken || page !== currentPage) return;
-      updatePageLevelUI(pageData, findings, measurementsData);
-      log("refreshCurrentPageFindings — updated", {
-        page,
-        findings: findings.length,
-      });
-    } catch (err) {
-      log.warn("refreshCurrentPageFindings failed", err);
-    }
-  }
-
-  // 翻页时更新页面级 UI：置信度徽章 / parse-error 横幅 / critical 横幅 / 参数矩阵
-  // 之前 AJAX 翻页只更新 OCR + findings，导致用户看到的是上一页的置信度、
-  // 首屏页面级 UI（#135）：只喂模板已经知道的那几项（parse-error 横幅 +
-  // 置信度），不伪造结构化数据。`findings` / `measurements` 传首屏已有的
-  // SSR 值（模板已渲染好，这里只是把"原因文案"补上）。
-  //
-  // 为什么不干脆在模板里直接渲染原因：模板文案与 JS 文案必须有**唯一副本**，
-  // 否则两处必然漂移（updatePageLevelUI 里已缓存 dataset.fallback 正是为此）。
-  // 所以这里复用同一个 updatePageLevelUI，让首屏与翻页走**同一条**代码路径。
-  function applyInitialPageLevelUI() {
-    if (ctx.page_parse_error || ctx.page_confidence || ctx.page_ocr_empty) {
-      updatePageLevelUI(
-        {
-          structured: {
-            _parse_error: bool(ctx.page_parse_error),
-            _ocr_empty: bool(ctx.page_ocr_empty),
-            _error: ctx.page_parse_error_reason || "",
-            overall_confidence: ctx.page_confidence || "",
-          },
-        },
-        [],
-        {},
-      );
-    }
-    // 首屏 findings 是 SSR 渲染的：若为空，按同一判据补上正确文案
-    // （#136 —— 模板已按 page_parse_error 分支渲染，此处只在"清单为空"
-    // 时兜底，避免依赖模板分支是否被正确渲染）。
-    const list = document.getElementById("findings-list");
-    if (list && !list.querySelector('[id^="finding-"]')) {
-      const note = document.getElementById("findings-empty-note");
-      if (note) note.outerHTML = emptyFindingsNote();
-    }
-  }
-
-  // critical 计数和参数矩阵，对 GMP 复核构成误导。
-  function updatePageLevelUI(pageData, findings, measurementsData) {
-    const structured = pageData.structured || {};
-    const pageConfidence = structured.overall_confidence || "";
-    const pageParseError = bool(structured._parse_error);
-
-    // #136：刷新"当前页标记" —— 空 findings 文案（emptyFindingsNote）依赖它。
-    // 必须在任何提前 return 之前写入，保证翻页后标记与页面同步。
-    currentPageFlags = {
-      parseError: pageParseError,
-      ocrEmpty: bool(structured._ocr_empty),
-    };
-
-    // 1. 置信度徽章
-    const confEl = document.getElementById("page-confidence-badge");
-    if (confEl) {
-      if (pageConfidence && !pageParseError) {
-        const confZh = { high: "高", medium: "中", low: "低" };
-        confEl.textContent = `置信度 ${zhOrUnknown(confZh, pageConfidence)}`;
-        confEl.classList.remove("hidden");
-      } else {
-        confEl.classList.add("hidden");
-      }
-    }
-
-    // 2. parse-error 横幅
-    // #127：把**实际失败原因**写进横幅。此前只有一句通用文案 —— 复核者知道
-    // "这页没解析出来"，却不知道是 PDF 本身损坏、网关超时，还是模型凭据失效。
-    // 后者是**全局性**故障（每页都一样），必须能一眼认出：否则整份 0 条 finding
-    // 会被当成"记录无异常"（GMP 假阴性）。
-    const parseBanner = document.getElementById("parse-error-banner");
-    if (parseBanner) {
-      parseBanner.classList.toggle("hidden", !pageParseError);
-      const parseText = document.getElementById("parse-error-text");
-      if (parseText) {
-        // 首帧模板文案即"通用兜底"的**唯一副本**：缓存后复用，
-        // 不在 JS 里再抄一份（两处文案必然漂移）。
-        if (parseText.dataset.fallback === undefined)
-          parseText.dataset.fallback = parseText.textContent.trim();
-        const reason = String(structured._error || "").trim();
-        parseText.textContent = reason
-          ? `此页 LLM 解析失败：${reason}`
-          : parseText.dataset.fallback;
-      }
-    }
-
-    // 2b. 幻觉防护横幅 — LLM 提取数值未在 OCR 原文找到（疑似臆造）
-    const groundingWarn = structured._grounding_warn || [];
-    const groundingBanner = document.getElementById("grounding-warn-banner");
-    if (groundingBanner) {
-      groundingBanner.classList.toggle("hidden", groundingWarn.length === 0);
-      const textEl = groundingBanner.querySelector(".grounding-warn-text");
-      if (textEl && groundingWarn.length > 0) {
-        textEl.textContent = groundingWarn.join("；");
-      }
-    }
-
-    // 2c. 截断透出横幅 — HTML 超上限被截，分析基于不完整输入
-    const truncatedBanner = document.getElementById("ocr-truncated-banner");
-    if (truncatedBanner) {
-      truncatedBanner.classList.toggle("hidden", !bool(structured._ocr_truncated));
-    }
-
-    // 2c-b. LLM 完整性横幅（对抗审查 P1）— 输出截断已恢复 / schema 校验
-    // 未通过，此前标记无消费终端，复核者看不到"数据可能静默缺失"
-    const llmIntegrityBanner = document.getElementById("llm-integrity-banner");
-    if (llmIntegrityBanner) {
-      const schemaWarn = structured._schema_warn || [];
-      const llmTruncated = bool(structured._truncated_warn);
-      const showLlmIntegrity = llmTruncated || schemaWarn.length > 0;
-      llmIntegrityBanner.classList.toggle("hidden", !showLlmIntegrity);
-      const mainText = llmIntegrityBanner.querySelector(".llm-integrity-text") ||
-        llmIntegrityBanner.querySelector("p.text-xs.font-medium");
-      if (mainText) {
-        let msg = "此页 LLM 分析结果可能不完整";
-        if (llmTruncated) msg += "（输出过长被截断后自动恢复，尾部数据可能丢失）";
-        if (llmTruncated && schemaWarn.length > 0) msg += "；";
-        if (schemaWarn.length > 0) msg += "（结构校验未完全通过）";
-        msg += "，请以 PDF 原图核对此页全部内容";
-        mainText.textContent = msg;
-      }
-      const schemaText = llmIntegrityBanner.querySelector(".llm-schema-warn-text");
-      if (schemaText) {
-        if (schemaWarn.length > 0) {
-          schemaText.textContent = schemaWarn.join("；");
-          schemaText.classList.remove("hidden");
-        } else {
-          schemaText.textContent = "";
-          schemaText.classList.add("hidden");
-        }
-      }
-    }
-
-    // 2d. OCR 状态横幅（空页/稀疏/不完整警告）— AJAX 翻页时同步更新，
-    // 否则上一页的横幅残留到当前页，对 GMP 复核构成误导
-    const emptyBanner = document.getElementById("ocr-empty-banner");
-    if (emptyBanner) {
-      emptyBanner.classList.toggle("hidden", !bool(structured._ocr_empty));
-    }
-    const sparseBanner = document.getElementById("ocr-sparse-banner");
-    if (sparseBanner) {
-      sparseBanner.classList.toggle("hidden", !bool(structured._ocr_sparse));
-    }
-    const warningBanner = document.getElementById("ocr-warning-banner");
-    if (warningBanner) {
-      warningBanner.classList.toggle("hidden", !structured._ocr_warning);
-      if (structured._ocr_warning) {
-        const warnText = warningBanner.querySelector("span.text-xs");
-        if (warnText) {
-          warnText.textContent = `此页 OCR 不完整：${structured._ocr_warning} — 分析已降级，请以 PDF 原图核对`;
-        }
-      }
-    }
-// OCR 原始完整性证据独立于 LLM 返回。LLM 超时/JSON 失败时仍须让
-    // 复核者看到“此页不可信”，不能因异步翻页而沿用上一页的横幅。
-    const integrityBanner = document.getElementById("ocr-integrity-banner");
-    if (integrityBanner) {
-      const diag = pageData.ocr_diagnostics || {};
-      const showIntegrity = diag.integrity === "incomplete" && !structured._ocr_warning;
-      integrityBanner.classList.toggle("hidden", !showIntegrity);
-      if (showIntegrity) {
-        const integrityText = document.getElementById("ocr-integrity-text");
-        if (integrityText) {
-          integrityText.textContent = `此页 OCR 完整性校验未通过：${(diag.reasons || []).join("；")}。请以 PDF 原图为准。`;
-        }
-        // 门禁 1：有效 DPI / 页面盒 / 旋转 / 长宽比 / 文本量诊断详情
-        const detailEl = document.getElementById("ocr-detail-text");
-        if (detailEl) {
-          const parts = [];
-          if (diag.effective_dpi != null) {
-            parts.push(`有效 DPI=${diag.effective_dpi}${diag.low_dpi ? "（低）" : ""}`);
-          }
-          if (Array.isArray(diag.media_box_pt) && diag.media_box_pt.length === 2) {
-            parts.push(`页面盒=${Math.round(diag.media_box_pt[0])}×${Math.round(diag.media_box_pt[1])}pt`);
-          }
-          if (diag.rotation) {
-            parts.push(`旋转=${diag.rotation}°`);
-          }
-          // round-23 A：自愈信息（切片重跑 / 横置页旋转重渲染）— 复核者
-          // 须知道"此页文本是恢复产物"而非原始识别，必要时以 PDF 原图核对。
-          if (diag.self_healed) {
-            parts.push(
-              diag.rotation_deg != null
-                ? `已自愈（横置页按 ${diag.rotation_deg}° 重渲染后识别）`
-                : "已自愈（切片重跑识别）",
-            );
-          }
-          // round-23 A2：旋转探测未果 — 提示复核者系统已尽力（90/270/180°
-          // 均试过），此页需人工核对原图，不要再怀疑横置可能性。
-          if (diag.rotation_probed) {
-            parts.push("已尝试 90/270/180° 旋转恢复未果，请人工核对原图");
-          }
-          if (diag.aspect_ratio != null) {
-            parts.push(`长宽比=${diag.aspect_ratio}`);
-          }
-          if (diag.text_chars != null) {
-            parts.push(`文本=${diag.text_chars} 字符`);
-          }
-          detailEl.textContent = parts.join("；");
-        }
-      }
-      renderOcrExemptionZone(diag, pageData.page);
-    }
-
-    // 3. critical 横幅 — 按当前页 findings 重新计算 critical 数量
-    const criticalBanner = document.getElementById("critical-banner");
-    const criticalCount = findings.filter(
-      (f) => f.severity === "critical",
-    ).length;
-    if (criticalBanner) {
-      if (criticalCount > 0) {
-        const strong = criticalBanner.querySelector("strong");
-        if (strong) strong.textContent = String(criticalCount);
-        criticalBanner.classList.remove("hidden");
-      } else {
-        criticalBanner.classList.add("hidden");
-      }
-    }
-
-    // 4. 参数矩阵 — 重新渲染表格
-    const matrixSection = document.getElementById("measurements-section");
-    const matrixBody = document.getElementById("measurements-body");
-    const matrixHeader = document.getElementById("measurements-header-row");
-    const matrixShape = document.getElementById("measurements-shape");
-    const measurements = measurementsData.measurements || [];
-    const columns = measurementsData.columns || [];
-
-    if (matrixSection) {
-      if (measurements.length > 0 && columns.length > 0) {
-        // 渲染表头
-        if (matrixHeader) {
-          matrixHeader.innerHTML = "";
-          const timeTh = document.createElement("th");
-          timeTh.className =
-            "text-left px-3 py-1.5 font-medium text-muted-foreground";
-          timeTh.textContent = "时间";
-          matrixHeader.appendChild(timeTh);
-          for (const col of columns) {
-            const th = document.createElement("th");
-            th.className =
-              "px-3 py-1.5 font-medium text-muted-foreground text-center whitespace-nowrap";
-            th.textContent = col;
-            matrixHeader.appendChild(th);
-          }
-        }
-        // 渲染表体
-        if (matrixBody) {
-          matrixBody.innerHTML = "";
-          measurements.forEach((m, i) => {
-            const tr = document.createElement("tr");
-            tr.className =
-              "stagger-in border-b border-border/50 hover:bg-muted/50";
-            tr.style.setProperty("--i", String(i));
-            const timeTd = document.createElement("td");
-            timeTd.className = "px-3 py-1.5 font-mono tabular-nums text-foreground";
-            timeTd.textContent = m.time || "-";
-            tr.appendChild(timeTd);
-            for (const col of columns) {
-              const cell = (m.values || {})[col] || {};
-              const inSpec = cell.in_spec;
-              const cellClass =
-                inSpec === true
-                  ? "cell-ok"
-                  : inSpec === false
-                    ? "cell-bad"
-                    : "cell-unknown";
-              const td = document.createElement("td");
-              td.className = `px-3 py-1.5 text-center tabular-nums ${cellClass}`;
-              td.title = `规格: ${cell.spec || ""} | 实测: ${cell.actual || ""} | 单位: ${cell.unit || ""}`;
-              td.textContent = cell.actual || "-";
-              tr.appendChild(td);
-            }
-            matrixBody.appendChild(tr);
-          });
-        }
-        if (matrixShape) {
-          matrixShape.textContent = `${measurements.length} × ${columns.length}`;
-          matrixShape.className = (matrixShape.className || "") + " tabular-nums";
-        }
-        matrixSection.classList.remove("hidden");
-      } else {
-        matrixSection.classList.add("hidden");
-      }
-    }
-  }
-
-  // 门禁 2（docs/OCR_GOLDEN_CORPUS.md）：OCR 完整性不达标的页面
-  // 记录"人工确认豁免 + 原因"。
-  // 已豁免 → 绿徽章 + 原因 + 时间 + 撤销；未豁免 → "已人工核对原图，
-  // 确认豁免"按钮。操作走 POST /api/jobs/{job_id}/pages/{page}/exemption。
-  function renderOcrExemptionZone(diag, pageNum) {
-    const zone = document.getElementById("ocr-exemption-zone");
-    if (!zone) {
-      return;
-    }
-    // 与 renderFindings 同款转义：reason 是人工输入，可能含 HTML。
-    const esc = (s) =>
-      String(s == null ? "" : s)
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;")
-        .replace(/"/g, "&quot;")
-        .replace(/'/g, "&#39;");
-    zone.replaceChildren();
-    const exempt = diag && diag.exemption;
-    if (exempt) {
-      const badge = document.createElement("div");
-      badge.className =
-        "inline-flex items-center gap-2 rounded border-l-2 border-success bg-card px-2 py-1.5 text-xs";
-      badge.innerHTML =
-        '<span class="w-1.5 h-1.5 rounded-full bg-success shrink-0"></span>' +
-        `<span>已确认豁免（人工已核对原图）：${esc(exempt.reason || "")}</span>` +
-        `<span class="text-muted-foreground tabular-nums">${esc(exempt.created_at || "")}</span>` +
-        '<button type="button" class="text-muted-foreground underline underline-offset-2 hover:text-foreground" data-exempt-revoke="1">撤销</button>';
-      zone.appendChild(badge);
-      const revokeBtn = badge.querySelector("[data-exempt-revoke]");
-      if (revokeBtn) {
-        revokeBtn.addEventListener("click", async (e) => {
-          e.stopPropagation();
-          const ok = await window.PBC.confirmDialog({
-            title: "撤销该页 OCR 豁免？",
-            message: "撤销后该页恢复为“完整性未通过”状态，请确认。",
-            confirmText: "撤销豁免",
-            cancelText: "取消",
-          });
-          if (!ok) {
-            return;
-          }
-          try {
-            const r = await fetch(`/api/jobs/${jobId}/pages/${pageNum}/exemption`, {
-              method: "POST",
-              headers: { "Content-Type": "application/x-www-form-urlencoded" },
-              body: "revoke=1",
-            });
-            if (!r.ok) {
-              const err = await r.json().catch(() => ({}));
-              throw new Error(err.detail || `HTTP ${r.status}`);
-            }
-            window.PBC.showToast("已撤销豁免", "ok");
-            loadPageData(pageNum);
-          } catch (err) {
-            window.PBC.showToast("撤销豁免失败: " + err.message, "err");
-          }
-        });
-      }
-    } else if (diag && diag.integrity === "incomplete") {
-      const btn = document.createElement("button");
-      btn.type = "button";
-      btn.className =
-        "rounded-md border border-border bg-card px-3 py-1 text-xs text-foreground hover:bg-muted";
-      btn.textContent = "已人工核对原图，确认豁免";
-      btn.addEventListener("click", async () => {
-        const reason = await window.PBC.promptDialog({
-          title: "确认本页 OCR 完整性豁免",
-          message:
-            "你已对照 PDF 原图核对，确认本页 OCR 不完整但内容可接受。请填写豁免原因（GMP 审计将记录）：",
-          confirmText: "记录豁免",
-          cancelText: "取消",
-        });
-        if (!reason) {
-          return;
-        }
-        try {
-          const r = await fetch(`/api/jobs/${jobId}/pages/${pageNum}/exemption`, {
-            method: "POST",
-            headers: { "Content-Type": "application/x-www-form-urlencoded" },
-            body: "reason=" + encodeURIComponent(reason),
-          });
-          if (!r.ok) {
-            const err = await r.json().catch(() => ({}));
-            throw new Error(err.detail || `HTTP ${r.status}`);
-          }
-          window.PBC.showToast("已记录豁免", "ok");
-          loadPageData(pageNum);
-        } catch (err) {
-          window.PBC.showToast("记录豁免失败: " + err.message, "err");
-        }
-      });
-      zone.appendChild(btn);
-    }
-  }
-
-  // 安全的布尔转换（structured._parse_error 可能是 true/false/"true"/1 等）
-  function bool(v) {
-    return v === true || v === "true" || v === 1;
-  }
-
-  // 渲染 findings 列表
-  // 未知枚举中文兜底（后端/LLM 新枚举不更新映射表也不显示裸英文）
-  function zhOrUnknown(map, key) {
-    return map[key] || (key ? `未知(${key})` : "");
-  }
-
-  // 三色复核分级（M6/T6.4）计数条刷新 —— 红/蓝为本页口径，与下方清单一致；
-  // 绿色（系统校验通过）是全批次口径，由 SSR 渲染，翻页不重算。
-  function updateTierCounts(findings) {
-    const tally = { rule: 0, llm: 0 };
-    for (const f of findings || []) {
-      const t = f && f.tier === "llm" ? "llm" : "rule"; // 未知/缺省 → 规则（保守同后端）
-      tally[t] += 1;
-    }
-    const rEl = document.getElementById("tier-count-rule");
-    const lEl = document.getElementById("tier-count-llm");
-    if (rEl) rEl.textContent = String(tally.rule);
-    if (lEl) lEl.textContent = String(tally.llm);
-  }
-
-  // 空 findings 的文案（#136）。**单一副本**：SSR 首屏（模板）与 AJAX 翻页
-  // 走同一判据（分析失败 / 空页 / 确实无问题），否则两套标记必然漂移。
-  // 依据的是**当前页**的结构化标记（`currentPageFlags`，由 updatePageLevelUI
-  // 每次刷新时写入）—— 不能用 ctx（那是首屏注入的，翻页后已过期）。
-  function emptyFindingsNote() {
-    const flags = currentPageFlags || {};
-    const base = "py-8 text-center text-[13px] text-muted-foreground";
-    if (flags.parseError) {
-      return (
-        `<div class="${base}" id="findings-empty-note">本页未能分析（LLM 解析失败），` +
-        `<span class="text-foreground">问题清单为空不代表本页无问题</span>，` +
-        `请以 PDF 原图人工核对</div>`
-      );
-    }
-    if (flags.ocrEmpty) {
-      return (
-        `<div class="${base}" id="findings-empty-note">` +
-        `本页无 OCR 内容（空白页或扫描质量过低），未执行分析</div>`
-      );
-    }
-    return `<div class="${base}" id="findings-empty-note">本页无问题</div>`;
-  }
-
-  function renderFindings(findings, hasMore) {
-    const list = document.getElementById("findings-list");
-    if (!list) return;
-    const severityZh = { critical: "严重", warning: "警告", info: "信息" };
-    const sourceZh = {
-      rule: "规则",
-      llm_page: "LLM单页",
-      llm_fallback: "LLM兜底",
-      llm_cross: "LLM跨页",
-      user_rule: "用户规则",
-    };
-    // finding type 英文 → 中文（用户面向中文，后端规则 type 是英文常量，
-    // LLM 自由输出的未知 type 保留原文兜底显示）
-    const typeZh = {
-      time_reversal: "时间倒序",
-      year_contradiction: "年份矛盾",
-      suspicious_date: "日期可疑",
-      signature_time_anomaly: "签名时间异常",
-      completeness: "信息缺失",
-      batch_inconsistency: "批号不一致",
-      param_out_of_spec: "参数超标",
-      low_confidence: "低置信度",
-      handwritten: "手写内容需核对",
-      signature_mismatch: "签名不符",
-      user_rule: "用户规则",
-      ocr_noise: "OCR 噪音",
-      time_anomaly: "时间异常",
-      step_gap: "工序缺号",
-      spec_unverifiable: "规格无法核定",
-      uncategorized: "未分类",
-      mass_balance: "物料平衡/收率",
-      self_review: "自检自核",
-      equipment_state: "设备/清洁状态",
-      env_monitor: "环境监测",
-      doc_version: "文件版本",
-      deviation_link: "偏差关联",
-      alteration: "涂改规范",
-    };
-    const statusZh = {
-      pending: "待复核",
-      confirmed: "已确认",
-      rejected: "已拒绝",
-      corrected: "已修正",
-    };
-
-    // Security: escape all attacker-controlled text before injecting as HTML.
-    // f.type / f.description / f.ocr_text come from LLM or rule output and
-    // could contain <script> tags otherwise.
-    const esc = (s) =>
-      String(s == null ? "" : s)
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;")
-        .replace(/"/g, "&quot;")
-        .replace(/'/g, "&#39;");
-
-    if (findings.length === 0) {
-      // #136：空 findings 的**原因**必须区分，三种情况视觉上不能相同：
-      //   - 分析失败（_parse_error）→ "未能分析，清单为空不代表无问题"
-      //   - 空页（_ocr_empty）      → "无 OCR 内容，未执行分析"
-      //   - 其余                     → "本页无问题"（确实检查过）
-      // 只按 `findings.length === 0` 判断会把失败页伪装成合规页（GMP 假阴性）。
-      list.innerHTML = emptyFindingsNote();
-      updateTierCounts(findings);
-      return;
-    }
-
-    list.innerHTML = findings
-      .map((f, i) => {
-        const sevDot =
-          f.severity === "critical"
-            ? "bg-destructive"
-            : f.severity === "warning"
-              ? "bg-warning"
-              : "bg-info";
-        const statusOpacity =
-          f.status === "confirmed"
-            ? "opacity-50"
-            : f.status === "rejected"
-              ? "opacity-40"
-              : "";
-        // 三色分级（M6/T6.4）：tier 由后端 core.finding_quality 单一来源计算，
-        // 前端只读不做映射 —— 避免 SSR/AJAX 两套颜色漂移。
-        const tier = f.tier === "llm" ? "llm" : "rule";
-        const statusTag =
-          f.status !== "pending"
-            ? `<span class="text-[11px] text-muted-foreground">· ${esc(zhOrUnknown(statusZh, f.status))}</span>`
-            : "";
-        const sourceTag =
-          f.source && f.source !== "rule"
-            ? `<span class="text-[11px] text-muted-foreground">· ${esc(zhOrUnknown(sourceZh, f.source))}</span>`
-            : "";
-        // #8 字段级置信度：低置信条目显式标记（LLM 生成 + 所在页带
-        // 完整性警告 → 评分下降），提示复核员优先对照原图
-        const lowConfTag =
-          typeof f.confidence === "number" && f.confidence < 0.6
-            ? `<span class="text-[11px] px-1 py-0.5 rounded bg-warning/10 text-warning" title="置信度 ${f.confidence}（来源可靠性/页面完整性加权）">低置信</span>`
-            : "";
-        const ocrSnippet = f.ocr_text
-          ? `<p class="text-[11px] text-muted-foreground font-mono mt-1 truncate">OCR：${esc(f.ocr_text.slice(0, 100))}</p>`
-          : "";
-        // GMP 依据引用（v7）：法规知识库映射（gmp_basis.py），复核员可
-        // 直接引用到复核记录；无映射（ocr_noise/user_rule）不显示
-        const basisInfo = f.gmp_basis
-          ? `<p class="text-[11px] text-muted-foreground mt-1 border-l-2 border-border pl-1.5">依据：${esc(f.gmp_basis)}</p>`
-          : "";
-        // 知识库条文引用（v8）：kb_refs 为 JSON 字符串，坏数据安全退化
-        let kbRefsInfo = "";
-        if (f.kb_refs) {
-          let refs = [];
-          try {
-            const parsed = JSON.parse(f.kb_refs);
-            if (Array.isArray(parsed)) refs = parsed.filter((x) => x && x.label);
-          } catch {
-            /* ignore malformed */
-          }
-          if (refs.length) {
-            const rowsHtml = refs
-              .map(
-                (r) =>
-                  `<p class="text-[11px] text-muted-foreground leading-relaxed">` +
-                  `<span class="font-medium text-foreground">${esc(r.label)}</span>：${esc(r.excerpt || "")}</p>`,
-              )
-              .join("");
-            kbRefsInfo =
-              `<details class="mt-1 group"><summary class="text-[11px] text-muted-foreground ` +
-              `cursor-pointer select-none hover:text-foreground">依据条文（${refs.length}）</summary>` +
-              `<div class="mt-1 space-y-1 border-l-2 border-border pl-1.5">${rowsHtml}</div></details>`;
-          }
-        }
-        // UX P1-2: AJAX 渲染补齐人工复核信息 — SSR 模板有 corrected_text /
-        // reviewer_note（review.html:359-364），JS 渲染此前缺失：用户修正
-        // 或备注后详情从视图中消失，复核记录审计不可见。
-        const correctedInfo =
-          f.status === "corrected" && f.corrected_text
-            ? `<p class="text-[11px] text-foreground mt-1">修正：${esc(f.corrected_text)}</p>`
-            : "";
-        const noteInfo = f.reviewer_note
-          ? `<p class="text-[11px] text-muted-foreground mt-1">备注：${esc(f.reviewer_note)}</p>`
-          : "";
-        // f.id is INTEGER from DB; coerce to Number to prevent string injection
-        const fid = Number(f.id);
-        // P0-3：区域级证据锚（后端读时推导；锚不上则无此入口）。
-        // 内联 onclick 传不了对象，先把锚存进 regionRefs 再按 id 取。
-        // 画的是 page_bbox（后端已按服务端上报的 angle 做旋转逆映射的
-        // **页面空间**坐标）；bbox 是 OCR 空间原始框，仅留痕不回显。
-        if (f.region_ref && Array.isArray(f.region_ref.page_bbox)) {
-          regionRefs[fid] = f.region_ref;
-        } else {
-          delete regionRefs[fid];
-        }
-        const locateBtn = f.region_ref && Array.isArray(f.region_ref.page_bbox)
-          ? `<button onclick="locateFinding(event, ${fid})" class="btn-press text-[11px] font-medium text-muted-foreground hover:text-foreground" title="在左侧页面上高亮该问题所在的 OCR 版面区域（区域级定位，非单元格级）">定位原图</button>`
-          : "";
-        const actionBtns =
-          f.status === "pending"
-            ? `
-                <div class="action-btns mt-1.5 flex items-center gap-2">
-                    <button onclick="updateFinding(event, ${fid}, 'confirmed')" class="btn-press text-[11px] font-medium text-foreground hover:text-muted-foreground">确认</button>
-                    <span class="text-muted-foreground/30">·</span>
-                    <button onclick="updateFinding(event, ${fid}, 'rejected')" class="btn-press text-[11px] font-medium text-muted-foreground hover:text-foreground">拒绝</button>
-                    <span class="text-muted-foreground/30">·</span>
-                    <button onclick="correctFinding(event, ${fid})" class="btn-press text-[11px] font-medium text-muted-foreground hover:text-foreground">修正</button>
-                </div>`
-            : "";
-        return `
-                <div id="finding-${fid}" class="finding-card tier-${tier} stagger-in hover-lift border-b border-border last:border-b-0 ${statusOpacity} py-2.5 px-1" data-tier="${tier}" data-ocr="${esc(f.ocr_text || "")}" style="--i: ${i}">
-                    <div class="flex items-start gap-2">
-                        <span class="w-1.5 h-1.5 rounded-full ${sevDot} mt-[7px] shrink-0"></span>
-                        <div class="flex-1 min-w-0">
-                            <div class="flex items-center gap-2 mb-0.5">
-                                <span class="text-[13px] font-medium text-foreground">${esc(zhOrUnknown(typeZh, f.type))}</span>
-                                ${statusTag}
-                                ${sourceTag}
-                                ${lowConfTag}
-                                <span class="text-[11px] text-muted-foreground uppercase tracking-wider ml-auto">${esc(zhOrUnknown(severityZh, f.severity))}</span>
-                            </div>
-                            <p class="text-[13px] text-muted-foreground leading-relaxed">${esc(f.description)}</p>
-                            ${ocrSnippet}
-                            ${basisInfo}
-                            ${kbRefsInfo}
-                            ${correctedInfo}
-                            ${noteInfo}
-                            ${locateBtn
-                              ? `<div class="mt-1.5 flex items-center gap-2">${locateBtn}</div>`
-                              : ""}
-                            ${actionBtns}
-                        </div>
-                    </div>
-                </div>`;
-      })
-      .join("")
-      // P2-3: has_more 时追加提示 — 后端默认 limit=50，超出部分被截断；
-      // 静默截断会让复核者误以为本页全部问题就是这些（GMP 漏检风险）。
-      // 对抗审查：has_more 现按当前过滤集（页/状态）统计，不再被全局
-      // 总数误触发；文案用实际渲染条数，与后端 limit 语义解耦。
-      .concat(
-        hasMore
-          ? `<div class="py-2 px-1 text-[11px] text-muted-foreground text-center">本页已显示 ${findings.length} 条，仍有多条未显示（请逐页翻页或处理后刷新）</div>`
-          : "",
-      );
-    // 三色计数条随本页清单同步（AJAX 翻页后红/蓝数字必须跟上）
-    updateTierCounts(findings);
-  }
-
-  function goPage(p) {
-    log("goPage() called", {
-      target: p,
-      current: currentPage,
-      max: totalPages,
-    });
-    if (p < 1 || p > totalPages) {
-      log.warn("goPage — out of range, aborted", { p, max: totalPages });
-      return;
-    }
-    if (p === currentPage) {
-      log("goPage — same page, aborted");
-      return;
-    }
-    loadPageData(p);
-  }
-
-  // 箭头翻页：onclick 只携带固定 delta（-1/+1），目标页永远从 currentPage
-  // 实时计算 — 避免服务端渲染的 {{ page ± 1 }} 死值在 AJAX 翻页后失效/错跳
-  function navPage(delta) {
-    goPage(currentPage + delta);
-  }
-
-  // prev/next 箭头按钮 disabled 状态：与 currentPage/totalPages 实时同步
-  function syncNavButtons() {
-    const prev = document.getElementById("btn-prev-page");
-    const next = document.getElementById("btn-next-page");
-    if (prev) prev.disabled = currentPage <= 1;
-    if (next) next.disabled = currentPage >= totalPages;
-  }
-
-  // === 上下文操作: 取消 / 重试 ===
-  async function cancelJob(e) {
-    const ok = await window.PBC.confirmDialog({
-      title: "确定取消此任务？",
-      message: "处理中的数据会保留，可稍后重试。",
-      confirmText: "确认取消",
-      cancelText: "保留",
-      danger: true,
-    });
-    if (!ok) return;
-    log("cancelJob");
-    const btn = e && e.currentTarget ? e.currentTarget : null;
-    setButtonLoading(btn, true);
-    try {
-      const r = await fetch(`/api/jobs/${jobId}/cancel`, { method: "POST" });
-      const data = await r.json();
-      if (data.ok) {
-        log("cancelJob — success", data);
-        setTimeout(() => location.reload(), 800);
-      } else {
-        throw new Error(data.message || "取消失败");
-      }
-    } catch (err) {
-      log.err("cancelJob failed", err);
-      setButtonLoading(btn, false, "取消任务");
-      window.PBC.showToast("取消失败: " + err.message, "err");
-    }
-  }
-
-  async function retryJob(e) {
-    // P1-6: review 状态 = 全量重新分析（清空结果），其余状态 = 断点续跑
-    const fullRetry = e && e.currentTarget && e.currentTarget.dataset.fullRetry === "1";
-    const ok = await window.PBC.confirmDialog({
-      title: fullRetry ? "确定重新分析此任务？" : "确定重试此任务？",
-      message: fullRetry
-        ? "将清空现有分析结果并完整重新分析（OCR 结果复用，不重复消耗）。"
-        : "将从中断处继续处理。",
-      confirmText: fullRetry ? "确认重新分析" : "确认重试",
-      cancelText: "取消",
-    });
-    if (!ok) return;
-    log("retryJob");
-    const btn = e && e.currentTarget ? e.currentTarget : null;
-    setButtonLoading(btn, true);
-    try {
-      const r = await fetch(`/api/jobs/${jobId}/retry`, { method: "POST" });
-      const data = await r.json();
-      if (data.ok) {
-        log("retryJob — success", data);
-        setTimeout(() => location.reload(), 800);
-      } else {
-        throw new Error(data.detail || data.message || "重试失败");
-      }
-    } catch (err) {
-      log.err("retryJob failed", err);
-      setButtonLoading(btn, false, "重试");
-      window.PBC.showToast("重试失败: " + err.message, "err");
-    }
-  }
-
-  // OCRraw HTML → 可读文本：保留表格结构（行/单元格分隔），剥离标签与
-  // MinerU 样式噪音（style= 属性、字面 "\n" 转义、img 长路径）。
-  // 纯字符串处理 + textContent 赋值，无 innerHTML，无 XSS 面。
-  function htmlToText(html) {
-    if (!html) return "";
-    return String(html)
-      .replace(/\\n/g, "\n") // MinerU 表格单元格分隔的字面 \n
-      .replace(/\\t/g, "\t")
-      .replace(/<br\s*\/?>/gi, "\n")
-      .replace(/<img[^>]*>/gi, "[图]")
-      .replace(/<\/tr>/gi, "\n")
-      .replace(/<\/t[dh]>/gi, " | ")
-      .replace(/<\/p>/gi, "\n")
-      .replace(/<div[^>]*>/gi, "\n")
-      .replace(/<[^>]+>/g, "") // 剩余标签
-      .replace(/&nbsp;/gi, " ")
-      .replace(/&amp;/gi, "&")
-      .replace(/&lt;/gi, "<")
-      .replace(/&gt;/gi, ">")
-      .replace(/&quot;/gi, '"')
-      .replace(/[ \t]+/g, " ") // 折叠行内空白
-      .replace(/ *\| */g, " | ") // 统一单元格分隔符
-      .replace(/[ \t]+\n/g, "\n") // 行尾空白
-      .replace(/\n{3,}/g, "\n\n")
-      .trim();
-  }
-
-  // === finding 定位（用户核心诉求第一步：减少复核查找时间） ===
-  // 点击 finding 卡片 → OCR 面板中高亮对应的原文片段并滚到可视区。
-  // 零后端改动：f.ocr_text（LLM 摘录）在 htmlToText 后的面板文本中
-  // 做 token 匹配。LLM 摘录可能改写个别字 → 按 token 逐个降级查找。
-  // 高亮用 TextRange + <mark> 包装（不 innerHTML 注入，无 XSS 面）。
-
-  function clearLocateMarks() {
-    document.querySelectorAll("mark.finding-locate-mark").forEach((m) => {
-      const parent = m.parentNode;
-      while (m.firstChild) parent.insertBefore(m.firstChild, m);
-      parent.removeChild(m);
-    });
-  }
-
-  function locateFinding(card) {
-    const ocrText = card.dataset.ocr || "";
-    const ocrEl = document.getElementById("ocr-text");
-    if (!ocrEl || !ocrText) {
-      log.warn("locateFinding — no target", { hasOcrText: !!ocrText });
-      return;
-    }
-    clearLocateMarks();
-
-    const text = ocrEl.textContent || "";
-    if (!text) {
-      window.PBC.showToast("OCR 面板无文本可定位", "info");
-      return;
-    }
-    // 摘录 token（≥4 字符，避免 "的/是" 之类噪音 token 误定位）
-    const tokens = String(ocrText)
-      .split(/[\s|；;，,]+/)
-      .filter((t) => t.length >= 4);
-    let needle = null;
-    let idx = -1;
-    for (const t of tokens) {
-      const i = text.indexOf(t);
-      if (i >= 0) {
-        needle = t;
-        idx = i;
-        break;
-      }
-    }
-    if (!needle) {
-      window.PBC.showToast(
-        "OCR 文本中未找到对应内容（原文可能被折叠/改写），请直接核对 PDF 原图",
-        "info",
-      );
-      return;
-    }
-
-    // 文本节点内定位（textContent 通常来自单文本节点；跨节点时跳 style 兜底）
-    const walker = document.createTreeWalker(ocrEl, NodeFilter.SHOW_TEXT);
-    let acc = 0;
-    let node;
-    while ((node = walker.nextNode())) {
-      const nl = (node.textContent || "").length;
-      if (idx < acc + nl) {
-        try {
-          const range = document.createRange();
-          range.setStart(node, idx - acc);
-          range.setEnd(node, idx - acc + needle.length);
-          const mark = document.createElement("mark");
-          mark.className = "finding-locate-mark";
-          range.surroundContents(mark);
-          mark.scrollIntoView({ behavior: "smooth", block: "center" });
-        } catch (err) {
-          // 跨文本节点边界等异常 → 无高亮滚动兜底
-          log.warn("locateFinding — surroundContents failed", err);
-          node.parentElement.scrollIntoView({ behavior: "smooth", block: "center" });
-        }
-        break;
-      }
-      acc += nl;
-    }
-    log("locateFinding", { needle: needle.slice(0, 30), at: idx });
-  }
-
-  // === P0-2 抑制留痕：被降噪规则抑制的候选条目（可查原因 / 可回退） ===
-  // 抑制 ≠ 删除。后端把每条被抑制的候选条目连同**理由 + 命中证据**落
-  // finding_suppressions 台账（EU GMP Annex 11 §16 / 中国附录《计算机化系统》
-  // 第 15/16 条：关键数据修改须记录理由）。本面板是它在复核页的出口：
-  // 可查、可抽检、可一键回退为正式问题。
-  // 渲染只此一处（SSR 只放空容器），避免 SSR/AJAX 两套标记漂移。
-  function renderSuppressions(data, page) {
-    const panel = document.getElementById("suppression-panel");
-    const list = document.getElementById("suppression-list");
-    const brief = document.getElementById("suppression-brief");
-    if (!panel || !list) return;
-    const entries = (data && data.entries) || [];
-    const total = (data && data.total) || 0;
-    if (brief) {
-      brief.textContent = total
-        ? `（第 ${page} 页 ${entries.length} 条 · 全批 ${total} 条）`
-        : "";
-    }
-    if (!entries.length) {
-      panel.classList.add("hidden");
-      list.replaceChildren();
-      return;
-    }
-    panel.classList.remove("hidden");
-    const esc = (s) =>
-      String(s == null ? "" : s)
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;")
-        .replace(/"/g, "&quot;")
-        .replace(/'/g, "&#39;");
-    list.innerHTML = entries
-      .map((e) => {
-        const matched = (e.evidence && e.evidence.matched) || [];
-        const evText = matched
-          .map(
-            (m) =>
-              `${m.name}：实测 ${m.actual || "—"} / 规格 ${m.spec || "—"} → ${m.state || "?"}`,
-          )
-          .join("；");
-        const action = e.reverted
-          ? `<span class="text-[11px] text-muted-foreground">· 已回退为正式问题</span>`
-          : `<button onclick="revertSuppression(event, ${e.id})"
-                     class="btn-press focus-ring text-[11px] font-medium text-foreground hover:text-muted-foreground">
-                 回退为正式问题
-               </button>`;
-        return `<div class="border-b border-border last:border-b-0 py-2 px-1" id="suppression-${e.id}">
-          <div class="flex items-center gap-2 mb-0.5">
-            <span class="text-[12px] font-medium text-foreground">${esc(e.type_zh || e.type || "")}</span>
-            <span class="text-[11px] text-muted-foreground uppercase tracking-wider ml-auto">${esc(e.severity || "")}</span>
-          </div>
-          <p class="text-[12px] text-muted-foreground leading-relaxed break-words">${esc(e.description || "")}</p>
-          <p class="text-[11px] text-muted-foreground mt-1 leading-relaxed">抑制理由：${esc(e.reason || "")}</p>
-          ${evText ? `<p class="text-[11px] text-muted-foreground mt-0.5 font-mono break-words">命中证据：${esc(evText)}</p>` : ""}
-          <div class="action-btns mt-1 flex items-center gap-2">${action}</div>
-        </div>`;
-      })
-      .join("");
-  }
-
-  async function loadSuppressions(page) {
-    try {
-      const r = await fetch(`/api/jobs/${jobId}/suppressions?page=${page}`);
-      if (!r.ok) {
-        log.warn("loadSuppressions — HTTP " + r.status);
-        return;
-      }
-      const data = await r.json();
-      if (page !== currentPage) return; // 代际守卫：期间已翻页则丢弃
-      renderSuppressions(data, page);
-    } catch (err) {
-      log.warn("loadSuppressions failed", err);
-    }
-  }
-
-  function revertSuppression(e, suppressionId) {
-    const btn = e && e.currentTarget ? e.currentTarget : null;
-    setButtonLoading(btn, true);
-    log("revertSuppression() called", { suppressionId });
-    fetch(`/api/jobs/${jobId}/suppressions/${suppressionId}/revert`, {
-      method: "POST",
-    })
-      .then((r) => {
-        if (!r.ok) return r.text().then((t) => {
-          log.err("revertSuppression — HTTP error body", t);
-          throw new Error("HTTP " + r.status);
-        });
-        return r.json();
-      })
-      .then(() => {
-        window.PBC.showToast("已回退为正式问题，可在问题清单中裁决", "ok");
-        // 回退后该 finding 才会出现在问题清单 → 双面板一起刷新
-        return refreshCurrentPageFindings().then(() => loadSuppressions(currentPage));
-      })
-      .catch((err) => {
-        log.err("revertSuppression failed", err);
-        window.PBC.showToast("回退失败: " + err.message, "err");
-        setButtonLoading(btn, false, "回退为正式问题");
-      });
-  }
-
-  // finding id → region_ref（渲染时收集；onclick 是内联的，无法携带对象）
-  const regionRefs = Object.create(null);
-  // SSR 首屏的锚点随 ctx 注入（首屏不经过 AJAX 渲染函数）
-  if (ctx.region_refs && typeof ctx.region_refs === "object") {
-    Object.assign(regionRefs, ctx.region_refs);
-  }
-  let activeRegionFid = null;
-  const REGION_ASPECT_TOL = 0.02;
-
-  function clearRegionAnchor() {
-    activeRegionFid = null;
-    const ov = document.getElementById("region-overlay");
-    if (ov) ov.classList.add("hidden");
-  }
-
-  function positionRegionOverlay() {
-    const ov = document.getElementById("region-overlay");
-    const img = document.getElementById("pdf-page-img");
-    if (!ov || !img || ov.classList.contains("hidden")) return;
-    const bbox = (ov.dataset.bbox || "").split(",").map(Number);
-    if (bbox.length !== 4 || bbox.some((v) => !Number.isFinite(v))) return;
-    // 以图片自身为基准计算：放大时 img.style.width 会超过包装层 100%，
-    // 用百分比定位会与实际渲染位置脱钩（缩放后框跑偏）。
-    const [x0, y0, x1, y1] = bbox;
-    ov.style.left = img.offsetLeft + x0 * img.offsetWidth + "px";
-    ov.style.top = img.offsetTop + y0 * img.offsetHeight + "px";
-    ov.style.width = (x1 - x0) * img.offsetWidth + "px";
-    ov.style.height = (y1 - y0) * img.offsetHeight + "px";
-  }
-
-  // P0-3 区域级证据锚：把 finding 锚回 OCR 原始版面区域并画到当前页图上。
-  // 只到区域级 —— Paddle/MinerU 都不回传单元格级 bbox（实测见
-  // docs/NOISE_REDUCTION_SPIKE.md），自称单元格级等于给复核员一个错位的框。
-  function locateFinding(e, findingId) {
-    if (e) e.stopPropagation();
-    const fid = Number(findingId);
-    const ref = regionRefs[fid];
-    const img = document.getElementById("pdf-page-img");
-    const ov = document.getElementById("region-overlay");
-    if (!ref || !img || !ov) return;
-    if (activeRegionFid === fid) {
-      clearRegionAnchor(); // 再点一次收起
-      return;
-    }
-    // 宽高比闸门（兜底）：page_bbox 已是页面空间坐标，正常情况下必与渲染图
-    // 同向。仍比对一次 —— 后端上报的坐标空间与页面**不同源**时（服务端转了
-    // 页但没上报 angle、或上游改了行为），归一化映射必然失真。此时明示"无法
-    // 定位"远好过画一个错位的框：后者会把复核员的注意力引到错误的区域，
-    // 比不显示更危险。page_aspect 是后端按 rotation 推出的"页面应有宽高比"。
-    const imgAspect = img.naturalWidth / img.naturalHeight;
-    const pgAspect = Number(ref.page_aspect);
-    if (
-      pgAspect > 0 &&
-      imgAspect > 0 &&
-      Math.abs(pgAspect - imgAspect) / imgAspect > REGION_ASPECT_TOL
-    ) {
-      window.PBC.showToast(
-        "该页坐标系与页面方向不一致（上游未上报旋转角），无法自动定位，请人工核对原图",
-        "err",
-      );
-      return;
-    }
-    ov.dataset.bbox = (ref.page_bbox || []).join(",");
-    ov.classList.remove("hidden");
-    activeRegionFid = fid;
-    positionRegionOverlay();
-    // 区域可能在容器可视区之外（页图高于容器），滚动到它附近
-    const scroll = document.getElementById("pdf-scroll");
-    if (scroll && ov.offsetTop > scroll.scrollTop + scroll.clientHeight - 40) {
-      scroll.scrollTop = Math.max(0, ov.offsetTop - scroll.clientHeight / 3);
-    }
-  }
-
-  function updateFinding(e, findingId, status) {
-    log("updateFinding() called", { findingId, status });
-    const btn = e && e.currentTarget ? e.currentTarget : null;
-    setButtonLoading(btn, true);
-    // 同时禁用同行其他操作按钮，防止交叉操作
-    const row = document.getElementById("finding-" + findingId);
-    if (row) {
-      row
-        .querySelectorAll(".action-btns button")
-        .forEach((b) => (b.disabled = true));
-    }
-    const url = "/api/jobs/" + jobId + "/findings/" + findingId;
-    const body = "status=" + status;
-    log("updateFinding — fetch", { url, method: "POST", body });
-    fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: body,
-    })
-      .then((r) => {
-        log("updateFinding — response", { status: r.status, ok: r.ok });
-        if (!r.ok) {
-          return r.text().then((txt) => {
-            log.err("updateFinding — HTTP error body", txt);
-            throw new Error("HTTP " + r.status);
-          });
-        }
-        return r.json();
-      })
-      .then((data) => {
-        log("updateFinding — success", data);
-        const el = document.getElementById("finding-" + findingId);
-        if (el) {
-          el.classList.add(status);
-          log("updateFinding — class applied", {
-            id: "finding-" + findingId,
-            classAdded: status,
-          });
-        } else {
-          log.warn("updateFinding — element not found", "finding-" + findingId);
-        }
-        log("updateFinding — reloading page");
-        location.reload();
-      })
-      .catch((err) => {
-        log.err("updateFinding — fetch failed", err);
-        // 恢复按钮
-        if (row) {
-          row
-            .querySelectorAll(".action-btns button")
-            .forEach((b) => (b.disabled = false));
-        }
-        setButtonLoading(btn, false, status === "confirmed" ? "确认" : "拒绝");
-        window.PBC.showToast(
-          "更新失败: " + err.message + "\n请查看控制台排查",
-          "err",
-        );
-      });
-  }
-
-  async function correctFinding(e, findingId) {
-    log("correctFinding() called", { findingId });
-    const text = await window.PBC.promptDialog({
-      title: "输入修正后的文本：",
-      confirmText: "确认修正",
-      cancelText: "取消",
-    });
-    log("correctFinding — prompt result", {
-      text: text ? text.slice(0, 80) + (text.length > 80 ? "…" : "") : null,
-    });
-    if (!text) {
-      log("correctFinding — user cancelled (empty input)");
-      return;
-    }
-    const btn = e && e.currentTarget ? e.currentTarget : null;
-    setButtonLoading(btn, true);
-    const row = document.getElementById("finding-" + findingId);
-    if (row) {
-      row
-        .querySelectorAll(".action-btns button")
-        .forEach((b) => (b.disabled = true));
-    }
-    const url = "/api/jobs/" + jobId + "/findings/" + findingId;
-    const body = "status=corrected&corrected_text=" + encodeURIComponent(text);
-    log("correctFinding — fetch", {
-      url,
-      method: "POST",
-      bodyLength: body.length,
-    });
-    fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: body,
-    })
-      .then((r) => {
-        log("correctFinding — response", { status: r.status, ok: r.ok });
-        if (!r.ok) {
-          return r.text().then((txt) => {
-            log.err("correctFinding — HTTP error body", txt);
-            throw new Error("HTTP " + r.status);
-          });
-        }
-        return r.json();
-      })
-      .then((data) => {
-        log("correctFinding — success", data);
-        log("correctFinding — reloading page");
-        location.reload();
-      })
-      .catch((err) => {
-        log.err("correctFinding — fetch failed", err);
-        if (row) {
-          row
-            .querySelectorAll(".action-btns button")
-            .forEach((b) => (b.disabled = false));
-        }
-        setButtonLoading(btn, false, "修正");
-        window.PBC.showToast(
-          "修正失败: " + err.message + "\n请查看控制台排查",
-          "err",
-        );
-      });
-  }
-
-  // 暴露到全局（onclick 处理器需要）
-  window.goPage = goPage;
-  window.navPage = navPage;
-  window.zoomPdf = zoomPdf;
-  window.resetZoom = resetZoom;
-  window.cancelJob = cancelJob;
-  window.retryJob = retryJob;
-  window.updateFinding = updateFinding;
-  window.correctFinding = correctFinding;
-  window.locateFinding = locateFinding;
-  window.revertSuppression = revertSuppression;
-
   // 初始化：OCR 文本 raw → htmlToText 可读化（data-raw 为服务端注入原文）
   window.addEventListener("DOMContentLoaded", () => {
     const el = document.getElementById("ocr-text");
     if (el) {
       const raw = el.getAttribute("data-raw") || "";
-      el.textContent = htmlToText(raw) || "无 OCR 数据";
+      el.textContent = R.locate.htmlToText(raw) || "无 OCR 数据";
     }
     // P0-2 抑制台账：首屏也走同一渲染函数（SSR 只放空容器）
-    loadSuppressions(currentPage);
-  });
-
-  // 键盘快捷键: ← → 翻页
-  document.addEventListener("keydown", (e) => {
-    if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
-    if (e.key === "ArrowLeft") goPage(currentPage - 1);
-    else if (e.key === "ArrowRight") goPage(currentPage + 1);
+    R.suppressions.loadSuppressions(R.state.currentPage);
   });
 
   // finding 定位：findings-list 事件委托（AJAX 重渲染后监听仍生效）。
   // 点击卡片（非操作按钮）→ OCR 面板高亮定位对应原文。
+  // ⚠️ R63 修复：拆分前这里调用 locateFinding(card)，但同名函数声明
+  // 提升使区域锚定版遮蔽了文本定位版 → 此路径一直静默失效（详见
+  // review-locate.js 头注）。现指向 locateInOcrPanel。
   document.addEventListener("DOMContentLoaded", () => {
     const listEl = document.getElementById("findings-list");
     if (listEl) {
       listEl.addEventListener("click", (e) => {
         if (e.target.closest("button")) return; // 确认/拒绝/修正按钮不触发
         const card = e.target.closest(".finding-card");
-        if (card) locateFinding(card);
+        if (card) R.locate.locateInOcrPanel(card);
       });
     }
+  });
+
+  // 键盘快捷键: ← → 翻页
+  // ⚠️ 必须排除"有弹窗打开"的情形：弹窗的 onKey 只处理 Esc/Enter/Tab，方向键
+  // 会继续冒泡到这里 —— 于是在"取消任务"确认框开着时按 ← → 会**翻动背后的
+  // 页面**：弹窗还在，上下文却已经换了（正要确认的那条 finding 已不在屏幕上，
+  // 翻页还会触发 loadPageData 重渲染清单）。
+  // 两个监听器都挂在 document 上、且本监听器注册更早，事件按注册序触发 ⇒
+  // 弹窗侧 stopPropagation 救不了，只能在这里主动查询。
+  document.addEventListener("keydown", (e) => {
+    if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
+    // 防御式取值：本处理器在**每次按键**上运行，一旦抛错会连带废掉全部键盘
+    // 导航（比"方向键穿透"更糟）。故宁可 fail-open，不做无保护解引用。
+    if (window.PBC && window.PBC.isDialogOpen && window.PBC.isDialogOpen()) {
+      return;
+    }
+    if (e.key === "ArrowLeft") goPage(R.state.currentPage - 1);
+    else if (e.key === "ArrowRight") goPage(R.state.currentPage + 1);
   });
 
   // 捕获全局错误，便于发现模板/Jinja 渲染或异步异常

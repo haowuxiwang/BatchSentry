@@ -48,6 +48,10 @@ UNPACKED_ENV = "PBC_E2E_UNPACKED"        # 直接指向 win-unpacked 目录
 EXE_ENV = "PBC_E2E_EXE"                  # 兼容：指向 resources/pbc-server/pbc-server.exe
 RUNS_ENV = "PBC_E2E_UNPACKED_RUNS"       # 重复次数（默认 1）
 COVERAGE_JSON_ENV = "PBC_E2E_COVERAGE_JSON"
+#: 追加给被测 exe 的开关（空格分隔）。通用逃生口，**默认不用**。
+#: ⚠️ 别把它当成本机启动失败的解法：2026-09-30 的 2×2 实测表明，
+#: 真正的自变量是"是否运行在受限沙箱里"，`--disable-gpu` 加了没用。
+ARGS_ENV = "PBC_E2E_UNPACKED_ARGS"
 
 #: ⚠️ 必须在子进程环境里**删除**的变量（否则 Electron 退化为 Node）。
 #: 这是本驱动存在的前提，不是可选项。
@@ -231,6 +235,53 @@ def kill_leftovers(path: Path | None = None) -> None:
         subprocess.run(["taskkill", "/IM", name, "/T", "/F"], capture_output=True)
 
 
+#: Chromium 在 GPU 进程反复失败后打出的致命行（2026-09-30 实测）。
+#: 之后整个应用会以 `0x80000003` 退出 —— 只看退出码根本猜不到是这个原因。
+_GPU_FATAL = "GPU process isn't usable"
+
+
+def _extra_app_args() -> list[str]:
+    """追加给被测 exe 的开关（空格分隔，来自 :data:`ARGS_ENV`）。
+
+    通用逃生口（无头 CI 常需要 `--disable-gpu` 之类）。
+    ⚠️ 它**不是**本机 2026-09-30 那次启动失败的解法 —— 见
+    :func:`_startup_failure_attribution` 的 2×2 对照结论。
+    """
+    return (os.environ.get(ARGS_ENV) or "").split()
+
+
+def _startup_failure_attribution(exit_code, err_path: Path, extra: list[str]) -> str:
+    """给"应用没起来"一句**可执行**的归因（只读证据，不猜）。
+
+    为什么必须做：本驱动原先用 ``stdout=DEVNULL, stderr=DEVNULL`` 起进程，
+    Electron 自己的报错**全被丢掉**，只剩一个 `0x80000003` —— 无从查起。
+    现改为落日志文件，并在此处把它翻成人话。判据强度不变（仍是 FAIL）。
+    """
+    try:
+        text = err_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        text = ""
+    if _GPU_FATAL in text:
+        # 🔴 2026-09-30 实测的 2×2 对照（同一产物、同一开关矩阵）：
+        #     不加 --disable-gpu + **非沙箱** → 3.05s 就绪，全绿
+        #     加   --disable-gpu + **非沙箱** → 1.67s 就绪，全绿
+        #     加   --disable-gpu + **沙箱内** → 崩 0x80000003
+        #     不加 --disable-gpu + **沙箱内** → 崩 0x80000003
+        #   ⇒ 唯一的自变量是**是否运行在受限沙箱里**；`--disable-gpu` 加了没用
+        #   （曾据此误判为"GPU 开关问题"，被 2×2 否证并撤回）。
+        hint = ("⚠️ 已加 --disable-gpu 仍崩 ⇒ 印证「加开关没用」，需换**非沙箱**终端。"
+                if "--disable-gpu" in extra else
+                "⚠️ 加 --disable-gpu **不能**绕过（2×2 实测加与不加都崩）"
+                "⇒ 需在**非沙箱**终端复跑，而不是加开关。")
+        return ("归因：Chromium 的 GPU 进程无法启动（stderr 有 "
+                f"`{_GPU_FATAL}`）⇒ **宿主/受限沙箱环境问题，非产品缺陷**；"
+                "同一产物在非沙箱终端 3.05s 就绪且多次全绿。" + hint)
+    if not text.strip():
+        return (f"归因：stderr 为空，仅凭退出码 {exit_code} 无法判定"
+                "（日志已落盘，见 rec['logs']）。")
+    return f"归因：退出码 {exit_code}，stderr 见 {err_path.name}。"
+
+
 # ── 单轮：启动 → 探活 → 校验 → 关窗 → 校验退出 ─────────────────────────────
 def run_once(unpacked: Path, sandbox: Path, run_idx: int, cov: Coverage) -> dict:
     exe = unpacked / "BatchSentry.exe"
@@ -256,25 +307,37 @@ def run_once(unpacked: Path, sandbox: Path, run_idx: int, cov: Coverage) -> dict
             return rec
 
     real_before = dir_snapshot(real_pbc)
-    t0 = time.time()
-    proc = subprocess.Popen([str(exe), f"--user-data-dir={userdata}"], env=env, cwd=str(unpacked),
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    rec["pipid"] = proc.pid
+    extra = _extra_app_args()
+    rec["extra_app_args"] = extra
+    # ⚠️ stdout/stderr 落**文件**（不是 DEVNULL，也不是 PIPE）：
+    #   · DEVNULL ⇒ Electron 的报错全丢，只剩退出码（本驱动原样，实测踩过：
+    #     一个 `0x80000003` 查了很久，真因是 stderr 里的 GPU FATAL）；
+    #   · PIPE 且不排空 ⇒ 写满管道缓冲后子进程阻塞（见 tests/e2e_proc.py 的实测）。
+    out_path = sandbox / f"run{run_idx}_stdout.log"
+    err_path = sandbox / f"run{run_idx}_stderr.log"
+    rec["logs"] = {"stdout": str(out_path), "stderr": str(err_path)}
 
-    # ── D1 启动可达 ──
-    h = None
-    while time.time() - t0 < 90:
-        if proc.poll() is not None:
-            break
-        h = _health()
-        if h:
-            break
-        time.sleep(0.5)
+    t0 = time.time()
+    with open(out_path, "wb") as fo, open(err_path, "wb") as fe:
+        proc = subprocess.Popen([str(exe), f"--user-data-dir={userdata}", *extra],
+                                env=env, cwd=str(unpacked), stdout=fo, stderr=fe)
+        rec["pipid"] = proc.pid
+
+        # ── D1 启动可达 ──
+        h = None
+        while time.time() - t0 < 90:
+            if proc.poll() is not None:
+                break
+            h = _health()
+            if h:
+                break
+            time.sleep(0.5)
     rec["steps"]["boot_s"] = round(time.time() - t0, 2)
     rec["steps"]["health"] = h
     if not h:
+        why = _startup_failure_attribution(proc.poll(), err_path, extra)
         bad(f"run{run_idx}.D1_startup", f"/health 未就绪（{rec['steps']['boot_s']}s, "
-                                        f"poll={proc.poll()}）")
+                                        f"poll={proc.poll()}）｜{why}")
         cov.record(ENTRY_LLM_PIPELINE, STATUS_FAILED, "应用未启动，流水线无从谈起")
         cov.record(ENTRY_OCR_PIPELINE, STATUS_FAILED, "应用未启动，流水线无从谈起")
         _reap(proc, rec)

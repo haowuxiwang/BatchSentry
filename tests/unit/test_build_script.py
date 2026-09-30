@@ -11,6 +11,7 @@
 
 本测试把这两个不变式 + build.bat 的转发约定机检化。
 """
+import re
 from pathlib import Path
 
 import pytest
@@ -106,6 +107,100 @@ def test_build_ps1_electron_lock_self_heals(ps1_bytes):
     )
     assert "Move-Item" in src and "Remove-Item -Recurse -Force $stdUnpacked" in src, (
         "确认可写后应 best-effort 归位（删旧标准目录 + 移入新产物）"
+    )
+
+
+def test_build_ps1_clean_preserves_run_ledger(ps1_bytes):
+    """`-Clean` 不得整删 `build/` —— 否则把**本次运行自己的** start 台账抹掉。
+
+    背景（2026-09-29 定位）：原实现是
+    `Remove-Item -Recurse -Force dist, dist-electron, build`。而运行台账
+    `build/_run/<runId>.start.json` 在脚本开头（`Set-Content -Path $startFile`）
+    就已落盘，`build/` 又正好是它的父目录 ⇒ 整删会把「本次运行的开始记录」
+    一起删掉。后果不是崩溃，而是**判据失效**：B9-6 靠「有 start 无 finish」
+    识别"被 TerminateProcess"，一旦 start 被自己删掉，一次被杀的全量构建
+    与「从未运行过」在证据上不可区分 —— 而 `-Clean` 恰恰是最需要该判据的场景。
+
+    行为证据（对照实验，非本测试）：
+    `devlogs/_verify/probe_build_clean_ledger.ps1` 在同一夹具上分别执行旧块与新块 ——
+    旧块 `build/_run/…start.json 存活 = False`，新块 `= True`，且两者都清掉了
+    `build/pbc-server`、`build/pyinstaller.log`、`dist/`、`dist-electron/`。
+    """
+    src = ps1_bytes.decode("utf-8-sig")
+    assert "Remove-Item -Recurse -Force dist, dist-electron, build" not in src, (
+        "不得整删 build/ —— 会连带删掉本次运行的 start 台账（见 docstring）"
+    )
+    assert '$_.Name -ne "_run"' in src, (
+        "build/ 的清理必须显式排除 _run（运行台账目录）"
+    )
+    assert '$buildRootForClean = Join-Path $projectRoot "build"' in src, (
+        "build/ 的清理应针对逐个子项，而不是整目录"
+    )
+
+
+def test_build_ps1_clean_still_deletes_dist_and_dist_electron(ps1_bytes):
+    """防空转：`-Clean` 必须**仍然**清掉 dist/ 与 dist-electron/。
+
+    没有这条，上面那条护栏可以用「干脆什么都不删」骗过去。
+
+    另：必须是**逐条单路径**删除。多路径形式
+    （`Remove-Item -Recurse -Force dist, dist-electron`）在受限宿主环境下的
+    行为与正常 PowerShell 不一致（实测：前者静默不删，留下陈旧产物）。
+    """
+    src = ps1_bytes.decode("utf-8-sig")
+    assert "Remove-Item -Recurse -Force dist -ErrorAction SilentlyContinue" in src, (
+        "dist/ 仍须整删（陈旧 PyInstaller 产物必须清掉）"
+    )
+    assert "Remove-Item -Recurse -Force dist-electron -ErrorAction SilentlyContinue" in src, (
+        "dist-electron/ 仍须整删（陈旧 Electron 产物会被 electron-builder 复用）"
+    )
+    assert "Remove-Item -Recurse -Force dist, dist-electron" not in src, (
+        "不要用多路径形式：受限宿主环境下它会静默不删"
+    )
+
+
+def test_ledger_prune_does_not_rely_on_empty_pipeline_semantics(ps1_bytes):
+    """台账裁剪不得把 `Remove-Item` 直接挂在管道尾端。
+
+    背景（2026-09-29 定位）：原实现是
+    `Get-ChildItem … | Sort-Object … | Select-Object -Skip 40 | Remove-Item -Force`。
+    它依赖一个**隐晦且不对称**的行为：真实 `Remove-Item` 在**管道上下文**里
+    收到 0 个对象时不抛，而**独立调用**缺 `-Path` 时抛
+    「无法处理命令，因为一个或多个强制参数丢失: Path」。
+    台账不足 40 个文件时管道恰好为空（实测本仓只有 10 个文件），
+    于是同一份代码在不同调用方式/宿主包装器下表现不同 —— 排查成本极高。
+
+    不变式：必须**显式收集**（`@(…)`）、**判空**（`.Count -gt 0`）、
+    再以 `-LiteralPath` 删除。
+    """
+    src = ps1_bytes.decode("utf-8-sig")
+    assert "$staleLedger = @(" in src, "台账裁剪必须先把待删项显式收集成数组"
+    assert "if ($staleLedger.Count -gt 0) {" in src, (
+        "台账裁剪必须判空 —— 不足 40 个文件时应是 no-op，而不是抛错"
+    )
+    assert "Remove-Item -LiteralPath $staleLedger.FullName" in src, (
+        "应显式传 -LiteralPath，而不是依赖管道绑定"
+    )
+    assert not re.search(r"\|\s*\n\s*Remove-Item\b", src), (
+        "不得把 Remove-Item 直接挂在管道尾端（空管道语义随环境而异）"
+    )
+    # 说明：上面这条刻意锚定「**行尾是 `|`、下一行行首是 `Remove-Item`**」的调用点，
+    # 而不是裸的 `| Remove-Item` 子串 —— 本文件的注释里就引用了这个反面示例，
+    # 用子串匹配会把注释判成违规（实测踩过：`AssertionError` 来自注释本身）。
+
+
+def test_start_ledger_is_written_before_the_clean_block(ps1_bytes):
+    """顺序不变式：start 台账的**写点**必须先于 `-Clean` 的删点。
+
+    这条是上面两条的**原因**：如果先清理后写台账，整删 build/ 就无害了。
+    断言锚定「调用点」而不是标识符 —— 注释里也会出现同样的名字。
+    """
+    src = ps1_bytes.decode("utf-8-sig")
+    write_at = src.index("Set-Content -Path $startFile")
+    clean_at = src.index("if ($Clean) {")
+    assert write_at < clean_at, (
+        "start 台账必须先落盘再执行 -Clean；否则 -Clean 一旦整删 build/，"
+        "本次运行的开始记录就没了（B9-6 判据失效）"
     )
 
 

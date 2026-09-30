@@ -6,7 +6,7 @@
   1. core.finding_quality.CANONICAL_TYPES     （类型白名单，权威）
   2. core.zh_map.FINDING_TYPE_ZH              （后端中文，report/notify 用）
   3. templates/review.html 的 type_zh         （服务端渲染前端）
-  4. static/review.js 的 typeZh               （SPA 前端）
+  4. static/findings-map.js 的 TYPE_ZH        （SPA 前端单一真值）
   5. core.rules.gmp_basis.GMP_BASIS_MAP       （法规依据）
   6. core.kb.retriever.TYPE_QUERIES           （条款检索词）
 
@@ -23,7 +23,9 @@ from core.zh_map import FINDING_TYPE_ZH
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TEMPLATE = REPO_ROOT / "templates" / "review.html"
-REVIEW_JS = REPO_ROOT / "static" / "review.js"
+# R63 P2：SPA 前端类型中文的单一真值已从 review.js 的局部 typeZh
+# 收敛到共享件 findings-map.js 的 TYPE_ZH（renderFindings 消费它）。
+REVIEW_JS = REPO_ROOT / "static" / "findings-map.js"
 
 # 无依据/检索语义的类型（内部键/技术噪音）：不强制映射。
 _NO_BASIS = {"user_rule", "ocr_noise", "uncategorized"}
@@ -38,8 +40,8 @@ def _template_type_map() -> dict:
 
 def _js_type_map() -> dict:
     text = REVIEW_JS.read_text(encoding="utf-8")
-    m = re.search(r"const\s+typeZh\s*=\s*(\{.*?\n\s*\})\s*;", text, re.S)
-    assert m, "review.js 未找到 typeZh 映射"
+    m = re.search(r"(?:const|var)\s+TYPE_ZH\s*=\s*(\{.*?\n\s*\})", text, re.S)
+    assert m, "findings-map.js 未找到 TYPE_ZH 映射"
     body = m.group(1)
     return {
         k: v for k, v in re.findall(r"(\w+)\s*:\s*\"([^\"]*)\"", body)
