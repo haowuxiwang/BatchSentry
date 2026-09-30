@@ -27,7 +27,7 @@
     `[data-job-id="x"]` 能命中 `el.dataset.jobId = "x"`。
   - `cloneNode(deep)` 已实现，且**不复制事件监听器**（浏览器语义）；
     `replaceWith` 会同步更新 `getElementById` 注册表 —— 二者都是
-    `settings.js::bindProviderActions`（"克隆换节点"防重复绑定）所必需。
+    `settings-llm.js::bindProviderActions`（"克隆换节点"防重复绑定）所必需。
   - 定时器是**手动驱动**的（`__flushTimers()`），不模拟真实时间流逝。
   - 微任务请用 `await new Promise(r => setImmediate(r))` 排空
     （`setTimeout` 已被接管为队列，不能用来等微任务）。
@@ -119,7 +119,7 @@ function __splitDesc(sel) {
 }
 function __matchOne(node, sel) {
   sel = sel.replace(/:not\([^)]*\)/g, "").trim();
-  // `:checked` —— `settings.js::feishuSelectedEvents` 用它取勾选的事件。
+  // `:checked` —— `settings-feishu.js::feishuSelectedEvents` 用它取勾选的事件。
   // ⚠️ 伪类**不能**像 `:not` 那样"忽略掉"：忽略 `:checked` 会让选择器
   // 静默返回空集（"没勾任何事件"），断言随之变成空断言 —— 正是假绿的方向。
   const wantChecked = /:checked\b/.test(sel);
@@ -310,7 +310,7 @@ function __makeEl(tag) {
   el.replaceChildren = (...cs) => { el.children.forEach((c) => { c.parentNode = null; }); el.children = []; cs.forEach((c) => el.appendChild(c)); };
   el.remove = () => { if (el.parentNode) el.parentNode.removeChild(el); el.isConnected = false; };
   /* 深/浅克隆。**不**复制 `_listeners` —— 浏览器同样不复制，而
-   * `settings.js::bindProviderActions` 正是靠"克隆换节点"来丢弃旧 handler
+   * `settings-llm.js::bindProviderActions` 正是靠"克隆换节点"来丢弃旧 handler
    * 实现防重复绑定（"第二次交互起按钮点了没反应"那个 bug）。若这里把
    * listener 也带过去，那条防重复逻辑就永远测不出来。 */
   el.cloneNode = (deep) => {

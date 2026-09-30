@@ -1,4 +1,9 @@
-"""settings.js 的行为护栏（此前**零前端覆盖** —— 1861 行只有后端 API 测试）。
+"""settings 页前端的行为护栏（此前**零前端覆盖** —— 原本 1861 行的单文件只有后端 API 测试）。
+
+⚠️ 该页已在 R65 按职责拆为 6 个模块（`settings-state.js` / `-llm.js` / `-ocr.js` /
+`-feishu.js` / `-rules.js` + 入口 `settings.js`），见
+`docs/ADVERSARIAL_REVIEW_2026-09-28.md` §维度 4。本文件因此**不再**锚单个文件：
+`FILES` 按**依赖序**列出全部模块，口径类断言走 `js_sources("settings*.js")`。
 
 **为什么必须测**：设置页是"配错就整条链路不通"的入口。本文件锁定四条
 "配错了但界面看着正常"的路径：
@@ -18,8 +23,9 @@
 `_USER_RULES_TOTAL_MAX` / `USER_RULES_TEXT_MAX`。本仓库对这类"两处实现"
 的既有做法是加机检锁定（见 `test_status_js.py` / `test_findings_map_js.py`）。
 
-`settings.js` 是**无导出**的 IIFE（`(function () { … })();`），故全部经由
-**真实入口**驱动（`load()` 的 bootstrap + 模块自己绑的事件监听器），
+拆分后各模块经 `window.PbcSettings` 命名空间导出（状态宿主 `settings-state.js` 建命名
+空间，其余模块 `Object.assign` 挂自己的导出），但**测试仍全部经由真实入口驱动** ——
+按依赖序拼接 `FILES` 后调用 `load()` 的 bootstrap + 模块自己绑的事件监听器，
 **未新增任何生产代码**。
 """
 from __future__ import annotations

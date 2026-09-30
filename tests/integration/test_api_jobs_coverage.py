@@ -1087,7 +1087,7 @@ class TestCorsPreflight:
 
     @pytest.mark.asyncio
     async def test_preflight_allows_put(self, client):
-        """PUT 预检（/api/settings/rules）应被允许 — settings.js:990。"""
+        """PUT 预检（/api/settings/rules）应被允许 — 前端见 settings-rules.js 的 saveRules。"""
         r = await client.request(
             "OPTIONS",
             "/api/settings/rules",
