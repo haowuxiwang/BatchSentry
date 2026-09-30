@@ -60,6 +60,41 @@
 - Electron 应用层 e2e 在本 agent 环境**仍取不到证据**（沙箱内 Chromium GPU 崩溃，
   `exitCode=0x80000003`）；**不得读成已通过**，须在真实终端复跑。
 
+**待办清单核销（R66 第三批，2026-09-30）** —— `docs/TODO.md` §A 及以下
+
+> 动机：§A 及以下自称"Round 59 快照"，但其中**一半已做完却仍显示未做**。
+> 不核销就按清单开工 = 重复劳动；而清单里"看起来精确"的行号锚点**指不到任何东西**。
+
+- **核销 14 条**（`[ ]`→`[x]` + 尾注 + §0.1.1 证据行）：`[ ]` **86 → 72**、`[x]` 76 → 90。
+  其中**两条 P1 安全项**影响最大：
+  - `B10-1`（守卫晚于请求体解析 ⇒ 跨站可触发 CPU 型 DoS）**已修** —— `main.py:318-420`
+    的**纯 ASGI 中间件**（`add_middleware` LIFO ⇒ 最后注册=最先执行）：Host/Origin 不读 body 即判
+    + 流式体积上限 + 非法/负 `Content-Length` 一律拒；护栏
+    `tests/unit/test_local_guard_middleware.py` ⇒ **17 passed**。
+  - `B10-2`/`B11-7`（4 个依赖漏洞）**已修** —— `requirements.txt` 实测
+    `python-multipart==0.0.31`、`Pillow==12.3.0`、`requests==2.33.0`、`python-dotenv==1.2.2`；
+    门禁 `dependency_vulns` ⇒ **0 条公告**。
+  - 另有 `B10-3`/`B11-8`（Electron 33.4.11 → **43.7.4**）、`B10-4`、`B11-9`（4 个 `dist*` → 2 个）、
+    `B11-17`（`docx` 已从 `dependencies` 移除）、`B11-18`（`get_flattened_data` + 兼容护栏）、
+    `#166`/`#167`（KB 键覆盖护栏**已存在**，`user_rule`/`uncategorized` 是**有意的开放桶**）、
+    `#162`、`A4`、`B4-1`。
+- **清掉 16 个前端行号锚点**（12 行，全在 §A）—— 拆模块后指不到任何东西。
+  `devlogs/_verify/r66_strip_frontend_anchors.py`，**断言 93 个 Python 锚点未被误伤**
+  （那些文件没拆、行号仍有效）。
+- **新增 2 条不变式护栏**（`tests/unit/test_todo_freshness.py`）：
+  E. 带核销尾注的 `[x]` 条数 **==** §0.1.1 台账行数（防"翻了勾却不写证据"）；
+  F. 活清单里**不得有前端行号锚点**（含防空转的构造样例 + 过宽反例）。
+- **变异验证 5/5**（`devlogs/_verify/mutation_todo_ledger_guards.py`，基线绿）：
+  M1 删尾注 / M2 删台账行 / M3 塞入前端锚点 ⇒ CAUGHT；M4 加不带尾注的 `[x]` /
+  M5 加 **Python** 锚点 ⇒ GREEN（不误报）。
+- **抽查确认仍开放 12 条**（保留 `[ ]` 并就地记证据）：`#144`（`engine.py` 两处 `_analyze_one`
+  确无 `config_error=`）｜`#145`（`root` 仍钉 DEBUG）｜`#146`（`stage2.py:64` 仍 `str(exc)[:200]`）｜
+  `#147`（只清 `error_message`/`finished_at`）｜`#148`（`api/report.py` 零处 `error_message`）｜
+  `#163①`（注释仍写 "29K chars"）｜`#165`（死键 `batch_logic`/`low_confidence` 仍在）｜
+  `#168`（每页检索两次）｜`#169`（`_STATIC_FIELDS` 白名单不含 `kb_prompt_inject`）｜
+  `B2-9`（审计写失败仍只 `warning`）｜`B3-3`（`RuleSpec.severity` 零消费点）｜
+  `B4-2`（`feishu_app_secret` 仍明文）｜`B7-2`（`ruff check .` ⇒ **105**，与登记一致）。
+
 ### 对抗性审查批次 + 重打包验收（Round 62–64，2026-09-30）
 
 > 本批次对应两份审查记录：`docs/ADVERSARIAL_REVIEW_2026-09-28.md`（FIX-1..FIX-11）
