@@ -55,6 +55,8 @@
   ⚠️ `worktree_clean` 是 11 项里的**第 1 项**、先于 pytest 跑 ⇒ 门禁结论只对**当时那份字节**有效，
   跑完再改文件即失效、须重跑。
 - 本地 `main` 领先 `origin/main` **9 个提交**（截至 HEAD `dd33330`）—— **尚未推送**。
+  ⚠️ 该数是**快照**、每提交 +1；**取当前值请运行** `git rev-list --left-right --count origin/main...HEAD`，
+  不要引用本文里的数字（"文档复述会变的代码事实"正是本轮 F1/F2 的病根）。
 - Electron 应用层 e2e 在本 agent 环境**仍取不到证据**（沙箱内 Chromium GPU 崩溃，
   `exitCode=0x80000003`）；**不得读成已通过**，须在真实终端复跑。
 
