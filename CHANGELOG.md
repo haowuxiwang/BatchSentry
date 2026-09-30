@@ -7,6 +7,43 @@
 
 ## [Unreleased]
 
+### 分片路径补上配置级故障的 job 级提升（Round 66 第五批，2026-09-30）
+
+> 与第四批同属一类问题（**GMP 假阴性**），但**只在分片路径上**。
+> 报告 → `docs/ADVERSARIAL_REVIEW_2026-09-30.md` §11.4。
+
+**Fixed**
+
+- **`#144` 分片路径漏掉配置级故障的 job 级提升**（`core/pipeline/engine.py::_run_sliced_stage1_2`）：
+  `_analyze_one` 确诊配置级故障后会闸住后续页（#127 的设计：一次 401/403/400 就别再拿同一份
+  坏配置去打 N 次）。闸门没问题，**问题在"闸住之后谁来记账"** —— 整份路径
+  `stage2._run_stage2_analysis` 会把 `config_error` 提到 job 级 `error_message`，
+  **分片路径的两处 `_analyze_one` 调用都没传 `config_error`** ⇒ 一条 0 finding 的 job
+  与"记录本身没问题"在前端**不可区分**。**大文档恰恰走分片路径**，即覆盖面最大的那条路反而没修。
+  5 处改动：① 声明共享 `config_error: dict = {}`；② 第一处调用点传参；③ `asyncio.gather` 之后
+  **回填**被闸掉的页；④ 自愈前加 `if config_error:` 守卫；⑤ 自愈内调用点同样传参。
+  ⚠️ **③ 是①②的伴生回归**：传了 `config_error` 闸门才激活，尚未尝试的页会**既不在
+  `failed_pages`、也不在已分析集合**里 ⇒ 两个计数都丢。不补③就是把假阴性换成**静默丢页**。
+
+**Added**
+
+- `tests/unit/test_pipeline.py::TestConfigErrorVisibility::test_sliced_path_escalates_config_error`
+  （**行为化**）：`ocr_slices=2` + `ocr_backend="mineru"` 走分片分支
+  （`sliced_calls["n"] == 1` **防空转**），断言 `error_message` 含"配置级故障"、
+  `failed_pages == [1,2,3,4]`、`calls["n"] == 1`、`heal_calls["n"] == 0`。
+- `tests/unit/test_config_error_visibility.py::TestSlicedPathSharesConfigErrorContract`（5 条结构性）：
+  `_analyze_one(` 计数 == 2（防空转）、`config_error=config_error,` 计数 == 2、共享字典声明、
+  回填块存在、自愈守卫**结构锚**。⚠️ 守卫第一版是**空断言**（只查 `"skip self-heal" in src`），
+  M3 变异证明 `if False:` 照样绿 ⇒ 改为 CRLF 归一化的多行结构锚 + 行为化双保险。
+- 变异验证 `devlogs/_verify/mutation_144_sliced_config_error.py` ⇒ **5/5，两条基线都绿**
+  （M1 丢传参 / M2 回填退化 / M3 守卫失效 / M4 共享字典置 None ⇒ CAUGHT；M5 阴性对照 ⇒ GREEN）。
+
+**Build / 产物**
+
+- `#144` 又动 `core/` ⇒ 按 `docs/ADVERSARIAL_REVIEW_2026-09-30.md` §5.2 的规矩，上一批的门禁
+  结论对本树失效：重建两份产物（PyInstaller → `bundle_manifest --write/--check` →
+  electron-builder → `gen_provenance.py`）并重跑门禁，结论见报告 §5.2 / §11.5。
+
 ### 错误文案脱敏 + 产物重建 + 门禁复绿（Round 66 第四批，2026-09-30）
 
 > 前三批只动 docs/tests；**本批动了 `core/` 字节**，于是把「产物新鲜度」这条链也拉进了射程。

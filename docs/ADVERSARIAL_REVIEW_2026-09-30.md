@@ -23,7 +23,7 @@
 | 本轮修复 | **5 条**：F1–F3 **文档缺陷**、F4 **测试清理期缺陷**、**F5 错误文案未脱敏（代码，见 §十一）** + 2 个新护栏（9 条用例）+ 变异 **9/9**，F5 另有变异 **5/5** |
 | 门禁 | 修复后重跑 ⇒ `overall=pass`、`11/11`、**3879**（`2787f29`）→ **3883 passed / 0 failed**（`8d5848d`，**含重建产物**） |
 | 重建与产物 | **已重建（R66 第四批）**：改 `core/` 后 `artifact_freshness` 转红 ⇒ PyInstaller + electron-builder 重建 ⇒ **两份产物逐字节一致**；`runtime_eol` 从 **SKIP 恢复为实测** —— 见 §十一 |
-| 待办清单核销 | **§A 及以下的"未做"有一半已做完**：核销 **14 条**（含 **2 条 P1 安全项** `B10-1`/`B10-2`）、清掉 **16 个失效行号锚点**、抽查确认 **12 条**仍开放 —— 见 §十 |
+| 待办清单核销 | **§A 及以下的"未做"有一半已做完**：核销 **16 条**（含 **2 条 P1 安全项** `B10-1`/`B10-2`、代码项 `#146`/`#144`）、清掉 **16 个失效行号锚点**、抽查确认 **10 条**仍开放 —— 见 §十 |
 
 ---
 
@@ -315,17 +315,17 @@ OVERALL: pass  (pass=11 fail=0 warn=0 skip=0)
 
 ```
 $ git branch -vv
-* main 8d5848d [origin/main: ahead 15]
+* main 172957c [origin/main: ahead 17]
 $ git remote -v
 origin  https://github.com/haowuxiwang/BatchSentry.git (fetch/push)
 $ git rev-list --left-right --count origin/main...HEAD
-0       15
+0       17
 ```
 
-⚠️ **本地 `main` 领先 `origin/main` 15 个提交**（`c8b092b` 之后的全部 R62–R66 工作），
+⚠️ **本地 `main` 领先 `origin/main` 17 个提交**（`c8b092b` 之后的全部 R62–R66 工作），
 **GitHub 上还是旧的**。推送是对外发布动作，**等用户确认**。
 
-> ⚠️ **上表的 `15` 是 `8d5848d`（13:0x）时点的快照，不是实时值。**
+> ⚠️ **上表的 `17` 是 `172957c`（R66 第五批）时点的快照，不是实时值。**
 > **取当前值的唯一方法是运行命令**，不要引用本报告里的数字：
 >
 > ```bash
@@ -558,3 +558,62 @@ shim 只在 `CODEBUDDY_SAFE_DELETE_BULK_STATE_DIR` + `CODEBUDDY_TOOL_CALL_ID` �
 > `devlogs/gate_report_*.json`，用例数来自该报告的 `tests_coverage` 行。
 > **任何一条若与当前树不符，以命令输出为准**（本文件不是事实源）。
 
+
+### 11.4 F6【已修】分片路径漏掉配置级故障的 job 级提升（`#144`）
+
+**定位**（`core/pipeline/engine.py::_run_sliced_stage1_2`）。
+
+`_analyze_one` 在**确诊配置级故障后**会闸住后续页 —— 这是 #127 的设计：一次 401/403/400
+就别再拿同一份坏配置去打 N 次。闸门本身没问题，**问题在"闸住之后谁来记账"**：
+
+| 路径 | 谁记账 | 现状 |
+|---|---|---|
+| 整份路径 `stage2._run_stage2_analysis` | 传 `config_error=config_error` 给 `_analyze_one`，确诊后写 job 级 `error_message` | ✅ 已对 |
+| **分片路径** `engine._run_sliced_stage1_2` | **两处 `_analyze_one` 调用都没传 `config_error`** | ❌ 漏 |
+
+后果正是 #127 要消灭的 **GMP 假阴性**：分片路径上的配置故障**不会**提升到 job 级，
+于是「一条 0 finding 的 job」与「记录本身没问题」在前端**不可区分**。
+而**大文档恰恰走分片路径** ⇒ 覆盖面最大的那条路反而没修。
+
+**修复**（5 处，字节模式改，CRLF 保持 `crlf=754 lf=0`，无 BOM）：
+
+| # | 改动 |
+|---|---|
+| A | 在 `_run_sliced_stage1_2` 里声明**共享** `config_error: dict = {}`（与整份路径同口径） |
+| B | 第一处 `_analyze_one(...)` 调用点补 `config_error=config_error,` |
+| C | `await asyncio.gather(*analysis_tasks)` **之后**回填被闸掉的页 |
+| D | 自愈（`_run_heal`）前加 `if config_error:` 守卫 —— 配置坏了就别再打 LLM |
+| E | 自愈内的 `_analyze_one(...)` 调用点同样补 `config_error=config_error,` |
+
+⚠️ **C 不是"顺手加的"，是 A/B 的伴生回归**：一旦把 `config_error` 传进 `_analyze_one`，
+闸门就激活了，**尚未尝试**的页会**既不在 `failed_pages`、也不在"已分析"集合**里 ——
+两个计数都丢。整份路径本来就有这段回填，分片路径因为此前没传 `config_error`
+**从来不需要它**。⇒ 这是"修 A 引出 B"的典型，不补 C 就是把假阴性换成**静默丢页**。
+
+**测试**：
+
+- `tests/unit/test_pipeline.py::TestConfigErrorVisibility::test_sliced_path_escalates_config_error`
+  （**行为化**）：`ocr_slices=2` + `ocr_backend="mineru"` 走分片分支，`analyze_page` 抛
+  `LLMConfigError`。判据：`sliced_calls["n"] == 1`（**防空转**：证明确实走了分片分支，
+  而不是整份路径那条已修好的行为在满足断言）、`"配置级故障" in error_message`、
+  `failed_pages == [1,2,3,4]`、`calls["n"] == 1`、`heal_calls["n"] == 0`。
+- `tests/unit/test_config_error_visibility.py::TestSlicedPathSharesConfigErrorContract`（5 条**结构性**）：
+  `_analyze_one(` 计数 == 2（**防空转**）、`config_error=config_error,` 计数 == 2、
+  共享字典声明存在、回填块存在、自愈守卫**结构上**绑定 `config_error`。
+
+⚠️ 自愈守卫第一版是**空断言**：只查 `"skip self-heal" in src`，M3（`if config_error:` → `if False:`）
+**照样绿**。改成 CRLF 归一化后的**多行结构锚**（`if config_error:` + `recovered = []` 的精确形状）
+**外加**行为化 `heal_calls["n"] == 0` 双保险。
+
+**变异验证** `devlogs/_verify/mutation_144_sliced_config_error.py` ⇒ **5/5，两条基线都绿**：
+
+| 变异 | 断言层 | 预期 | 结果 |
+|---|---|---|---|
+| M1 第一处调用点丢 `config_error` | 行为 | CAUGHT | ✅ |
+| M2 回填 `range(1, total_pages+1)` → `range(1, 1)` | 行为 | CAUGHT | ✅ |
+| M3 自愈守卫 `if config_error:` → `if False:` | 结构 | CAUGHT | ✅ |
+| M4 `config_error: dict = {}` → `config_error = None` | 行为 | CAUGHT | ✅ |
+| M5 纯注释（阴性对照） | 行为 | GREEN | ✅ |
+
+**定向回归**：`test_pipeline.py` + `test_config_error_visibility.py` +
+`test_import_graph_contract.py` + `test_config_import_order_contract.py` ⇒ **167 passed**。

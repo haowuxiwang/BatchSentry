@@ -41,9 +41,10 @@
 |---|---|---|---|---|---|
 | **0-1** | 推送本地未推送提交到 `origin/main` | **P1** | **用户决策** —— 推送是对外发布，agent 不擅自做 | `git rev-list --left-right --count origin/main...HEAD` ⇒ `0	0` | R66 复核时 `0	9`（HEAD `dd33330`）；**该数每提交 +1，是快照、不追求实时** —— 取当前值请跑左侧命令 |
 | **0-2** | Electron 应用层 e2e 在**真实终端**复跑 | **P1** | 需**非沙箱**终端（本 agent 环境做不到） | `tests/e2e_unpacked.py` 两跑均 `health` 非 `null` 且 `exitCode == 0` | `devlogs/e2e_unpacked_20260930_104144.json`：`health: null`、`exitCode=2147483651`（`0x80000003`） |
-| **0-3** | 逐条复核 §A 及以下的未复核项 | **P2 → 进行中** | 无（纯复核工作） | 每条要么 `[x]` + 证据，要么移入"已确认仍开放"并注明为何仍未做 | **R66 已核销 15 条**（见 §0.1，其中 1 条 `#146` 为**第四批**修复）；统计 `[ ]` **86 → 71**、`[x]` **76 → 91**。**剩余 71 条未逐条复核** |
+| **0-3** | 逐条复核 §A 及以下的未复核项 | **P2 → 进行中** | 无（纯复核工作） | 每条要么 `[x]` + 证据，要么移入"已确认仍开放"并注明为何仍未做 | **R66 已核销 16 条**（见 §0.1，其中 `#146`/`#144` 为**第四批**修复）；统计 `[ ]` **86 → 70**、`[x]` **76 → 92**。**剩余 70 条未逐条复核** |
 | **0-4** | 跨页总览增强（后端 `status` 过滤 / 关键词搜索） | P3 | 无 | 后端支持 `status` 查询参数；前端可筛选且空态文案正确 | R65 backlog（可选） |
 | **0-5** | 上传批次并发提交 | P3 | 后端配额 3 | 单例进度条拆为每文件一条后，3 路并发且不撞配额 | **不建议先做**：当前串行不撞配额，无实测收益 |
+| **0-6** | 把「失败性质」提升为 **job 级列 `error_kind`**（替代「每个调用点都得记得传 `config_error`」） | P2 | 无；建议在 `#144` 结案后单独做 | `jobs` 增列 + 迁移；`error_kind` 由异常类型在**写入处**统一判定，调用点无需传参；`#127`/`#144` 的行为护栏**不改动**即仍绿 | R66 第五批：`#144` 逐点修法已结案，但**结构性遗漏仍开放**（见 `#144` 条目尾注） |
 
 > 用法：完成一条就把 `[ ]`/状态改掉并补证据列。**0-1 / 0-2 是用户动作，agent 不代做。**
 
@@ -55,10 +56,11 @@
 > 结论：**15 条证实已完成 ⇒ 就地翻 `[x]`**；**1 条（`#163`）只部分完成 ⇒ 保持 `[ ]` 并加注**。
 > 其余 70 条**无解决类标记**，抽查其中 12 条（`#144`/`#145`/`#146`/`#147`/`#148`/`#163①`/
 > `#165`/`#168`/`#169`/`B2-9`/`B3-3`/`B4-2`/`B7-2`）**均确认仍开放**，故保留 `[ ]`。
-> ⚠️ 其中 **`#146` 已在 R66 第四批修复**（`8d5848d`）—— 抽查时它**确为开放**，
-> 但本批已结案 ⇒ 已移出 §0.1.3、并入 §0.1.1。**这不是"抽查错了"，是先后顺序。**
+> ⚠️ 其中 **`#146`（`8d5848d`）与 `#144`（`172957c`）已在 R66 第四批修复** ——
+> 抽查时它们**确为开放**，本批才结案 ⇒ 已移出 §0.1.3、并入 §0.1.1。
+> **这不是"抽查错了"，是先后顺序。**
 
-### 0.1.1 已核销（15 条）
+### 0.1.1 已核销（16 条）
 
 | 条目 | 优先级 | 证据（R66 实测） |
 |---|---|---|
@@ -76,6 +78,7 @@
 | **#162** TODO 内远端值自相矛盾 | P2 | 已修；且"每轮只改一处更新行"已升级为**机检** `tests/unit/test_todo_freshness.py`（复核戳不得落后于 CHANGELOG 的 Round） |
 | **A4** 硅基流动 402 阻塞 | P1（阻塞） | 阻塞已解除（2026-09-18，条目内已记）；**其解锁的"含真实 findings 的多轮 e2e"是另一件事**，见 B1 |
 | **#146** 页级失败原因未脱敏 | P2 | **R66 第四批**修：`stage2.py` 新增 `_sanitize_error_text()` = `redact_urls(_mask_secrets(text))[:200]`，**两个出口都**改走它（截断在脱敏之后）。护栏 `test_config_error_visibility.py::TestPageLevelErrorTextIsSanitized`（4 条），变异 `mutation_page_error_sanitize.py` ⇒ **5/5** |
+| **#144** 分片路径不传 `config_error` | P2 | **R66 第四批**修（`172957c`）：分片路径建共享 `config_error` dict、两处 `_analyze_one` 都传、`gather` 后补记被闸门跳过的页、配置级故障下跳过自愈。护栏 `test_pipeline.py::TestConfigErrorVisibility::test_sliced_path_escalates_config_error`（行为级 + 防空转）+ `TestSlicedPathSharesConfigErrorContract`（5 条），变异 `mutation_144_sliced_config_error.py` ⇒ **5/5** |
 | **B4-1** SSE 断点续传与心跳 | P3 | 条目自述两项**均不成立**、残余已拆出为 `B2-11`，且明写"**本条无需再做**" |
 
 ### 0.1.2 只部分完成（保持 `[ ]`，已就地加注）
@@ -85,13 +88,12 @@
 | **#163②** `rule_doc.py` 注释称 R8 是 `low_confidence` | ✅ 实测该处注释已不存在；现存 `_check_low_confidence_params` 是**另一条规则**，非误标 | — （故未翻 `[x]`：同一条目的 ① 仍未做，见下一行） |
 | **#163①** | ② 已修 | `core/kb/retriever.py:5` 注释仍写 "at **29K chars** of corpus"，与当前语料规模不符 |
 
-### 0.1.3 抽查确认"仍开放"（**11 条**保留 `[ ]`）
+### 0.1.3 抽查确认"仍开放"（**10 条**保留 `[ ]`）
 
-> 原抽查 12 条；其中 **`#146` 已在 R66 第四批修复** ⇒ 已移入 §0.1.1，故本节剩 **11 条**。
+> 原抽查 12 条；其中 **`#146`、`#144` 已在 R66 第四批修复** ⇒ 已移入 §0.1.1，故本节剩 **10 条**。
 
 | 条目 | R66 实测证据 |
 |---|---|
-| **#144** 分片路径不传 `config_error` | `core/pipeline/engine.py` 两处 `_analyze_one(`（L572、L698）**均无 `config_error=` 实参** |
 | **#145** root 钉在 DEBUG | `logging_config.py:119` `root.setLevel(logging.DEBUG)`；`:141` file handler 亦 DEBUG |
 | **#147** 重试不清 `failed_pages` | `api/jobs/actions.py:83` 只 `SET error_message = NULL, finished_at = NULL` |
 | **#148** 报告不带失败信息 | `api/report.py` **零处** `error_message` |
@@ -483,12 +485,21 @@
       词表退回裸状态码 → 2 例红）；同一探针复测 **8/8 正确（原 5/8）**。
       ⚠️ **登记一条实测副产物**（见 #174）：`anthropic`/`openai` SDK **自带**
       `max_retries`，与我们的重试循环**相乘**。
-- [ ] **#144【P2】分片路径未传 `config_error` ⇒ #127 的 job 级首因在 `OCR_SLICES>1` 下失效。**
-      `engine.py:527-534` / `:650-660` 两处 `_analyze_one` **无 `config_error=` 实参**，
-      而 `stage2.py:151` 是**唯一**传参点 ⇒ `stage2.py:56` 的 `escalate` 恒 `False` ⇒
-      403/401 的具体原因只落在页级 `_error`，`jobs.error_message` 只剩通用句。
-      **修法**：分片路径建 `config_error: dict` 并传给两处 `_analyze_one`；更稳的做法是把
-      "失败性质"提升为 job 级列（`error_kind`），消除"每个调用点都得记得传"的结构性遗漏。
+- [x] **#144【P2】分片路径未传 `config_error` ⇒ #127 的 job 级首因在 `OCR_SLICES>1` 下失效。** —— **R66 已核销**（证据见 §0.1）
+      `engine.py` 两处 `_analyze_one` **无 `config_error=` 实参**，
+      而 `stage2.py` 的 `_run_stage2_analysis` 是**唯一**传参点 ⇒ `stage2.py` 的
+      `escalate` 恒 `False` ⇒ 403/401 的具体原因只落在页级 `_error`，
+      `jobs.error_message` 只剩通用句（甚至为 NULL）。
+      **修法**：分片路径建 `config_error: dict` 并传给两处 `_analyze_one`。
+      → **R66 第四批已修（`172957c`）**：分片路径建共享 `config_error` dict、
+      两处调用点都传、`gather` 后**补记被闸门跳过的页**、配置级故障下**跳过自愈**。
+      护栏 `tests/unit/test_pipeline.py::TestConfigErrorVisibility::`
+      `test_sliced_path_escalates_config_error`（**行为级**，真跑分片分支，含防空转）
+      + `test_config_error_visibility.py::TestSlicedPathSharesConfigErrorContract`（5 条），
+      变异 `devlogs/_verify/mutation_144_sliced_config_error.py` ⇒ **5/5**。
+      ⚠️ **条目里"更稳的做法"（把失败性质提升为 job 级列 `error_kind`）本轮未做** ——
+      它消除的是"每个调用点都得记得传"的**结构性**遗漏，比本次的逐点修法更彻底。
+      仍开放，见 §0 的 0-6。
 - [ ] **#145【P2】日志：root 永远 DEBUG + 第三方 INFO/DEBUG 全量落盘 + 原始 LLM 输出写日志。**
       `logging_config.py:119,141` 把 root 与 file handler 都钉在 DEBUG；`level` 参数**只作用于 console**，
       无 `PBC_LOG_LEVEL`；第三库（httpx/httpcore/openai）DEBUG 经 root 全进 `pharma.log`（10MB 很快滚完）。
