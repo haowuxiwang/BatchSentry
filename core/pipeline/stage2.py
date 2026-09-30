@@ -9,9 +9,34 @@ import time
 from config import config
 from core.page_analyzer import AnalysisCancelled
 from core.pipeline.state import _audit_log, touch_activity, transition_status
+from core.security import redact_urls
 from llm.client import LLMConfigError, _mask_secrets
 
 logger = logging.getLogger(__name__)
+
+_ERROR_TEXT_LIMIT = 200
+
+
+def _sanitize_error_text(text: str) -> str:
+    """错误文本**入库 / 上屏前**的统一脱敏（单一真值，#146）。
+
+    为什么必须统一：同一个异常文本有**两个出口** ——
+    ① job 级首因（``config_error["reason"]`` → ``jobs.error_message``）；
+    ② **页级**（``error_data["_error"]`` → ``page_cache.structured_json``
+    → 复核页横幅，见 ``test_config_error_visibility`` 的页级横幅用例）。
+    两处口径不一致时，**脱敏较弱的那条就是泄露路径**（实测：job 级掩了、
+    页级没掩）。
+
+    两层，顺序有意：
+    1. ``_mask_secrets`` —— 掩 API key / token 字面量；
+    2. ``redact_urls`` —— 抹掉 URL 的 query（签名 token 常藏在这里）。
+
+    ⚠️ **截断必须放在脱敏之后**：``_mask_secrets`` 的模式带最小长度
+    （``sk-…{8,}`` / 32 位十六进制 / ``cli_…{8,}``），先截断会把 token 切成
+    短于该长度的残片 ⇒ **正则不再匹配**，等于把脱敏绕过。故顺序为
+    「掩码 → 抹 query → 截断」，不是「截断 → 掩码」。
+    """
+    return redact_urls(_mask_secrets(text))[:_ERROR_TEXT_LIMIT]
 
 
 def config_error_job_message(reason: str) -> str:
@@ -54,14 +79,16 @@ async def _handle_page_failure(
     # 判定与暂存在同一"无 await 区间"内完成 → 并发页只会有一个拿到 True
     escalate = False
     if config_error is not None and not config_error:
-        config_error["reason"] = _mask_secrets(str(exc))[:200]
+        config_error["reason"] = _sanitize_error_text(str(exc))
         config_error["page"] = page_num
         escalate = True
 
     error_data = {
         "page_number": page_num,
         "_parse_error": True,
-        "_error": str(exc)[:200],
+        # #146：与 job 级首因**同一口径**（此前这里是裸 `str(exc)` ⇒ 页级
+        # 横幅是脱敏较弱的那条出口）。
+        "_error": _sanitize_error_text(str(exc)),
         "overall_confidence": "low",
     }
     # Runtime resolution — tests rebuild core.pipeline.db_lock.

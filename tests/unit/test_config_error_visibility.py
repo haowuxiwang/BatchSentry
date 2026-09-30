@@ -489,3 +489,72 @@ class TestAnalyzedPagesSingleSource:
         assert n >= 2, (
             f"GET /{{job_id}} 与 _get_job_progress 都应走同一口径，实测 {n} 处"
         )
+
+
+class TestPageLevelErrorTextIsSanitized:
+    """#146：**页级**失败原因必须与 job 级首因**同一脱敏口径**。
+
+    要防的失效模式：同一个异常文本有两个出口 ——
+    ① job 级 ``config_error["reason"]`` → ``jobs.error_message``；
+    ② 页级 ``error_data["_error"]`` → ``page_cache.structured_json`` →
+       **复核页横幅**（前端消费点见本文件 ``TestFrontend...`` 的
+       ``structured._error`` 断言）。
+    改动前 ① 走 ``_mask_secrets``、② 是**裸** ``str(exc)`` ⇒ ② 是泄露路径：
+    上游 SDK 的异常文本常原样回显 ``sk-…`` 与带签名 query 的 URL。
+    """
+
+    def _sanitize(self, text: str) -> str:
+        from core.pipeline.stage2 import _sanitize_error_text
+        return _sanitize_error_text(text)
+
+    def test_masks_api_key(self):
+        out = self._sanitize("401 Token is invalid: sk-abcdefghijklmnop")
+        assert "sk-abcdefghijklmnop" not in out, f"API key 未脱敏：{out!r}"
+        assert "sk-***" in out, f"掩码占位符没出现，脱敏可能没生效：{out!r}"
+
+    def test_redacts_signed_url_query(self):
+        msg = ("upload failed: https://oss.example.com/out.zip"
+               "?X-Amz-Signature=deadbeefcafe&X-Amz-Credential=AKIA")
+        out = self._sanitize(msg)
+        assert "X-Amz-Signature" not in out, f"签名 query 未抹除：{out!r}"
+        assert "?<redacted>" in out, f"未见 query 占位符：{out!r}"
+
+    def test_truncation_happens_after_masking(self):
+        """**顺序**判据：先截断会让被切短的 token 短于正则最小长度 ⇒ 漏掩。
+
+        `_mask_secrets` 的 `sk-` 模式要求 **≥8** 个字符（`sk-[A-Za-z0-9_-]{8,}`）。
+        这里把 token 放在第 193 字符之后、且**恰好 8 位**：
+          * 先掩码 → `sk-***`（总长 197）→ 再截 200 ⇒ 掩码保住；
+          * 先截断 → 只剩 `sk-abc`（3 位）→ 正则不匹配 ⇒ **原样漏出**。
+        故断言"不得出现 `sk-abc` 这个残片"—— 它是两种顺序的分水岭。
+        """
+        payload = "x" * 193 + "sk-abcdefgh"
+        assert len(payload) == 204 > 200, "样例必须超过截断长度，否则测不出顺序"
+        out = self._sanitize(payload)
+        assert len(out) <= 200
+        assert "sk-***" in out, f"掩码被截断吃掉了（顺序反了？）：{out[-20:]!r}"
+        assert "sk-abc" not in out, (
+            "出现了被截断后的 key 残片 —— 说明截断发生在脱敏**之前**，"
+            "等于绕过 `_mask_secrets` 的最小长度要求"
+        )
+
+    def test_both_export_sites_route_through_the_helper(self):
+        """调用点判据：两个出口都不得再直接写裸 `str(exc)`。
+
+        只测 helper 是不够的 —— 它可能**存在但没被调用**（本仓踩过"新增可选参
+        改进输出、调用点却漏传"的同类问题）。故按调用点形状断言。
+        """
+        src = STAGE2_PY.read_text(encoding="utf-8")
+        assert "def _sanitize_error_text(" in src, "helper 不见了"
+
+        assert 'config_error["reason"] = _sanitize_error_text(str(exc))' in src, (
+            "job 级首因未走统一脱敏 helper"
+        )
+        assert '"_error": _sanitize_error_text(str(exc)),' in src, (
+            "页级 _error 未走统一脱敏 helper（#146 的原始缺陷点）"
+        )
+        # 反例：这两个出口不得残留裸 str(exc)
+        assert '"_error": str(exc)' not in src, "页级 _error 又变回裸 str(exc)"
+        assert 'config_error["reason"] = _mask_secrets(' not in src, (
+            "job 级首因绕过了 helper（口径会再次分叉）"
+        )
