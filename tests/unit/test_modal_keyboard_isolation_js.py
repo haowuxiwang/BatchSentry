@@ -20,7 +20,7 @@ from __future__ import annotations
 from tests.js_harness import run_js_async
 
 # review.js 的**模块作用域**会执行 `R.safeAutoReload = R.progress.safeAutoReload`
-# （review.js:343），故必须加载 review-progress.js。
+# 该赋值在 review.js 的模块作用域，故必须加载 review-progress.js。
 FILES = [
     "pbc-fallback.js",
     "confirm-dialog.js",

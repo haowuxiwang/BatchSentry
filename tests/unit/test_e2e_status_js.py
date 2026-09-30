@@ -126,9 +126,9 @@ def test_unknown_state_does_not_crash_and_differs():
 #
 # 背景：`e2e_frozen.py` 的 13b/13c 段原本只在 `upload.js` / `review.js` 里
 # 找 #127 修复标记。但消费逻辑随后被**纯模块化重构**拆走：
-#   · `job.failed_pages`            → `static/upload-jobs.js:518`
-#   · `["error","partial_review"].includes(st)` → `static/upload-jobs.js:583`
-#   · `structured._error`           → `static/review-pageinfo.js:88`
+#   · `job.failed_pages`            → `static/upload-jobs.js` 的 `buildMetaLine`
+#   · `["error","partial_review"].includes(st)` → `static/upload-jobs.js` 的 `renderJobRow`
+#   · `structured._error`           → `static/review-pageinfo.js` 的 `updatePageLevelUI`
 # ⇒ 发版冒烟 `upload_js_127` / `review_js_127` **假红**（本轮实测 11 passed / 3 failed）。
 # 判据要证明的是它自己注释里写明的**分发事实**——"要分发的那份东西带着修复"——
 # 而不是"修复住在哪个文件里"。把位置写进判据，等于让一次纯重构把门禁变成噪声。

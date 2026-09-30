@@ -36,6 +36,7 @@ D. **判定谓词不过度匹配**（`dist-electron` 前缀不得命中 `dist-el
 from __future__ import annotations
 
 import importlib.util
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -317,3 +318,89 @@ class TestNoShadowDirectories:
             f"都会立刻显示在 git status 里 → 补一条整目录忽略（如 `spike/`），"
             f"或确属源码则纳入版本控制。"
         )
+
+# ── 测试里不得用「模块名 + 冒号 + 行号」指路 ────────────────────────────────
+# 由来（2026-09-30，R65）：`settings.js` 拆为 6 个模块后，`tests/` 里留下 5 处
+# 「`xxx.js` 后跟 `:990`」形式的**行号锚点** —— 它们指向的行早已换了内容，而
+# **没有任何东西会发现**：注释不参与执行，`grep` 也不会报错。这不是第一次：
+# R63 拆 `review.js` 时同样腐坏过一批。
+#
+# 为什么**只扫 `tests/`**：`docs/` 里的行号是**历史审查证据**（如
+# `docs/ADVERSARIAL_AUDIT.md` 记的是 2026-09-16 的事实），回改反而篡改证据。
+# 而测试是**可执行契约**，应当引用**符号**（函数名 / 常量名），不该引用行号 ——
+# 符号会被重构工具和 `grep` 一起更新，行号不会。
+#
+# ⚠️ 本文件**自己**也受这条约束：下面的说明文字与测试夹具都**不得**写出字面量
+# 形态（否则护栏会打到自身 —— 首次运行实测 3 条红，其中一条就是它）。
+# 夹具用拼接构造，说明文字用「`xxx.js` 后跟 `:990`」这种不含冒号+数字的措辞。
+_JS_LINE_REF_RE = re.compile(r"[a-zA-Z0-9_-]+\.js:\d+")
+
+#: 测试夹具：拼接构造，避免本文件出现字面量形态而**自我命中**。
+_SAMPLE_REF = "upload-jobs.js" + ":" + "518"
+
+
+class TestNoLineNumberRefsIntoFrontend:
+    """`tests/**/*.py` 里不得出现「模块名 + 冒号 + 行号」。
+
+    要指路就写**符号**：`static/upload-jobs.js` 的 `buildMetaLine`。
+    """
+
+    @staticmethod
+    def _find_refs(root: Path) -> dict[str, list[str]]:
+        """返回 ``{相对路径: [命中的引用, …]}``。``root`` 可注入 ⇒ 可直接单测。"""
+        out: dict[str, list[str]] = {}
+        for p in sorted(root.rglob("*.py")):
+            if "__pycache__" in p.parts:
+                continue
+            text = p.read_text(encoding="utf-8", errors="replace")
+            hits: list[str] = []
+            for m in _JS_LINE_REF_RE.finditer(text):
+                # ⚠️ 排除 URL：`http://127.0.0.1:58765/app.js:8080` 里的 `:8080`
+                # 是**端口**不是行号。判定看**本行**匹配点之前有没有 `://`
+                # —— 不能用"匹配点前 12 字符"，因为 `://` 可能远在 12 字符之外
+                # （首次实现就是那么写的，实测两条 URL 用例全红）。
+                # 不排除的话，将来有人把 e2e 的 base_url 写进注释就会**假红**，
+                # 而假红的下场是这个护栏被整个删掉。
+                line_start = text.rfind("\n", 0, m.start()) + 1
+                if "://" in text[line_start:m.start()]:
+                    continue
+                hits.append(m.group(0))
+            if hits:
+                out[str(p.relative_to(root))] = hits
+        return out
+
+    def test_no_line_number_refs_into_frontend(self):
+        found = self._find_refs(REPO / "tests")
+        assert not found, (
+            "测试里出现了「模块名 + 冒号 + 行号」形式的指路（行号会随拆分/重构腐坏）：\n"
+            + "\n".join(f"  {f}: {refs}" for f, refs in sorted(found.items()))
+            + "\n⇒ 改成引用**符号**（函数名/常量名）。"
+        )
+
+    def test_detector_scanned_the_test_tree(self):
+        """防空转：提取器必须**真的扫到文件**。
+
+        没有这条，`rglob` 写错（或路径写错）会让上面的断言**恒真** ——
+        "一条都没扫到"与"一条都没有"在空集上完全一样。
+        """
+        n = len(list((REPO / "tests").rglob("*.py")))
+        assert n > 50, f"只扫到 {n} 个测试文件 —— 路径或 glob 写错了，上面的断言是空的"
+
+    def test_detector_is_not_vacuous(self, tmp_path):
+        """阳性对照：植入一处引用后必须**报出来**，并给出文件与引用本身。"""
+        (tmp_path / "test_planted.py").write_text(
+            f"# 见 static/{_SAMPLE_REF} 的 buildMetaLine\n", encoding="utf-8")
+        found = self._find_refs(tmp_path)
+        assert found == {"test_planted.py": [_SAMPLE_REF]}, found
+
+    def test_detector_ignores_urls_with_ports(self, tmp_path):
+        """URL 里的端口不得被误判成行号引用（假红会让人删掉这个护栏）。"""
+        (tmp_path / "test_url.py").write_text(
+            "base = http://127.0.0.1:58765/app.js:8080\n", encoding="utf-8")
+        assert self._find_refs(tmp_path) == {}
+
+    def test_detector_still_flags_a_plain_comment(self, tmp_path):
+        """对照：**不带 URL** 的同样形态仍须命中（证明上一条不是把整类都放过了）。"""
+        (tmp_path / "test_plain.py").write_text(
+            f"# 见 static/{_SAMPLE_REF}\n", encoding="utf-8")
+        assert self._find_refs(tmp_path) == {"test_plain.py": [_SAMPLE_REF]}

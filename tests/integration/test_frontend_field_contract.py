@@ -99,7 +99,7 @@ def _consumed(body: str, prefix: str) -> set[str]:
 # 全部字段/类型契约一起失效）—— 正是本文件 docstring 警告的"空护栏"。
 _JS = _upload_js_sources()
 
-# 冷加载路径：列表响应直接喂给 renderJobRow（upload.js:397）
+# 冷加载路径：列表响应直接喂给 `upload-jobs.js` 的 `renderJobRow`
 # ⇒ 这些字段必须由 `GET /api/jobs` 提供。
 LIST_ROW_FIELDS: set[str] = _consumed(_fn_body(_JS, "renderJobRow"), "job") | _consumed(
     _fn_body(_JS, "buildMetaLine"), "job"
