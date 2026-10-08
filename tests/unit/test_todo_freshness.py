@@ -189,3 +189,162 @@ class TestNoDeadFrontendAnchors:
         assert not _FRONTEND_ANCHOR_RE.search("见 `settings" + _JS_SUFFIX + "` 的 renderProvider"), (
             "检测器把「无行号的模块指路」也判成锚点了 ⇒ 过宽，会误报"
         )
+
+
+# ── 交叉引用解析（不变式 G）────────────────────────────────────────────
+# 条目 id 形态：`0-6` / `B1-14` / `B11-7` / `B9-10`
+_ITEM_ID = r"(?:[A-Z]{1,2}\d+-\d+|\d+-\d+)"
+# 引用形态：`见 <id>` 或 `见 §<sec> 的 <id>`（`§` 可省、id 可带反引号）
+# ⚠️ 章节号**故意放宽**成「任意非空白/非`的`串」：若只认数字，`见 §B 的 X`
+# 这类引用会**一条都匹配不到** ⇒ 被**静默跳过**（首版即如此，变异 M2 当场抓到）。
+# 宁可捕获后判红（护栏只支持数字章节），也不要静默漏过看不懂的引用。
+_XREF_RE = re.compile(
+    r"见\s*(?:§(?P<sec>[^\s的`]+)\s*的\s*)?`?(?P<id>" + _ITEM_ID + r")`?"
+)
+# 声明形态：表格行 `| **<id>** ...` 或复选框行 `- [ ] **<id> ...`
+_DECL_RE = re.compile(
+    r"^(?:\|\s*\*\*(?P<t>" + _ITEM_ID + r")\*\*"
+    r"|-\s*\[[ xX]\]\s*\*\*(?P<c>" + _ITEM_ID + r")[\s：:])"
+)
+# 标题（用于把数字章节号映射到行区间）：`## 0. ...` / `### 0.1.1 ...`
+_HEADING_RE = re.compile(r"^#{2,3}\s+(\S+)")
+_NUMERIC_SECTION_RE = re.compile(r"\d+(?:\.\d+)*")
+
+
+def _todo_lines() -> list[str]:
+    return _TODO.read_text(encoding="utf-8").splitlines()
+
+
+def _declared_items() -> dict[str, int]:
+    """条目 id → 它被声明的行号（1-based）。同一 id 多次声明取**首次**。"""
+    out: dict[str, int] = {}
+    for lineno, line in enumerate(_todo_lines(), 1):
+        m = _DECL_RE.match(line)
+        if m:
+            out.setdefault(m.group("t") or m.group("c"), lineno)
+    return out
+
+
+def _xrefs() -> list[tuple[int, str | None, str]]:
+    """全部 `见 <id>` 交叉引用 → `(行号, 章节号 or None, 被引 id)`。"""
+    out: list[tuple[int, str | None, str]] = []
+    for lineno, line in enumerate(_todo_lines(), 1):
+        for m in _XREF_RE.finditer(line):
+            out.append((lineno, m.group("sec"), m.group("id")))
+    return out
+
+
+def _section_range(sec: str) -> tuple[int, int] | None:
+    """数字章节号 → `[起始行, 结束行)`；找不到该章节返回 None。
+
+    结束行 = 下一个**非后代**标题 —— `§0` 的区**包含** `§0.1` / `§0.1.1` 这些后代，
+    到 `## A.` 为止。字母章节（`A.`/`B.`/`F1.`）不参与数字章节号匹配。
+    """
+    lines = _todo_lines()
+    heads: list[tuple[str | None, int]] = []
+    for lineno, line in enumerate(lines, 1):
+        m = _HEADING_RE.match(line)
+        if not m:
+            continue
+        token = m.group(1).rstrip(".")
+        heads.append((token if _NUMERIC_SECTION_RE.fullmatch(token) else None, lineno))
+    start = next((ln for num, ln in heads if num == sec), None)
+    if start is None:
+        return None
+    end = len(lines) + 1
+    for num, ln in heads:
+        if ln <= start:
+            continue
+        if num is not None and (num == sec or num.startswith(sec + ".")):
+            continue
+        end = ln
+        break
+    return (start, end)
+
+
+class TestCrossReferencesResolve:
+    """不变式 G：`见 <id>` / `见 §N 的 <id>` 必须解析到**真实条目**。
+
+    为什么锁这条：R66 实测 `#144` 的尾注引用了**不存在**的 `0-6` —— 悬空引用。
+    读者按它去找会一无所获；而本文件当时只锁「台账 1:1」与「无失效行号锚点」，
+    **不查交叉引用**（报告 §11.6）。
+
+    ⚠️ 本护栏**只读 `docs/TODO.md`**。核销文字里**不要写出**「引用一个不存在的
+    条目」那种**字面引用形态** —— 写了会被这条护栏**自己判红**（首版核销时就
+    当场命中）。要举例就描述它，别复述它 —— 与 `TestNoDeadFrontendAnchors`
+    那条「说明文字不得自我命中」是同一个约定。
+    """
+
+    def test_both_sides_parsed(self):
+        decl, refs = _declared_items(), _xrefs()
+        assert decl, "一个条目 id 都没解析到 —— 声明锚点形态变了"
+        assert refs, (
+            "一条 `见 <id>` 交叉引用都没解析到 —— 要么引用锚点形态变了，"
+            "要么引用被删光（后者会让下面两条断言退化成空断言）"
+        )
+
+    def test_every_reference_resolves_to_a_declared_item(self):
+        decl, refs = _declared_items(), _xrefs()
+        dangling = [(ln, sec, i) for ln, sec, i in refs if i not in decl]
+        assert not dangling, (
+            "悬空交叉引用（引用了清单里不存在的条目）：\n  "
+            + "\n  ".join(
+                (f"L{ln}: §{sec} 的 {i}" if sec else f"L{ln}: 见 {i}")
+                for ln, sec, i in dangling
+            )
+            + "\n  → 要么补上该条目，要么把引用改指向真实存在的条目。"
+        )
+
+    def test_section_qualified_reference_lives_in_that_section(self):
+        """`§N 的 <id>` 还要求该条目**声明在 §N 内** —— 条目挪了章节，引用要跟着改。"""
+        decl = _declared_items()
+        bad: list[str] = []
+        for ln, sec, i in _xrefs():
+            if not sec:
+                continue
+            rng = _section_range(sec)
+            if rng is None:
+                bad.append(
+                    f"L{ln}: §{sec} —— 无法解析的章节号（护栏只支持**数字**章节，"
+                    f"如 §0 / §0.1.1）。fail-closed：看不懂的引用一律判红，不静默跳过"
+                )
+                continue
+            if i not in decl:
+                continue          # 悬空由上面那条用例负责报，这里不重复
+            start, end = rng
+            if not (start <= decl[i] < end):
+                bad.append(
+                    f"L{ln}: §{sec} 的 {i} —— 该条目声明在 L{decl[i]}，"
+                    f"不在 §{sec} 的 [{start}, {end}) 区间内"
+                )
+        assert not bad, (
+            "`§N 的 <id>` 指向的条目不在 §N 内：\n  "
+            + "\n  ".join(bad)
+            + "\n  → 条目被挪了章节，引用必须跟着改。"
+        )
+
+    def test_detectors_are_not_vacuous(self):
+        """阴性对照：引用一个**不存在**的条目时必须能被报出来。"""
+        # 两种引用形态都要能匹配
+        assert _XREF_RE.search("见 0-99"), "引用检测器匹配不到 `见 <id>`"
+        assert _XREF_RE.search("见 §0 的 0-99"), "引用检测器匹配不到 `见 §N 的 <id>`"
+        # **非数字章节**也必须被捕获（否则会被静默跳过 —— 首版即此缺陷，M2 抓到）
+        m = _XREF_RE.search("见 §B 的 0-99")
+        assert m and m.group("sec") == "B", (
+            "引用检测器漏掉了非数字章节号 ⇒ `见 §B 的 X` 会被静默跳过"
+        )
+        # 且该 id 确实不在已声明集合里 —— 证明"解析"这一步有判别力，不是恒绿
+        assert "0-99" not in _declared_items(), "0-99 竟然被当成已声明条目"
+        # 两种声明形态都要能匹配
+        assert _DECL_RE.match("| **0-1** | 推送 |"), "声明检测器匹配不到表格行"
+        assert _DECL_RE.match("- [ ] **B10-6 精度现状：** 无 P/R"), (
+            "声明检测器匹配不到「复选框 + id 与标题同处一个粗体段」的形态"
+        )
+        # 反例：正文里的引用行**不得**被当成声明（否则检测器过宽、悬空引用会漏网）
+        assert not _DECL_RE.match("  仍开放，见 §0 的 0-6。"), (
+            "声明检测器把正文引用行也判成了声明 ⇒ 过宽"
+        )
+        # 章节区间必须真的收窄（否则「§N 内」这一条会退化成恒真）
+        rng = _section_range("0")
+        assert rng is not None, "解析不到 §0 的区间 —— 标题锚点失效"
+        assert rng[1] <= len(_todo_lines()) + 1 and rng[0] < rng[1]
