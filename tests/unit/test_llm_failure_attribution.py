@@ -114,11 +114,27 @@ def test_invalid_text_says_environment_not_product_defect():
     assert _PRODUCT_DEFECT_CLAIM not in t
 
 
-def test_ok_text_says_product_defect():
-    """阳性对照的另一半：两段都通过时**必须**敢说是产品缺陷。"""
+def test_ok_text_does_not_overclaim_from_a_tiny_probe():
+    """``ok`` 只证"凭据 + 额度可用"，**不足以**断言产品缺陷（Round 70 第十四批，第三次同类修正）。
+
+    实测（2026-10-08）：同一凭据两段探测双双 200，而真实 ``page_analysis`` 长请求
+    （~3127 prompt tokens / 77s）被上游 ALB 以 ``<title>504 Gateway Time-out</title>``
+    的 **HTML** 页截断（``llm_call_audit.error`` 因此不是 JSON）⇒ 旧文案
+    "故此处失败是产品缺陷" 与**同一份报告的另一行**（``首条错误：<html>…504…``）
+    **自相矛盾** —— 与 2026-09-30 那次（402 被报成产品缺陷）是同一形状。
+
+    故 ``ok`` 文案必须：① 说清它**证到了什么**；② **点名盲区**（极小请求看不到
+    长请求的网关超时）；③ 给出**下一步判据**（看 ``error`` 是不是 JSON）；
+    ④ 仍**不得**倒向"环境问题"放行。
+    """
     t = llm_failure_attribution(VERDICT_OK, "免费端点 HTTP 200 + 计费端点 HTTP 200")
-    assert _PRODUCT_DEFECT_CLAIM in t, "凭据与额度都可用时却不敢归因到产品"
-    assert "非产品缺陷" not in t
+    assert "凭据有效" in t and "额度可用" in t, "未说清探测证到了什么"
+    assert "排除" in t and "401/402" in t, "未排除凭据/额度类环境问题"
+    assert "极小请求" in t, "未点名探测盲区（极小请求 ≠ 真实长请求）"
+    assert "504" in t and "llm_call_audit.error" in t, "未给出可执行的下一步判据"
+    assert "才是产品缺陷" in t, "条件式归因被删掉了（满足条件时仍须敢归因到产品）"
+    assert _PRODUCT_DEFECT_CLAIM not in t, "又回到无条件断言产品缺陷（本次修正的缺陷）"
+    assert "非产品缺陷" not in t, "凭据与额度都可用时却倒向'环境问题'放行"
 
 
 def test_unknown_text_is_fail_closed():

@@ -7,6 +7,46 @@
 
 ## [Unreleased]
 
+### LLM 归因的 `ok` 分支**越过证据**断言「产品缺陷」—— 实测被上游 504 打脸（Round 70 第十四批，2026-10-08）
+
+> 记录 → `docs/TODO.md` 的 **0-13**（本轮**新发现**；属当前 backlog ⇒ 就地记 §0 表，不进 §0.1 台账）。
+
+**怎么发现的**：产物级 e2e 两次以 `status=error` 收场，报告同时打印了两行**互相矛盾**的内容 ——
+
+- `FAIL pipeline_terminal … 归因：同一凭据（含一次**计费**最小请求）探测得 免费端点 HTTP 200 +
+  计费端点 HTTP 200 ⇒ **凭据与额度均可用**，故此处失败是产品缺陷（优先查：凭据是否被发给了错误的提供方/端点…）`
+- 同一行的 `error_message` 与 `llm_call_audit` 里却是：
+  **`<html>…<title>504 Gateway Time-out</title>…<hr><center>alb</center>`**
+
+**定位**：`tests/e2e_proc.llm_failure_attribution` 的 `ok` 分支把"探针两段都 200"直接读成"产品缺陷"，
+但探针第二段是 `POST /chat/completions` + `max_tokens=1` —— 一个**极小请求**。真实失败发生在
+`page_analysis`（~3127 prompt tokens；同一模型成功时耗时 **77s**）上，被上游 ALB 以 **504** 截断
+（`llm_call_audit.error` 因此不是 JSON）。⇒ `ok` 的语义只是"**凭据有效 + 额度可用**"，
+**推不出**"产品缺陷"；该推理隐含了"探针请求与真实请求等价"这一**未被声明、且已为假**的前提。
+
+与 2026-09-30 那次（**402 欠费**被报成产品缺陷）是**同一形状**：判据本身没错，错在**结论越过了
+判据能支撑的范围**。本项目历史上已两次修正同类问题（Round 54、2026-09-30）。
+
+**修法（保留全部既有保护，只去掉超出证据的断言）**：`ok` 文案改为
+① 说清证到了什么（凭据/额度可用、**排除 401/402 类环境问题**）；
+② **点名盲区**（极小请求看不到长请求的网关超时，附本次实测样本）；
+③ 给出可执行的下一步判据（先看 `llm_call_audit.error` 是不是 JSON）；
+④ 保留**条件式**归因「…⇒ 才是产品缺陷」，且仍**不得**出现「非产品缺陷」（不倒向环境放行）。
+
+**验证**：
+
+- 护栏 `tests/unit/test_llm_failure_attribution.py::test_ok_text_does_not_overclaim_from_a_tiny_probe`
+  （断言四要素齐全 + 旧的越界断言不出现 + 不倒向环境）；
+- 变异 `devlogs/_verify/mutate_r72_ok_attribution_scope.py` ⇒ **5/5 CAUGHT**（删盲区句 / 退回无条件断言 /
+  删「排除 401-402」/ 弱化「极小请求」/ 把条件式改成无条件）+ 阴性对照绿 + 还原逐文件 sha256 一致；
+- **产物实测**：强制 `error` 场景下新文案原样打印（`devlogs/_verify/r72_ocr_ready_failopen_probe.py`）。
+
+**未重建**：改动只在 `tests/`（`BUNDLE_SOURCES` 不含 `tests/`）⇒ 两份产物不受影响。
+
+**同批附记（工具修正）**：该探针脚本首版把"修复前基线"写死为 `HEAD`，而前一批修复**已提交** ⇒
+`HEAD` 已是修复后版本，脚本当场 `AssertionError`。已改为**回溯查找**含旧形态的修订
+（`HEAD`、`HEAD~1`…），使脚本在"修复已提交"之后仍可复跑。
+
 ### 冻结冒烟的 OCR 就绪真值：**只看 env** ⇒ 低报 + 一次真实的 fail-open（Round 69 第十三批，2026-10-08）
 
 > 记录 → `docs/TODO.md` 的 **0-12**（本轮**新发现**；属当前 backlog ⇒ 就地记 §0 表，不进 §0.1 台账）。

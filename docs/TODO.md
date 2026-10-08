@@ -1,6 +1,6 @@
 # TODO —— 活的待办清单
 
-> **复核戳：Round 69（2026-10-08，第十三批）** ← `tests/unit/test_todo_freshness.py` 机检读这一行；
+> **复核戳：Round 70（2026-10-08，第十四批）** ← `tests/unit/test_todo_freshness.py` 机检读这一行；
 > 该戳**不得落后于 `CHANGELOG.md` 的最新 Round**。
 >
 > **状态（R66 复核，2026-09-30）——本文件分两层，别混读**：
@@ -19,6 +19,10 @@
 >   **只看 env** ⇒ 覆盖清单低报 + 一次真实的 **fail-open**）。已修：就绪真值改取**应用自报**
 >   （`GET /api/settings` 的 `ocr.{paddle,mineru}.configured`），并新增 `ocr_ready_self_report` 断言。
 >   属**当前 backlog** ⇒ **就地记 §0 表**，**不进 §0.1 台账**（台账按定义只记 §A 及以下）。
+> - **R74 第十四批（2026-10-08）**：核销 **§0 表内的 0-13**（本轮**新发现**：LLM 归因的 `ok` 分支
+>   **越过证据**断言"产品缺陷" —— 实测同一份报告的另一行写着上游 **504** 网关页）。
+>   已修：`ok` 文案只陈述证到了什么 + 点名盲区（极小请求 ≠ 真实长请求）+ 给出下一步判据，
+>   并保留条件式归因。属**当前 backlog** ⇒ **就地记 §0 表**，**不进 §0.1 台账**。
 > - **§A 及以下 = Round 59（2026-09-23）的快照**，**已做过一轮核销，但未逐条复核**。
 >   核销过的条目带 **`—— **R66 已核销**（证据见 §0.1）`** 尾注；
 >   **其余仍标 `[ ]` 的，按"未复核"对待，不要当成当前事实。**
@@ -64,6 +68,7 @@
 | **0-10** | 看门狗 `analyzing` 阈值**未覆盖 fix-hint 重试链**的叠加静默 | P3 | 无 | 落一条结论：覆盖 or **显式豁免 + 写明理由** | **R69 定位（未修）**：`llm/client.py::chat_json` 的 JSON 解析修复链最多**再发 2 次**调用；若 call1 成功但解析失败、随后两次均超时，静默可达 `3 × (480×3) = 4320s` > 1 页阈值 2280s ⇒ **理论上可能误判停滞**。概率极低（需上游在 call1 之后彻底失联），且**该情形下"恢复"本身就是期望行为** ⇒ 倾向**显式豁免 + 写明理由**，而非抬高阈值。 |
 | **0-11** | 冻结冒烟（`test_frozen_smoke`）的就绪失败**不可当场归因**；30s 期限在满载下会抖动 | P3 | 无 | 失败消息能区分「进程已死」与「进程活着但没就绪」 | **R71 第十一批（2026-10-08）**：门禁实测**同一份逐字节一致的产物**三轮 —— R69 `test_health_ok` **4.039s 通过**、R70 **4.666s 通过**、R71 首轮 **33.157s 超时**（30s 期限用尽 ⇒ 8 条 error、门禁 10/11）。隔离复跑 **8 passed / 20.25s**、整轮重跑 **11/11 / 3939 passed** ⇒ 判为**环境抖动**，**不是**回归（本批未改任何入包字节，`artifact_freshness` 逐字节一致）。**真缺口 = 可诊断性**：旧消息只打服务端日志，而该日志为空 ⇒ **无法区分**「进程已死」与「进程活着但没就绪」（根因完全不同）。**已修**（`tests/integration/test_frozen_smoke.py`）：失败消息带上 `after Ns` / `alive=` / `exit_code=`（`rc` 在 `stop_server` **之前**取）；验证脚本 `devlogs/_verify/verify_r71_frozen_smoke_diag.py` 用「立刻退出的 stub exe」逼出该分支 ⇒ 实测消息 `after 5.4s (alive=False, exit_code=0)`，且**还原字节一致**。⚠️ **未做**：**不**加重试（会掩盖真回归）、**不**抬高 30s 期限（抖动根因未定位 —— `alive` 字段正是为下一次复现准备的）。 |
 | **0-12** | 冻结冒烟的 OCR **就绪真值只看 env**、忽略应用已有配置 ⇒ 覆盖清单**低报**（跑过 OCR 却记 skipped）+ 真实 `error` 被吞成「预期降级」**不记 FAIL**（**fail-open**） | **P2** | **✅ 已完成（R73 第十三批核销）** | 就绪真值取自**应用自报**；`error` 且应用已配 ⇒ 必须记 FAIL（不得只打印 `[SKIP]`） | **R73 第十三批（2026-10-08）：达成。** **定位**：e2e appdata 固定复用 ⇒ 上轮凭据残留，而 `OCR_CONFIGURED = bool(_paddle or _mineru)` 只认 env；实测未注入 OCR env 时流水线仍到 `review`（`ocr_backend_used=paddle`、`llm_audit success=3/3`），清单却记 `[skipped] ocr_pipeline`。**修法**：`tests/e2e_proc.py` 新增纯函数 `ocr_ready_from_settings()`（读 `ocr.{paddle,mineru}.configured`，非真布尔 `True` 一律 fail-closed）；`tests/e2e_frozen.py` 就绪真值改由它派生 + 新增 `ocr_ready_self_report` 断言 + 修正 `ocr_config` 的 reason。**护栏**：`test_e2e_proc_helper.py::TestOcrReadyFromSettings`（**8 条**）+ `test_e2e_frozen_derives_ocr_ready_from_app_not_env`（接线，源码扫描）。**变异** `devlogs/_verify/mutate_r72_ocr_ready_truth.py` ⇒ **7/7 CAUGHT** + 负控绿 + 还原 sha256 一致。**行为对照**（`devlogs/_verify/r72_ocr_ready_failopen_probe.py`）：成功路径 `[skipped]`→`[covered]`；error 路径 `[SKIP] pipeline_terminal`（不记 FAIL）→ `FAIL pipeline_terminal` + `[failed ] ocr_pipeline`。**未重建**（`tests/` 不入包，`artifact_freshness` 不受影响）。 |
+| **0-13** | LLM 归因的 `ok` 分支**越过证据**断言「产品缺陷」：探针只证"凭据 + 额度可用"，却据此结论"产品缺陷"，隐含"探针极小请求 ≡ 真实长请求"这一未声明且已为假的前提 | **P2** | **✅ 已完成（R74 第十四批核销）** | `ok` 文案只陈述证到了什么（排除 401/402）+ 点名盲区 + 给出下一步判据，且保留条件式归因 | **R74 第十四批（2026-10-08）：达成。** **定位**：产物级 e2e 两次 `status=error`，报告**自相矛盾** —— 归因写"故此处失败是产品缺陷"，而同一行 `error_message` 与 `llm_call_audit.error` 是上游 ALB 的 `<title>504 Gateway Time-out</title>` **HTML 页**（`page_analysis`，~3127 prompt tokens，成功时 77s）。`ok` 的判据是"免费 + 计费端点双双 200"，而计费段是 `max_tokens=1` 的**极小请求** ⇒ 看不到长请求的网关超时。**修法**：`tests/e2e_proc.py` 的 `ok` 分支改为"凭据有效、额度可用 ⇒ 排除 401/402 类环境问题" + 点名盲区（附实测样本）+ "先看 `llm_call_audit.error` 是否 JSON" + 条件式"…⇒ 才是产品缺陷"。**护栏**：`test_llm_failure_attribution.py::test_ok_text_does_not_overclaim_from_a_tiny_probe`。**变异** `devlogs/_verify/mutate_r72_ok_attribution_scope.py` ⇒ **5/5 CAUGHT** + 负控绿 + 还原 sha256 一致。**产物实测**：强制 `error` 场景下新文案原样打印。**未重建**（`tests/` 不入包）。 |
 
 > 用法：完成一条就把 `[ ]`/状态改掉并补证据列。**0-1 / 0-2 是用户动作，agent 不代做。**
 
