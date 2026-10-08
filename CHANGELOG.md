@@ -7,6 +7,37 @@
 
 ## [Unreleased]
 
+### 产物级 e2e **首次全绿** + 一处「归因错向」的修复（Round 67 第八批，2026-10-08）
+
+> 报告 → `docs/ADVERSARIAL_REVIEW_2026-09-30.md` §十四。
+
+**背景（外部条件解封）**：`SILICONFLOW_API_KEY` 此前被上游拒（401 `30014`）/
+欠费（402 `30001`）。本轮**先单独探测外部那一半**再跑 e2e：`GET /v1/models` 与
+`POST /v1/chat/completions` 双双 **HTTP 200** ⇒ 凭据**可用**。于是
+`tests/e2e_frozen.py` 跑出 **28/28 全绿、`E2E_RC=0`、覆盖 `covered=4 skipped=0
+failed=0`** —— **`llm_pipeline` 首次被真实覆盖**（`llm_audit` 有 `success=1`
+的调用，不再是「靠降级到达终态」）。`docs/TODO.md` 的 **0-8 据此核销**。
+
+**修复（只改归因，不改判据强度）**：驱动把「OCR 真实后端 ≠ 本轮配置的后端」
+与「字段根本没写」合并成同一句话 —— 前者却写成「**未记录**
+`ocr_backend_used`」。2026-10-08 实测触发了前者：PaddleOCR 上游返回
+`state=failed, errorMsg=系统错误-单页` ⇒ 产品**按设计** failover 到 MinerU ⇒
+`ocr_backend_used='mineru'`（字段**有值**）。旧 reason 会把排查引向「字段为什么
+是空的」，而真问题是「配置的后端为什么没跑成」。修法：
+`classify_pipeline(..., ocr_backend_expected=)` + 驱动在不一致分支**保留真实值**；
+状态仍为 `failed`。护栏 6 条，变异 `mutate_e2e_coverage.py` ⇒ **11/11**。
+
+**新增能力**：`devlogs/_verify/run_e2e_with_config_creds.py` 支持 `--model` /
+`--provider` 覆盖（**只影响本次子进程**）—— 换模型复跑不再需要改用户的
+`config.json` 再改回来（那既动了用户实时配置，又留一个「忘了改回」的静默失败面）。
+
+**记录（本批不修）**：产物内一次 `page_analysis` 调用**没有墙钟上界** ——
+`_PAGE_TIMEOUT=480s` 是**单次尝试**的超时，而 `openai` SDK 自带内部重试
+⇒ 最坏要 3×480s 才轮到产品自己处理。实测 `Qwen/Qwen3.5-35B-A3B`（推理模型，
+输出预算大量花在 reasoning 上）在产物内挂起 **>930s 且无任何日志**；同一任务
+`deepseek-ai/DeepSeek-V3.2` **142.9s** 正常返回 ⇒ **`deepseek-ai/DeepSeek-V3.2`
+是本轮唯一可用的档位**。已登记 `docs/TODO.md` 0-9。
+
 ### 看门狗「启动即首扫」—— 存活信号无空窗（Round 67 第七批，2026-10-08）
 
 > 报告 → `docs/ADVERSARIAL_REVIEW_2026-09-30.md` §十三。

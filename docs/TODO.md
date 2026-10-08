@@ -6,6 +6,7 @@
 > **状态（R66 复核，2026-09-30）——本文件分两层，别混读**：
 > - **§0 = R66 实核过的当前 backlog**（每条挂证据，可信）。
 > - **§0.1 = R66 对 §A 及以下的核销台账**（**19 条**经证据核实已完成，就地翻 `[x]`；含后续批次自 §0.1.3 移入的 `#146`/`#144`/`#145`，以及 `B4`+`B5-2` 这对**同缺陷双登记**）。
+> - **R68 第八批（2026-10-08）**：核销的是 **§0 表内的 0-8**（LLM 凭据可用、`llm_pipeline` 首次被真实覆盖）—— 它属**当前 backlog**，故**就地改状态**，**不进 §0.1 台账**（台账按定义只记 §A 及以下，不变式 E 的 1:1 因此不受影响）。
 > - **§A 及以下 = Round 59（2026-09-23）的快照**，**已做过一轮核销，但未逐条复核**。
 >   核销过的条目带 **`—— **R66 已核销**（证据见 §0.1）`** 尾注；
 >   **其余仍标 `[ ]` 的，按"未复核"对待，不要当成当前事实。**
@@ -46,7 +47,8 @@
 | **0-5** | 上传批次并发提交 | P3 | 后端配额 3 | 单例进度条拆为每文件一条后，3 路并发且不撞配额 | **不建议先做**：当前串行不撞配额，无实测收益 |
 | **0-6** | 把「失败性质」提升为 **job 级列 `error_kind`**（替代「每个调用点都得记得传 `config_error`」） | P2 | 无；建议在 `#144` 结案后单独做 | `jobs` 增列 + 迁移；`error_kind` 由异常类型在**写入处**统一判定，调用点无需传参；`#127`/`#144` 的行为护栏**不改动**即仍绿 | R66 第五批：`#144` 逐点修法已结案，但**结构性遗漏仍开放**（见 `#144` 条目尾注） |
 | **0-7** | 给 `docs/TODO.md` 的 `§N 的 M-K` 形式**交叉引用加解析护栏** | P3 | 无 | 新护栏枚举全部交叉引用并断言每条都解析到**真实条目**；先用一条**阴性对照**（引用一个不存在的行）证明检测器不空转 | R66 第五批：`#144` 尾注引用了**不存在**的 0-6 ⇒ 悬空引用，而 `test_todo_freshness.py` 只锁「台账 1:1」与「无失效行号锚点」，**不查交叉引用**（见报告 §11.6） |
-| **0-8** | 轮换已失效的 LLM 凭据后复跑 e2e，才能真覆盖 LLM 链路 | **P1** | **用户动作** —— 凭据是外部资产，agent 不代改 | `PBC_E2E_LLM_KEY=<新 key>` 跑 `tests/e2e_frozen.py` ⇒ 覆盖清单 `llm_pipeline=covered`（`llm_audit` 里有 `success=1` 的调用） | R68 第六批：`.env` 的 `SILICONFLOW_API_KEY` 被上游**确凿拒绝**（两段式探测：免费端点 HTTP 401、`{'code': 30014, 'message': 'Token is invalid.'}`）⇒ 流水线止于 `error`、`llm_pipeline` 记 `failed`（`devlogs/e2e_coverage_20261008-085130.json`）。⚠️ 同轮还发现 `tests/e2e_unpacked.py` 的 D3 在沙箱内**假红**（子进程枚举看不到已被产品日志与 `/health` 证明存在的内嵌后端）⇒ 已在 `9768ae8` **只修归因、不改判据强度**。**R68 第七批复测更正**：同一凭据**已不再被拒**（免费端点 HTTP 200），失败变为 **402 `code=30001` "account balance is insufficient"** ⇒ 实为**凭据有效、账户欠费**（`devlogs/e2e_coverage_20261008-100631.json`、`…-101148.json`）。故本条动作由「轮换凭据」更正为「**充值或换一把有余额的 key**」，其余不变 |
+| **0-8** | 轮换已失效的 LLM 凭据后复跑 e2e，才能真覆盖 LLM 链路 | **P1** | **✅ 已完成（R68 第八批核销）** | `PBC_E2E_LLM_KEY=<新 key>` 跑 `tests/e2e_frozen.py` ⇒ 覆盖清单 `llm_pipeline=covered`（`llm_audit` 里有 `success=1` 的调用） | **R68 第八批（2026-10-08）：达成。** 先**单独探测外部那一半**：`GET /v1/models` 与 `POST /v1/chat/completions` 双双 **HTTP 200**（`devlogs/_verify/r70_probe_siliconflow.json`）⇒ 凭据**可用**。`tests/e2e_frozen.py`（`--require-llm`）跑出 **28/28 全绿、`E2E_RC=0`、`covered=4 skipped=0 failed=0`**，`llm_audit_success success=3/3（失败 0 次）`⇒ `llm_pipeline` **首次被真实覆盖**（`devlogs/e2e_coverage_20261008-140638.json`、`devlogs/_verify/_r70_e2e_frozen_run4.log`）。⚠️ 仅 `deepseek-ai/DeepSeek-V3.2` 可用；`Qwen/Qwen3.5-35B-A3B` 在产物内挂起（见 0-9）。前序更正见 `CHANGELOG.md`（401 `30014` 被拒 → 402 `30001` 欠费 → 本轮可用）。
+| **0-9** | 给单次 LLM 调用加**墙钟上界**（`asyncio.wait_for`）—— 使「单次尝试超时 × SDK 内部重试」不再叠加成**无上界的挂起** | **P2** | 无；须先定「多长算超时」（长报告 / 多页 cross-page 的**合法**耗时上界） | 单次 LLM 调用有 wall-clock 上界（可配）；超时后该页归 `failed_pages` 转人工**且留一条日志**；护栏 + 变异；`Qwen/Qwen3.5-35B-A3B` 复跑不再出现「无日志挂起 >930s」 | **R68 第八批实测（只定位、未修）**：产物内一页 `page_analysis` 调用挂起 **>930s** 且**全程无任何日志**（`_PAGE_TIMEOUT=480s` 是**单次尝试**的超时，`openai` SDK 自带内部重试⇒ 最坏 3×480s 才轮到产品自己处理；`devlogs/_verify/_r70_e2e_frozen_run3_qwen.log`）。对照实验：**同一任务**（3.9k prompt / `max_tokens=8000` / `json_object`）`deepseek-ai/DeepSeek-V3.2` **142.9s** 正常返回、`Qwen/Qwen3.5-35B-A3B` 200s 仍未返回（`devlogs/_verify/r70_probe_long_output.py`）⇒ 差异在**输出预算**（推理模型把预算花在 reasoning 上），不在模型能否作答。⚠️ **本批不改**：动的是 LLM 热路径，需单独评估。 |
 
 > 用法：完成一条就把 `[ ]`/状态改掉并补证据列。**0-1 / 0-2 是用户动作，agent 不代做。**
 

@@ -950,3 +950,107 @@ OK watchdog_invariants: ocr_running=4200.0 >= max(cap=3600.0, rot_bound=1260.0);
   ⇒ **凭据有效、账户欠费**。故 `docs/TODO.md` 的 **0-8 动作已更正**为
   「充值或换一把有余额的 key」。⚠️ 两次 e2e 的 `llm_pipeline`/`ocr_pipeline`
   仍记 `failed` —— **"流水线到达终态"依然不蕴含 LLM 成功过**。
+
+## 十四、R68 第八批：`0-8` 解封 —— 产物级 e2e **首次全绿** + 一处**归因错向**的修复
+
+### 14.1 前置：先把「外部那一半」单独证掉
+
+本项目吃过一次教训：**凭据 401（被拒）与 402（欠费）在 e2e 里长得一模一样**
+（都是 `llm_pipeline=failed`），但处置完全不同。故本批**先探测外部**再跑 e2e，
+脚本 `devlogs/_verify/r70_probe_siliconflow.py`（结果落 `r70_probe_siliconflow.json`）：
+
+| 探测 | 结果 |
+|---|---|
+| `GET /v1/models` | **HTTP 200**，97 个模型 ⇒ 凭据被接受 |
+| `POST /v1/chat/completions` `deepseek-ai/DeepSeek-V3.2` | **HTTP 200**，3.58s |
+| `POST /v1/chat/completions` `Qwen/Qwen3.5-35B-A3B` | **HTTP 200**，3.68s（`reasoning_tokens=182`）|
+
+⇒ 外部条件**已解封**（此前的 401/402 都消失），e2e 的红此后只能有一种解释。
+
+### 14.2 四次产物级 e2e 实跑（含两个指定模型的对照）
+
+| # | 模型 | 结果 | 关键行 |
+|---|---|---|---|
+| 1 | `deepseek-ai/DeepSeek-V3.2` | 27 OK / 1 XX | PaddleOCR 上游 `state=failed, errorMsg=系统错误-单页` ⇒ 产品 failover 到 MinerU |
+| 2 | `deepseek-ai/DeepSeek-V3.2` | **28 OK / 0 XX / `E2E_RC=0`** | `llm_audit_success success=3/3`、`covered=4 failed=0` |
+| 3 | `Qwen/Qwen3.5-35B-A3B` | 26 OK / 3 XX | `未在 930s 内到达终态: status='analyzing'`、`0 条 LLM 调用` |
+| 4 | `deepseek-ai/DeepSeek-V3.2`（`--require-llm`）| **28 OK / 0 XX / `E2E_RC=0`** | 同上；此轮驱动已是 §14.4 修后的版本 |
+
+第 2 轮是本项目**第一次**把四条覆盖项全部记 `covered`（`llm_config` / `llm_pipeline` /
+`ocr_config` / `ocr_pipeline`）—— **`llm_pipeline` 首次建立在权威证据上**
+（`GET /api/jobs/{id}/llm_audit` 里存在 `success=1` 的调用），而不是「终态到达」的推断。
+
+### 14.3 定位到的一处真实缺陷：驱动把「failover 兜底」写成「未记录」
+
+第 1 轮的 1 条红，**驱动自己的判据是对的，但它给出的理由与事实相反**：
+
+- 事实：`jobs.ocr_backend_used = 'mineru'`（产品把真实用的后端**如实记下了**）。
+- 驱动：断言 `mineru != paddle` 失败 ⇒ `except` 分支把 `_ocr_backend` **清成 `None`** ⇒
+  覆盖清单写出「**未记录** `ocr_backend_used` ⇒ 无法断定 OCR 走了真实后端」。
+
+字段明明有值，reason 却说没有。**状态没错（确实该 `failed`），归因错向** ——
+读者会去查「字段为什么是空的」，而真问题是「**配置的 paddle 为什么没跑成**」。
+本仓已有两次同类先例（`llm_failure_attribution`、`_startup_failure_attribution`），
+处置一致：**只改归因，不改判据强度**。
+
+### 14.4 修法 + 护栏 + 变异 **11/11**
+
+- `tests/e2e_coverage.py`：`_judge_ocr_success(..., expected=)` 拆出**三种可区分**的
+  reason（匹配 / 不一致 / 真·未记录）；`classify_pipeline(..., ocr_backend_expected=)`
+  透传（缺省 `None` ⇒ 与旧版逐字一致）。
+- `tests/e2e_frozen.py`：不一致分支**保留真实值**并把它写进失败消息（仍 `fail(...)`）。
+- 护栏 6 条（含 1 条 AST 接线护栏 + 1 条阳性对照）；变异 `mutate_e2e_coverage.py`
+  扩到 **11 条**（新增 M8 判据丢分支 / M9 清成 None / M10 不传期望 / M11 负控）
+  ⇒ **11/11 CAUGHT**。
+  ⚠️ 首版 AST 护栏查「整段 body 是否含 `_ocr_backend`」⇒ 被那句 `_ocr_backend = None`
+  **自我满足**，恒绿；**阳性对照当场把它抓出来**，改成查 `fail()` 的**实参**。
+
+### 14.5 新增能力：`--model` / `--provider` 覆盖
+
+验收常要求「换一个模型再跑一遍」。旧做法只能**改用户的 `config.json` 再改回来** ——
+既动实时配置，又留一个「忘了改回」的静默失败面。现在
+`run_e2e_with_config_creds.py` 支持 `--model` / `--provider`，**只影响本次子进程**。
+
+### 14.6 定位到但**本批不修**：单次 LLM 调用没有墙钟上界
+
+第 3 轮（`Qwen/Qwen3.5-35B-A3B`）的现象：产物内一页 `page_analysis` 调用挂起 **>930s**，
+**全程无任何日志**（既无完成行，也无超时/重试行）。
+
+已定位的机制（有据）：`_PAGE_TIMEOUT = 480.0` 是**单次尝试**的超时，而 `openai` SDK
+**自带内部重试** ⇒ 最坏要 3×480s 才轮到产品自己的 `except` 处理 ⇒ 930s 预算先耗尽，
+于是「什么都没记下」。**产品侧没有任何 wall-clock 上界**（`llm/` 与 `stage2/3` 里
+搜不到 `asyncio.wait_for` / `asyncio.timeout`）。
+
+分离自变量（`devlogs/_verify/r70_probe_long_output.py`，同一任务：3.9k prompt /
+`max_tokens=8000` / `response_format=json_object`）：
+
+| 模型 | 结果 |
+|---|---|
+| `deepseek-ai/DeepSeek-V3.2` | **HTTP 200 / 142.9s**，3469 completion tokens，JSON 可解析 |
+| `Qwen/Qwen3.5-35B-A3B` | **200s ReadTimeout**（未返回） |
+
+⇒ 差异在**输出预算**：`Qwen3.5-35B-A3B` 是推理模型，把 completion 预算大量花在
+`reasoning_tokens` 上（短任务实测 182–321），长任务下墙钟远超产品的单次尝试超时。
+**结论：`deepseek-ai/DeepSeek-V3.2` 是本轮唯一可用档位**（也正是 `config.json` 现值）。
+加固项登记为 `docs/TODO.md` **0-9**，**本批不动**（改的是 LLM 热路径，需单独评估
+「多长算超时」，否则会把合法的长报告误杀）。
+
+### 14.7 本批**未**验证的边界（不得读成已通过）
+
+- **§14.4 的修复没有在「真实 failover 现场」复跑过**：它是**归因**改动，触发条件是
+  上游 Paddle 偶发失败（第 1 轮那种）。第 4 轮虽然跑的是修后驱动，但那轮**没有发生
+  failover** ⇒ 新 reason 分支只有**单元级 + 变异级**证据，**未在产物内观测到**。
+- **`0-2`（Electron 应用层 e2e）仍未解除**：沙箱内起不来 GUI，须真实终端复跑。
+- **`Qwen/Qwen3.5-35B-A3B` 的挂起只做到「现象 + 机制定位」**：`openai` SDK 的内部重试
+  次数/退避未被观测（只从 `llm/client.py` 的注释与默认值推断）⇒ 「3×480s」是**推断**，
+  不是测量。
+- **未做全量门禁**：本批改动只在 `tests/` 与 `devlogs/`（**均不入包**）⇒ 产物与源码
+  的关系未变；但门禁用例数会变，**门禁必须重跑**（见 §14.8）。
+
+### 14.8 仓库卫生与文档时效（同轮核查）
+
+- `git status --porcelain` 空；`tests/unit/test_repo_hygiene.py` ⇒ **39 passed**。
+- `tests/unit/test_todo_freshness.py` + `test_gate_inventory_doc.py` ⇒ **13 passed**
+  （核销台账 1:1、无失效前端行号锚点、复核戳不落后）。
+- `CHANGELOG.md` 与本报告同步更新；`docs/TODO.md` 的 **0-8 就地核销**（§0 表内，
+  不进 §0.1 台账 —— 台账按定义只记 §A 及以下），并新增 **0-9**。
