@@ -1137,6 +1137,15 @@ timeout=_PAGE_TIMEOUT,   # 480.0
 **正确**行为，非误报）。实测：重建前 **10/11**，两份产物**都**点名 `core/watchdog.py`。
 ⇒ 本批**必须重建** `dist/pbc-server` 与 `dist-electron/win-unpacked`，再在干净树上复跑门禁。
 
+**已重建并复跑**：`PyInstaller --clean` → `bundle_manifest --write`（`head=c008769
+dirty=False`）→ `electron-builder` → `gen_provenance.py`（`git_head=c008769`）；
+两份 `pbc-server.exe` 均 **20,487,983 字节**（同 sha256）。门禁 **11/11 PASS**
+（`3932 passed`、coverage `95.08%`、`artifact_freshness` 逐字节一致）；
+产物级 e2e ⇒ **`E2E_RC=0`、`covered=4 skipped=0 failed=0`**、`llm_audit 3/3`、
+`ocr_backend_used=paddle`（本轮配置后端，**无 failover**）
+⇒ 新增归因分支的**一致路径**首次在产物上被目击
+（`devlogs/e2e_coverage_20261008-143941.json`）。
+
 ### 15.6 仍未修（新记 0-10）
 
 `llm/client.py::chat_json` 的 JSON 解析修复链最多**再发 2 次**调用。若 call1 成功但

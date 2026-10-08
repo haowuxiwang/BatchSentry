@@ -39,6 +39,18 @@ e2e 的 930s 只是**冒烟预算**（`poll_timeout_for_pages(1) 630 + 300`）�
 （M1 增量退回 180 / M2 真值源上移到 1200 / M3 调用点写死 `timeout=180`）+ 负控绿。
 文档同步：`docs/RUNTIME_WATCHDOG.md` 阈值表 `+180s/页` → `+480s/页` + 事故说明。
 
+**重建 + 复跑**：`core/watchdog.py` 在 `BUNDLE_SOURCES` 内 ⇒ 必须重建。
+重建链（跳过 `build:css` —— 未碰 `templates/`/`static/`）：`PyInstaller --clean` →
+`bundle_manifest --write`（`head=c008769 dirty=False`）→ `electron-builder` →
+`gen_provenance.py`（`git_head=c008769`）。两份产物 `pbc-server.exe` 均
+**20,487,983 字节**（同 sha256）。随后门禁 **11/11 PASS**（`3932 passed`、
+coverage `95.08%`、`artifact_freshness` 两份产物**逐字节一致**）；产物级 e2e
+（`frozen --model deepseek-ai/DeepSeek-V3.2 --require-llm`）⇒ **`E2E_RC=0`、
+`covered=4 skipped=0 failed=0`**、`llm_audit_success success=3/3`，且
+`ocr_backend_used=paddle` **正是本轮配置的后端**（无 failover）
+⇒ 新增归因分支的**一致路径**首次在产物上被目击
+（`devlogs/e2e_coverage_20261008-143941.json`）。
+
 **仍未修（新记 `docs/TODO.md` 0-10）**：`chat_json` 的 fix-hint 重试链可叠加
 （理论上 `3 × 1440 = 4320s` > 1 页阈值 2280s）—— 概率极低，且该情形下"恢复"
 本就是期望行为，倾向**显式豁免 + 写明理由**而非抬高阈值。
