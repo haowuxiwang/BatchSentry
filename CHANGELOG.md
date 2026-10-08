@@ -7,6 +7,44 @@
 
 ## [Unreleased]
 
+### 冻结冒烟的就绪失败**不可当场归因** —— 顺带定性一次门禁抖动（Round 67 第十一批，2026-10-08）
+
+> 记录 → `docs/TODO.md` 的 **0-11**。
+
+**现象**：本批门禁首轮 **10/11** —— `tests_coverage` 报 `3931 passed, 8 failed`，
+8 条全在 `tests/integration/test_frozen_smoke.py`，且都是 **setup ERROR**
+（`Failed: frozen server failed to become ready:`），**不是**断言失败。
+
+**定位（三轮对照，产物逐字节一致）**：
+
+| 轮次 | `test_health_ok` 用时 | 结果 |
+|---|---|---|
+| R69 门禁 14:32 | **4.039 s** | 通过 |
+| R70 门禁 14:58 | **4.666 s** | 通过 |
+| 本批首轮 15:12 | **33.157 s** | 超时（30 s 期限用尽） |
+
+`artifact_freshness` 判定两份产物与源码**逐字节一致**；隔离复跑
+`test_frozen_smoke.py` ⇒ **8 passed / 20.25 s**；整轮重跑 ⇒ **11/11、3939 passed、
+coverage 95.08%**。⇒ 判为**环境抖动**（冷启动 / IO 争用），**不是回归** ——
+本批只动 `tests/` + `docs/` + 本文件，未改任何入包字节。
+
+**真缺口 = 可诊断性**：旧失败消息只打印服务端日志，而该日志**为空** ⇒
+**无法区分**「进程已死」与「进程活着但没就绪」（前者是崩溃、后者是冷启动/争用，
+根因完全不同）—— 8 条 error 因此**无法就地定性**，只能靠整轮重跑。
+
+**修法**（`tests/integration/test_frozen_smoke.py`，**不改判定语义、不加重试**）：
+失败消息带上 `after Ns` / `alive=` / `exit_code=`；`rc = proc.poll()` 必须在
+`stop_server` **之前**取（否则拿到的是被杀之后的码）。
+验证：`devlogs/_verify/verify_r71_frozen_smoke_diag.py` 把 `EXE` 临时指向**立刻退出**的
+stub（选 `cmd.exe` 而**非**不存在的路径 —— 后者会被模块级 `skipif` 整文件跳过、测不到
+该分支），逼出失败分支 ⇒ 实测消息 `after 5.4s (alive=False, exit_code=0)`，
+且**还原字节一致**。
+
+**未做（明确边界）**：**不**加重试（会掩盖真回归）；**不**抬高 30 s 期限 ——
+抖动根因未定位，`alive` 字段正是为下一次复现准备的（届时可判"死"与"慢"）。
+
+**不入包**：只动 `tests/` ⇒ **无需重建**；用例数未变 ⇒ 门禁重跑以确认。
+
 ### LLM 自由枚举的**前置富集**契约 —— **「2 个死键」的前提被否证**（Round 67 第十一批，2026-10-08）
 
 > 报告 → `docs/ADVERSARIAL_REVIEW_2026-09-30.md` §十七。
