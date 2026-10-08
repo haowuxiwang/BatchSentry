@@ -124,12 +124,17 @@ $ git status --porcelain
 | **R66 第五批终验（13:49）** | **`7d53aed`** | **3889** | **0 failed** | `gate_report_20260930_134900.json` |
 | **R68 第六批门禁（08:57）** | **`acd25ed`** | **3915** | **0 failed** | `gate_report_20261008_085756.json` |
 | **R68 第六批终验（09:17）** | **`9768ae8`** | **3921** | **0 failed** | `gate_report_20261008_091744.json` |
+| R68 第七批门禁（09:50，**产物未重建**） | `2c820d9` | 3923 | **10/11** —— `artifact_freshness` FAIL（`core/watchdog.py` 与产物副本不符） | `gate_report_20261008_095033.json` |
+| R68 第七批终验（10:06） | `2c820d9` | 3923 | **0 failed** | `gate_report_20261008_100622.json` |
+| **R68 第七批收尾（10:28）** | **`8e281cd`** | **3924** | **0 failed** | `gate_report_20261008_102812.json` |
 
 **第四段对账**：`3883 → 3889` = **+6**，正是 §11.4 新增的 6 条用例
 （`test_sliced_path_escalates_config_error` 1 条 + `TestSlicedPathSharesConfigErrorContract` 5 条）
 ⇒ **数字自洽**。
 
 **第六段对账**：`3889 → 3915` = **+26**，正是 `#145` 新增的 `tests/unit/test_log_privacy.py`（26 条）；`3915 → 3921` = **+6**，正是 `9768ae8` 新增的 `TestE2eUnpackedGuard` 护栏（5 条新增 + 1 条防空转）⇒ **数字自洽**。详见 §十二。
+
+**第七段对账**：`3921 → 3923` = **+2**，正是本批新增的 `TestStartupFirstScan`（1 条判别性行为用例 + 1 条 AST 结构钉）；`3923 → 3924` = **+1**，正是收尾新增的 `test_frozen_smoke_watchdog_liveness_budget_discriminates_scan_first` ⇒ **数字自洽**。详见 §十三。
 
 **第三段对账**：`3879 → 3883` = **+4**，正是 F5 新增的 4 条用例
 （`TestPageLevelErrorTextIsSanitized`）⇒ **数字自洽**。
@@ -793,3 +798,155 @@ FATAL:content\browser\gpu\gpu_data_manager_impl_private.cc:416] GPU process isn'
 - **D3 新分支**：未实机观测（§12.4 尾注）。
 - **依赖快照** `docs/DEPENDENCY_AUDIT.json` 已 **14 天**（门禁阈值 90 天，仍绿，
   但这条轴随**日历**老化，与代码是否改动无关）。
+
+---
+
+## 十三、R68 第七批：看门狗「启动即首扫」（`B4` / 缺陷 `#125`）
+
+> 本批只动 `core/watchdog.py` + 其单测，**不改版号** —— 对外契约没变
+> （`/api/health/watchdog` 的字段、阈值、判据一个没动），变的是**时序**。
+
+### 13.1 定位：循环体把「等待」放在了「扫描」之前
+
+改前 `core/watchdog.py::watchdog_loop` 的循环体：
+
+```python
+while True:
+    if stop_event is not None:
+        await asyncio.wait_for(stop_event.wait(), timeout=interval)   # ← 先等
+    else:
+        await asyncio.sleep(interval)
+    await recover_stalled_jobs()                                      # ← 后扫
+    ...
+    finally:
+        _STATE["total_scans"] += 1
+        _STATE["last_scan_at"] = _local_now_str()
+```
+
+两个后果（`docs/RUNTIME_WATCHDOG.md` §8.10 早有登记，当时明写「本轮不改」）：
+
+1. **存活信号有 ~60s 空窗** —— 进程启动后头一个 `interval`（默认 60s）内
+   `last_scan_at` 恒为 `null`。外部监控**无法区分**「刚启动还没扫」与
+   「巡检已死」（两者都报 `null`）。
+2. **重启后回收要等满一个周期** —— 库里遗留的 `running`/`ocr_running` 行
+   要等 60s 才被标记为失败供重试。
+
+### 13.2 一处**更隐蔽**的连带缺陷（本次一并修）
+
+`finally` 里的 `total_scans += 1` / `last_scan_at = ...` 写在**等待之后**
+⇒ **等待期间被取消也会记一次扫描**：`total_scans` 虚高，且 `last_scan_at`
+会被「其实没扫过」的轮次刷新 —— 也就是**存活信号本身失真**。
+这与主缺陷**同源**：都把「等待」与「扫描」的次序搞反了。
+
+### 13.3 修法
+
+把 `recover_stalled_jobs()` 提到**任何等待之前**，等待块整块挪到扫描**之后**。
+`stop_event` 版仍是 `wait_for(stop_event.wait(), timeout=interval)`
+⇒ 关停仍可被**立即唤醒**，不拖满一个周期。
+
+**「扫描失败也不退出循环」的契约逐字未变**：扫描仍包在
+`try / except CancelledError / except Exception / finally` 里，异常只写
+`last_scan_error` 并继续下一轮。既有护栏 `test_loop_survives_scan_exception`
+与 `test_scan_error_is_recorded_not_swallowed` **不动即仍绿**。
+
+### 13.4 测试与变异（**7/7**）
+
+| 护栏 | 类型 | 判据 |
+|---|---|---|
+| `test_loop_scans_immediately_before_first_interval` | **行为（判官）** | `interval=5s`、只等 0.1s ⇒ 旧实现扫描 **0** 次、新实现 **≥1** 次 |
+| `test_loop_waits_only_after_the_scan` | 结构（AST） | 取 `watchdog_loop` 内「首扫」与「最早等待」行号，断言 `scan < wait`；含反空转锚点检查 |
+
+变异 `devlogs/_verify/mutation_r69_watchdog_firstscan.py` ⇒ **7/7**：
+
+| 变异 | 行为用例 | 结构钉 |
+|---|---|---|
+| M1 整块回退成「先睡后扫」 | CAUGHT | CAUGHT |
+| M2 假修复：形状对但**第一轮跳过扫描** | CAUGHT | **GREEN** |
+| M3 阴性对照（只改 docstring） | GREEN | GREEN |
+| M4 删掉每轮 `last_scan_at` 写入 | CAUGHT | —（未跑） |
+
+⚠️ **M2 那一格是**有意保留**的边界**：结构钉只钉**形状**，证明不了语义。
+所以**行为用例才是判官**；结构钉的职责只有一条 —— 把「整块改回先睡后扫」
+这种回退在**不需要 DB 的环境**里也能立刻抓住。把结构钉当成"语义已验证"就是
+把形状当语义（Trap 57/66 的同一族错误）。
+
+### 13.4.1 产物级覆盖（本批补齐的一处**断言失效**）
+
+跑 e2e 时发现：`tests/e2e_frozen.py` 的 `watchdog_invariants` 用
+`budget = interval + 30.0` 等 `last_scan_at` 被写上一次。旧实现「先睡一个周期
+再首扫」要到 **t≈interval** 才写它 ⇒ **预算 ≥ interval 时新旧实现同样绿**，
+这条**产物级**断言对 B4/#125 是**瞎的**；其旁注释（"循环是先等一个 interval
+再扫，故头 60s 内本就为 null"）在修复后更**与代码矛盾**。
+
+改法：预算改为 `interval * 0.8`（**严格小于** interval ⇒ 旧实现必然超时），
+输出标签从写死的 `scanned@t+60s`（那只是 interval，不是实际耗时）改成
+**实测** `first_scan@t+<elapsed>s`。
+
+护栏 `tests/unit/test_e2e_round_budget.py::test_frozen_smoke_watchdog_liveness_budget_discriminates_scan_first`
+—— 静态解析 `_wd_budget` 表达式，断言它是 `interval * <系数>` 且**系数严格 < 1**
+（只查"含 `*`"不够：`interval * 1.2` 会假绿）。
+变异 `devlogs/_verify/mutation_r69_frozen_watchdog_budget.py` ⇒ **5/5**：
+
+| 变异 | 结果 |
+|---|---|
+| M1 `interval + 30.0`（回退） | CAUGHT |
+| M2 `interval * 1.2`（≥ interval） | CAUGHT |
+| M3 `interval * 1.0`（边界） | CAUGHT |
+| M4 阴性对照（只改注释） | GREEN |
+| M5 变量改名（护栏锚点消失） | CAUGHT（不把"找不到"读成"通过"） |
+
+**重建产物上实跑**（`devlogs/_verify/_r69_e2e_frozen2.log`）：
+
+```
+OK watchdog_invariants: ocr_running=4200.0 >= max(cap=3600.0, rot_bound=1260.0);
+   cancelling=2400.0 >= cpu_cap=1800.0; first_scan@t+0.0s (interval=60s)
+```
+
+⇒ **产物级确认「启动即首扫」**（`first_scan@t+0.0s`；旧实现会是 t≈60s）。
+
+### 13.5 门禁：**先红后绿**（`artifact_freshness` 正确报警）
+
+| 时点 | 结果 | 说明 |
+|---|---|---|
+| 首次（09:50，**产物未重建**） | **10/11** | `artifact_freshness` 指名 `core/watchdog.py` |
+| 四步重建后（10:06） | **11/11 / 0 failed** | `3923 passed`、覆盖率 **95.08%** |
+| 收尾（10:28，`8e281cd`，只动 `tests/`） | **11/11 / 0 failed** | `3924 passed`、覆盖率 **95.08%** |
+
+**为什么必须重建**：`core/**/*.py` 在 `scripts/bundle_manifest.py::BUNDLE_SOURCES`
+的入包集合内 ⇒ 改 `core/watchdog.py` 会让**两份产物**（`dist/pbc-server`、
+`dist-electron/win-unpacked/resources/pbc-server`）与源码**逐字节不符**。
+门禁第一次就把它挑出来了（`artifact_freshness` = FAIL）—— **这不是误报，
+是门禁在阻止"用旧产物冒充新源码"**。
+
+**收尾那次（`8e281cd`）只动 `tests/`**（不在入包集合内）⇒ 无需重建，
+门禁仍 **11/11** —— 这顺带证明了「`tests/`-only 提交不使产物失效」
+这条判断在本仓的清单口径下**确实成立**（`BUNDLE_SOURCES` 里没有 `tests/`）。
+
+### 13.5.1 产物级 e2e（重建后实跑）
+
+`python devlogs/_verify/run_e2e_with_config_creds.py frozen`
+⇒ **26 passed / 2 failed**（`devlogs/_verify/_r69_e2e_frozen2.log`）。
+
+2 条红**同因**且**非产品缺陷**：上游 LLM 返回 **402 `code=30001`
+"account balance is insufficient"** ⇒ `llm_pipeline` / `ocr_pipeline` 记
+`failed`（`devlogs/e2e_coverage_20261008-101148.json`）。产品按设计把 LLM
+调用失败**降级成 finding 并继续** —— 这正是 `_judge_llm_success` 要拦的假绿
+（"终态到达"不蕴含"LLM 成功过"）。
+
+### 13.6 本批**未**验证的边界（不得读成已通过）
+
+- **时序改动未在真实长跑上复核**：「启动即回收不引入竞态」正是 §8.10 当初
+  写下"本轮不改"的理由之一。本批只做到：单测（行为 + AST）+ 变异 **7/7** +
+  门禁 **11/11** + 产物逐字节一致 + 产物级 e2e（§13.4.1）。**"真实重启场景下
+  不误杀"仍是推断，不是观测。**
+- **沙箱内 Electron 层 e2e 仍不可复现**（见 §十二 / §12.5）。
+- **LLM 链路仍未被覆盖**（上游账户欠费，见 §12.5 / §0 的 0-8）。
+- ⚠️ **文档内 `R68` 与 `Round 67` 两套批次标签并存**（`CHANGELOG.md` 写
+  `Round 67 第六批`，本报告与 `docs/TODO.md` 写 `R68 第六批`）。本批**沿用各自
+  文件既有写法**（CHANGELOG 用 `Round 67`、报告/TODO 用 `R68`），**未统一** ——
+  这是既存的文档卫生问题，单独登记，不在本批顺手改（避免把两批的证据行混在一起改）。
+- ⚠️ **LLM 失败归因本批有更新**：上一批记的是 **401 `30014` 凭据被拒**，
+  本批实跑（两次）都是 **402 `code=30001` "account balance is insufficient"**
+  ⇒ **凭据有效、账户欠费**。故 `docs/TODO.md` 的 **0-8 动作已更正**为
+  「充值或换一把有余额的 key」。⚠️ 两次 e2e 的 `llm_pipeline`/`ocr_pipeline`
+  仍记 `failed` —— **"流水线到达终态"依然不蕴含 LLM 成功过**。

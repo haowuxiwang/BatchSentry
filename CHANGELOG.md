@@ -7,6 +7,65 @@
 
 ## [Unreleased]
 
+### 看门狗「启动即首扫」—— 存活信号无空窗（Round 67 第七批，2026-10-08）
+
+> 报告 → `docs/ADVERSARIAL_REVIEW_2026-09-30.md` §十三。
+
+**定位**（`B4` / 缺陷 `#125`）：`core/watchdog.py::watchdog_loop` 的循环体是
+`await sleep(interval)` → `recover_stalled_jobs()`，而 `total_scans` /
+`last_scan_at` 写在该轮迭代的 `finally` ⇒ 进程启动后**头一个 interval
+（默认 60s）内 `last_scan_at` 恒为 `null`**。后果有二：① 存活信号有 60s 空窗
+—— 外部监控无法区分「刚启动还没扫」与「巡检已死」（两者都报 `null`）；
+② 崩溃重启后，库里遗留的 `running`/`ocr_running` 行要等满 60s 才被回收。
+
+**修复**：循环体改为**先扫后睡** —— `recover_stalled_jobs()` 移出
+`if stop_event` 分支、放到**任何等待之前**；等待块整块挪到扫描**之后**。
+「扫描失败也不退出循环」的契约逐字不变（仍包在
+`try/except CancelledError/except Exception/finally` 里，异常只写
+`last_scan_error` 并继续下一轮）。
+
+**顺带修掉一处更隐蔽的计数缺陷**：旧写法把 `finally`（`total_scans += 1` /
+`last_scan_at` 写入）放在等待**之后** ⇒ **等待期间被取消也会记一次扫描**
+（`total_scans` 虚高、`last_scan_at` 被「没扫过」的轮次刷新）。等待挪到扫描
+之后，取消发生在扫描之外 ⇒ 不再计数。这与主缺陷**同源**（都把「等待」与
+「扫描」的次序搞反了）。
+
+**测试**：新增 `tests/unit/test_watchdog.py::TestStartupFirstScan` 两条 ——
+① **行为用例**（判官）`test_loop_scans_immediately_before_first_interval`：
+`interval` 设成 5s（≫ 等待窗口 0.1s），旧实现此刻扫描 **0** 次、新实现 **≥1** 次；
+② **结构钉** `test_loop_waits_only_after_the_scan`：用 **AST** 取 `watchdog_loop`
+内「首扫」与「最早等待」的行号并断言 `scan < wait`（不写行号、不写子串 ⇒
+重排代码不会假红），含反空转锚点检查。变异
+`devlogs/_verify/mutation_r69_watchdog_firstscan.py` ⇒ **7/7**（其中 M2「假修复：
+形状对但跳过首扫」只被行为用例抓住 ⇒ 结构钉**只钉形状**，该边界**有意保留**）。
+
+**门禁**：`2c820d9` 上**先红后绿** —— 首次 `09:50` 得 **10/11**
+（`artifact_freshness` 指名 `core/watchdog.py`：源码改了、产物还是旧的 ⇒
+**门禁干了它该干的事**）；四步重建后 `{mid_hhmm}` 终验 **11/11**、
+**3923 passed / 0 failed**、覆盖率 **95.08%**（`gate_report_20261008_100622.json`）。
+本批第二个提交 `8e281cd`（只动 `tests/`，**不入包**）⇒ 收尾终验 **11/11**、
+**3924 passed / 0 failed**、覆盖率 **95.08%**（`gate_report_20261008_102812.json`）。
+`docs/RUNTIME_WATCHDOG.md` §8.10 由「已记录，本轮不改」改为「已修」并新增
+§8.10.1（保留「当时为什么不改」的理由段，避免文档自相矛盾）。
+
+**产物级 e2e（重建后实跑）**：`python devlogs/_verify/run_e2e_with_config_creds.py frozen`
+⇒ **26 passed / 2 failed**（`devlogs/_verify/_r69_e2e_frozen2.log`）。
+2 条红**同因**且**非产品缺陷**：上游 LLM 返回 **402 `code=30001`
+"account balance is insufficient"** ⇒ `llm_pipeline`/`ocr_pipeline` 记 `failed`
+（产品按设计把 LLM 失败**降级成 finding 并继续**）。⚠️ **与上一批不同**：
+上一批是 **401 `30014` 凭据被拒**，本批是**凭据有效但账户欠费** ⇒ 条目 0-8 的
+动作由「轮换凭据」更正为「充值/换有余额的 key」。
+
+**同批补齐一处产物级覆盖缺口**：跑 e2e 时发现 `tests/e2e_frozen.py` 的
+`watchdog_invariants` 用 `interval + 30` 等 `last_scan_at` —— 旧实现要到
+t≈interval 才写它 ⇒ **新旧同样绿，这条断言对 B4 是瞎的**（其旁注释
+「循环是先等一个 interval 再扫」在修复后更与代码矛盾）。改为 `interval * 0.8`
+（严格小于 interval）并把标签从写死的 `scanned@t+60s` 改成实测
+`first_scan@t+<elapsed>s`；新增静态护栏（含系数必须 **< 1** 的上界，
+防 `interval * 1.2` 假绿），变异
+`devlogs/_verify/mutation_r69_frozen_watchdog_budget.py` ⇒ **5/5**。
+重建产物上实跑：**`first_scan@t+0.0s (interval=60s)`** ⇒ 产物级确认。
+
 ### `#145` 批记录正文不再进日志/持久化载荷 + 全量重建 + 两份构建物 e2e（Round 67 第六批，2026-10-08）
 
 > 报告 → `docs/ADVERSARIAL_REVIEW_2026-09-30.md` §十二。

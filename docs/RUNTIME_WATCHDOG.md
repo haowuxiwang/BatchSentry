@@ -585,7 +585,7 @@ test_ocr_limit_covers_rotation_remediation_silence`（读 `rotation_silence_boun
   `ast.parse` 抛 `SyntaxError` —— 一次让 5 条用例集体报错，
   且**看起来像被测代码崩了**。解析失败一律跳过该文件，护栏自身永不崩。
 
-### 8.10 【低】巡检"先睡一个周期再首扫" —— 存活信号有 ~60s 空窗（**已记录，本轮不改**）
+### 8.10 【低】巡检"先睡一个周期再首扫" —— 存活信号有 ~60s 空窗（**R68 第七批已修**，见 §8.10.1）
 
 **定位**（写产物级冒烟时发现）：`watchdog_loop` 的循环体是
 `await sleep(interval)` → `recover_stalled_jobs()`，而 `last_scan_at` 写在
@@ -599,9 +599,46 @@ interval（默认 60s）内 `last_scan_at` 恒为 `null`**。
    而非硬编码 60。
 2. 崩溃后重启时，库里遗留的 `running`/`ocr_running` 行要等满 60s 才被回收。
 
-**为什么不现在改**：这属于**行为时序变更**（把首扫提到等待之前），
+**当时为什么不改**：这属于**行为时序变更**（把首扫提到等待之前），
 与 #120/P2 无关，且需要在真实长跑上复核"启动即回收"不引入竞态。
 按纪律（不在同一轮里叠加无关变更）**记录待办、不改**：0–60s 的空窗相对
 4200s 的判定阈值无实际风险，收益（启动即回收 + 信号无空窗）留待独立一轮
 连同"启动时孤儿任务回收"一起做。
+
+#### 8.10.1 R68 第七批修复（缺陷 #125，条目 `B4` / `B5-2`）
+
+**改法**：循环体改为**先扫后睡** —— `recover_stalled_jobs()` 移出
+`if stop_event` 分支，放到**任何等待之前**；等待块
+（`if stop_event is not None: await asyncio.wait_for(...)` /
+`else: await asyncio.sleep(interval)`）整块挪到扫描**之后**。
+
+**"扫描失败也不退出循环"这条契约没被破坏**：扫描仍包在
+`try / except CancelledError / except Exception / finally` 里，异常只写
+`last_scan_error` 并继续下一轮 —— 与改前逐字相同（`test_loop_survives_scan_exception`
+与 `test_scan_error_is_recorded_not_swallowed` 两条既有护栏不动即仍绿）。
+
+**顺带修掉一处更隐蔽的缺陷**：旧写法把 `finally`
+（`total_scans += 1` / `last_scan_at` 写入）放在等待**之后**，于是
+**等待期间被取消也会记一次扫描** —— `total_scans` 虚高、`last_scan_at` 被
+"没有扫描"的轮次刷新。等待挪到扫描之后，取消发生在扫描之外 ⇒ 不再计数。
+这是"存活信号"这件事的**第二处失真**，与主缺陷同源（都把"等待"与"扫描"
+的次序搞反了）。
+
+**验收（可机检）**：`GET /api/health/watchdog` 的 `last_scan_at` 在进程启动后
+**第一秒内**即非 `null`，并随每个 `interval_s` 持续推进。
+
+**证据**：
+- **行为用例**（判官）
+  `tests/unit/test_watchdog.py::TestStartupFirstScan::test_loop_scans_immediately_before_first_interval`
+  —— `interval` 设成 5s（≫ 等待窗口 0.1s）：旧实现此刻扫描 **0** 次，新实现 **≥1** 次。
+- **结构钉**（形状）
+  `...::test_loop_waits_only_after_the_scan` —— 用 **AST** 取 `watchdog_loop` 内
+  「首扫」与「最早等待」的行号并断言 `scan < wait`；**不写行号、不写子串**
+  （Trap 66：子串断言会被同函数注释满足）。
+- **变异** `devlogs/_verify/mutation_r69_watchdog_firstscan.py` ⇒ **7/7**。
+
+⚠️ **边界（有意保留，不是漏网）**：变异 M2「假修复：形状看着是先扫后睡、
+但第一轮跳过扫描」**只被行为用例抓住**，结构钉照绿 —— 形状钉证明不了语义。
+故**行为用例才是判官**；结构钉的职责只有一条：把"整块改回先睡后扫"这种回退
+在**不需要 DB 的环境**里也能立刻抓住。
 
