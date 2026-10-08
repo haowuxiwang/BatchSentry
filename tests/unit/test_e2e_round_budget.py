@@ -196,3 +196,30 @@ def test_single_page_poll_cap_covers_the_measured_frozen_run():
         f"单页轮询封顶 {poll_timeout_for_pages(1)}s ≤ 实测 {_FROZEN_MEASURED_S}s"
         f" —— 上游正常排队会被误判为卡死"
     )
+
+
+def test_frozen_smoke_watchdog_liveness_budget_discriminates_scan_first():
+    """**静态护栏**：巡检存活预算必须 **< interval**，否则对 B4/#125 是瞎的。
+
+    旧实现「先睡一个周期再首扫」要到 t≈interval 才写 `last_scan_at`；
+    原预算 `interval + 30` ≥ interval ⇒ **新旧实现同样绿** —— 这条产物级断言
+    证明不了「启动即首扫」。故锁死：预算必须是 interval 的**分数**（含 `*`），
+    且**不得**出现 `interval + 常数` 形态。
+    """
+    src = _FROZEN.read_text(encoding="utf-8")
+    m = re.search(r"^\s*_wd_budget\s*=\s*(.+)$", src, re.M)
+    assert m, "找不到巡检存活预算 `_wd_budget` 的赋值（锚点形态变了？）"
+    expr = m.group(1).strip()
+    assert not re.search(r"interval\s*\+", expr), (
+        f"预算不得含 `interval + 常数`（会 ≥ interval ⇒ 非判别）—— 实为：{expr}"
+    )
+    mm = re.search(r"interval\s*\*\s*([0-9.]+)", expr)
+    assert mm, (
+        f"预算必须是 `interval * <系数>`（如 `interval * 0.8`）—— 实为：{expr}。"
+        f"写成 `interval + 常数` 或 `interval * 1.2` 都会 ≥ interval ⇒ 非判别。"
+    )
+    factor = float(mm.group(1))
+    assert 0 < factor < 1, (
+        f"interval 的系数必须**严格小于 1**（实为 {factor}）—— 否则预算 ≥ interval，"
+        f"「先睡一个周期再首扫」同样会通过（B4/#125 变瞎）。"
+    )

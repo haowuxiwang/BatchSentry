@@ -181,24 +181,30 @@ try:
         assert limits["cancelling"] >= cpu_cap, (
             f"cancelling={limits['cancelling']} < cpu_task_cap_s={cpu_cap}"
         )
-        # 巡检存活证据：last_scan_at 必须最终被写上一次（证明后台巡检任务
-        # 在**这个冻结包里**真的起来了 —— 一个没启动的循环永远不会写它）。
-        # ⚠️ 不能启动后立刻断言：循环是"先等一个 interval 再扫"，故头 60s 内
-        # 本就为 null。等待预算由**自述的 interval_s** 派生（不硬编码 60）。
+        # 巡检存活证据：last_scan_at 必须被写上一次（证明后台巡检任务在**这个
+        # 冻结包里**真的起来了 —— 一个没启动的循环永远不会写它）。
+        #
+        # B4 / #125：巡检是**启动即首扫** ⇒ 后端能应答 /health 时首扫早已完成。
+        # 故预算必须**严格小于 interval**：旧实现「先睡一个周期再首扫」要到
+        # t≈interval 才写 last_scan_at，若预算 ≥ interval（原为 interval + 30）
+        # 则**新旧实现同样绿** ⇒ 这条产物级断言对 B4 是**瞎的**。
+        # 预算仍由**自述的 interval_s** 派生（不硬编码 60）。
         interval = float(wd.get("interval_s") or 60.0)
-        budget = interval + 30.0
-        deadline = time.time() + budget
-        while not wd.get("last_scan_at") and time.time() < deadline:
-            time.sleep(2)
+        _wd_budget = interval * 0.8
+        _wd_t0 = time.time()
+        while not wd.get("last_scan_at") and time.time() - _wd_t0 < _wd_budget:
+            time.sleep(0.5)
             wd = requests.get(f"{BASE}/api/health/watchdog", timeout=5).json()
+        _wd_elapsed = time.time() - _wd_t0
         assert wd.get("last_scan_at"), (
-            f"{budget:.0f}s 内 last_scan_at 仍为空 —— 巡检循环未运行"
+            f"{_wd_budget:.0f}s（=0.8×interval）内 last_scan_at 仍为空 —— "
+            f"巡检未「启动即首扫」（B4 / #125）"
         )
         ok("watchdog_invariants",
            f"ocr_running={limits['ocr_running']} >= "
            f"max(cap={ocr_cap}, rot_bound={rot_bound})"
            f"; cancelling={limits['cancelling']} >= cpu_cap={cpu_cap}"
-           f"; scanned@t+{interval:.0f}s")
+           f"; first_scan@t+{_wd_elapsed:.1f}s (interval={interval:.0f}s)")
     except Exception as e:
         fail("watchdog_invariants", str(e))
 
