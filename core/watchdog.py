@@ -104,16 +104,24 @@ _PENDING_TAKEOVER_STALL_S = 900.0
 _BASE_STALL_S = {
     "ocr_running": _OCR_BASE_STALL_S,
     "ocr_done": 1800.0,      # 纯过渡态，正常停留不到 1s，留足余量
-    "analyzing": 1800.0,     # 逐页 LLM：单次适配器超时 180s，逐页写心跳
+    "analyzing": 1800.0,     # 逐页 LLM：单次调用最坏 480s(SDK 重试 3 次)=1440s，逐页写心跳
     "cancelling": _CANCEL_BASE_STALL_S,
     "pending": _PENDING_TAKEOVER_STALL_S,   # **仅**在有活 task 时生效（判据 4）
 }
 
 # 每页增量（秒）：OCR 要覆盖旋转自愈（每页最多 2 角度 × 2 重试的完整上游任务），
-# 逐页 LLM 用 180s/页（即 LLM 适配器单次超时）作为上界估计。
+# 逐页 LLM 取「单次调用超时」作为上界估计。
+#
+# ⚠️ **真值源是调用点，不是适配器默认值**（2026-10-08 修正）。此处曾写死
+# `180.0`，理由是"LLM 适配器单次超时" —— 但 `core/page_analyzer.py` 早已在
+# 调用点把 timeout **覆盖**为 `_PAGE_TIMEOUT`（Round 3 为大矩阵页提高），
+# 而 `LLMAdapter.chat` 的签名默认值仍是 180。写死值跟着**默认值**走，
+# 与真实调用点差 8×，且护栏也读错了真值源（见
+# `test_watchdog.py::test_analyzing_per_page_covers_real_call_site_timeout`）。
+# 改调用点 timeout 时**必须**同步本表 —— 该用例会拦住漏改。
 _PER_PAGE_S = {
     "ocr_running": 120.0,
-    "analyzing": 180.0,
+    "analyzing": 480.0,   # = core/page_analyzer._PAGE_TIMEOUT（调用点覆盖值）
 }
 
 # 封顶（秒）：51 页上限下 OCR 10320s / LLM 10800s，均远超实测值。

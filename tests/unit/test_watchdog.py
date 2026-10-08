@@ -104,8 +104,10 @@ class TestStallLimitContract:
 
     def test_analyzing_hits_cap_on_large_docs(self, monkeypatch):
         monkeypatch.delenv("PBC_WATCHDOG_SCALE", raising=False)
-        assert watchdog.stall_limit_seconds("analyzing", 4) == 1800 + 180 * 4
-        # 51 页裸算 10980 > 封顶 10800
+        # 每页 480 = core/page_analyzer._PAGE_TIMEOUT（调用点真值，见
+        # test_analyzing_per_page_covers_real_call_site_timeout）
+        assert watchdog.stall_limit_seconds("analyzing", 4) == 1800 + 480 * 4
+        # 51 页裸算 1800 + 480*51 = 26280 > 封顶 10800
         assert watchdog.stall_limit_seconds("analyzing", 51) == 10800.0
 
     def test_transitional_and_cancel_limits(self, monkeypatch):
@@ -235,15 +237,91 @@ class TestThresholdsAboveUpstreamCaps:
         assert max(_ROTATION_CONGESTION_BACKOFF_S) <= (
             watchdog.stall_limit_seconds("ocr_running", 1))
 
-    def test_analyzing_base_covers_single_llm_call(self):
-        """逐页 LLM 单次调用超时（适配器默认参数）必须被基准覆盖。"""
-        import inspect
+    def test_analyzing_per_page_covers_real_call_site_timeout(self):
+        """逐页 LLM 的**真实调用点**超时必须被基准与每页增量覆盖。
 
-        from llm.adapters.base import LLMAdapter
+        ⚠️ 真值源是 `core/page_analyzer.py` 调用点传的实参 `_PAGE_TIMEOUT`，
+        **不是** `LLMAdapter.chat` 的签名默认值 —— 调用点会覆盖默认值。
 
-        llm_timeout = inspect.signature(LLMAdapter.chat).parameters["timeout"].default
-        assert watchdog._BASE_STALL_S["analyzing"] >= llm_timeout
-        assert watchdog._PER_PAGE_S["analyzing"] >= llm_timeout
+        2026-10-08 实测（本用例旧版即缺陷）：旧版读签名默认值（180），
+        于是断言退化成 `180 >= 180` 的**恒真式**；而真实关系
+        `_PER_PAGE_S["analyzing"] >= 480` 早已为假 —— `_PAGE_TIMEOUT`
+        从 180 提到 480（Round 3）时，护栏读错了真值源，**静默失效**。
+        单次 `chat()` 的真实静默上界还要再乘 SDK 尝试次数
+        （`AsyncOpenAI` 未显式设 `max_retries` ⇒ 用 SDK 默认值）。
+        """
+        import openai._constants as _oai_c
+
+        from core.page_analyzer import _PAGE_TIMEOUT
+
+        silent_bound = _PAGE_TIMEOUT * (_oai_c.DEFAULT_MAX_RETRIES + 1)
+        assert watchdog._BASE_STALL_S["analyzing"] >= silent_bound, (
+            f"逐页 LLM 基准 {watchdog._BASE_STALL_S['analyzing']}s < "
+            f"单次调用静默上界 {silent_bound}s —— 会抢在上游超时前误判停滞"
+        )
+        assert watchdog._PER_PAGE_S["analyzing"] >= _PAGE_TIMEOUT, (
+            f"每页增量 {watchdog._PER_PAGE_S['analyzing']}s < 调用点超时 "
+            f"{_PAGE_TIMEOUT}s —— 增量不得低于它所估计的单次调用成本"
+        )
+
+
+def _call_sites_with_literal_timeout(src: str) -> list[str]:
+    """返回源码里所有「传了 `timeout=` 但实参不是 `_PAGE_TIMEOUT`」的调用点。
+
+    提取成纯函数是为了能对**合成源码**做阳性对照 —— 一条恒绿的 AST 护栏
+    无法自证它真的会报（见 `TestPageAnalyzerCallSiteTimeoutSource::
+    test_detector_is_not_vacuous`）。
+    """
+    import ast
+
+    bad: list[str] = []
+    for node in ast.walk(ast.parse(src)):
+        if not (isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)):
+            continue
+        if node.func.attr not in ("chat", "chat_json"):
+            continue
+        for kw in node.keywords:
+            if kw.arg != "timeout":
+                continue
+            v = kw.value
+            if not (isinstance(v, ast.Name) and v.id == "_PAGE_TIMEOUT"):
+                bad.append(f"line {node.lineno}: timeout={ast.unparse(v)}")
+    return bad
+
+
+class TestPageAnalyzerCallSiteTimeoutSource:
+    """静态护栏：`core/page_analyzer.py` 的调用点必须把 `timeout` 传成
+    **模块常量 `_PAGE_TIMEOUT`**，而不是写死字面量。
+
+    否则 `TestThresholdsAboveUpstreamCaps::
+    test_analyzing_per_page_covers_real_call_site_timeout` 从 `_PAGE_TIMEOUT`
+    推导出的不变式会**与真实调用无关地**保持绿色（真值源被架空）。
+    """
+
+    def test_call_sites_pass_the_module_constant(self):
+        import pathlib
+
+        from core import page_analyzer
+
+        src = pathlib.Path(page_analyzer.__file__).read_text(encoding="utf-8")
+        bad = _call_sites_with_literal_timeout(src)
+        assert not bad, (
+            f"page_analyzer 调用点的 timeout 必须是 `_PAGE_TIMEOUT`（真值源），"
+            f"实测异常：{bad}"
+        )
+
+    def test_detector_is_not_vacuous(self):
+        """阳性对照：写死字面量时必须报出来，且正常的常量传参不得误报。"""
+        flagged = _call_sites_with_literal_timeout(
+            "async def f(client, p, q):\n"
+            "    await client.chat_json(p, q, timeout=180, retries=2)\n"
+        )
+        assert flagged, "检测器对写死的 timeout 字面量未报警 ⇒ 恒绿"
+        assert not _call_sites_with_literal_timeout(
+            "async def f(client, p, q):\n"
+            "    await client.chat_json(p, q, timeout=_PAGE_TIMEOUT)\n"
+        ), "检测器对正确的常量传参误报"
 
 
 class TestElapsedSeconds:
@@ -268,7 +346,7 @@ class TestFindStalledJobs:
                           last_activity_at=_stale(10_000))
         got = await watchdog.find_stalled_jobs(now=datetime.now())
         assert [r["id"] for r in got] == ["s1"]
-        assert got[0]["limit_s"] == 1800 + 180 * 4
+        assert got[0]["limit_s"] == 1800 + 480 * 4
 
     @pytest.mark.asyncio
     async def test_fresh_job_not_reported(self, test_db):
