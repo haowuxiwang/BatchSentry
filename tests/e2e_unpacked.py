@@ -260,10 +260,7 @@ def _startup_failure_attribution(exit_code, err_path: Path, extra: list[str]) ->
     Electron 自己的报错**全被丢掉**，只剩一个 `0x80000003` —— 无从查起。
     现改为落日志文件，并在此处把它翻成人话。判据强度不变（仍是 FAIL）。
     """
-    try:
-        text = err_path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        text = ""
+    text = _stderr_text(err_path)
     if _GPU_FATAL in text:
         # 🔴 2026-09-30 实测的 2×2 对照（同一产物、同一开关矩阵）：
         #     不加 --disable-gpu + **非沙箱** → 3.05s 就绪，全绿
@@ -283,6 +280,36 @@ def _startup_failure_attribution(exit_code, err_path: Path, extra: list[str]) ->
         return (f"归因：stderr 为空，仅凭退出码 {exit_code} 无法判定"
                 "（日志已落盘，见 rec['logs']）。")
     return f"归因：退出码 {exit_code}，stderr 见 {err_path.name}。"
+
+
+def _stderr_text(err_path: Path) -> str:
+    """读 Electron 的 stderr 落盘日志（读不到就返回空串，绝不抛）。"""
+    try:
+        return err_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def _backend_absent_hint(err_path: Path) -> str:
+    """D3 判"没找到内嵌后端子进程"时，把**为什么判不了**一并说清（只读证据）。
+
+    🔴 2026-10-08 实测的矛盾：同一轮里 ``/health`` 已应答
+    ``{status: ok, version: 1.2.1}``、产品自身 stdout 也写着拉起内嵌后端，
+    而 D3 的子进程枚举**什么都没看到**（``children`` 里只有一个无关的 IME 进程）。
+    ⇒ 在受限沙箱内"子进程清单"这一路证据**不可靠**；若只报"没找到"，读的人会去
+    查一个并不存在的拉起缺陷（错误归因 —— 与 :func:`llm_failure_attribution`
+    要解决的问题同宗）。
+
+    ⚠️ **判据强度不变（仍是 FAIL）**：本函数只加归因、不改判定。要验的事实
+    （内嵌后端被拉起）在沙箱内既证不实也证不伪，故不得据此转绿或转 skip。
+    归因证据与 :func:`_startup_failure_attribution` 同源（同一个 ``_GPU_FATAL``），
+    并同样**不得**把 ``--disable-gpu`` 说成解法（2×2 实测已否证）。
+    """
+    if _GPU_FATAL not in _stderr_text(err_path):
+        return ""
+    return ("；⚠️ 本轮 stderr 有 Chromium GPU FATAL（受限沙箱内 GPU 进程起不来）"
+            "⇒ **进程树枚举在沙箱内不可靠**，本条在沙箱内既证不实也证不伪；"
+            "须在**非沙箱**终端复跑（同一产物在非沙箱终端已多次全绿）")
 
 
 # ── 单轮：启动 → 探活 → 校验 → 关窗 → 校验退出 ─────────────────────────────
@@ -386,7 +413,8 @@ def run_once(unpacked: Path, sandbox: Path, run_idx: int, cov: Coverage) -> dict
     backend_kids = [k for k in kids if k["name"].lower() == "pbc-server.exe"]
     bref = os.environ.get(EXE_ENV, "").lower()
     if not backend_kids:
-        bad(f"run{run_idx}.D3_embedded_backend", "未找到 pbc-server.exe 子进程")
+        bad(f"run{run_idx}.D3_embedded_backend",
+            "未找到 pbc-server.exe 子进程" + _backend_absent_hint(err_path))
     elif embedded in backend_kids[0]["cmdline"].lower():
         ok(f"run{run_idx}.D3_embedded_backend", "内嵌后端已拉起：" +
            Path(backend_kids[0]["cmdline"]).name)
