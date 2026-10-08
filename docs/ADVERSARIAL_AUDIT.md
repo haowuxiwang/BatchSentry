@@ -138,7 +138,19 @@ PDF"记录。所以"能分发"目前的证据是**构建产物的一致性**，�
 | P2 | `ocr_slices` 上限**不一致**：后端仅校验 ≥1；底部保存未 clamp，独立保存 clamp 20 | `write.py:195-206`、`settings.js:1736` vs `settings.js:823` | 上限收敛到 `config.UPLOAD_LIMITS` 同源的单一真值 |
 | P2 | **死字段**：`DATABASE_PATH` frozen 下被 APPDATA 覆盖、`APP_PORT` 被 `PORT` 环境变量压过，且都无 UI；DB 连接首次后缓存，改了也不生效 | `config.py:684-697`、`config.py:752`、`server.py:31`、`db/client.py:27-42` | 要么接 UI 并即时重连，要么从 config 里删掉（消失的开关比假开关好） |
 
-测试缺口：**无重启持久化测试**；`llm_json_mode` / `kb_prompt_inject` 全仓库无测试。
+> ⚠️ **R72 更正（2026-10-08）**：上表第二行的 P1 已**结案**（`#169` / `C4`）。
+> `kb_prompt_inject` **不是**"完全不可达"的装饰 —— 已接通：`_STATIC_FIELDS` 补映射、
+> `SettingsUpdate` 声明、`GET /api/settings` 暴露 `kb.prompt_inject`、知识库分区加复选框。
+> 未知字段**未**改成"报错"（**有意偏离**本表"修法方向"）：`SettingsUpdate` 是 `extra="allow"`，
+> 报错会让"前端先加字段、后端还没认"的过渡期**整批**保存失败；改为随响应 `dropped` **回显**，
+> 同样消除"以为改了"的假成功而无破坏性耦合。证据见 `CHANGELOG.md`（Round 68 第十二批）
+> 与 `docs/TODO.md` 的 `#169`。
+> 另：上表第一行（provider 自动改写）已在 **B4-4** 关闭 —— `config._resolve_active_provider`
+> 是唯一决策点，**显式选择绝不改写**，事实经 `llm.auto_activated` 回传界面；写入侧对未注册
+> provider 直接 400。残余仅 `llm/client.py` 的防御性兜底（记 WARNING）。
+> 仍未做：`llm_json_mode` / `ocr_dual_compare` 依旧 **API-only**（无 UI 控件）。
+
+测试缺口：**无重启持久化测试**；`llm_json_mode` / `ocr_dual_compare` 全仓库无测试（`kb_prompt_inject` 已补）。
 
 ---
 

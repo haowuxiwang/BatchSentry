@@ -7,6 +7,56 @@
 
 ## [Unreleased]
 
+### `kb_prompt_inject` 从「装饰开关」接通 + 白名单外字段不再静默（Round 68 第十二批，2026-10-08）
+
+> 记录 → `docs/TODO.md` 的 **#169** / **C4**（同一件事的两处登记）。
+
+**现象（C4 的下半，`#169`）**：`kb_prompt_inject` 是个**装饰开关** ——
+`config.py` 支持该键（`AppConfig` 字段 + `update_config` 分支 + `KB_PROMPT_INJECT` env），
+注入代码也是**活的**（`core/page_analyzer.py` 的 `kb_prompt_inject` 判定，默认 `True`），
+但 `api/settings/write.py` 的 `_STATIC_FIELDS` 白名单**不含**它 ⇒ POST 时落到
+`prov_name is None` 分支被 `continue` **静默丢弃**：接口回 "配置已保存并立即生效"，
+而字段**根本没落盘**；GET 不暴露、UI 也没有控件。⇒ 只能改 env / 手改 config.json。
+
+**修法（选择「接通」而非「删除」—— 注入能力是真的，删掉是净损失）**：
+
+| 层 | 改动 |
+|---|---|
+| 白名单 | `_STATIC_FIELDS` 补 `kb_prompt_inject → KB_PROMPT_INJECT` |
+| 请求模型 | `SettingsUpdate` 声明 `kb_prompt_inject: Optional[bool]`（此前只靠 `extra="allow"` 兜着，无类型约束） |
+| read 接口 | `GET /api/settings` 新增 `kb.prompt_inject`（前端据此回填） |
+| UI | `templates/settings.html` 知识库分区加「跨页分析注入条文参考」复选框；`static/settings-ocr.js` 读 GET / 写 POST（失败**回滚**复选框） |
+
+**顺带堵住同类缝（"不静默"半边）**：`prov_name is None` 分支由裸 `continue` 改为记入
+`dropped`，随响应 `dropped` 键 + `message` 回显（与既有 `skipped` 掩码回写提示同款）。
+⇒ 字段名写错的人**当场看得见**，而不是"保存成功"却什么都没变。
+
+> ⚠️ **未采纳**审计原文的"未知字段应**报错**"。理由：`SettingsUpdate` 是 `extra="allow"`，
+> 前端**加字段早于后端认识它**时，报错会**整批**保存失败（连合法字段一起丢）。回显达到了
+> 同一目的（消除"以为改了"的假成功）而**无破坏性耦合**。这是**有意的偏离**，写明于此。
+
+**护栏**（新增 **13 条**用例）：
+- `tests/unit/test_settings_write_whitelist.py`（**7 条**）：核心是**类级**不变式 ——
+  「`SettingsUpdate` 里**显式声明**的每个字段都必须可达（白名单 / provider 后缀）」，
+  以后加字段忘改白名单会**当场红**；外加防空转、env/mem 映射、`update_config` 消费、未知字段进 `dropped`。
+- `tests/unit/test_settings_js.py::TestKbInjectToggle`（**3 条**，行为级）：读 GET 回填、缺失时回落 `true`、保存失败回滚。
+- `tests/integration/test_api_settings.py`（**3 条**）：GET 暴露 + **POST→GET→config.json 落盘**往返 + 未知字段回显（原 `test_unknown_field_ignored` 更名并加强）。
+
+**变异验证**：`devlogs/_verify/mutate_r72_c4_kb_prompt_inject.py` ⇒ **7/7 CAUGHT**
+（白名单摘键 / 恢复静默丢弃 / GET 不暴露 / POST 体漏字段 / `load()` 不回填 / 不回滚）
++ **负控绿** + 每个变异后**还原字节一致**（sha256 证明）。
+
+> ⚠️ **变异当场抓出首版护栏的弱断言**：`test_reads_payload_and_posts_on_toggle` 原本用 payload `false`，
+> 而假 DOM 里复选框的默认值**也是** `false` ⇒ "读了 payload" 与 "没读、恰好默认相同"**不可区分**，
+> M5（摘掉 `load()` 里的 `syncKbInjectToggle()` 调用）**MISSED**。改成 payload `true`（**异于**默认）
+> 后才真正咬住。这是"用例存在 ≠ 断言有效"的又一例。
+
+**未做（明确边界）**：`llm_json_mode` / `ocr_dual_compare` 仍是 **API-only**（无 UI 控件），
+未一并处理 —— 它们是**同类但独立**的条目，本批只结 `#169`/`C4`。
+
+**入包**：`static/settings-ocr.js` 与 `templates/settings.html` **在产物内**（`api/settings/` 亦然）
+⇒ 需**重建**两份产物，否则门禁 `artifact_freshness` 会红。
+
 ### 冻结冒烟的就绪失败**不可当场归因** —— 顺带定性一次门禁抖动（Round 67 第十一批，2026-10-08）
 
 > 记录 → `docs/TODO.md` 的 **0-11**。
