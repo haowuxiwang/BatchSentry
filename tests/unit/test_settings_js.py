@@ -214,6 +214,48 @@ def _probe(body: str, *, settings: dict | None = None, rules: dict | None = None
 
 
 # ─────────────────────────────────────────────────────────────────────
+# KB 条文注入开关（C4/#169）用的 stub 扩展
+# ─────────────────────────────────────────────────────────────────────
+# 该控件在「知识库」分区；`initKbInjectToggle` 在**模块作用域**绑定（分区是
+# `hidden` 而非销毁 ⇒ 元素始终在 DOM，与 `ocr-save-btn` 同款）。故需额外两件事：
+#   ① 把控件元素建出来（不在 `_REQUIRED_IDS` 里 —— 生产代码对它有 `if (!cb)`
+#      守卫，不是"缺了就整页挂掉"那一类）；
+#   ② 让 POST 响应带上 `ok: true`（`_STUB_TMPL` 的 POST 返回体只有
+#      `{updated, skipped}`，会让 `r.ok && data.ok` 走失败分支，测不出成功路径）。
+#      `globalThis.__postOk = false` 可切到失败分支。
+_KB_EXTRA = r"""
+["kb_prompt_inject", "kb-inject-msg"].forEach((id) => {
+  document.body.appendChild(__el(id));
+});
+const __origFetch = globalThis.fetch;
+globalThis.fetch = async (url, opts) => {
+  if (opts && opts.method === "POST") {
+    __fetchCalls.push({ url, opts });
+    __postBodies.push({ url, body: JSON.parse(opts.body) });
+    const ok = globalThis.__postOk !== false;
+    return {
+      ok, status: ok ? 200 : 400,
+      json: async () => (ok
+        ? { ok: true, updated: 1, skipped: [], dropped: [] }
+        : { detail: "boom" }),
+      text: async () => "",
+    };
+  }
+  return __origFetch(url, opts);
+};
+"""
+
+
+def _probe_kb(body: str, *, settings: dict | None = None):
+    """同 `_probe`，但额外建出 KB 注入开关元素 + 让 POST 可成功。"""
+    return run_js_async(
+        FILES,
+        _PRE + "\nawait settle();\n" + body,
+        stub=_stub(settings, None) + "\n" + _KB_EXTRA,
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────
 # provider 渲染
 # ─────────────────────────────────────────────────────────────────────
 class TestProviderRender:
@@ -700,3 +742,75 @@ class TestRuleLimitParityWithBackend:
         )
 
         assert _USER_RULES_TOTAL_MAX != _USER_RULES_MAX * _USER_RULES_TEXT_MAX
+
+
+# ─────────────────────────────────────────────────────────────────────
+# KB 条文注入开关必须真的接通（C4/#169 —— 此前是"装饰开关"）
+# ─────────────────────────────────────────────────────────────────────
+class TestKbInjectToggle:
+    """`kb_prompt_inject` 的**两端**都必须接线：读 GET、写 POST。
+
+    背景：该开关此前只有 `config.py` 支持 —— `api/settings/write.py` 的
+    `_STATIC_FIELDS` 白名单不含它，未知字段被**静默丢弃**，界面也无控件。
+    于是"后端支持、代码活着、用户却改不了"。少任何一端，界面看着正常而
+    开关没接线 —— 正是本文件要锁的那类"配错了但界面看着正常"。
+    """
+
+    def test_reads_payload_and_posts_on_toggle(self):
+        """初值来自 GET 的 `kb.prompt_inject`（不是写死），勾选后真的 POST。
+
+        ⚠️ payload 必须取 `True`（**异于**假 DOM 的默认 `false`）——
+        否则"读了 payload"与"没读、恰好默认也是 false"无法区分，护栏会静默
+        失效。R72 变异 **M5**（摘掉 `load()` 里的 `syncKbInjectToggle()`）
+        一开始就是这么漏过去的；改成 `True` 后才真正咬住。
+        """
+        s = _settings()
+        s["kb"] = {"prompt_inject": True}
+        body = """
+const cb = el("kb_prompt_inject");
+const before = cb.checked;
+cb.checked = false;
+cb.dispatchEvent({ type: "change" });
+await settle(20);
+const posts = __postBodies.filter((p) => p.url === "/api/settings");
+console.log(JSON.stringify({
+  before: before,
+  posted: posts.length ? posts[posts.length - 1].body.kb_prompt_inject : null,
+  msg: txt("kb-inject-msg"),
+}));
+"""
+        assert _probe_kb(body, settings=s) == {
+            "before": True, "posted": False,
+            "msg": "✓ 已关闭条文注入（仅保留引用）",
+        }
+
+    def test_defaults_to_true_when_payload_omits_kb(self):
+        """后端字段缺失时回填 `true`（与 `config.py` 默认一致）。
+
+        渲染成"关闭"是更坏的错 —— 用户会以为注入被关了，而实际仍在注入。
+        """
+        s = _settings()
+        s.pop("kb", None)
+        body = """
+console.log(JSON.stringify({ checked: el("kb_prompt_inject").checked }));
+"""
+        assert _probe_kb(body, settings=s) == {"checked": True}
+
+    def test_failed_save_rolls_back_checkbox(self):
+        """保存失败必须回滚复选框 —— 否则界面显示一个**未生效**的状态。"""
+        s = _settings()
+        s["kb"] = {"prompt_inject": True}
+        body = """
+globalThis.__postOk = false;
+const cb = el("kb_prompt_inject");
+cb.checked = false;
+cb.dispatchEvent({ type: "change" });
+await settle(20);
+console.log(JSON.stringify({
+  checked: cb.checked,
+  msg: txt("kb-inject-msg"),
+}));
+"""
+        out = _probe_kb(body, settings=s)
+        assert out["checked"] is True, "保存失败后必须回滚到旧值"
+        assert out["msg"].startswith("✗"), out["msg"]

@@ -42,6 +42,7 @@ _STATIC_FIELDS = {
     "ocr_slices": "OCR_SLICES",  # MinerU 分片 OCR（流式输出）页数/片
     "ocr_dual_compare": "OCR_DUAL_COMPARE",  # 门禁 3：双后端输出对比（opt-in）
     "llm_json_mode": "LLM_JSON_MODE",  # 结构化输出 json_object（网关不支持自动降级）
+    "kb_prompt_inject": "KB_PROMPT_INJECT",  # KB-2：知识库条文参考注入（RAG grounding，默认开）
     "paddle_ocr_api_url": "PADDLE_OCR_API_URL",
     "paddle_ocr_token": "PADDLE_OCR_TOKEN",
     "paddle_ocr_model": "PADDLE_OCR_MODEL",
@@ -80,6 +81,9 @@ class SettingsUpdate(BaseModel):
     llm_provider: Optional[str] = None
     llm_providers_add: Optional[str] = None
     llm_providers_remove: Optional[str] = None
+    # C4/#169：KB 条文参考注入开关。此前只有 config.py 支持该键，
+    # _STATIC_FIELDS 白名单缺失 ⇒ POST 静默丢弃（"装饰开关"）。
+    kb_prompt_inject: Optional[bool] = None
     # 向后兼容字段（旧前端仍可使用）
     deepseek_api_key: Optional[str] = None
     deepseek_base_url: Optional[str] = None
@@ -110,19 +114,23 @@ def _validate_provider_name(name: str) -> bool:
 
 def _build_env_updates(
     req: SettingsUpdate,
-) -> tuple[dict[str, str], dict[str, object], list[str], list[str]]:
-    """把请求字段拆为 (env_updates, mem_updates, errors, skipped)。
+) -> tuple[dict[str, str], dict[str, object], list[str], list[str], list[str]]:
+    """把请求字段拆为 (env_updates, mem_updates, errors, skipped, dropped)。
 
     env_updates: 写入 config.json 的 KEY=VALUE 字典
     mem_updates: 传给 update_config() 的内存热更新字段
     errors: 校验错误信息（如有则拒绝本次写入）
     skipped: 掩码回写被跳过的字段名（T2.3：此前静默跳过无提示，
              用户以为已修改；随响应 message 回显）
+    dropped: 白名单外的未知字段名（C4/#169：此前在 `prov_name is None`
+             分支**静默丢弃** —— 用户看到 "配置已保存并立即生效" 而字段
+             根本没落盘。现随响应 message 回显，使"以为改了"不再可能）
     """
     env_updates: dict[str, str] = {}
     mem_updates: dict[str, object] = {}
     errors: list[str] = []
     skipped: list[str] = []
+    dropped: list[str] = []
 
     raw = req.model_dump(exclude_none=True)
 
@@ -313,7 +321,9 @@ def _build_env_updates(
             mem_updates[f"{prov_name}_api_key"] = ""
             continue
         if prov_name is None:
-            continue  # 不是 per-provider 字段，忽略
+            # 不是 per-provider 字段 —— 白名单外，记录后忽略（不再静默）
+            dropped.append(field)
+            continue
         if not _validate_provider_name(prov_name):
             errors.append(f"invalid provider name in field: {field}")
             continue
@@ -344,7 +354,7 @@ def _build_env_updates(
             env_updates[env_key] = str(value)
             mem_updates[field] = value
 
-    return env_updates, mem_updates, errors, skipped
+    return env_updates, mem_updates, errors, skipped, dropped
 
 
 @router.post("/api/settings")
@@ -375,7 +385,7 @@ async def update_settings(req: SettingsUpdate, request: Request):
         )
         raise HTTPException(403, "Settings can only be modified from localhost")
 
-    env_updates, mem_updates, errors, skipped = _build_env_updates(req)
+    env_updates, mem_updates, errors, skipped, dropped = _build_env_updates(req)
 
     # Phase 7 security: validate URLs to prevent SSRF
     # paddle_ocr_api_url and any <provider>_base_url must be external.
@@ -419,17 +429,27 @@ async def update_settings(req: SettingsUpdate, request: Request):
         raise HTTPException(400, detail={"errors": errors})
 
     if not env_updates:
-        if skipped:
+        if skipped or dropped:
+            notes = []
+            if skipped:
+                notes.append(
+                    "已保存值未变化（掩码），未修改：" + "、".join(skipped)
+                )
+            if dropped:
+                notes.append(
+                    "未知字段已忽略（不在白名单内）：" + "、".join(dropped)
+                )
             return {
                 "ok": True,
                 "updated": 0,
                 "skipped": skipped,
-                "message": (
-                    "已保存值未变化：以下字段与已保存内容相同（掩码），"
-                    f"未修改：{'、'.join(skipped)}"
-                ),
+                "dropped": dropped,
+                "message": "；".join(notes),
             }
-        return {"ok": True, "updated": 0, "message": "无更新字段"}
+        return {
+            "ok": True, "updated": 0, "skipped": [], "dropped": [],
+            "message": "无更新字段",
+        }
 
     config_path = _settings_config_path()
     config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -501,10 +521,14 @@ async def update_settings(req: SettingsUpdate, request: Request):
     # T2.3: 掩码回写被跳过的字段显式提示（此前静默跳过，用户以为已修改）
     if skipped:
         msg += f"；以下字段与已保存值相同（掩码），未修改：{'、'.join(skipped)}"
+    # C4/#169: 白名单外字段显式提示（此前静默丢弃，同上）
+    if dropped:
+        msg += f"；未知字段已忽略（不在白名单内）：{'、'.join(dropped)}"
     return {
         "ok": True,
         "updated": len(env_updates),
         "skipped": skipped,
+        "dropped": dropped,
         "fields": list(env_updates.keys()),
         "message": msg,
         "config_file": str(config_path),

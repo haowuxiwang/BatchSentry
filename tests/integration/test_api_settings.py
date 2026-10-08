@@ -132,6 +132,13 @@ class TestGetSettings:
         assert "configured" in data["ocr"]["paddle"]
         assert "configured" in data["ocr"]["mineru"]
 
+    @pytest.mark.asyncio
+    async def test_kb_prompt_inject_exposed(self, settings_client):
+        """C4/#169：GET 必须暴露 kb.prompt_inject —— 否则前端无从回填开关。"""
+        data = (await settings_client.get("/api/settings")).json()
+        assert "kb" in data
+        assert isinstance(data["kb"]["prompt_inject"], bool)
+
 
 class TestUpdateSettings:
     """POST /api/settings — 供应商切换 bug 的核心验证。"""
@@ -221,6 +228,50 @@ class TestUpdateSettings:
         # 确认内存配置也同步为空（恢复默认）
         from config import config as _cfg
         assert _cfg["providers"]["deepseek"].base_url == ""
+
+    @pytest.mark.asyncio
+    async def test_kb_prompt_inject_roundtrip(self, settings_client, tmp_path):
+        """C4/#169：`kb_prompt_inject` 必须能经 API 落盘 + 内存生效。
+
+        修复前该字段不在 `_STATIC_FIELDS` 白名单 ⇒ 落到 `prov_name is None`
+        分支被**静默丢弃**：返回 "配置已保存并立即生效"，但什么都没写。
+        本用例同时验三段：POST 的 env 映射、GET 的回读、config.json 的落盘。
+        """
+        import json
+
+        from config import config as _cfg
+
+        app = _cfg["app"]
+        saved = app.kb_prompt_inject
+        try:
+            r = await settings_client.post(
+                "/api/settings", json={"kb_prompt_inject": False}
+            )
+            assert r.status_code == 200, r.text[:200]
+            body = r.json()
+            assert body["updated"] == 1
+            assert body["dropped"] == []
+            assert "KB_PROMPT_INJECT" in body["fields"]
+
+            # ① 内存热更新立即生效
+            assert app.kb_prompt_inject is False
+            # ② GET 回读
+            data = (await settings_client.get("/api/settings")).json()
+            assert data["kb"]["prompt_inject"] is False
+            # ③ 落盘（config.json 里存的是 env 形态的字符串）
+            cfg_file = tmp_path / "config.json"
+            assert json.loads(cfg_file.read_text(encoding="utf-8"))[
+                "KB_PROMPT_INJECT"
+            ] == "false"
+
+            # 反向：true 也要能写回
+            r2 = await settings_client.post(
+                "/api/settings", json={"kb_prompt_inject": True}
+            )
+            assert r2.status_code == 200
+            assert app.kb_prompt_inject is True
+        finally:
+            app.kb_prompt_inject = saved
 
 
 class TestDynamicProviders:
@@ -395,15 +446,23 @@ class TestDynamicProviders:
         })
 
     @pytest.mark.asyncio
-    async def test_unknown_field_ignored(self, settings_client):
-        """非白名单字段应被静默忽略（不写入 config.json）。"""
+    async def test_unknown_field_ignored_but_reported(self, settings_client):
+        """非白名单字段不写入 config.json，但**必须回显**（C4/#169）。
+
+        修复前是纯静默丢弃：用户看到 "配置已保存并立即生效"，
+        不知道自己的字段名写错了。现随响应 `dropped` + message 回显。
+        """
         r = await settings_client.post("/api/settings", json={
             "random_unknown_field": "should_be_ignored",
             "deepseek_model": "deepseek-chat",  # 加一个合法字段避免 "无更新"
         })
         assert r.status_code == 200
+        data = r.json()
         # random_unknown_field 不应出现在更新字段列表
-        assert "RANDOM_UNKNOWN_FIELD" not in r.json()["fields"]
+        assert "RANDOM_UNKNOWN_FIELD" not in data["fields"]
+        # 但必须被显式报告，不得无声消失
+        assert data["dropped"] == ["random_unknown_field"]
+        assert "random_unknown_field" in data["message"]
 
     @pytest.mark.asyncio
     async def test_response_includes_providers_list(self, settings_client):

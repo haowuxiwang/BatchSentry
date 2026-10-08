@@ -357,6 +357,64 @@
     ?.addEventListener("click", saveOcrConfig);
 
   // ============================================================
+  // KB 条文注入开关（C4/#169）
+  // ------------------------------------------------------------
+  // 元素在「知识库」分区（`templates/settings.html`），但监听器在模块作用域
+  // 绑定 —— 该分区是 `hidden` 而非销毁，元素始终在 DOM 里。
+  // 此前该开关**只有 config.py 支持**：`_STATIC_FIELDS` 白名单缺失 ⇒ POST
+  // 静默丢弃，界面也无控件（"装饰开关"）。现接通：读取走 GET 的 `kb` 段，
+  // 写入走 POST /api/settings（与来源开关同为即时保存）。
+  // ============================================================
+  function syncKbInjectToggle() {
+    const cb = document.getElementById("kb_prompt_inject");
+    if (!cb) return;
+    // 缺字段时回填 `true`（与 config.py 的默认值一致）
+    cb.checked = !!(S.state.current?.kb?.prompt_inject ?? true);
+  }
+
+  function initKbInjectToggle() {
+    const cb = document.getElementById("kb_prompt_inject");
+    const msg = document.getElementById("kb-inject-msg");
+    if (!cb) return;
+    cb.addEventListener("change", async () => {
+      const next = cb.checked;
+      if (msg) msg.textContent = "保存中…";
+      try {
+        const r = await fetch("/api/settings", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            llm_provider: S.state.activeProvider,
+            kb_prompt_inject: next,
+          }),
+        });
+        const d = await r.json();
+        if (r.ok && d.ok) {
+          if (msg) {
+            msg.textContent = next
+              ? "✓ 已开启条文注入"
+              : "✓ 已关闭条文注入（仅保留引用）";
+          }
+          if (S.state.current) {
+            S.state.current.kb = S.state.current.kb || {};
+            S.state.current.kb.prompt_inject = next;
+          }
+        } else {
+          cb.checked = !next; // 保存失败 → 回滚到旧值（界面不得显示未生效的状态）
+          const errs =
+            d.detail?.errors?.join("；") || d.detail || d.message || "保存失败";
+          if (msg) msg.textContent = "✗ " + errs;
+        }
+      } catch (err) {
+        cb.checked = !next;
+        if (msg) msg.textContent = "✗ " + err.message;
+        log.err("kb prompt inject toggle failed", err);
+      }
+    });
+  }
+  initKbInjectToggle();
+
+  // ============================================================
   // 加载设置 — 初始渲染
   // ============================================================
   async function load() {
@@ -395,6 +453,7 @@
     const providers = S.state.current.llm.providers || [];
     S.renderProviders(providers, S.state.activeProvider);
     fillOcrForm();
+    syncKbInjectToggle();
     S.fillFeishuForm();
     await S.loadRules();
     initSectionNav();

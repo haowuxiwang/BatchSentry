@@ -525,6 +525,18 @@
               <span id="kb-meta" class="text-[11px] text-muted-foreground tabular-nums shrink-0 ml-4"></span>
             </div>
 
+            <!-- 条文注入开关（C4/#169：此前只有 config.py 支持，API 白名单缺失 ⇒ 装饰） -->
+            <div class="border border-border rounded-md mb-2 px-3 py-2 flex items-center justify-between gap-3">
+              <label class="flex items-center gap-2 text-[12px] cursor-pointer">
+                <input type="checkbox" id="kb_prompt_inject" class="w-4 h-4 accent-foreground cursor-pointer" />
+                跨页分析注入条文参考
+              </label>
+              <span id="kb-inject-msg" class="text-[11px] text-muted-foreground" role="status" aria-live="polite"></span>
+            </div>
+            <p class="text-[12px] text-muted-foreground mb-3">
+              关闭后仅在问题清单里保留引用（findings.kb_refs 不受影响），不再把条文正文拼进分析提示词。
+            </p>
+
             <!-- 来源开关（写 config.json kb.disabled_sources，即时生效） -->
             <div class="border border-border rounded-md mb-3">
               <div class="px-3 py-2 border-b border-border flex items-center justify-between gap-3">

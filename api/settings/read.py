@@ -125,6 +125,12 @@ async def get_settings(request: Request):
                 "configured": _is_real_api_key(cfg["mineru"].token),
             },
         },
+        "kb": {
+            # C4/#169：条文参考注入开关。此前只有 config.py 支持该键，
+            # API 白名单缺失 ⇒ 设置页无控件、POST 静默丢弃（装饰开关）。
+            # 前端「知识库」分区据此回填复选框。
+            "prompt_inject": getattr(cfg["app"], "kb_prompt_inject", True),
+        },
         "app": {
             "host": cfg["app"].host,
             "port": cfg["app"].port,
