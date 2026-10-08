@@ -1227,3 +1227,74 @@ dirty=False`）→ `electron-builder` → `gen_provenance.py`（`git_head=c00876
   需先解决"哪些裸 id 是引用、哪些只是叙述"的歧义。
 - 章节区间只支持**数字**章节号；字母章节（`§A` / `§B` / `§F1`）**不解析**，
   命中即判红（fail-closed），**不是**已支持。
+
+
+## 十七、R71 第十一批：LLM 自由枚举的**前置富集**契约（2026-10-08）
+
+### 17.1 缘起 —— `docs/TODO.md` #165 的「2 个死键」
+
+`#165` 断言：`TYPE_QUERIES` 的 `batch_logic` / `low_confidence` **不在
+`CANONICAL_TYPES`** ⇒ `normalize_finding_type` 永不产出该 type ⇒ **词表永不命中**。
+`docs/ADVERSARIAL_AUDIT.md` 同款 P1 行据此写成「2 个死键」。
+
+### 17.2 实测 —— **前提被否证**
+
+富集（`attach_gmp_basis` / `attach_kb_refs`）在**类型归一之前**执行：
+
+| stage | 富集调用 | 归一调用 |
+|---|---|---|
+| `stage2.py` | `attach_gmp_basis` 442 / `attach_kb_refs` 453 | `_norm` 465 |
+| `stage3.py` | `attach_gmp_basis` 132 / `attach_kb_refs` 144 | `_norm` 191 / 203 |
+
+⇒ 归一吃的是**原始** type，所以这三条非规范键**真的会被命中**。直接测量
+（2026-10-08，本机）：
+
+| raw type | 在 `GMP_BASIS_MAP` | `gmp_basis` | `kb_refs` | 归一后 |
+|---|---|---|---|---|
+| `batch_logic` | ✓ | 非空（批号管理与物料平衡） | 4 | `batch_inconsistency` |
+| `low_confidence` | ✓ | 非空（批记录应字迹清晰） | 4 | `uncategorized` |
+| `time_anomaly` | ✓ | 非空（批记录应及时填写） | 4 | `signature_time_anomaly` |
+
+**`low_confidence` → `uncategorized` 不是缺陷**：`finding_quality` 模块 docstring
+明写「无法归一的落到 `uncategorized`（**而非混入 `completeness`，避免继续膨胀
+最大的噪声桶**）」—— 即**策略使然**。三层（前置富集 / 归一 / 前端标签）自洽；
+前端 `findings-map.js` 收录这两个键也早有正向对照
+（`test_findings_map_js.py::test_js_may_have_extra_llm_enum_keys`）。
+
+### 17.3 真缺口 —— 这条顺序不变式**此前无人守**
+
+把归一上提（例如"先归一，再富集"看起来更整洁）会让这 3 类 finding **静默**失去
+依据与引用 —— 而**所有既有用例仍然全绿**，因为它们都**直接以 raw type 调富集函数**，
+不经过 pipeline 的调用顺序。这是本项目最在意的一类缝：**护栏通过，接线是断的**。
+
+### 17.4 修法 —— **按集合配对**，不是全局排序
+
+第一版想法（`max(富集行号) < min(归一行号)`）**是错的**：`stage3.py` 另有一条
+`attach_kb_refs(dual_dicts)`（317 行）在归一**之后** —— 但 `dual_dicts` 的 type 是
+**写死的规范值** `completeness`、**根本不经过归一** ⇒ 不该被这条不变式约束。
+故改为 **AST 按集合配对**：从归一调用向上找最近的循环 / 推导式，取其 `iter` 的
+根名（stage2 = `dict_findings`、stage3 = `findings`），再断言**同一集合**的富集
+行号 < 归一调用行号。
+
+新增 `tests/unit/test_type_sync.py::TestRawEnumEnrichmentContract`（3 条）：
+① 非规范键集棘轮 + **行为级**证明每条都真能产出依据/引用；② 源码级顺序不变式；
+③ 正/负对照（倒序必须报警、正序必须放行）。
+
+### 17.5 验证
+
+- `pytest tests/unit/test_type_sync.py` ⇒ **12 passed**（原 9）。
+- 变异 `devlogs/_verify/mutate_r71_raw_enum_enrichment.py` ⇒ **3/3 CAUGHT**：
+  M1 stage3 归一提早 / M2 stage2 归一提早 / M3 删 `time_anomaly` 使键集漂移；
+  M4 负控（只改注释）⇒ 全绿。**还原字节一致**（3 个源文件 sha256 逐文件核对）。
+- `pytest tests/unit/test_todo_freshness.py` ⇒ 绿（不变式 E 的 1:1 同步 +1：19 → 20）。
+
+### 17.6 不入包 / 未验证边界
+
+- 只动 `tests/` 与 `docs/` + `CHANGELOG.md` ⇒ **不需要重建产物**；用例数变了 ⇒ 门禁重跑。
+- **未验证**：这三条非规范键在生产里**是否真的出现过**。`batch_logic` 有实证
+  （`devlogs/e2e_r1.log` 的 findings 类型分布里 `batch_logic: 1`）；`low_confidence`
+  与 `time_anomaly` **没有**目击记录 —— 它们是**防御性**条目（`gmp_basis.py` 注释
+  自称"LLM 可能产出任意 type 字符串"）。⇒ 本批**不动**它们（删掉等于拆掉防线），
+  但**不得**读成"已在生产中被使用"。
+- 顺序不变式是**静态**检查（源码行号），**不是**运行时断言 —— 它挡的是"有人重排
+  调用顺序"，挡不住"有人把富集改写成先归一内部再回填"这类更隐蔽的改法。

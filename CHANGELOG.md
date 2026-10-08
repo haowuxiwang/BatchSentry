@@ -7,6 +7,41 @@
 
 ## [Unreleased]
 
+### LLM 自由枚举的**前置富集**契约 —— **「2 个死键」的前提被否证**（Round 67 第十一批，2026-10-08）
+
+> 报告 → `docs/ADVERSARIAL_REVIEW_2026-09-30.md` §十七。
+
+**缘起（更正 #165）**：`docs/TODO.md` 的 #165 断言 `TYPE_QUERIES` 的
+`batch_logic` / `low_confidence` 是「**死键** ⇒ `normalize_finding_type` 永不产出该
+type ⇒ 词表永不命中」。**实测否证**：富集（`attach_gmp_basis` / `attach_kb_refs`）在
+**类型归一之前**执行（`stage2.py`：442/453 → 465；`stage3.py`：132/144 → 191/203），
+故 LLM 直出的**原始** type 会被这三条非规范键接住。实测 raw `batch_logic` ⇒
+`gmp_basis` 非空 + `kb_refs=4`；raw `time_anomaly` 同理。
+
+**为什么非规范键却不空**：归一**之后**才落到规范类型 —— `batch_logic`→
+`batch_inconsistency`（关键词 `batch` 兜底）、`time_anomaly`→`signature_time_anomaly`
+（显式同义词）、`low_confidence`→`uncategorized`（**策略使然**：`finding_quality`
+模块 docstring 明写「无法归一的落到 uncategorized（而非混入 completeness，避免继续
+膨胀最大的噪声桶）」）。⇒ **三层（前置富集 / 归一 / 前端标签）是自洽的**，
+前端映射收录这两个键也早有正向对照。
+
+**真缺口（定位）**：这条「**富集先于归一**」的顺序不变式**此前无人守** —— 把归一上提
+会让这 3 类 finding **静默**失去依据与引用，而**所有既有用例仍全绿**（它们直接以
+raw type 调富集函数）。注意**全局排序是错的**：`stage3.py` 另有一条
+`attach_kb_refs(dual_dicts)` 在归一之后，但 `dual_dicts` 的 type 是**写死的规范值**
+`completeness`、根本不经过归一 ⇒ 必须**按集合配对**，不能按全局行号排。
+
+**新增护栏**（`tests/unit/test_type_sync.py::TestRawEnumEnrichmentContract`，3 条）：
+① 非规范键集棘轮（断言恰为 `{batch_logic, low_confidence, time_anomaly}`）+ **行为级**
+证明每条都真能产出依据/引用；② 源码级顺序不变式（AST：从循环 iter 反推「被归一的
+集合」，断言该集合的富集行号 < 归一调用行号）；③ 正/负对照（倒序必须报警、正序必须放行）。
+
+**验证**：`pytest tests/unit/test_type_sync.py` ⇒ **12 passed**（原 9）；变异
+`devlogs/_verify/mutate_r71_raw_enum_enrichment.py` ⇒ **3/3 CAUGHT**（stage3 归一提早 /
+stage2 归一提早 / 删 `time_anomaly` 使键集漂移）+ 负控绿 + **还原字节一致**（sha256 逐文件核对）。
+
+**不入包**：只动 `tests/` 与 `docs/` + 本文件 ⇒ **无需重建**；用例数变了 ⇒ 门禁重跑。
+
 ### `docs/TODO.md` 交叉引用解析护栏 —— **变异当场抓出「静默跳过」**（Round 67 第十批，2026-10-08）
 
 > 报告 → `docs/ADVERSARIAL_REVIEW_2026-09-30.md` §十六。

@@ -1,14 +1,15 @@
 # TODO —— 活的待办清单
 
-> **复核戳：Round 67（2026-10-08，第十批）** ← `tests/unit/test_todo_freshness.py` 机检读这一行；
+> **复核戳：Round 67（2026-10-08，第十一批）** ← `tests/unit/test_todo_freshness.py` 机检读这一行；
 > 该戳**不得落后于 `CHANGELOG.md` 的最新 Round**。
 >
 > **状态（R66 复核，2026-09-30）——本文件分两层，别混读**：
 > - **§0 = R66 实核过的当前 backlog**（每条挂证据，可信）。
-> - **§0.1 = R66 对 §A 及以下的核销台账**（**19 条**经证据核实已完成，就地翻 `[x]`；含后续批次自 §0.1.3 移入的 `#146`/`#144`/`#145`，以及 `B4`+`B5-2` 这对**同缺陷双登记**）。
+> - **§0.1 = R66 对 §A 及以下的核销台账**（**20 条**经证据核实已完成，就地翻 `[x]`；含后续批次自 §0.1.3 移入的 `#146`/`#144`/`#145`，以及 `B4`+`B5-2` 这对**同缺陷双登记**）。
 > - **R68 第八批（2026-10-08）**：核销的是 **§0 表内的 0-8**（LLM 凭据可用、`llm_pipeline` 首次被真实覆盖）—— 它属**当前 backlog**，故**就地改状态**，**不进 §0.1 台账**（台账按定义只记 §A 及以下，不变式 E 的 1:1 因此不受影响）。
 > - **R69 第九批（2026-10-08）**：核销 **§0 表内的 0-9** —— 但核销方式特殊：该条**前提被否证**（"产品无墙钟上界"是错的，产物**有**界 = 看门狗停滞阈值），真缺陷是**阈值真值源漂移**，已修；另开 **0-10** 记录一个**未修**的残余。同样**不进 §0.1 台账**。
 > - **R70 第十批（2026-10-08）**：核销 **§0 表内的 0-7**（交叉引用解析护栏）。同样**不进 §0.1 台账**。
+> - **R71 第十一批（2026-10-08）**：核销 **§F9 的 #165** —— 方式同样是**前提否证**（「2 个死键」是错的：那 3 个非规范键是**前置富集键**，富集在归一**之前**跑，实测真能产出依据/引用）；真缺口是**这条顺序不变式无人守**，已加护栏。它属 §A 及以下 ⇒ **进 §0.1 台账**（不变式 E 的 1:1 同步 +1）。
 > - **§A 及以下 = Round 59（2026-09-23）的快照**，**已做过一轮核销，但未逐条复核**。
 >   核销过的条目带 **`—— **R66 已核销**（证据见 §0.1）`** 尾注；
 >   **其余仍标 `[ ]` 的，按"未复核"对待，不要当成当前事实。**
@@ -67,7 +68,7 @@
 > 抽查时它们**确为开放**，本批才结案 ⇒ 已移出 §0.1.3、并入 §0.1.1。
 > **这不是"抽查错了"，是先后顺序。**
 
-### 0.1.1 已核销（19 条）
+### 0.1.1 已核销（20 条）
 
 | 条目 | 优先级 | 证据（R66 实测） |
 |---|---|---|
@@ -90,6 +91,7 @@
 | **B4** 巡检器「启动即回收 + 存活信号无空窗」（缺陷 #125） | P2 | **R68 第七批**修（`2c820d9`）：`core/watchdog.py::watchdog_loop` 循环体由「先睡一个周期再首扫」改为「先扫后睡」⇒ 启动即首扫，`last_scan_at` 从第一秒起持续推进；顺带修掉「等待期间被取消也照记 `total_scans`」。护栏 `tests/unit/test_watchdog.py::TestStartupFirstScan`（1 条判别性行为用例 + 1 条 AST 结构钉），变异 `devlogs/_verify/mutation_r69_watchdog_firstscan.py` ⇒ **7/7**（M2「假修复：形状对但跳过首扫」只被行为用例抓住 ⇒ 结构钉**只钉形状**，边界有意保留）。**产物级**：`tests/e2e_frozen.py` 的 `watchdog_invariants` 预算由 `interval + 30`（对 B4 **不判别** —— 旧实现同样绿）改为 `interval * 0.8`，并新增静态护栏 `tests/unit/test_e2e_round_budget.py::test_frozen_smoke_watchdog_liveness_budget_discriminates_scan_first`，变异 `devlogs/_verify/mutation_r69_frozen_watchdog_budget.py` ⇒ **5/5**；重建产物上实跑得 `first_scan@t+0.0s (interval=60s)`（`devlogs/_verify/_r69_e2e_frozen2.log`） |
 | **B5-2** `#125` 巡检首扫空窗 | P2 | **与 `B4` 同缺陷、同一次修复**（两处登记同一缺陷 #125，故一并核销）；证据同上 |
 | **B4-1** SSE 断点续传与心跳 | P3 | 条目自述两项**均不成立**、残余已拆出为 `B2-11`，且明写"**本条无需再做**" |
+| **#165** `TYPE_QUERIES`/`GMP_BASIS_MAP` 的 3 个非规范键 | P2 | **R71 第十一批**：**前提否证** —— 它们**不是死键**，而是 LLM 自由枚举的**前置富集键**（富集先于归一：`stage2.py` 442/453→465、`stage3.py` 132/144→191/203）。实测 raw `batch_logic` ⇒ `gmp_basis` 非空 + `kb_refs=4`。**真缺口**：这条顺序不变式此前**无人守** ⇒ 新增 `test_type_sync.py::TestRawEnumEnrichmentContract`（3 条：非规范键集棘轮 + 按集合的源码级顺序不变式 + 正负对照），变异 `devlogs/_verify/mutate_r71_raw_enum_enrichment.py` ⇒ **3/3 CAUGHT** + 负控绿 + 还原字节一致 |
 
 ### 0.1.2 只部分完成（保持 `[ ]`，已就地加注）
 
@@ -98,15 +100,14 @@
 | **#163②** `rule_doc.py` 注释称 R8 是 `low_confidence` | ✅ 实测该处注释已不存在；现存 `_check_low_confidence_params` 是**另一条规则**，非误标 | — （故未翻 `[x]`：同一条目的 ① 仍未做，见下一行） |
 | **#163①** | ② 已修 | `core/kb/retriever.py:5` 注释仍写 "at **29K chars** of corpus"，与当前语料规模不符 |
 
-### 0.1.3 抽查确认"仍开放"（**9 条**保留 `[ ]`）
+### 0.1.3 抽查确认"仍开放"（**8 条**保留 `[ ]`）
 
-> 原抽查 12 条；其中 **`#146`、`#144` 已在 R66 第四批修复**、**`#145` 已在 R68 第六批修复** ⇒ 已移入 §0.1.1，故本节剩 **9 条**。
+> 原抽查 12 条；其中 **`#146`、`#144` 已在 R66 第四批修复**、**`#145` 已在 R68 第六批修复** ⇒ 已移入 §0.1.1，故本节剩 **9 条**；**`#165` 已在 R71 第十一批核销（前提否证）** ⇒ 本节剩 **8 条**。
 
 | 条目 | R66 实测证据 |
 |---|---|
 | **#147** 重试不清 `failed_pages` | `api/jobs/actions.py:83` 只 `SET error_message = NULL, finished_at = NULL` |
 | **#148** 报告不带失败信息 | `api/report.py` **零处** `error_message` |
-| **#165** `TYPE_QUERIES` 2 个死键 | 实测死键 = `['batch_logic', 'low_confidence']`（不在 `CANONICAL_TYPES`） |
 | **#168** 每页 KB 检索跑两次 | `core/page_analyzer.py:496` 与 `:567` 两次调 `build_page_kb_context` |
 | **#169** `kb_prompt_inject` 开关不可达 | `config.py:981` 支持该键，但 `api/settings/write.py` 的 `_STATIC_FIELDS` 白名单**不含**它 ⇒ API 仍改不到 |
 | **B2-9** 审计写失败被静默丢弃 | `core/pipeline/state.py:31-32` 仍只 `logger.warning`，无重试/告警 |
@@ -769,10 +770,21 @@
 
 ### F9. 知识库（结构完整，4 个键级缺口 + 1 处浪费）
 
-- [ ] **#165【P2】`TYPE_QUERIES` 2 个死键。** `batch_logic`（`retriever.py:52`）与
-      `low_confidence`（`:54`）**不在 `CANONICAL_TYPES`** ⇒ `normalize_finding_type`
-      永不产出该 type ⇒ 词表永不命中。`GMP_BASIS_MAP` 另有 3 个非规范键
-      （`gmp_basis.py:22,67,76`；其中 `time_anomaly` 靠同义词兜底才不空）。
+- [x] **#165【P2】`TYPE_QUERIES` 2 个死键。** —— **R71 已核销**（证据见 §0.1）
+      ⚠️ **原判据是错的**：`batch_logic` / `low_confidence`（以及 `GMP_BASIS_MAP`
+      的 `time_anomaly`）**不是死键** —— 富集在**类型归一之前**执行
+      （`stage2.py`：`attach_gmp_basis`→`attach_kb_refs`→`_norm`；`stage3.py` 同序），
+      故 LLM 直出的**原始** type 会被它们接住。实测 raw `batch_logic` ⇒
+      `gmp_basis` 非空 + `kb_refs=4`。归一**之后**才落到规范类型
+      （`batch_logic`→`batch_inconsistency` 关键词兜底、`time_anomaly`→
+      `signature_time_anomaly` 显式同义词、`low_confidence`→`uncategorized`
+      —— 后者是**策略使然**，见 `finding_quality` 模块 docstring
+      「无法归一的落到 uncategorized（而非混入 completeness…）」）。
+      **真缺口**：这条「富集先于归一」的顺序不变式**此前无人守** —— 把归一上提
+      会让这 3 类 finding **静默**失去依据/引用，而既有用例仍全绿
+      （它们直接以 raw type 调富集函数）。已加
+      `tests/unit/test_type_sync.py::TestRawEnumEnrichmentContract`（3 条），
+      变异 `devlogs/_verify/mutate_r71_raw_enum_enrichment.py` ⇒ **3/3 CAUGHT**。
 - [x] **#166【P2】2 个规范类型无词表。** `user_rule` / `uncategorized` 无 `TYPE_QUERIES` 条目 —— **R66 已核销**（证据见 §0.1）
       ⇒ `query_for` 退化为泛词 `["批记录","记录"]`（`retriever.py:200-202`），检索质量形同随机。
 - [x] **#167【P2】缺护栏。** 加一条断言 **`TYPE_QUERIES.keys() ⊆ CANONICAL_TYPES`** —— **R66 已核销**（证据见 §0.1）

@@ -236,12 +236,21 @@ PDF"记录。所以"能分发"目前的证据是**构建产物的一致性**，�
 
 | 级别 | 空洞 | 证据 |
 |---|---|---|
-| P1 | `TYPE_QUERIES` 有 **2 个死键**（`batch_logic` / `low_confidence` 不是规范类型）+ **2 个规范类型无词表**（`user_rule` / `uncategorized` → 退化为「批记录/记录」） | `retriever.py:44`；金标只覆盖 20 类，`uncategorized` 无金标用例 |
+| P1 | `TYPE_QUERIES` 有 **2 个非规范键**（`batch_logic` / `low_confidence` 不在 `CANONICAL_TYPES`）+ **2 个规范类型无词表**（`user_rule` / `uncategorized` → 退化为「批记录/记录」） | `retriever.py:44`；金标只覆盖 20 类，`uncategorized` 无金标用例 |
 | P1 | **gmp2010 是唯一主源（313/441）却缺 `license`、无可复现 raw** → 正文只能从 `docs/2010版GMP.doc` 经 Word COM 重建 | `test_kb_multisource.py:388` |
 | P2 | 无 **OCR 混淆字符表**（搜 `core/` 无 confusable/CONFUSION 表） | 本轮 R2 的 `_OCR_DIGIT_MAP` 是硬编码的 5 个映射，不在 KB 里 |
 | P2 | GMP 附录只有 2 个（缺无菌/原料药等）；无**检查缺陷项库** | 语料来源清单 |
 | P2 | 纯 BM25 无同义扩展（"效价"vs"含量"、"批号"vs"批代码" 全库搜索无映射） | 设计取舍，非 bug |
 | P2 | `retriever.py:5` 注释写 "29K chars" 与实际 59.4K 不符（陈旧注释） | 同上 |
+
+> ⚠️ **R71 更正（2026-10-08）**：本表 P1 行原写「**2 个死键**」并据此推断
+> 「词表永不命中」—— **该前提已被否证**。`batch_logic` / `low_confidence`
+> （以及 `GMP_BASIS_MAP` 的 `time_anomaly`）是 **LLM 自由枚举的前置富集键**：
+> `attach_gmp_basis` / `attach_kb_refs` 在 `normalize_finding_type` **之前**执行，
+> 故**原始** type 会被接住。实测 raw `batch_logic` ⇒ `gmp_basis` 非空 + `kb_refs=4`。
+> **真缺口**是该顺序不变式此前无人守，R71 已加护栏
+> （`tests/unit/test_type_sync.py::TestRawEnumEnrichmentContract`，变异 3/3 CAUGHT）。
+> 详见 `docs/TODO.md` 的 #165 尾注。
 
 **另一条要记的事实**：本轮的 442 条 finding 里 `kb_refs` **442/442 全空**。
 但那轮（2026-08-26）早于 KB 后置富集（v8）落地，**不能据此说 KB 未被使用**；
