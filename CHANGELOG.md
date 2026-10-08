@@ -7,6 +7,42 @@
 
 ## [Unreleased]
 
+### 看门狗 `analyzing` 阈值：**护栏读错了真值源**（Round 67 第九批，2026-10-08）
+
+> 报告 → `docs/ADVERSARIAL_REVIEW_2026-09-30.md` §十五。
+
+**缘起（对第八批的更正）**：第八批把产物内 `>930s` 静默挂起记成「产物**没有**
+墙钟上界」—— 复查发现**该结论是错的**：产物**有**界，`core/watchdog.py` 的
+`analyzing` 停滞阈值 = `1800 + 480×页`（封顶 10800s；e2e 那个 1 页件 **2280s**）。
+e2e 的 930s 只是**冒烟预算**（`poll_timeout_for_pages(1) 630 + 300`），**故意低于**
+看门狗阈值 ⇒ 慢模型在 e2e 显红而产品仍在自己预算内 —— 是**预算错配**，不是缺上界。
+
+**真缺陷（定位）**：看门狗 `_PER_PAGE_S["analyzing"]` 与它自己的护栏
+`test_watchdog.py::test_analyzing_base_covers_single_llm_call` **都读
+`LLMAdapter.chat` 的签名默认值**（`180.0`）。但 `core/page_analyzer.py` 在**调用点**
+把 `timeout` **覆盖**为 `_PAGE_TIMEOUT`，Round 3 已从 180 提到 **480**。
+⇒ 护栏断言退化成 `180 >= 180` 的**恒真式**，而它声称守护的真实关系
+`180 >= 480` **早已为假** —— `_PAGE_TIMEOUT` 提高时，没有任何东西会响。
+
+**修法（只改真值源与数值，不动机制）**：
+
+- `_PER_PAGE_S["analyzing"]`：`180.0` → **`480.0`**（= 调用点 `_PAGE_TIMEOUT`）；
+- 护栏改**从调用点推导**：`_BASE_STALL_S["analyzing"] >= _PAGE_TIMEOUT ×
+  (SDK DEFAULT_MAX_RETRIES + 1)`（`AsyncOpenAI` 未显式设 `max_retries` ⇒ 用 SDK
+  默认 2 ⇒ 单次 `chat()` 静默上界 **1440s**，基准 1800s 覆盖它），
+  且 `_PER_PAGE_S["analyzing"] >= _PAGE_TIMEOUT`；
+- 新增**静态护栏** `TestPageAnalyzerCallSiteTimeoutSource`：调用点的 `timeout=`
+  实参**必须是** `_PAGE_TIMEOUT` 而非字面量（否则真值源再次被架空），带**阳性对照**。
+
+**验证**：`pytest tests/unit/test_watchdog.py` ⇒ **64 passed**；
+变异 `devlogs/_verify/mutate_r69_watchdog_llm_budget.py` ⇒ **3/3 CAUGHT**
+（M1 增量退回 180 / M2 真值源上移到 1200 / M3 调用点写死 `timeout=180`）+ 负控绿。
+文档同步：`docs/RUNTIME_WATCHDOG.md` 阈值表 `+180s/页` → `+480s/页` + 事故说明。
+
+**仍未修（新记 `docs/TODO.md` 0-10）**：`chat_json` 的 fix-hint 重试链可叠加
+（理论上 `3 × 1440 = 4320s` > 1 页阈值 2280s）—— 概率极低，且该情形下"恢复"
+本就是期望行为，倾向**显式豁免 + 写明理由**而非抬高阈值。
+
 ### 产物级 e2e **首次全绿** + 一处「归因错向」的修复（Round 67 第八批，2026-10-08）
 
 > 报告 → `docs/ADVERSARIAL_REVIEW_2026-09-30.md` §十四。
@@ -31,12 +67,14 @@ failed=0`** —— **`llm_pipeline` 首次被真实覆盖**（`llm_audit` 有 `s
 `--provider` 覆盖（**只影响本次子进程**）—— 换模型复跑不再需要改用户的
 `config.json` 再改回来（那既动了用户实时配置，又留一个「忘了改回」的静默失败面）。
 
-**记录（本批不修）**：产物内一次 `page_analysis` 调用**没有墙钟上界** ——
-`_PAGE_TIMEOUT=480s` 是**单次尝试**的超时，而 `openai` SDK 自带内部重试
-⇒ 最坏要 3×480s 才轮到产品自己处理。实测 `Qwen/Qwen3.5-35B-A3B`（推理模型，
-输出预算大量花在 reasoning 上）在产物内挂起 **>930s 且无任何日志**；同一任务
+**记录（本批不修）**：实测 `Qwen/Qwen3.5-35B-A3B`（推理模型，输出预算大量花在
+reasoning 上）在产物内挂起 **>930s 且无任何日志**；同一任务
 `deepseek-ai/DeepSeek-V3.2` **142.9s** 正常返回 ⇒ **`deepseek-ai/DeepSeek-V3.2`
 是本轮唯一可用的档位**。已登记 `docs/TODO.md` 0-9。
+
+> ⚠️ **同日更正（R69 第九批）**：上文初版把原因写成「产物**没有**墙钟上界」
+> —— **是错的**。产物**有**界（看门狗停滞阈值）。930s 只是 e2e 的**冒烟预算**。
+> 真缺陷另在别处，已修 —— 见上方第九批条目。
 
 ### 看门狗「启动即首扫」—— 存活信号无空窗（Round 67 第七批，2026-10-08）
 

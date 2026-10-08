@@ -1013,6 +1013,9 @@ OK watchdog_invariants: ocr_running=4200.0 >= max(cap=3600.0, rot_bound=1260.0);
 
 ### 14.6 定位到但**本批不修**：单次 LLM 调用没有墙钟上界
 
+> ⚠️ **本节结论已被 §十五 更正**：标题里的「没有墙钟上界」是**错的** —— 产物**有**
+> 界（看门狗停滞阈值）。保留本节原文以存证，但**不得**再引用其结论。见 §十五。
+
 第 3 轮（`Qwen/Qwen3.5-35B-A3B`）的现象：产物内一页 `page_analysis` 调用挂起 **>930s**，
 **全程无任何日志**（既无完成行，也无超时/重试行）。
 
@@ -1054,3 +1057,95 @@ OK watchdog_invariants: ocr_running=4200.0 >= max(cap=3600.0, rot_bound=1260.0);
   （核销台账 1:1、无失效前端行号锚点、复核戳不落后）。
 - `CHANGELOG.md` 与本报告同步更新；`docs/TODO.md` 的 **0-8 就地核销**（§0 表内，
   不进 §0.1 台账 —— 台账按定义只记 §A 及以下），并新增 **0-9**。
+
+## 十五、R69 第九批：对 §14.6 的**更正** —— 真缺陷是**阈值真值源漂移**，不是「缺上界」
+
+### 15.1 更正：产物**有**墙钟上界
+
+§14.6 的结论「产品侧没有任何 wall-clock 上界」是**错的**。复查 `core/watchdog.py`：
+
+| 项 | 值（实测，非推断） |
+|---|---|
+| `_BASE_STALL_S["analyzing"]` | `1800.0` |
+| `_PER_PAGE_S["analyzing"]` | 修正前 `180.0` / 修正后 `480.0` |
+| `_CAP_S["analyzing"]` | `10800.0` |
+| e2e 那个 1 页件的停滞阈值 | 修正前 **1980s** / 修正后 **2280s** |
+| e2e 的终态等待预算 | **930s** = `poll_timeout_for_pages(1) 630 + 300` |
+
+⇒ 看门狗在 `last_activity_at` 静默超过阈值时把 job 改判 `error`（`recover_stalled_jobs`）。
+**e2e 的 930s 故意低于看门狗阈值**（它是冒烟预算，不是产品上界）⇒ 慢模型在 e2e 里
+显红、而产品仍在自己预算内。**这是预算错配，不是缺上界。**
+
+### 15.2 真缺陷：护栏与阈值**都读错了真值源**
+
+`tests/unit/test_watchdog.py::test_analyzing_base_covers_single_llm_call` 旧版：
+
+```python
+llm_timeout = inspect.signature(LLMAdapter.chat).parameters["timeout"].default  # 180.0
+assert watchdog._BASE_STALL_S["analyzing"] >= llm_timeout      # 1800 >= 180  ✓
+assert watchdog._PER_PAGE_S["analyzing"] >= llm_timeout        #  180 >= 180  ✓（恒真）
+```
+
+它读的是 `LLMAdapter.chat` 的**签名默认值**（`180.0`）。而真实调用点
+`core/page_analyzer.py` 把 `timeout` **覆盖**为 `_PAGE_TIMEOUT`（Round 3 已提到 **480**）：
+
+```python
+timeout=_PAGE_TIMEOUT,   # 480.0
+```
+
+⇒ 第二条断言退化成 `180 >= 180` 的**恒真式**；它声称守护的真实关系
+`180 >= 480` **早已为假**，而 `_PAGE_TIMEOUT` 从 180 提到 480 时**没有任何东西会响**。
+
+实测对照（`core/watchdog.py` / `core/page_analyzer.py` / `openai 2.35.1`）：
+
+| 断言 | 用签名默认值 180 | 用调用点真值 480 |
+|---|---|---|
+| `_BASE_STALL_S >= timeout` | ✓ | ✓（1800 ≥ 480） |
+| `_PER_PAGE_S >= timeout` | ✓（**恒真**） | ✗ **180 < 480** |
+
+另有第二层放大：`AsyncOpenAI(...)` **未显式设 `max_retries`** ⇒ SDK 默认
+`DEFAULT_MAX_RETRIES = 2` ⇒ 单次 `chat()` 的静默上界 = `480 × 3 = 1440s`。
+
+### 15.3 修法（只改真值源与数值，不动机制）
+
+- `_PER_PAGE_S["analyzing"]`：`180.0` → **`480.0`**，注释点名真值源是**调用点**而非默认值；
+- 护栏改**从调用点推导**（不再是抄一个常数）：
+  `_BASE_STALL_S["analyzing"] >= _PAGE_TIMEOUT × (DEFAULT_MAX_RETRIES + 1)`；
+  并保留 `_PER_PAGE_S["analyzing"] >= _PAGE_TIMEOUT`；
+- 新增静态护栏 `TestPageAnalyzerCallSiteTimeoutSource`（AST）：调用点的 `timeout=`
+  实参必须是 `_PAGE_TIMEOUT` **Name 节点**，不得是字面量 —— 否则真值源再次被架空；
+  该检测器**自带阳性对照**（对合成源码里的 `timeout=180` 必须报警，对
+  `timeout=_PAGE_TIMEOUT` 不得误报）。
+
+### 15.4 验证
+
+- `pytest tests/unit/test_watchdog.py` ⇒ **64 passed**。
+- 变异 `devlogs/_verify/mutate_r69_watchdog_llm_budget.py` ⇒ **3/3 CAUGHT** + 负控绿：
+
+| 变异 | 内容 | 期望 |
+|---|---|---|
+| M1 | `_PER_PAGE_S["analyzing"]` 480 → 180（历史值） | G1 红 ✓ |
+| M2 | `_PAGE_TIMEOUT` 480 → 1200（真值源上移，表没跟） | G1 红 ✓ |
+| M3 | 调用点 `timeout=_PAGE_TIMEOUT` → `timeout=180` | G2 红 ✓ |
+| M4 | 负控：只改注释 | 三条全绿 ✓ |
+
+- 文档同步：`docs/RUNTIME_WATCHDOG.md` 阈值表 `+180s/页` → `+480s/页` + 事故说明。
+
+### 15.5 必须重建产物（`core/**/*.py` 在 `BUNDLE_SOURCES` 内）
+
+`core/watchdog.py` 是**入包源码** ⇒ 改它必然让 `artifact_freshness` FAIL（门禁
+**正确**行为，非误报）。实测：重建前 **10/11**，两份产物**都**点名 `core/watchdog.py`。
+⇒ 本批**必须重建** `dist/pbc-server` 与 `dist-electron/win-unpacked`，再在干净树上复跑门禁。
+
+### 15.6 仍未修（新记 0-10）
+
+`llm/client.py::chat_json` 的 JSON 解析修复链最多**再发 2 次**调用。若 call1 成功但
+解析失败、随后两次均超时，静默可达 `3 × 1440 = 4320s` > 1 页阈值 2280s ⇒
+**理论上可能误判停滞**。概率极低（需上游在 call1 之后彻底失联），且**该情形下
+"恢复"本身就是期望行为** ⇒ 倾向**显式豁免 + 写明理由**，而非抬高阈值。
+
+### 15.7 未验证边界（不得读成已通过）
+
+- 「4320s」是**算术推断**，未构造出该时序（需三段连续超时）。
+- 看门狗阈值改动**只影响「多久判停滞」**，不影响判定逻辑本身；但**「更晚判停滞」
+  意味着真卡死的 job 会多等 300s** —— 该代价**未做实测评估**。

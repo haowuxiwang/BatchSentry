@@ -166,7 +166,7 @@ SQS/Celery 用 visibility timeout 让"超时未 ACK"的任务重新可见。
 | 状态 | 基准 | 页数增量 | 封顶 | 实测参照 |
 |---|---|---|---|---|
 | `ocr_running` | 4200s | +120s/页 | 10800s | 51 页真实件 644s（10× 余量）；4 页旋转自愈轮 1031s |
-| `analyzing` | 1800s | +180s/页 | 10800s | 51 页真实件 825–1209s（9× 余量）|
+| `analyzing` | 1800s | +480s/页 | 10800s | 51 页真实件 825–1209s（9× 余量）|
 | `ocr_done` | 1800s | — | — | 纯过渡态，正常 <1s |
 | `cancelling` | 2400s | — | — | 取消要等 Stage 0 收尾，封顶 = CPU 重活超时 1800s（§8.5）|
 | `pending` | **不监视** | — | — | 已建单未推进的过渡态；**例外**：已被 pipeline 接管（§8.3）|
@@ -174,6 +174,18 @@ SQS/Celery 用 visibility timeout 让"超时未 ACK"的任务重新可见。
 > ⚠️ `ocr_running` / `cancelling` 两个基准在 v1.1.3 首版分别写成 1800s / 900s，
 > 都**低于**它们所覆盖的上游封顶 —— 属 §8.2 / §8.5 的缺陷，v1.1.4 已按
 > "基准 ≥ 上游封顶 + 余量"的不变式修正。
+>
+> ⚠️ **`analyzing` 的每页增量（R69，2026-10-08）**：原写 `+180s/页`，理由是
+> "LLM 适配器单次超时" —— 但那读的是 `LLMAdapter.chat` 的**签名默认值**；
+> 真实调用点 `core/page_analyzer.py` 早已把 `timeout` **覆盖**为
+> `_PAGE_TIMEOUT`（Round 3 为大矩阵页从 180 提到 **480**）。更糟的是
+> `test_analyzing_base_covers_single_llm_call` 也读同一默认值，于是断言退化成
+> `180 >= 180` 的**恒真式**，而真实关系 `180 >= 480` 早已为假 —— 护栏**静默失效**。
+> 现改为 `+480s/页`，且护栏改成**从调用点真值源推导**：
+> `_PAGE_TIMEOUT × (SDK DEFAULT_MAX_RETRIES + 1)`（`AsyncOpenAI` 未显式设
+> `max_retries` ⇒ 用 SDK 默认 2 ⇒ 单次 `chat()` 静默上界 1440s，基准 1800s 覆盖它）。
+> 另加静态护栏锁死"调用点必须传 `_PAGE_TIMEOUT` 而非字面量"，防真值源再次被架空。
+> 变异 3/3 CAUGHT（含"真值源上移"与"调用点写死"两个方向）。
 >
 > 📐 **`ocr_running` 的第二条依据（§8.9，2026-09-16）**：旋转补救期间的**静默上界**
 > 不再是"整页补救总时长"，而是由 `core/pipeline/self_heal.rotation_silence_bound_s()`
