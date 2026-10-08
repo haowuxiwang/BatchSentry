@@ -7,6 +7,48 @@
 
 ## [Unreleased]
 
+### 冻结冒烟的 OCR 就绪真值：**只看 env** ⇒ 低报 + 一次真实的 fail-open（Round 69 第十三批，2026-10-08）
+
+> 记录 → `docs/TODO.md` 的 **0-12**（本轮**新发现**；属当前 backlog ⇒ 就地记 §0 表，不进 §0.1 台账）。
+
+**怎么发现的（不是读代码读出来的，是跑出来的）**：跑产物级 e2e 时出现一对**自相矛盾**的输出 ——
+`pipeline_terminal status=review`、`llm_audit success=3/3`、`ocr_backend_used=paddle`（**OCR 真的跑了**），
+而覆盖清单却写 `[skipped] ocr_pipeline —— 流水线成功，但本轮未提供 OCR 凭据 ⇒ 无法断定 OCR 链路被覆盖`。
+
+**定位**：`tests/e2e_frozen.py` 的 APPDATA 是**固定复用**的（`%TEMP%/pbc-e2e-frozen`，跨会话保留），
+上一轮注入过的 Paddle/MinerU 凭据留在 `PBC/config.json` 里；而就绪标志是
+`OCR_CONFIGURED = bool(_paddle or _mineru)` —— **只认本轮 env**。两者不一致，于是：
+
+| 情形 | 修复前 | 后果 |
+|---|---|---|
+| 应用已配、流水线成功 | `ocr_pipeline = skipped`（reason 称"本轮未验"） | **低报**：实际验过却说没验 |
+| 应用已配、流水线 `error` | 走"环境未配 ⇒ 预期降级"分支，**只打印 `[SKIP]`、不记 PASS/FAIL** | **fail-open**：真实产品缺陷不产生任何失败记录 |
+
+`classify_pipeline` 的**文档契约**本就写着 `ocr_ready` 指"凭据已提供且被应用**写入**" ——
+实现喂的是 env 可用性，**偏离契约**。
+
+**修法（单一真值：应用才是"写没写进去"的权威）**：
+
+| 文件 | 改动 |
+|---|---|
+| `tests/e2e_proc.py` | 新增纯函数 `ocr_ready_from_settings()` —— 从 `GET /api/settings` 的 `ocr.{paddle,mineru}.configured` 读**应用自报**；非 dict / 缺段 / 非真布尔 `True` 一律 **fail-closed** |
+| `tests/e2e_frozen.py` | `OCR_CONFIGURED` 改由该函数派生；新增 `ocr_ready_self_report` 断言（打出 `configured` 与 `env_injected`）；`ocr_config` 仍是 `skipped`（该**配置步骤**本轮确实没执行，语义不变），但 reason 改准（不再声称"流水线成功路径本轮未验"） |
+
+**验证（三层，全部实测）**：
+
+1. **变异 7/7 CAUGHT** + 阴性对照绿 + 还原逐文件 sha256 一致（`devlogs/_verify/mutate_r72_ocr_ready_truth.py`）；
+2. **成功路径前后对照**：同一环境（不注入 OCR env）下 `[skipped] ocr_pipeline` → `[covered] ocr_pipeline`
+   （`ocr_backend_used=paddle`；`covered=3 skipped=1`）；
+3. **fail-open 前后对照**（把上游故意弄坏以逼出 `error`）：修复前 `[SKIP] pipeline_terminal`（**不记 FAIL**）
+   → 修复后 `FAIL pipeline_terminal` + `[failed ] ocr_pipeline`（`devlogs/_verify/r72_ocr_ready_failopen_probe.py`）。
+
+**未重建**：改动只在 `tests/`（`BUNDLE_SOURCES` 不含 `tests/`）⇒ 两份产物**不受影响**，
+门禁 `artifact_freshness` 保持逐字节一致。
+
+**踩坑（写进 `MEMORY-DETAIL.md`）**：变异脚本首轮在"变异后、还原前"因宿主垫片 `unlink` 抛错退出 ⇒
+真文件**带着变异留在盘上**，下一次快照又把它固化成"基线"。已加两道保险：`try/finally` 强制还原 +
+快照前校验已知-good 的 sha256。（这正是本项目反复警告的"改真文件跑测试"的危险面。）
+
 ### `kb_prompt_inject` 从「装饰开关」接通 + 白名单外字段不再静默（Round 68 第十二批，2026-10-08）
 
 > 记录 → `docs/TODO.md` 的 **#169** / **C4**（同一件事的两处登记）。

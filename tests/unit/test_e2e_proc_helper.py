@@ -24,7 +24,9 @@ import pytest
 _ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_ROOT))
 
-from tests.e2e_proc import spawn_server, stop_server, tail_log  # noqa: E402
+from tests.e2e_proc import (  # noqa: E402
+    ocr_ready_from_settings, spawn_server, stop_server, tail_log,
+)
 
 _PIPE_RE = re.compile(r"stdout\s*=\s*subprocess\.PIPE")
 
@@ -358,3 +360,75 @@ def test_tail_log_truncates_to_max_chars(tmp_path):
     # 末尾 10 字节 = 7 个 x + "END"
     assert out == "xxxxxxxEND"
     assert len(out) == 10
+
+
+# ── OCR 就绪真值（应用自报）─────────────────────────────────────────
+# 由来（2026-10-08 实测）：`e2e_frozen` 的 APPDATA 固定复用，上轮凭据会留下 ⇒
+# 只按 env 判会把"其实跑了 OCR"记成 skipped，并把真实 error 吞成"预期降级"
+# （fail-open）。真值必须取**应用自报**。见 `tests/e2e_proc.ocr_ready_from_settings`。
+
+
+def _settings(paddle=None, mineru=None, with_ocr=True):
+    """造一份 `GET /api/settings` 形态的响应（None = 该键缺失）。"""
+    d = {"llm": {"provider": "siliconflow"}}
+    if with_ocr:
+        ocr = {}
+        if paddle is not None:
+            ocr["paddle"] = {"configured": paddle}
+        if mineru is not None:
+            ocr["mineru"] = {"configured": mineru}
+        d["ocr"] = ocr
+    return d
+
+
+class TestOcrReadyFromSettings:
+    def test_paddle_configured_is_ready(self):
+        assert ocr_ready_from_settings(_settings(paddle=True, mineru=False)) is True
+
+    def test_mineru_configured_is_ready(self):
+        assert ocr_ready_from_settings(_settings(paddle=False, mineru=True)) is True
+
+    def test_both_false_is_not_ready(self):
+        assert ocr_ready_from_settings(_settings(paddle=False, mineru=False)) is False
+
+    def test_missing_ocr_section_is_not_ready(self):
+        assert ocr_ready_from_settings(_settings(with_ocr=False)) is False
+
+    def test_non_dict_is_not_ready(self):
+        # fail-closed：判不了按未就绪处理
+        assert ocr_ready_from_settings(None) is False
+        assert ocr_ready_from_settings([]) is False
+        assert ocr_ready_from_settings("boom") is False
+
+    def test_malformed_provider_entry_is_not_ready(self):
+        assert ocr_ready_from_settings({"ocr": {"paddle": "yes"}}) is False
+        assert ocr_ready_from_settings({"ocr": "yes"}) is False
+
+    def test_truthy_non_bool_does_not_count(self):
+        # `configured` 必须是**真布尔 True**：字符串 "true" 不算（防止口径漂移）
+        assert ocr_ready_from_settings({"ocr": {"paddle": {"configured": "true"}}}) is False
+        assert ocr_ready_from_settings({"ocr": {"paddle": {"configured": 1}}}) is False
+
+    def test_guard_is_not_vacuous(self):
+        """反空转：断言上面的"就绪"与"未就绪"两簇**确实可分**。"""
+        ready = _settings(paddle=True, mineru=False)
+        not_ready = _settings(paddle=False, mineru=False)
+        assert ocr_ready_from_settings(ready) != ocr_ready_from_settings(not_ready)
+
+
+
+def test_e2e_frozen_derives_ocr_ready_from_app_not_env():
+    """`e2e_frozen` 的 OCR 就绪真值必须来自**应用自报**，不得回退成只看 env。
+
+    反例（2026-10-08 实测）：`OCR_CONFIGURED = bool(_paddle or _mineru)` ——
+    e2e appdata 固定复用、带着上轮凭据时，会把**真实跑过**的 OCR 记成 skipped
+    （低报），并把真实产品缺陷导致的 `error` 吞成"环境未配 ⇒ 预期降级"
+    （只打印、不记 FAIL）⇒ 冒烟退出码 0（fail-open）。
+    """
+    src = (_ROOT / "tests" / "e2e_frozen.py").read_text(encoding="utf-8")
+    assert "ocr_ready_from_settings(" in src, (
+        "tests/e2e_frozen.py 未用应用自报的就绪真值 —— 就绪判定会退回只看 env"
+    )
+    assert "OCR_CONFIGURED = bool(_paddle or _mineru)" not in src, (
+        "tests/e2e_frozen.py 的 OCR 就绪真值又回退成只看 env 了（fail-open 会复发）"
+    )

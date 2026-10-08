@@ -1,6 +1,6 @@
 # TODO —— 活的待办清单
 
-> **复核戳：Round 68（2026-10-08，第十二批）** ← `tests/unit/test_todo_freshness.py` 机检读这一行；
+> **复核戳：Round 69（2026-10-08，第十三批）** ← `tests/unit/test_todo_freshness.py` 机检读这一行；
 > 该戳**不得落后于 `CHANGELOG.md` 的最新 Round**。
 >
 > **状态（R66 复核，2026-09-30）——本文件分两层，别混读**：
@@ -15,6 +15,10 @@
 >   `kb_prompt_inject` 此前是**装饰开关**（`config.py` 支持、注入代码也活着，但 `_STATIC_FIELDS` 白名单漏了
 >   ⇒ POST **静默丢弃**、GET 不暴露、UI 无控件），已**接通**（白名单 + `SettingsUpdate` 声明 + GET 暴露 + 知识库分区复选框）；
 >   顺带把白名单外字段由**静默** `continue` 改为随响应 `dropped` **回显**。属 §A 及以下 ⇒ **进 §0.1 台账**（不变式 E 的 1:1 同步 +2）。
+> - **R73 第十三批（2026-10-08）**：核销 **§0 表内的 0-12**（本轮**新发现**：冻结冒烟的 OCR 就绪真值
+>   **只看 env** ⇒ 覆盖清单低报 + 一次真实的 **fail-open**）。已修：就绪真值改取**应用自报**
+>   （`GET /api/settings` 的 `ocr.{paddle,mineru}.configured`），并新增 `ocr_ready_self_report` 断言。
+>   属**当前 backlog** ⇒ **就地记 §0 表**，**不进 §0.1 台账**（台账按定义只记 §A 及以下）。
 > - **§A 及以下 = Round 59（2026-09-23）的快照**，**已做过一轮核销，但未逐条复核**。
 >   核销过的条目带 **`—— **R66 已核销**（证据见 §0.1）`** 尾注；
 >   **其余仍标 `[ ]` 的，按"未复核"对待，不要当成当前事实。**
@@ -59,6 +63,7 @@
 | **0-9** | ~~给单次 LLM 调用加**墙钟上界**~~ —— **前提否证**：产物**已有**上界（看门狗停滞阈值），真缺陷是**阈值真值源漂移** | **P2** | **✅ 已完成（R69 第九批核销：前提否证 + 真缺陷已修）** | 看门狗 `analyzing` 阈值与其**真实调用点**保持一致（机检 + 变异） | **R69（2026-10-08）—— 先更正初版结论**：第八批把这条记成「产品**没有**墙钟上界」—— **是错的**。产物**有**界：`core/watchdog.py` 的 `analyzing` 停滞阈值 = `1800 + 480×页`（封顶 10800s；e2e 那个 1 页件 **2280s**）。e2e 的 930s 只是**冒烟预算**（`poll_timeout_for_pages(1) 630 + 300`），**故意低于**看门狗阈值 ⇒ 慢模型在 e2e 显红、而产品仍在自己预算内 —— 这是**预算错配**，不是缺上界。**真缺陷**：`_PER_PAGE_S["analyzing"]` 与其护栏 `test_analyzing_base_covers_single_llm_call` **都读 `LLMAdapter.chat` 的签名默认值 180**，而调用点 `core/page_analyzer.py` 早已把 `timeout` **覆盖**为 `_PAGE_TIMEOUT=480`（Round 3）⇒ 断言退化成 `180 >= 180` 的**恒真式**，真实关系 `180 >= 480` 早已为假却无人发现。**修法**：每页增量改 `480`；护栏改从**调用点真值源**推导（`_PAGE_TIMEOUT × (SDK DEFAULT_MAX_RETRIES + 1)`）；另加**静态护栏**锁死「调用点必须传 `_PAGE_TIMEOUT` 而非字面量」（防真值源再次被架空）。变异 `devlogs/_verify/mutate_r69_watchdog_llm_budget.py` ⇒ **3/3 CAUGHT**（含"真值源上移"与"调用点写死"两个方向）+ 负控绿。**重建 + 复跑**：`core/watchdog.py` 入包 ⇒ 重建两份产物后门禁 **11/11 PASS**（`3932 passed`、coverage `95.08%`）；产物级 e2e `frozen --model deepseek-ai/DeepSeek-V3.2 --require-llm` ⇒ **`E2E_RC=0`、`covered=4 skipped=0 failed=0`**、`llm_audit success=3/3`，`ocr_backend_used=paddle`（= 本轮配置后端，**无 failover**）⇒ 新归因分支的**一致路径**首次在产物上被目击（`devlogs/e2e_coverage_20261008-143941.json`）。 |
 | **0-10** | 看门狗 `analyzing` 阈值**未覆盖 fix-hint 重试链**的叠加静默 | P3 | 无 | 落一条结论：覆盖 or **显式豁免 + 写明理由** | **R69 定位（未修）**：`llm/client.py::chat_json` 的 JSON 解析修复链最多**再发 2 次**调用；若 call1 成功但解析失败、随后两次均超时，静默可达 `3 × (480×3) = 4320s` > 1 页阈值 2280s ⇒ **理论上可能误判停滞**。概率极低（需上游在 call1 之后彻底失联），且**该情形下"恢复"本身就是期望行为** ⇒ 倾向**显式豁免 + 写明理由**，而非抬高阈值。 |
 | **0-11** | 冻结冒烟（`test_frozen_smoke`）的就绪失败**不可当场归因**；30s 期限在满载下会抖动 | P3 | 无 | 失败消息能区分「进程已死」与「进程活着但没就绪」 | **R71 第十一批（2026-10-08）**：门禁实测**同一份逐字节一致的产物**三轮 —— R69 `test_health_ok` **4.039s 通过**、R70 **4.666s 通过**、R71 首轮 **33.157s 超时**（30s 期限用尽 ⇒ 8 条 error、门禁 10/11）。隔离复跑 **8 passed / 20.25s**、整轮重跑 **11/11 / 3939 passed** ⇒ 判为**环境抖动**，**不是**回归（本批未改任何入包字节，`artifact_freshness` 逐字节一致）。**真缺口 = 可诊断性**：旧消息只打服务端日志，而该日志为空 ⇒ **无法区分**「进程已死」与「进程活着但没就绪」（根因完全不同）。**已修**（`tests/integration/test_frozen_smoke.py`）：失败消息带上 `after Ns` / `alive=` / `exit_code=`（`rc` 在 `stop_server` **之前**取）；验证脚本 `devlogs/_verify/verify_r71_frozen_smoke_diag.py` 用「立刻退出的 stub exe」逼出该分支 ⇒ 实测消息 `after 5.4s (alive=False, exit_code=0)`，且**还原字节一致**。⚠️ **未做**：**不**加重试（会掩盖真回归）、**不**抬高 30s 期限（抖动根因未定位 —— `alive` 字段正是为下一次复现准备的）。 |
+| **0-12** | 冻结冒烟的 OCR **就绪真值只看 env**、忽略应用已有配置 ⇒ 覆盖清单**低报**（跑过 OCR 却记 skipped）+ 真实 `error` 被吞成「预期降级」**不记 FAIL**（**fail-open**） | **P2** | **✅ 已完成（R73 第十三批核销）** | 就绪真值取自**应用自报**；`error` 且应用已配 ⇒ 必须记 FAIL（不得只打印 `[SKIP]`） | **R73 第十三批（2026-10-08）：达成。** **定位**：e2e appdata 固定复用 ⇒ 上轮凭据残留，而 `OCR_CONFIGURED = bool(_paddle or _mineru)` 只认 env；实测未注入 OCR env 时流水线仍到 `review`（`ocr_backend_used=paddle`、`llm_audit success=3/3`），清单却记 `[skipped] ocr_pipeline`。**修法**：`tests/e2e_proc.py` 新增纯函数 `ocr_ready_from_settings()`（读 `ocr.{paddle,mineru}.configured`，非真布尔 `True` 一律 fail-closed）；`tests/e2e_frozen.py` 就绪真值改由它派生 + 新增 `ocr_ready_self_report` 断言 + 修正 `ocr_config` 的 reason。**护栏**：`test_e2e_proc_helper.py::TestOcrReadyFromSettings`（**8 条**）+ `test_e2e_frozen_derives_ocr_ready_from_app_not_env`（接线，源码扫描）。**变异** `devlogs/_verify/mutate_r72_ocr_ready_truth.py` ⇒ **7/7 CAUGHT** + 负控绿 + 还原 sha256 一致。**行为对照**（`devlogs/_verify/r72_ocr_ready_failopen_probe.py`）：成功路径 `[skipped]`→`[covered]`；error 路径 `[SKIP] pipeline_terminal`（不记 FAIL）→ `FAIL pipeline_terminal` + `[failed ] ocr_pipeline`。**未重建**（`tests/` 不入包，`artifact_freshness` 不受影响）。 |
 
 > 用法：完成一条就把 `[ ]`/状态改掉并补证据列。**0-1 / 0-2 是用户动作，agent 不代做。**
 

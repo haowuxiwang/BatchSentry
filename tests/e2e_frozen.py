@@ -10,8 +10,8 @@ from tests.e2e_coverage import (  # noqa: E402
 )
 from tests.e2e_proc import (  # noqa: E402
     EXE_ENV, LLM_KEY_ENV, classify_llm_probe, llm_failure_attribution, llm_key,
-    llm_key_env_display, llm_model, llm_provider, resolve_exe, spawn_server,
-    stop_server,
+    llm_key_env_display, llm_model, llm_provider, ocr_ready_from_settings,
+    resolve_exe, spawn_server, stop_server,
 )
 from tests.e2e_status_js import (  # noqa: E402
     dot_semantics_problems, status_dot_classes,
@@ -340,11 +340,11 @@ try:
     section("Configure OCR")
     _paddle = os.environ.get("PBC_E2E_PADDLE_TOKEN", "")
     _mineru = os.environ.get("PBC_E2E_MINERU_TOKEN", "")
-    OCR_CONFIGURED = bool(_paddle or _mineru)
+    _env_injected = bool(_paddle or _mineru)
     #: 本轮**实际配置的**后端名 —— 后面用它判 `ocr_backend_used` 是否被
     #: failover 掩盖（"跑了 OCR" 与 "跑了我配的那个后端" 是两件事）。
     _ocr_expected = ""
-    if OCR_CONFIGURED:
+    if _env_injected:
         payload = {"ocr_backend": "paddle" if _paddle else "mineru"}
         _ocr_expected = payload["ocr_backend"]
         if _paddle:
@@ -368,9 +368,33 @@ try:
             COV.record(ENTRY_OCR_CONFIG, STATUS_FAILED, f"配置 OCR 失败：{e}", "")
     else:
         print("    [WARN] 未提供 PBC_E2E_PADDLE_TOKEN / PBC_E2E_MINERU_TOKEN —— "
-              "OCR 未配置，pipeline 无法跑通（下游将如实标注为降级，不冒充 PASS）")
-        COV.record(ENTRY_OCR_CONFIG, STATUS_SKIPPED,
-                   "未提供 OCR 凭据 ⇒ 流水线成功路径本轮未验", "")
+              "本轮不注入 OCR 凭据；就绪与否改由**应用自报**判定"
+              "（e2e appdata 固定复用，可能带着上轮写入的凭据）")
+
+    # 就绪真值 = **应用自报**（单一真值），不是"本轮 env 有没有给"。
+    # 由来见 `tests/e2e_proc.ocr_ready_from_settings` 的注释：只按 env 判会把
+    # "其实跑了 OCR"记成 skipped（低报），且会把真实 error 吞成"预期降级"（fail-open）。
+    _ocr_self_ok = True
+    try:
+        _settings_now = requests.get(f"{BASE}/api/settings", timeout=5).json()
+    except Exception as e:
+        _settings_now = {}
+        _ocr_self_ok = False
+        fail("ocr_ready_self_report", f"读取应用 OCR 就绪状态失败：{e}")
+    OCR_CONFIGURED = (ocr_ready_from_settings(_settings_now)
+                      if _ocr_self_ok else _env_injected)
+    if _ocr_self_ok:
+        ok("ocr_ready_self_report",
+           f"应用自报 configured={OCR_CONFIGURED}（env_injected={_env_injected}）")
+    if not _env_injected:
+        # 该**配置步骤**本轮确实没执行（skipped 语义不变）；但**不得**再说
+        # "流水线成功路径本轮未验" —— 应用若已带凭据，OCR 照跑（2026-10-08 实测）。
+        COV.record(
+            ENTRY_OCR_CONFIG, STATUS_SKIPPED,
+            "本轮未注入 OCR 凭据（该配置步骤未执行）；"
+            f"应用自报已就绪={OCR_CONFIGURED}"
+            + (" ⇒ OCR 链路仍会真实运行" if OCR_CONFIGURED else
+               " ⇒ 流水线成功路径本轮未验"), "")
 
     # 6. PDF upload —— 样例必须**含真实文字**，不能是空白页。
     # 为什么（2026-09-17 实测，两处盲区同根）：

@@ -227,6 +227,42 @@ def llm_failure_attribution(verdict, detail):
             "（fail-closed：判不了 ≠ 通过）。")
 
 
+# ── OCR 就绪真值：以**应用自报**为准，不以"本轮是否注入 env"为准 ──────────
+# 由来（2026-10-08 实测）：`tests/e2e_frozen.py` 的 APPDATA 是**固定复用**的
+# （`%TEMP%/pbc-e2e-frozen`，跨会话保留）⇒ 上一轮注入过的 Paddle/MinerU 凭据会
+# 留在 `PBC/config.json`。本轮**没有**提供任何 `PBC_E2E_*` OCR 凭据，流水线却
+# **真的**跑完了 OCR（terminal=review、ocr_backend_used=paddle）。而就绪标志当时
+# 只由 env 推导 ⇒ 覆盖清单把**实际跑过**的 OCR 记成 skipped（低报）；更危险的是
+# 反向：`terminal == "error"` 且 env 无凭据时会走"环境未配 ⇒ 预期降级"分支
+# **只打印、不记 FAIL** ⇒ 真实产品缺陷被吞成退出码 0（fail-open）。
+# `classify_pipeline` 的文档契约本就写着 `ocr_ready` 指"凭据已提供且被应用
+# **写入**" —— 应用才是"写没写进去"的权威。故就绪真值改从
+# `GET /api/settings` 的 `ocr.{paddle,mineru}.configured` 取。
+# 回归护栏：`tests/unit/test_e2e_proc_helper.py::TestOcrReadyFromSettings`。
+
+
+def ocr_ready_from_settings(settings) -> bool:
+    """从 `GET /api/settings` 的响应判定 OCR 是否**已就绪**（应用自报）。**纯函数**。
+
+    只看 ``ocr.paddle.configured`` / ``ocr.mineru.configured`` 两个布尔 —— 它们是
+    应用侧对"凭据是不是真值（非掩码占位）"的判定（``api/settings/read.py`` 的
+    ``_is_real_api_key``），与本轮测试**有没有**注入 env 无关。
+
+    fail-closed：响应不是 dict、缺 ``ocr`` 段、两个标志都不是 ``True`` ⇒ 返回
+    ``False``（"判不了"按未就绪处理，与 :func:`classify_pipeline` 的 fail-closed 同源）。
+    """
+    if not isinstance(settings, dict):
+        return False
+    ocr = settings.get("ocr")
+    if not isinstance(ocr, dict):
+        return False
+    for name in ("paddle", "mineru"):
+        prov = ocr.get(name)
+        if isinstance(prov, dict) and prov.get("configured") is True:
+            return True
+    return False
+
+
 # ── 产物出处（PROVENANCE.txt 的 `git_head`）──────────────────────────────────
 # 由来（2026-09-30 实测）：`build.ps1` 用 `try { & git rev-parse --short HEAD }`
 # 取 HEAD，**异常被吞**。在一台 git 不在 PATH 的宿主上执行时，写出来的
