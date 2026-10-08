@@ -13,7 +13,7 @@ import re
 from datetime import datetime
 from typing import Awaitable, Callable, Optional
 
-from llm.client import get_llm_client
+from llm.client import get_llm_client, raw_digest
 from core.hw_signal import _extract_low_conf_tokens
 from config import config as _app_config
 
@@ -630,8 +630,10 @@ async def analyze_page(
         return {
             "page_number": page_num,
             "_parse_error": True,
-            "_raw": result.get("_raw", "")[:500],
-            "_parse_error_payload": result.get("_raw", "")[:2000],
+            # #145：`_raw` 由生产者保证已是**摘要**（llm.client.raw_digest），
+            # 这里不再截断；原 `_parse_error_payload`（2000 字模型正文）已删除 ——
+            # 它**零消费者**，却会写进 page_cache 并经 get_page_data 回给浏览器。
+            "_raw": result.get("_raw", ""),
             "overall_confidence": "low",
             "steps": [],
             "findings": [],
@@ -655,7 +657,7 @@ async def analyze_page(
             return {
                 "page_number": page_num,
                 "_parse_error": True,
-                "_raw": str(result)[:500],
+                "_raw": raw_digest(str(result)),
                 "_prompt_version": CURRENT_PROMPT_VERSION,
                 "overall_confidence": "low",
             }
@@ -674,7 +676,7 @@ async def analyze_page(
         return {
             "page_number": page_num,
             "_parse_error": True,
-            "_raw": str(result)[:500],
+            "_raw": raw_digest(str(result)),
             "_prompt_version": CURRENT_PROMPT_VERSION,
             "overall_confidence": "low",
         }

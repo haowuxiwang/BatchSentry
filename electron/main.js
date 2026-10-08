@@ -49,20 +49,54 @@ const READY_TIMEOUT_MS = 180_000;
 
 let reusedBackend = false; // 复用孤儿后端时 waitForServer 不要求子进程存活
 
+// #145：backend-boot.log 此前**无上限** —— `flags: "a"` 只追加、不轮转，
+// 反复启动 / 长会话会让它无限增长。给一个粗粒度上限：超过就轮转，
+// **只保留 `.1` 一份**（启动日志是排障用的，不需要历史归档）。
+const BOOT_LOG_MAX_BYTES = 2 * 1024 * 1024;
+
 let bootLogStream = null;
+let bootLogBytes = 0;
+let bootLogPath = null;
+
+function openBootLog(dir) {
+  bootLogPath = path.join(dir, "backend-boot.log");
+  try {
+    bootLogBytes = fs.statSync(bootLogPath).size;
+  } catch {
+    bootLogBytes = 0; // 首次运行：文件还不存在
+  }
+  if (bootLogBytes > BOOT_LOG_MAX_BYTES) {
+    try {
+      fs.renameSync(bootLogPath, `${bootLogPath}.1`);
+      bootLogBytes = 0;
+    } catch {
+      // 轮转失败（句柄被占用等）**不能让启动失败** ⇒ 退化为继续追加
+    }
+  }
+  bootLogStream = fs.createWriteStream(bootLogPath, { flags: "a" });
+}
 
 function bootLog(line) {
   try {
     if (!bootLogStream) {
       const dir = path.join(app.getPath("appData"), "PBC", "logs");
       fs.mkdirSync(dir, { recursive: true });
-      bootLogStream = fs.createWriteStream(path.join(dir, "backend-boot.log"), {
-        flags: "a",
-      });
+      openBootLog(dir);
     }
-    bootLogStream.write(
-      `${new Date().toISOString()} ${line}\n`,
-    );
+    const text = `${new Date().toISOString()} ${line}\n`;
+    const bytes = Buffer.byteLength(text);
+    // 运行期也要轮转：只在启动时查一次不够 —— 一次会话可能写很久
+    if (bootLogBytes + bytes > BOOT_LOG_MAX_BYTES) {
+      try {
+        bootLogStream.end();
+      } catch {
+        /* 忽略：关不掉也必须继续 */
+      }
+      bootLogStream = null;
+      openBootLog(path.dirname(bootLogPath));
+    }
+    bootLogStream.write(text);
+    bootLogBytes += bytes;
   } catch {
     // 日志尽力而为，绝不阻断启动流程
   }

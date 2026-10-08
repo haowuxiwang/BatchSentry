@@ -12,6 +12,7 @@ will be the AsyncAnthropic instance instead — callers that only need to
 send chat requests should use `client.chat()` / `client.chat_json()`.
 """
 import asyncio
+import hashlib
 import json
 import logging
 import re
@@ -161,6 +162,21 @@ def _looks_like_rf_unsupported(err: Exception) -> bool:
         or "unsupported" in s
     )
     return has_rf and has_bad
+
+
+def raw_digest(raw: str) -> str:
+    """把模型原始输出摘要成「可关联、不泄内容」的短串（#145）。
+
+    **为什么不能写 `raw[:200]`**：模型输出的就是**批记录正文**，而日志会被打包
+    外发做支持与排障。此前三处出口都把前 200 字原文写进 `pharma.log`（`llm.client`
+    还同时挂 `pipeline.log`），等于把产品数据抄进一个会被拷来拷去的文件。
+
+    保留 `len` + `sha256[:12]` 足以判定「两次失败是不是同一份响应」—— 那才是排障
+    真正需要的信息 —— 且**不含任何正文**。`response_length=` 这个 token 刻意保留，
+    便于既有排障习惯继续 grep。
+    """
+    digest = hashlib.sha256(raw.encode("utf-8", "replace")).hexdigest()[:12]
+    return f"response_length={len(raw)} sha256={digest}"
 
 
 class LLMClient:
@@ -416,8 +432,7 @@ class LLMClient:
             parse_attempt += 1
             logger.warning(
                 f"JSON parse failed{ctx_tag} (attempt {parse_attempt - 1}), "
-                f"retrying with fix hint: response_length={len(raw)}, "
-                f"first_200={raw[:200]!r}"
+                f"retrying with fix hint: {raw_digest(raw)}"
             )
             # C1: fix-hint 重试的 audit 记录单独标记 stage（stage:fix_hint）—
             # 原样复用 audit_ctx 会在 llm_call_audit 留下两条无法区分的同
@@ -451,8 +466,7 @@ class LLMClient:
         # Log final parse failures with context for production debugging
         if isinstance(result, dict) and result.get("_parse_error"):
             logger.warning(
-                f"JSON parse failed{ctx_tag}: "
-                f"response_length={len(raw)}, first_200={raw[:200]!r}"
+                f"JSON parse failed{ctx_tag}: {raw_digest(raw)}"
             )
 
         return result
@@ -533,8 +547,13 @@ class LLMClient:
                     except json.JSONDecodeError:
                         pass
 
-        logger.warning(f"Failed to parse JSON from LLM response: {raw[:200]}")
-        return {"_parse_error": True, "_raw": raw[:500]}
+        logger.warning(
+            f"Failed to parse JSON from LLM response: {raw_digest(raw)}"
+        )
+        # #145：`_raw` 会被 stage2 拼进页级 `_error` → DB → 复核 UI，
+        # 原先回传的是模型正文前 500 字。改回摘要：UI 侧真正需要的信号是
+        # 「这一页没解析出来」，而不是那段被截断的正文。
+        return {"_parse_error": True, "_raw": raw_digest(raw)}
 
 
 _NUM_TOKEN_RE = __import__("re").compile(

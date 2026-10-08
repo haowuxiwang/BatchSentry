@@ -90,6 +90,44 @@ def generate_request_id() -> str:
     return uuid.uuid4().hex[:8]
 
 
+# #145：显式压掉第三方库的 DEBUG。
+# 它们默认 NOTSET ⇒ **继承 root 的 DEBUG** ⇒ httpx/httpcore/openai 的每请求 DEBUG
+# 全量落进 pharma.log（10MB × 5 份很快滚完），把自家 DEBUG 挤出去。
+# ⚠️ **必须显式设**：root 得留在 DEBUG，否则 `core.*`/`llm.*` 的 DEBUG 也一起没了
+# —— 那才是排障真正要看的东西。所以这里是「逐库降级」，不是「抬高 root」。
+_NOISY_THIRD_PARTY_LOGGERS = (
+    "httpx",
+    "httpcore",
+    "openai",
+    "anthropic",
+    "urllib3",
+    "requests",
+    "asyncio",
+)
+
+# `PBC_LOG_LEVEL` 的合法取值（#145）。不合法时**不静默当 DEBUG**，而是报一声再回退，
+# 否则一个拼错的变量名会被读成"我已经调低日志了"。
+_LOG_LEVEL_NAMES = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
+
+
+def resolve_file_log_level(env: dict | None = None) -> tuple[int, str | None]:
+    """解析 `PBC_LOG_LEVEL` → (级别, 警告文本或 None)。
+
+    只作用于**文件** handler。console 级别仍由 `setup_logging(level=...)` 决定
+    （保持既有语义，不改变现有调用方的行为）。
+    """
+    env = os.environ if env is None else env
+    raw_level = (env.get("PBC_LOG_LEVEL") or "").strip().upper()
+    if not raw_level:
+        return logging.DEBUG, None
+    if raw_level not in _LOG_LEVEL_NAMES:
+        return logging.DEBUG, (
+            f"PBC_LOG_LEVEL={raw_level!r} 不是合法级别 "
+            f"{'/'.join(_LOG_LEVEL_NAMES)} ⇒ 回退 DEBUG"
+        )
+    return getattr(logging, raw_level), None
+
+
 def setup_logging(log_dir: str = "", level: str = "INFO"):
     """配置日志系统 — console + file + pipeline。
 
@@ -117,6 +155,9 @@ def setup_logging(log_dir: str = "", level: str = "INFO"):
     # Configure root logger
     root = logging.getLogger()
     root.setLevel(logging.DEBUG)
+    # #145：逐库降噪（见 _NOISY_THIRD_PARTY_LOGGERS 的说明）
+    for _noisy in _NOISY_THIRD_PARTY_LOGGERS:
+        logging.getLogger(_noisy).setLevel(logging.WARNING)
     # 避免重复添加 console handler（测试中可能多次 import main）
     has_console = any(
         isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler)
@@ -131,6 +172,12 @@ def setup_logging(log_dir: str = "", level: str = "INFO"):
 
     Path(log_dir).mkdir(parents=True, exist_ok=True)
 
+    # #145：文件 handler 的级别（默认 DEBUG 保持既有行为；运维可用
+    # PBC_LOG_LEVEL=INFO/WARNING 调低落盘量）。console 不受此变量影响。
+    file_level, _level_warn = resolve_file_log_level()
+    if _level_warn:
+        logging.getLogger(__name__).warning(_level_warn)
+
     # File handler (rotate at 10MB, keep 5 backups)
     file_handler = logging.handlers.RotatingFileHandler(
         f"{log_dir}/pharma.log",
@@ -138,7 +185,7 @@ def setup_logging(log_dir: str = "", level: str = "INFO"):
         backupCount=5,
         encoding="utf-8",
     )
-    file_handler.setLevel(logging.DEBUG)
+    file_handler.setLevel(file_level)
     file_handler.setFormatter(formatter)
     file_handler.addFilter(RequestIdFilter())
     root.addHandler(file_handler)
@@ -162,7 +209,7 @@ def setup_logging(log_dir: str = "", level: str = "INFO"):
         backupCount=5,
         encoding="utf-8",
     )
-    pipeline_handler.setLevel(logging.DEBUG)
+    pipeline_handler.setLevel(file_level)
     pipeline_handler.setFormatter(formatter)
     pipeline_handler.addFilter(RequestIdFilter())
 
