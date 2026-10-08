@@ -52,7 +52,8 @@ def frozen_server(tmp_path_factory):
     # 阻塞在 write（asyncio 事件循环停摆，后续请求全超时）。见 tests/e2e_proc.py。
     srv_log = fake_appdata / "frozen-smoke-server.log"
     proc, logf = spawn_server([str(EXE)], env=env, log_path=srv_log)
-    deadline = time.time() + 30
+    t_start = time.time()
+    deadline = t_start + 30
     ready = False
     while time.time() < deadline:
         if proc.poll() is not None:
@@ -66,8 +67,21 @@ def frozen_server(tmp_path_factory):
             time.sleep(0.5)
     if not ready:
         out = tail_log(srv_log)
+        # 诊断（2026-10-08 补）：失败时**必须**区分「进程已死」与「进程活着但没就绪」
+        # —— 根因完全不同（崩溃 vs 冷启动/IO 争用）。旧消息只打服务端日志，
+        # 而**空日志什么也说明不了**（既可能是崩溃在写日志之前，也可能是该进程
+        # 本就不往 stdout 写）。实测 2026-10-08 门禁：同一份**逐字节一致**的产物，
+        # R69/R70 两轮各 ~4s 就绪，第三轮 33s 超时 ⇒ 8 条 error 却**无法就地定性**，
+        # 只能靠整轮重跑（重跑 11/11 通过）才判为环境抖动。故把退出码/存活/耗时
+        # 一并带进失败消息，让下一次复现**当场可归因**。
+        rc = proc.poll()          # ⚠️ 必须在 stop_server **之前**取
+        alive = rc is None
+        elapsed = round(time.time() - t_start, 1)
         stop_server(proc, logf, timeout=5)
-        pytest.fail(f"frozen server failed to become ready:\n{out[:2000]}")
+        pytest.fail(
+            f"frozen server failed to become ready after {elapsed}s "
+            f"(alive={alive}, exit_code={rc}):\n{out[:2000]}"
+        )
 
     yield {"proc": proc, "appdata": fake_appdata, "base": base}
 
