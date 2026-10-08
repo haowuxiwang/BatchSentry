@@ -580,11 +580,21 @@ try:
             _job = requests.get(f"{BASE}/api/jobs/{job_id}", timeout=5).json()
             _ocr_backend = _job.get("ocr_backend_used")
             assert _ocr_backend, "产品未记录 ocr_backend_used"
-            if _ocr_expected:
-                assert str(_ocr_backend).strip().lower() == _ocr_expected, (
-                    f"ocr_backend_used={_ocr_backend!r}，期望本轮配置的 "
-                    f"{_ocr_expected!r} ⇒ 可能被 failover 掩盖")
-            ok("ocr_backend_used", f"{_ocr_backend}（期望 {_ocr_expected or '未配'}）")
+            if _ocr_expected and str(_ocr_backend).strip().lower() != _ocr_expected:
+                # 判据强度**不变**（仍是 FAIL）：本轮要验的那个后端没跑成。
+                # 但**保留真实值**，让覆盖清单能写出"真实后端是 X 而不是 Y"。
+                # 旧写法在此把 `_ocr_backend` 置 None ⇒ reason 写成
+                # "**未记录** ocr_backend_used"，与事实**相反**（2026-10-08 实测：
+                # PaddleOCR 上游 `state=failed, errorMsg=系统错误-单页` ⇒
+                # 产品按设计 failover 到 MinerU ⇒ 字段有值 'mineru'）。
+                # 那条 reason 会把排查引向"字段为什么是空的"，而真问题是
+                # "配置的后端为什么没跑成" —— 归因错向比没有归因更贵。
+                fail("ocr_backend_used",
+                     f"ocr_backend_used={_ocr_backend!r}，期望本轮配置的 "
+                     f"{_ocr_expected!r} ⇒ 配置的后端未完成解析、由 failover 兜底")
+            else:
+                ok("ocr_backend_used",
+                   f"{_ocr_backend}（期望 {_ocr_expected or '未配'}）")
         except Exception as e:  # noqa: BLE001 — 判不了 ⇒ fail-closed
             _ocr_backend = None
             fail("ocr_backend_used", str(e))
@@ -594,7 +604,8 @@ try:
         # 规则只此一处（`tests/e2e_coverage.classify_pipeline`）。
         COV.record_many(classify_pipeline(
             terminal, llm_ready=_llm_ready, ocr_ready=OCR_CONFIGURED,
-            llm_call_succeeded=_llm_ok, ocr_backend_used=_ocr_backend))
+            llm_call_succeeded=_llm_ok, ocr_backend_used=_ocr_backend,
+            ocr_backend_expected=_ocr_expected))
     else:
         # 上传就没成功 ⇒ 流水线根本没跑（产品在未配置 LLM 时会直接 400 拒绝上传，
         # 见 api/jobs/upload.py）。**传空终态 + upload_failed** 让判据记 failed，

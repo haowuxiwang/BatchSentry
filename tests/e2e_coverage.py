@@ -210,18 +210,38 @@ def _judge_llm_success(llm_call_succeeded: bool | None, terminal: str):
             f"（llm_call_succeeded=None）⇒ fail-closed：判不了 ≠ 已验", "LLM")
 
 
-def _judge_ocr_success(ocr_backend_used: str | None, terminal: str):
-    """成功终态下判 OCR 链路是否**真的**走了真实后端。
+def _judge_ocr_success(ocr_backend_used: str | None, terminal: str,
+                       expected: str | None = None):
+    """成功终态下判 OCR 链路是否**真的**走了本轮要验的那个后端。
 
-    判据取**产品自己记录**的 ``jobs.ocr_backend_used``（不是驱动自述）：
-    非空 ⇒ 确实由某个真实后端完成了解析；空/None ⇒ 无从断定
-    （可能是 failover 掩盖或根本没跑 OCR）⇒ fail-closed。
+    判据取**产品自己记录**的 ``jobs.ocr_backend_used``（不是驱动自述）。
+    三种情形，reason 必须**互相可区分** —— 否则归因会把排查引向错的方向：
+
+    | 事实 | 状态 | reason 要点 |
+    |---|---|---|
+    | 非空，且（未指定期望 或 与期望一致） | covered | 「真实后端 = X」 |
+    | 非空，但与**本轮配置的期望**不一致 | failed | 「真实后端是 X，**不是**配置的 Y」= failover 兜底 |
+    | 空 / None | failed | 「**未记录** ocr_backend_used」 |
+
+    🔴 第三行与第二行**必须分开写**（2026-10-08 实测的真实误归因）：
+    PaddleOCR 上游返回 `state=failed, errorMsg=系统错误-单页` ⇒ 产品按设计
+    failover 到 MinerU ⇒ `ocr_backend_used='mineru'`。此时字段**有值**，
+    旧实现却写成「**未记录** ocr_backend_used」，与事实相反 —— 读者会去查
+    「字段为什么是空的」，而真问题是「配置的后端为什么没跑成」。
+    状态两者都是 failed（判据强度不变），改的只是**归因文案**。
     """
     backend = (ocr_backend_used or "").strip()
-    if backend:
+    exp = (expected or "").strip()
+    if backend and (not exp or backend.lower() == exp.lower()):
         return (STATUS_COVERED,
                 f"流水线到达成功终态（terminal={terminal}），"
                 f"且 ocr_backend_used={backend}（真实后端）", "OCR")
+    if backend and exp:
+        return (STATUS_FAILED,
+                f"流水线到达成功终态（terminal={terminal}），但真实后端是 "
+                f"{backend}，**不是本轮配置的 {exp}** ⇒ 配置的后端未能完成解析、"
+                f"结果由 failover 兜底（OCR 链路跑通了，但**本轮要验的那个后端"
+                f"没验到**）⇒ fail-closed", "OCR")
     return (STATUS_FAILED,
             f"流水线到达成功终态（terminal={terminal}），但**未记录 "
             f"ocr_backend_used** ⇒ 无法断定 OCR 走了真实后端"
@@ -231,7 +251,8 @@ def _judge_ocr_success(ocr_backend_used: str | None, terminal: str):
 def classify_pipeline(terminal: str, *, llm_ready: bool, ocr_ready: bool,
                       upload_failed: bool = False,
                       llm_call_succeeded: bool | None = None,
-                      ocr_backend_used: str | None = None) -> dict:
+                      ocr_backend_used: str | None = None,
+                      ocr_backend_expected: str | None = None) -> dict:
     """由**原始事实**推导 ``llm_pipeline`` / ``ocr_pipeline`` 两条覆盖状态。
 
     参数是事实（终态字符串 + 凭据是否齐备 + 上传是否失败 + **两条链路各自的
@@ -248,7 +269,11 @@ def classify_pipeline(terminal: str, *, llm_ready: bool, ocr_ready: bool,
 
     ``llm_call_succeeded``（LLM 的权威证据）取自产品自己的
     ``GET /api/jobs/{id}/llm_audit``：**有 success=1 的调用**才为 ``True``。
-    ``ocr_backend_used``（OCR 的权威证据）取自 ``GET /api/jobs/{id}`` 的同名字段。
+    ``ocr_backend_used``（OCR 的权威证据）取自 ``GET /api/jobs/{id}`` 的同名字段；
+    ``ocr_backend_expected`` 是**本轮驱动配置的那个后端**，只用于把
+    「failover 兜底」与「字段根本没写」两种 failed 的 reason 分开
+    （见 :func:`_judge_ocr_success`）—— 它**不改变状态**，缺省 ``None``
+    时行为与旧版逐字一致。
 
     ⚠️ 两者**默认 ``None`` = 判不了 ⇒ failed**（fail-closed）。这条默认值就是
     "成功终态不蕴含链路被覆盖"的落地：忘记传证据**不会**得到绿，而不是悄悄变绿
@@ -281,7 +306,8 @@ def classify_pipeline(terminal: str, *, llm_ready: bool, ocr_ready: bool,
             out[entry] = (
                 _judge_llm_success(llm_call_succeeded, terminal)
                 if entry == ENTRY_LLM_PIPELINE
-                else _judge_ocr_success(ocr_backend_used, terminal)
+                else _judge_ocr_success(ocr_backend_used, terminal,
+                                        ocr_backend_expected)
             )
         elif success and not ready:
             out[entry] = (

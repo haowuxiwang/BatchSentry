@@ -557,3 +557,132 @@ def test_evidence_wiring_guard_has_positive_control():
         'COV.record_many(classify_pipeline(t, llm_ready=True, ocr_ready=True))\n'
     )
     assert _evidence_wiring_problems(leaked), "豁免外溢：漏传证据未被报出"
+
+
+# ── 🔴 归因护栏：「failover 兜底」与「字段没写」必须互相可区分（2026-10-08）──
+#
+# 事故经过（本轮实测，非构造）：PaddleOCR 上游返回 `state=failed,
+# errorMsg=系统错误-单页` ⇒ 产品**按设计** failover 到 MinerU ⇒
+# `jobs.ocr_backend_used='mineru'`。驱动把"与期望不符"也走 `except` 分支并把
+# `_ocr_backend` 清成 None ⇒ 覆盖清单写出「**未记录** ocr_backend_used」。
+# 字段明明有值，reason 却说没有 —— 读者会去查"字段为什么是空的"，
+# 而真问题是"配置的后端为什么没跑成"。**状态没错，归因错向。**
+#
+# 这三条钉住：状态不变（仍 failed），但 reason 必须点明**真实后端**与**期望后端**。
+
+
+def test_classify_ocr_failover_mismatch_names_both_backends():
+    """真实后端 ≠ 本轮配置的后端 ⇒ failed，且 reason 必须**同时**给出两者。"""
+    got = classify_pipeline("review", llm_ready=True, ocr_ready=True,
+                            llm_call_succeeded=True,
+                            ocr_backend_used="mineru",
+                            ocr_backend_expected="paddle")
+    status, reason, who = got[ENTRY_OCR_PIPELINE]
+    assert status == STATUS_FAILED, "判据强度不得被削弱"
+    assert "mineru" in reason and "paddle" in reason, reason
+    assert "未记录" not in reason, (
+        f"字段有值却写成「未记录」= 归因错向：{reason}")
+    assert who == "OCR"
+
+
+def test_classify_ocr_matching_expected_backend_is_covered():
+    """配置的就是真实用的 ⇒ covered（期望值只用于区分 reason，不改变判据）。"""
+    got = classify_pipeline("review", llm_ready=True, ocr_ready=True,
+                            llm_call_succeeded=True,
+                            ocr_backend_used="Paddle",
+                            ocr_backend_expected="paddle")
+    assert got[ENTRY_OCR_PIPELINE][0] == STATUS_COVERED
+
+
+def test_classify_ocr_empty_backend_still_says_not_recorded():
+    """真·没记录（空/None）时**仍**必须写「未记录」—— 两条 reason 不得合并。"""
+    for backend in (None, "", "   "):
+        got = classify_pipeline("review", llm_ready=True, ocr_ready=True,
+                                llm_call_succeeded=True,
+                                ocr_backend_used=backend,
+                                ocr_backend_expected="paddle")
+        status, reason, _ = got[ENTRY_OCR_PIPELINE]
+        assert status == STATUS_FAILED, (backend, got)
+        assert "未记录" in reason, (backend, reason)
+
+
+def test_classify_ocr_expected_default_keeps_legacy_behaviour():
+    """不给 `ocr_backend_expected` 时行为与旧版逐字一致（向后兼容）。"""
+    got = classify_pipeline("review", llm_ready=True, ocr_ready=True,
+                            llm_call_succeeded=True, ocr_backend_used="mineru")
+    assert got[ENTRY_OCR_PIPELINE][0] == STATUS_COVERED
+    assert "mineru" in got[ENTRY_OCR_PIPELINE][1]
+
+
+def _ocr_attribution_problems(src: str) -> list:
+    """返回 OCR 归因接线缺陷清单（空 = 合格）。抽成函数以便阳性对照喂合成源码。
+
+    ⚠️ 「消息里带真实值」必须查 **fail() 的实参**，不能查整段 body ——
+    不一致分支里那句 `_ocr_backend = None` 本身就含 `_ocr_backend`，
+    查整段会让这条判据**永远不报**（首版就是这么写的，被阳性对照当场抓到）。
+    """
+    probs: list[str] = []
+    if not any("ocr_backend_expected" in {k.arg for k in c.keywords if k.arg}
+               for c in _call_nodes(src, "classify_pipeline")):
+        probs.append("classify_pipeline 调用未传 ocr_backend_expected= ⇒ "
+                     "「failover 兜底」与「未记录」两种 failed 的 reason 无法区分")
+    found = False
+    for n in ast.walk(ast.parse(src)):
+        if not isinstance(n, ast.If):
+            continue
+        test_src = ast.unparse(n.test)
+        if "_ocr_expected" not in test_src or "!=" not in test_src:
+            continue
+        found = True
+        body_src = chr(10).join(ast.unparse(s) for s in n.body)
+        if "fail(" not in body_src:
+            probs.append("后端不一致分支没有 fail(...) ⇒ 判据被削弱")
+        else:
+            msgs = []
+            for stmt in n.body:
+                for c in ast.walk(stmt):
+                    if (isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
+                            and c.func.id == "fail"):
+                        msgs.extend(ast.unparse(a) for a in c.args[1:])
+            if not any("_ocr_backend" in m for m in msgs):
+                probs.append("后端不一致分支的失败消息未引用真实值 _ocr_backend"
+                             " ⇒ 归因丢失")
+        if "_ocr_backend = None" in body_src:
+            probs.append("后端不一致分支把真实值清成 None ⇒ reason 会写成「未记录」")
+    if not found:
+        probs.append("找不到 OCR 后端一致性分支 ⇒ 护栏空转")
+    return probs
+
+def test_frozen_driver_keeps_the_real_ocr_backend_on_mismatch():
+    src = (_ROOT / "tests" / "e2e_frozen.py").read_text(encoding="utf-8")
+    problems = _ocr_attribution_problems(src)
+    assert not problems, "驱动未正确接线 OCR 归因：\n" + "\n".join(
+        f"  - {p}" for p in problems)
+
+
+def test_ocr_attribution_guard_has_positive_control():
+    """阳性对照：证明护栏**真的会报**，不是因解析失败而空转。"""
+    bad = (
+        '_ocr_backend = job.get("ocr_backend_used")\n'
+        'if _ocr_expected and _ocr_backend != _ocr_expected:\n'
+        '    _ocr_backend = None\n'
+        '    fail("ocr_backend_used", "未记录")\n'
+        'COV.record_many(classify_pipeline(t, llm_ready=True, ocr_ready=True,\n'
+        '    ocr_backend_used=_ocr_backend))\n'
+    )
+    problems = _ocr_attribution_problems(bad)
+    assert problems, "护栏对「不一致就清空 + 不传期望」的写法零反应"
+    assert any("未传 ocr_backend_expected" in p for p in problems), problems
+    assert any("清成 None" in p for p in problems), problems
+    assert any("未引用真实值" in p for p in problems), problems
+
+    good = (
+        '_ocr_backend = job.get("ocr_backend_used")\n'
+        'if _ocr_expected and _ocr_backend != _ocr_expected:\n'
+        '    fail("ocr_backend_used", f"real={_ocr_backend!r} want={_ocr_expected!r}")\n'
+        'else:\n'
+        '    ok("ocr_backend_used", _ocr_backend)\n'
+        'COV.record_many(classify_pipeline(t, llm_ready=True, ocr_ready=True,\n'
+        '    ocr_backend_used=_ocr_backend, ocr_backend_expected=_ocr_expected))\n'
+    )
+    assert not _ocr_attribution_problems(good), "误报合格写法"
