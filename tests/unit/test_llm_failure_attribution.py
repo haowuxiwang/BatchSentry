@@ -18,7 +18,9 @@
   1. **免费端点 200 ≠ 可用** —— 没有计费探测就只能 ``unknown``，**不得**升格
      成 ``ok``（这正是原缺陷的形状）；
   2. **归因与状态正交** —— ``billing`` / ``invalid`` 必须写明"非产品缺陷"，
-     ``ok`` 必须写明"是产品缺陷"，``unknown`` 必须 fail-closed（不得被读成放行）。
+     ``ok`` 必须写明「探测证到了什么 ＋ 盲区 ＋ 下一步判据」（**不得**无条件
+     断言产品缺陷 —— 探针是极小请求，长请求仍可能被上游网关 5xx），
+     ``unknown`` 必须 fail-closed（不得被读成放行）。
 """
 import re
 import sys
@@ -96,7 +98,7 @@ def test_unclassifiable_is_unknown(free, metered):
 # ── 归因文案（承重措辞）─────────────────────────────────────────────
 
 #: 原缺陷的确切措辞。``billing`` / ``invalid`` / ``unknown`` 分支都**不得**含它。
-_PRODUCT_DEFECT_CLAIM = "故此处失败是产品缺陷"
+_PRODUCT_DEFECT_CLAIM = "故此处失败是产品缺陷"  # attr-history: 反面样例（被禁断言原文）
 
 
 def test_billing_text_says_environment_not_product_defect():
@@ -120,7 +122,7 @@ def test_ok_text_does_not_overclaim_from_a_tiny_probe():
     实测（2026-10-08）：同一凭据两段探测双双 200，而真实 ``page_analysis`` 长请求
     （~3127 prompt tokens / 77s）被上游 ALB 以 ``<title>504 Gateway Time-out</title>``
     的 **HTML** 页截断（``llm_call_audit.error`` 因此不是 JSON）⇒ 旧文案
-    "故此处失败是产品缺陷" 与**同一份报告的另一行**（``首条错误：<html>…504…``）
+    "故此处失败是**产品缺陷**" 与**同一份报告的另一行**（``首条错误：<html>…504…``）
     **自相矛盾** —— 与 2026-09-30 那次（402 被报成产品缺陷）是同一形状。
 
     故 ``ok`` 文案必须：① 说清它**证到了什么**；② **点名盲区**（极小请求看不到

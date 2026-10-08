@@ -7,6 +7,57 @@
 
 ## [Unreleased]
 
+### 第十四批的修正**只做了 1/4**：同一归因结论写在 4 处，3 处残留与实现相反（Round 71 第十五批，2026-10-08）
+
+> 记录 → `docs/TODO.md` 的 **0-14**（本轮**新发现**；属当前 backlog ⇒ 就地记 §0 表，不进 §0.1 台账）。
+
+**怎么发现的**：第十四批只改了 `tests/e2e_proc.llm_failure_attribution` 的**返回文案**。
+复核时沿同一条结论 `grep` 全部落点，发现 **6 处残留**（含 1 处**事实错误**、1 处落在
+**纪律文档**里），全部与实现**相反**：
+
+| 位置 | 残留措辞 | 性质 |
+|---|---|---|
+| `tests/e2e_proc.py` 的 `VERDICT_OK` 行注释 | 「…⇒ 此时失败**才真是**产品缺陷」 | 必要/充分含糊 |
+| `tests/e2e_proc.py` 的 `classify_llm_probe` 行为表 | 「…⇒ 流水线仍失败**才是**产品缺陷」 | 同上 |
+| `tests/e2e_proc.py` 的 `llm_failure_attribution` docstring | 「``ok`` 分支写"产品缺陷"」 | **事实错误**（已不写） |
+| `tests/e2e_frozen.py::probe_llm_credential` docstring | 「仍 error **就是**产品缺陷」 | **无条件过度断言** |
+| `docs/PROJECT_PITFALLS.md` §D「修法」 | 「**就是**产品缺陷」 | **纪律文档**里写着被推翻的纪律 |
+| `tests/unit/test_llm_failure_attribution.py` 模块 docstring | 「``ok`` 必须写明"是产品缺陷"」 | 同上 |
+
+⇒ 这正是本项目自己的纪律「**同一语义写两处必然漂移**」的实例：改实现而不改复述，
+复述就成了**误导源**；而 `docs/PROJECT_PITFALLS.md` 是**纪律文档**，读它会把纪律读回
+已被推翻的那一版。
+
+**修法**：
+
+1. 六处残留一律改成「**必要条件，非充分条件**」的说法，或直接指向唯一实现；
+2. 新增机检护栏 `tests/unit/test_attribution_single_source.py`：遍历**全部被跟踪的文本文件**，
+   禁止被禁措辞出现；
+3. 明确区分**断言 / 引述 / 数据**三类，各有各的处理：
+   - **断言**（"所以这是产品缺陷"）→ 删掉，改「必要条件 / 不足以断定」；
+   - **引述**（描述"当时错成什么样"）→ 保留，但插入 `**` **断开连续字面量**
+     （`CHANGELOG.md` 既有约定），让它在文本上就显形为引文；
+   - **数据**（`FORBIDDEN_CLAIMS` / `_PRODUCT_DEFECT_CLAIM` 这类常量）→ 保留原文 +
+     **同一行**加 `attr-history` 标记；
+4. 整文件豁免只给 **append-only** 的 `CHANGELOG.md`，并配一条**反腐**检查：豁免若已无必要
+   （文件里再也找不到被禁措辞）就必须删 —— 豁免表只增不减，等于护栏在放水。
+
+**验证**：
+
+- 护栏 `tests/unit/test_attribution_single_source.py`（**6 条**）—— **首跑即抓出 2 处人工清单
+  漏掉的引述行**（`docs/TODO.md` 的 0-13 行、`tests/unit/test_llm_failure_attribution.py` 的
+  docstring），即"非空转"的现场证据；
+- 变异 `devlogs/_verify/mutate_r71_attribution_single_source.py` ⇒ **10/10 CAUGHT**
+  （3 处活文件退回旧断言 / `ok` 文案退回无条件 / 抹掉「必要条件」/ 抽掉 CHANGELOG 豁免 /
+  扩展名表**部分**与**全部**塌缩 / 关掉同行豁免 / 豁免表加死条目）+ 阴性对照绿 +
+  还原逐文件 sha256 一致；
+- **自审发现并修掉护栏自身的 fail-open**：初版在扫描范围塌缩时会 `pytest.skip`（把"范围塌缩"
+  误当"git 不可用"）⇒ 改为：`git ls-files` 为空才 skip，扩展名表匹配不到任何文件**一律 FAIL**。
+  变异 **M7b** 正是为压这条分支而设。
+
+⚠️ **未重建**：本轮只改 `tests/` 与 `docs/`，二者都不在 `BUNDLE_SOURCES` 内 ⇒
+`artifact_freshness` 不受影响，无需重新打包。
+
 ### LLM 归因的 `ok` 分支**越过证据**断言「产品缺陷」—— 实测被上游 504 打脸（Round 70 第十四批，2026-10-08）
 
 > 记录 → `docs/TODO.md` 的 **0-13**（本轮**新发现**；属当前 backlog ⇒ 就地记 §0 表，不进 §0.1 台账）。

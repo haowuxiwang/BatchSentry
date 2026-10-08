@@ -168,7 +168,7 @@ def llm_key_env_display() -> str:
 
 VERDICT_INVALID = "invalid"   # 凭据确凿无效（401/403）⇒ 环境问题
 VERDICT_BILLING = "billing"   # 凭据有效但账户欠费（402）⇒ 环境问题
-VERDICT_OK = "ok"             # 凭据与额度都可用 ⇒ 此时失败才真是产品缺陷
+VERDICT_OK = "ok"             # 凭据与额度都可用（**必要条件**，非充分：长请求仍可能被上游网关 5xx）
 VERDICT_UNKNOWN = "unknown"   # 判不了 ⇒ fail-closed，按产品缺陷处理
 
 
@@ -187,7 +187,7 @@ def classify_llm_probe(free_status, metered_status):
     |---|---|---|
     | 401/403 | 任意 | invalid —— 上游确凿拒绝该凭据 |
     | 200 | 402 | **billing** —— 凭据是真的，但账户付不起 |
-    | 200 | 200 | ok —— 两者都可用 ⇒ 流水线仍失败**才是**产品缺陷 |
+    | 200 | 200 | ok —— 两者都可用；**必要条件**，**不足以**断定产品缺陷 |
     | 200 | 401/403 | invalid |
     | 200 | None/其它 | unknown（**不得**据"免费端点 200"就判 ok）|
     | 其它 | 任意 | unknown |
@@ -206,10 +206,12 @@ def classify_llm_probe(free_status, metered_status):
 def llm_failure_attribution(verdict, detail):
     """把 verdict 翻成一句**给人看的归因**（文案的唯一实现）。
 
-    ⚠️ 措辞是**承重**的：``ok`` 分支写"产品缺陷"，``billing`` / ``invalid``
-    分支必须写"环境问题、非产品缺陷"。曾有一版把**欠费**报成产品缺陷，把排查
+    ⚠️ 措辞是**承重**的：``ok`` 分支只写「探测**证到了什么** ＋ **盲区** ＋
+    **下一步判据**」，**不得**无条件断言产品缺陷；``billing`` / ``invalid``
+    分支必须写「环境问题、非产品缺陷」。曾有一版把**欠费**报成产品缺陷，把排查
     引向代码（见本节顶部由来）。回归护栏：
-    ``tests/unit/test_llm_failure_attribution.py``。
+    ``tests/unit/test_llm_failure_attribution.py``（文案）＋
+    ``tests/unit/test_attribution_single_source.py``（**残留措辞机检**）。
     """
     if verdict == VERDICT_INVALID:
         return (f"归因：同一 base_url/凭据直连探测得 {detail} ⇒ "
