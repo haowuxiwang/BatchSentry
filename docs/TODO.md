@@ -1,11 +1,11 @@
 # TODO —— 活的待办清单
 
-> **复核戳：Round 66（2026-09-30）** ← `tests/unit/test_todo_freshness.py` 机检读这一行；
+> **复核戳：Round 67（2026-10-08）** ← `tests/unit/test_todo_freshness.py` 机检读这一行；
 > 该戳**不得落后于 `CHANGELOG.md` 的最新 Round**。
 >
 > **状态（R66 复核，2026-09-30）——本文件分两层，别混读**：
 > - **§0 = R66 实核过的当前 backlog**（每条挂证据，可信）。
-> - **§0.1 = R66 对 §A 及以下的核销台账**（15 条经证据核实已完成，就地翻 `[x]`）。
+> - **§0.1 = R66 对 §A 及以下的核销台账**（**17 条**经证据核实已完成，就地翻 `[x]`；含后续批次自 §0.1.3 移入的 `#146`/`#144`/`#145`）。
 > - **§A 及以下 = Round 59（2026-09-23）的快照**，**已做过一轮核销，但未逐条复核**。
 >   核销过的条目带 **`—— **R66 已核销**（证据见 §0.1）`** 尾注；
 >   **其余仍标 `[ ]` 的，按"未复核"对待，不要当成当前事实。**
@@ -40,12 +40,13 @@
 | # | 事项 | 优先级 | 阻塞 / 依赖 | 验收判据（可机检） | 本轮证据 |
 |---|---|---|---|---|---|
 | **0-1** | 推送本地未推送提交到 `origin/main` | **P1** | **用户决策** —— 推送是对外发布，agent 不擅自做 | `git rev-list --left-right --count origin/main...HEAD` ⇒ `0	0` | R66 复核时 `0	9`（HEAD `dd33330`）；**该数每提交 +1，是快照、不追求实时** —— 取当前值请跑左侧命令 |
-| **0-2** | Electron 应用层 e2e 在**真实终端**复跑 | **P1** | 需**非沙箱**终端（本 agent 环境做不到） | `tests/e2e_unpacked.py` 两跑均 `health` 非 `null` 且 `exitCode == 0` | `devlogs/e2e_unpacked_20260930_104144.json`：`health: null`、`exitCode=2147483651`（`0x80000003`） |
-| **0-3** | 逐条复核 §A 及以下的未复核项 | **P2 → 进行中** | 无（纯复核工作） | 每条要么 `[x]` + 证据，要么移入"已确认仍开放"并注明为何仍未做 | **R66 已核销 16 条**（见 §0.1，其中 `#146`/`#144` 为**第四批**修复）；统计 `[ ]` **86 → 70**、`[x]` **76 → 92**。**剩余 70 条未逐条复核** |
+| **0-2** | Electron 应用层 e2e 在**真实终端**复跑 | **P1** | 需**非沙箱**终端（本 agent 环境做不到） | `tests/e2e_unpacked.py` 两跑均 `health` 非 `null` 且 `exitCode == 0` | **R68 第六批复测（4 次）**：1 次 `/health` 就绪（9.44s）后在渲染层崩、3 次**在 health 之前**就崩（5.15/5.15/5.27s）⇒ 沙箱内**不稳定**；4 次均 `exitCode=2147483651`（`0x80000003`）、`renderer_count=0`、窗口数恒 0（`devlogs/e2e_unpacked_20261008_085800.json`）。⚠️ 唯一到达 D3 的那次暴露了**驱动自身**的假红（见 0-8 尾注） |
+| **0-3** | 逐条复核 §A 及以下的未复核项 | **P2 → 进行中** | 无（纯复核工作） | 每条要么 `[x]` + 证据，要么移入"已确认仍开放"并注明为何仍未做 | **R66/R67 已核销 17 条**（见 §0.1，其中 `#146`/`#144` 为**第四批**、`#145` 为**第六批**修复）；统计 `[ ]` **86 → 69**、`[x]` **76 → 93**。**剩余 69 条未逐条复核** |
 | **0-4** | 跨页总览增强（后端 `status` 过滤 / 关键词搜索） | P3 | 无 | 后端支持 `status` 查询参数；前端可筛选且空态文案正确 | R65 backlog（可选） |
 | **0-5** | 上传批次并发提交 | P3 | 后端配额 3 | 单例进度条拆为每文件一条后，3 路并发且不撞配额 | **不建议先做**：当前串行不撞配额，无实测收益 |
 | **0-6** | 把「失败性质」提升为 **job 级列 `error_kind`**（替代「每个调用点都得记得传 `config_error`」） | P2 | 无；建议在 `#144` 结案后单独做 | `jobs` 增列 + 迁移；`error_kind` 由异常类型在**写入处**统一判定，调用点无需传参；`#127`/`#144` 的行为护栏**不改动**即仍绿 | R66 第五批：`#144` 逐点修法已结案，但**结构性遗漏仍开放**（见 `#144` 条目尾注） |
 | **0-7** | 给 `docs/TODO.md` 的 `§N 的 M-K` 形式**交叉引用加解析护栏** | P3 | 无 | 新护栏枚举全部交叉引用并断言每条都解析到**真实条目**；先用一条**阴性对照**（引用一个不存在的行）证明检测器不空转 | R66 第五批：`#144` 尾注引用了**不存在**的 0-6 ⇒ 悬空引用，而 `test_todo_freshness.py` 只锁「台账 1:1」与「无失效行号锚点」，**不查交叉引用**（见报告 §11.6） |
+| **0-8** | 轮换已失效的 LLM 凭据后复跑 e2e，才能真覆盖 LLM 链路 | **P1** | **用户动作** —— 凭据是外部资产，agent 不代改 | `PBC_E2E_LLM_KEY=<新 key>` 跑 `tests/e2e_frozen.py` ⇒ 覆盖清单 `llm_pipeline=covered`（`llm_audit` 里有 `success=1` 的调用） | R68 第六批：`.env` 的 `SILICONFLOW_API_KEY` 被上游**确凿拒绝**（两段式探测：免费端点 HTTP 401、`{'code': 30014, 'message': 'Token is invalid.'}`）⇒ 流水线止于 `error`、`llm_pipeline` 记 `failed`（`devlogs/e2e_coverage_20261008-085130.json`）。⚠️ 同轮还发现 `tests/e2e_unpacked.py` 的 D3 在沙箱内**假红**（子进程枚举看不到已被产品日志与 `/health` 证明存在的内嵌后端）⇒ 已在 `9768ae8` **只修归因、不改判据强度** |
 
 > 用法：完成一条就把 `[ ]`/状态改掉并补证据列。**0-1 / 0-2 是用户动作，agent 不代做。**
 
@@ -57,11 +58,11 @@
 > 结论：**15 条证实已完成 ⇒ 就地翻 `[x]`**；**1 条（`#163`）只部分完成 ⇒ 保持 `[ ]` 并加注**。
 > 其余 70 条**无解决类标记**，抽查其中 12 条（`#144`/`#145`/`#146`/`#147`/`#148`/`#163①`/
 > `#165`/`#168`/`#169`/`B2-9`/`B3-3`/`B4-2`/`B7-2`）**均确认仍开放**，故保留 `[ ]`。
-> ⚠️ 其中 **`#146`（`8d5848d`）与 `#144`（`172957c`）已在 R66 第四批修复** ——
+> ⚠️ 其中 **`#146`（`8d5848d`）与 `#144`（`172957c`）已在 R66 第四批修复**、**`#145`（`acd25ed`）已在 R68 第六批修复** ——
 > 抽查时它们**确为开放**，本批才结案 ⇒ 已移出 §0.1.3、并入 §0.1.1。
 > **这不是"抽查错了"，是先后顺序。**
 
-### 0.1.1 已核销（16 条）
+### 0.1.1 已核销（17 条）
 
 | 条目 | 优先级 | 证据（R66 实测） |
 |---|---|---|
@@ -80,6 +81,7 @@
 | **A4** 硅基流动 402 阻塞 | P1（阻塞） | 阻塞已解除（2026-09-18，条目内已记）；**其解锁的"含真实 findings 的多轮 e2e"是另一件事**，见 B1 |
 | **#146** 页级失败原因未脱敏 | P2 | **R66 第四批**修：`stage2.py` 新增 `_sanitize_error_text()` = `redact_urls(_mask_secrets(text))[:200]`，**两个出口都**改走它（截断在脱敏之后）。护栏 `test_config_error_visibility.py::TestPageLevelErrorTextIsSanitized`（4 条），变异 `mutation_page_error_sanitize.py` ⇒ **5/5** |
 | **#144** 分片路径不传 `config_error` | P2 | **R66 第四批**修（`172957c`）：分片路径建共享 `config_error` dict、两处 `_analyze_one` 都传、`gather` 后补记被闸门跳过的页、配置级故障下跳过自愈。护栏 `test_pipeline.py::TestConfigErrorVisibility::test_sliced_path_escalates_config_error`（行为级 + 防空转）+ `TestSlicedPathSharesConfigErrorContract`（5 条），变异 `mutation_144_sliced_config_error.py` ⇒ **5/5** |
+| **#145** 批记录正文进日志 / 持久化载荷 | P2 | **R68 第六批**修（`acd25ed`）：`llm/client.py` 新增 `raw_digest()`（`len` + `sha256[:12]`），**3 个日志出口 + `_raw` 载荷全部**改走它；`logging_config.py` **逐库**把第三方降到 WARNING（**root 仍留 DEBUG** —— 抬高 root 会把自家 DEBUG 一起丢掉）+ 新增 `PBC_LOG_LEVEL`（非法值不静默）；`core/page_analyzer.py` 删掉**零消费者**的 `_parse_error_payload`（2000 字模型正文，却被 `api/review.get_page_data` **整份回给浏览器**）、两处 `str(result)[:500]` 收口；`electron/main.js` 的 `backend-boot.log` 加 2 MB 上限 + 轮转。护栏 `tests/unit/test_log_privacy.py`（**26 条**），变异 `devlogs/_verify/mutation_145_log_privacy.py` ⇒ **9/9** |
 | **B4-1** SSE 断点续传与心跳 | P3 | 条目自述两项**均不成立**、残余已拆出为 `B2-11`，且明写"**本条无需再做**" |
 
 ### 0.1.2 只部分完成（保持 `[ ]`，已就地加注）
@@ -89,13 +91,12 @@
 | **#163②** `rule_doc.py` 注释称 R8 是 `low_confidence` | ✅ 实测该处注释已不存在；现存 `_check_low_confidence_params` 是**另一条规则**，非误标 | — （故未翻 `[x]`：同一条目的 ① 仍未做，见下一行） |
 | **#163①** | ② 已修 | `core/kb/retriever.py:5` 注释仍写 "at **29K chars** of corpus"，与当前语料规模不符 |
 
-### 0.1.3 抽查确认"仍开放"（**10 条**保留 `[ ]`）
+### 0.1.3 抽查确认"仍开放"（**9 条**保留 `[ ]`）
 
-> 原抽查 12 条；其中 **`#146`、`#144` 已在 R66 第四批修复** ⇒ 已移入 §0.1.1，故本节剩 **10 条**。
+> 原抽查 12 条；其中 **`#146`、`#144` 已在 R66 第四批修复**、**`#145` 已在 R68 第六批修复** ⇒ 已移入 §0.1.1，故本节剩 **9 条**。
 
 | 条目 | R66 实测证据 |
 |---|---|
-| **#145** root 钉在 DEBUG | `logging_config.py:119` `root.setLevel(logging.DEBUG)`；`:141` file handler 亦 DEBUG |
 | **#147** 重试不清 `failed_pages` | `api/jobs/actions.py:83` 只 `SET error_message = NULL, finished_at = NULL` |
 | **#148** 报告不带失败信息 | `api/report.py` **零处** `error_message` |
 | **#165** `TYPE_QUERIES` 2 个死键 | 实测死键 = `['batch_logic', 'low_confidence']`（不在 `CANONICAL_TYPES`） |
@@ -501,13 +502,22 @@
       ⚠️ **条目里"更稳的做法"（把失败性质提升为 job 级列 `error_kind`）本轮未做** ——
       它消除的是"每个调用点都得记得传"的**结构性**遗漏，比本次的逐点修法更彻底。
       仍开放，见 §0 的 0-6。
-- [ ] **#145【P2】日志：root 永远 DEBUG + 第三方 INFO/DEBUG 全量落盘 + 原始 LLM 输出写日志。**
+- [x] **#145【P2】日志：root 永远 DEBUG + 第三方 INFO/DEBUG 全量落盘 + 原始 LLM 输出写日志。** —— **R66 已核销**（证据见 §0.1）
       `logging_config.py:119,141` 把 root 与 file handler 都钉在 DEBUG；`level` 参数**只作用于 console**，
       无 `PBC_LOG_LEVEL`；第三库（httpx/httpcore/openai）DEBUG 经 root 全进 `pharma.log`（10MB 很快滚完）。
       `llm/client.py:361-365,393-397,477` 把**原始模型输出前 200 字**写日志（含批记录正文）。
       Electron 侧 `electron/main.js:59-61` 的 `backend-boot.log` **无大小上限**。
       **修法**：显式 `setLevel(WARNING)` 给第三方 logger；抽 `PBC_LOG_LEVEL` 供 file handler 用；
       raw 只记长度/摘要哈希；`backend-boot.log` 加轮转。
+      → **R68 第六批已修（`acd25ed`）**：四点全部落地。⚠️ 两处**比条目所述更严重**的实测：
+      ① 条目里的行号**已漂移** —— 真实泄漏点是 `llm/client.py` **L417/L453/L536**
+      （非 361/393/477），且 **L536 那处原本连 `_mask_secrets` 都没有**；
+      ② `core/page_analyzer.py` 的 `_parse_error_payload`（**2000 字模型正文**）
+      **零消费者**，却写进 `page_cache.structured_json` 并被 `api/review.get_page_data`
+      **整份回给浏览器** ⇒ 条目**低估了**问题面（"只修你最先找到的那一处 = 没修"）。
+      护栏 `tests/unit/test_log_privacy.py`（**26 条**），变异
+      `devlogs/_verify/mutation_145_log_privacy.py` ⇒ **9/9**（含一条**假修复**变异：
+      把 root 抬到 WARNING 而非逐库降级）。详见报告 §12。
 - [x] **#146【P2】页级失败原因未脱敏，直达复核 UI（job 级已脱敏，口径不一致）。** —— **R66 已核销**（证据见 §0.1）
       `stage2.py:61-66` 的 `"_error": str(exc)[:200]` 未过 `_mask_secrets`/`redact_urls`；
       而 job 级 `engine.py:366-370` 做了两层脱敏。该字段经 `review.js` 直接上屏，

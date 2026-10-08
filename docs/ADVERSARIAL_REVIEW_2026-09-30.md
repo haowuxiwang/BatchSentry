@@ -122,10 +122,14 @@ $ git status --porcelain
 | **R66 第三批终验（12:43）** | **`2787f29`** | **3879** | **0 failed** | `gate_report_20260930_124300.json` |
 | **R66 第四批终验（13:07）** | **`8d5848d`** | **3883** | **0 failed** | `gate_report_20260930_130757.json` |
 | **R66 第五批终验（13:49）** | **`7d53aed`** | **3889** | **0 failed** | `gate_report_20260930_134900.json` |
+| **R68 第六批门禁（08:57）** | **`acd25ed`** | **3915** | **0 failed** | `gate_report_20261008_085756.json` |
+| **R68 第六批终验（09:17）** | **`9768ae8`** | **3921** | **0 failed** | `gate_report_20261008_091744.json` |
 
 **第四段对账**：`3883 → 3889` = **+6**，正是 §11.4 新增的 6 条用例
 （`test_sliced_path_escalates_config_error` 1 条 + `TestSlicedPathSharesConfigErrorContract` 5 条）
 ⇒ **数字自洽**。
+
+**第六段对账**：`3889 → 3915` = **+26**，正是 `#145` 新增的 `tests/unit/test_log_privacy.py`（26 条）；`3915 → 3921` = **+6**，正是 `9768ae8` 新增的 `TestE2eUnpackedGuard` 护栏（5 条新增 + 1 条防空转）⇒ **数字自洽**。详见 §十二。
 
 **第三段对账**：`3879 → 3883` = **+4**，正是 F5 新增的 4 条用例
 （`TestPageLevelErrorTextIsSanitized`）⇒ **数字自洽**。
@@ -350,9 +354,10 @@ $ git rev-list --left-right --count origin/main...HEAD
 
 1. 推送本地未推送提交到 `origin/main`（**用户动作**）—— 数量见 §八的实时命令，别引用快照。
 2. Electron 应用层 e2e 在**真实终端**复跑（本环境不可复现）。
-3. ~~`docs/TODO.md` §A 及以下的 86 条未复核项逐条复核~~ → **R66 第三批已核销 14 条**，
-   剩 **72 条**未逐条复核（见 §十）；**第四批又修掉 `#146`**（§11.1）⇒ 其中 1 条已结案，
-   **剩 71 条**。⚠️ 注意这 14+1 条是"抽查到并确认"的，**不等于**其余 71 条都还开放。
+3. ~~`docs/TODO.md` §A 及以下的 86 条未复核项逐条复核~~ → 已分四批核销：**R66 第三批 14 条**（§十）、**第四批 `#146`**（§11.1）、**第五批 `#144`**（§11.4）、**第六批 `#145`**（§十二）。
+   ⚠️ **累计条数以 `docs/TODO.md` §0.1.1 台账为准**（那里是权威，且被`test_todo_freshness.py` 机检锁定）—— **本报告不再写死剩余条数**：它每批都在变，
+   而"文档复述一个会变的代码事实"正是本轮 F1/F2 的病根。
+   ⚠️ 核销过的是"抽查到并确认"的，**不等于**其余条目都还开放。
 4. 跨页总览增强（后端 `status` 过滤 / 关键词搜索）—— 小，可选。
 5. 上传批次并发提交 —— 小，可选，**不建议先做**。
 6. ~~产物重建~~ → **R66 第四批已做**（§11.2）：两份产物逐字节一致，`runtime_eol` 已从 SKIP 恢复实测。
@@ -665,3 +670,126 @@ coverage **95.09%**（`devlogs/gate_report_20260930_134900.json`）。
 ⚠️ **这一类目前没有护栏**：`test_todo_freshness.py` 只锁"核销台账 1:1"与
 "无失效行号锚点"，**不检查 `§N 的 M-K` 形式的交叉引用能否解析到真实条目**。
 ⇒ 已登记 **0-7**（给交叉引用加解析护栏）。
+
+## 十二、R68 第六批：`#145` 修复 + 全量重建 + 两份构建物上的 e2e 实测
+
+> 本批是对「**当前是否可以打包**」这个问题的完整答卷：
+> `#145` 动了 `core/`/`llm/`/`electron/` 字节 ⇒ **必须重建产物**，
+> 然后门禁 + **两份构建物**上的 e2e 全部实跑。
+> 结论：**可以打包**（§12.2），但 **LLM 链路本轮仍未被覆盖**（外部凭据失效，§12.3）。
+
+### 12.1 定位：`#145` 的三条实测更正（条目**低估**了问题）
+
+| 条目所述 | 实测 | 性质 |
+|---|---|---|
+| `llm/client.py:361-365,393-397,477` | **L417 / L453 / L536** | 行号**已漂移**（该文件前三批改过） |
+| 三处都过 `_mask_secrets` | **L536 那处没有** | 泄漏面**比条目宽** |
+| 只有这三处写正文 | 还有 `core/page_analyzer.py::_parse_error_payload`（**2000 字**） | **零消费者**，却进 `page_cache.structured_json`，并被 `api/review.get_page_data` **整份回给浏览器** |
+
+⇒ 教训与 `#146` 同宗：**「只修你最先找到的那一处 = 没修」**。
+`_raw` 这个键有 **3 个生产者**；本批按「先把生产者数清、再收口」做，
+而不是逐点打补丁。
+
+### 12.2 重建 + 门禁（两份产物逐字节一致）
+
+**重建**（四步全绿，与 §11.2/§11.5 同一链条）：
+
+```
+1/4 PyInstaller                        Build complete! → dist
+2/4 bundle_manifest --write/--check    version=1.2.1 files=116 head=acd25edcc36f dirty=False；逐字节一致
+3/4 electron-builder --win --x64       OK（signing with signtool.exe）
+4/4 gen_provenance.py                  git_head=acd25ed BOM=True crlf=11 lf=0
+```
+
+**门禁终验**：`overall=pass`、**11/11**、**3921 passed / 0 failed**、coverage **95.1%**
+（`devlogs/gate_report_20261008_091744.json`，树 `9768ae8`）。
+
+⚠️ **本批第二段（`9768ae8`，只动 `tests/`）没有触发重建 —— 这是对的，不是漏跑**：
+`tests/` **不在入包集合**（入包集合 = `core/ static/ api/ llm/ templates/ db/ models/
+config.py electron/ logging_config.py main.py server.py`）⇒ `artifact_freshness` 仍绿。
+
+### 12.3 构建物 e2e（①）内嵌后端：**26 passed / 2 failed**
+
+被测：`dist-electron/win-unpacked/resources/pbc-server/pbc-server.exe`（**双击时真正跑的那一份**）。
+先做身份核对：它与 `dist/pbc-server/pbc-server.exe` **sha256 完全相同**
+（`d4054cf883ffbe76ac32851e9ebcfee994045b47fa3cc2e377513504ed6f378f`）
+⇒ **一次运行同时构成两份产物的证据**。
+
+**26 条绿**，含：`/health v1.2.1`、看门狗阈值不变量、上传/设置/复核页、`/api/settings`、
+上传建作业、`failed_pages` **运行时类型是 `list`**（#132 的分发实证）、`report_md`、
+静态资源、**#127 的可见性修复确实在产物里**（`upload.js`/`upload-jobs.js`/`review-pageinfo.js`
+三处标记全命中）、档位配色语义、settings 六个模块可从产物取到且非空、
+`ocr_backend_used=paddle`（**期望值与实际一致**）、Swagger UI。
+
+**2 条红，且同因 —— 上游凭据失效**：
+
+```
+status=error
+error_message=LLM 配置级故障（重试无效）：LLM call failed (non-retryable)
+  [job=…, page=1, stage=page_analysis]: Error code: 401 -
+  {'code': 30014, 'data': None, 'message': 'Token is invalid.'}
+```
+
+驱动做了**两段式正向对照**（免费端点 + 计费端点，且用应用自己上报的 `base_url`/模型）：
+免费端点即 **HTTP 401** ⇒ **上游确凿拒绝该凭据** ⇒ **环境问题，非产品缺陷**。
+
+⚠️ 但**覆盖清单仍记 `llm_pipeline=failed`**，**不因「归因是环境」改记 `skipped`**：
+流水线**确实执行了**且没到成功终态，而 `failed` 的定义就是「执行了但结果不符预期」，
+`skipped` 的定义是「因环境缺项**未执行**」。**归因与状态是两个正交维度，不可互相顶替。**
+⇒ 已登记 **0-8**（轮换凭据后复跑）。
+
+⚠️ **同轮 `ocr_pipeline` 也记 `failed`，这是刻意的 fail-closed，不是误记**：
+`classify_pipeline` 在 `error` 终态下对「凭据齐备的一侧」一律记 `failed`，**不采信**
+`ocr_backend_used`。本批专门核了**为什么不能采信**：`core/pipeline/engine.py:628-630`
+有一条「保证 GMP 审计字段在所有路径下都有值」的**兜底写入** ⇒ 该字段**非空 ≠ OCR 成功**。
+在 error 轮次拿它当成功证据，就是**假绿**。
+（代价是「OCR 明明跑了」与「OCR 坏了」在报告里不可区分 —— 但这是**安全方向**的误差；
+真实归因由 `pipeline_terminal` 断言与产品自己的 `error_message` 给出，信息并未丢失。）
+
+**顺带拿到一条正向证据**：本轮 `error_message` 是 `LLM 配置级故障（重试无效）` 且
+`failed_pages=[1]` ⇒ 这证明 `#127`/`#144` 的**配置级故障 job 级提升**确实**随产物分发**了，
+而不只是「源码树里写过」。
+
+### 12.4 构建物 e2e（②）Electron 应用层：**3 passed / 3 failed（沙箱边界）**
+
+被测：`dist-electron/win-unpacked`（双击 `BatchSentry.exe` 的完整形态）。**共 4 次复跑**：
+
+| 复跑 | 结果 |
+|---|---|
+| #1 | `/health` 就绪 **9.44s**（`version=1.2.1` == PROVENANCE、`git_head=acd25ed`）⇒ 随后渲染层崩 |
+| #2–#4 | **在 health 之前**就崩（5.15s / 5.15s / 5.27s） |
+
+四次均 `exitCode=2147483651`（`0x80000003`）、`renderer_count=0`、窗口数恒 0。
+stderr 的直接证据：
+
+```
+FATAL:content\browser\gpu\gpu_data_manager_impl_private.cc:416] GPU process isn't usable. Goodbye.
+```
+
+⇒ **受限沙箱内 GPU 进程起不来** ⇒ 渲染层/窗口层**在本环境无法取证**。
+与 §11.3 的 2×2 对照一致（唯一自变量是「是否在沙箱里」，`--disable-gpu` 加与不加都崩
+⇒ **不得把它当解法**）。**结论：0-2 仍未解除，须在真实（非沙箱）终端复跑；
+本环境下的任何「通过」都不得采信。**
+
+⚠️ **本轮还暴露了驱动自身的一处假红（已修，`9768ae8`）**：唯一到达 D3 的那次里，
+`/health` 已应答、产品自身 stdout 也写着
+`[BatchSentry] Spawning server: …\resources\pbc-server\pbc-server.exe`，
+而 D3 的子进程枚举**什么都没看到**（`children` 里只有一个无关的 IME 进程）
+⇒ D3 报「未找到 pbc-server.exe 子进程」，**指向一个并不存在的拉起缺陷**。
+修法：**只把归因说准**（点明「沙箱内进程树枚举不可靠」），**判据强度不变（仍是 FAIL）**
+—— 沙箱内该事实既证不实也证不伪，据此转绿或转 skip 都会制造假绿。
+护栏 5 条 + 变异 **6/6**（含一条**假修复**变异：归因恒返回空串）。
+
+⚠️ **诚实标注**：本沙箱 4 次复跑里 **3 次没走到 D3**（在 health 前就崩），
+故新分支**未在实机观测到**，只有单元级（行为 + AST）与变异级证据。
+按逻辑它必然命中（那次 stderr 里确实有 GPU FATAL —— D1 的归因正是据此触发的），
+但那是**推断，不是观测**。
+
+### 12.5 本批**未**验证的边界（不得读成已通过）
+
+- **LLM 链路**：上游 401 ⇒ `llm_pipeline` 记 `failed`；「流水线到达成功终态」
+  **不蕴含** LLM 成功过（这正是 `_judge_llm_success` 要拦的假绿）。
+- **Electron 渲染层/窗口层**：沙箱内不可取证（§12.4）。
+- **D3 新分支**：未实机观测（§12.4 尾注）。
+- **依赖快照** `docs/DEPENDENCY_AUDIT.json` 已 **14 天**（门禁阈值 90 天，仍绿，
+  但这条轴随**日历**老化，与代码是否改动无关）。

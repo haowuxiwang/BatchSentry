@@ -7,6 +7,81 @@
 
 ## [Unreleased]
 
+### `#145` 批记录正文不再进日志/持久化载荷 + 全量重建 + 两份构建物 e2e（Round 67 第六批，2026-10-08）
+
+> 报告 → `docs/ADVERSARIAL_REVIEW_2026-09-30.md` §十二。
+
+**Fixed**
+
+- **`#145` 日志/载荷泄漏批记录正文**（四点全修）：
+  - `llm/client.py` 新增 `raw_digest()`（`response_length=` + `sha256[:12]`，刻意保留前者
+    便于既有排障 grep），**3 个日志出口 + `_raw` 载荷全部**改走它。
+    ⚠️ 条目里的行号**已漂移**：真实泄漏点是 **L417 / L453 / L536**（非 361/393/477），
+    且 **L536 那处原本连 `_mask_secrets` 都没有**。
+  - `logging_config.py`：**逐库**把第三方（httpx/httpcore/openai/urllib3/requests/asyncio）
+    降到 WARNING；**root 仍留 DEBUG** —— 这是「逐库降级」而非「抬高 root」，后者会把自家
+    DEBUG 一起丢掉（那才是排障要看的）。新增 `PBC_LOG_LEVEL` 控制**文件** handler，
+    非法值**不静默**（回退 DEBUG 并告警）。
+  - `core/page_analyzer.py`：删掉**零消费者**的 `_parse_error_payload`（**2000 字模型正文**）
+    —— 它没有任何读取方，却写进 `page_cache.structured_json`，并被
+    `api/review.get_page_data` **整份回给浏览器**；同文件两处 `str(result)[:500]` 也是活的
+    正文出口，一并收口。⚠️ 条目**低估了**问题面：`_raw` 有 **3 个生产者**，
+    「只修最先找到的那一处 = 没修」。
+  - `electron/main.js`：`backend-boot.log` 加 **2 MB 上限 + 轮转**（启动时与运行期各查一次，
+    只保留 `.1` 一份；轮转失败**不阻断启动**）。
+- **`tests/e2e_unpacked.py` 的 D3 在受限沙箱内假红**：同一轮里 `/health` 已应答、产品自身
+  stdout 也写着拉起内嵌后端，而 D3 的子进程枚举**什么都没看到** ⇒ 只报「未找到
+  pbc-server.exe 子进程」会把排查引向一个**并不存在**的拉起缺陷。抽出 `_stderr_text()`、
+  新增 `_backend_absent_hint()`，D3 的 not-found 分支接上归因。
+  ⚠️ **判据强度不变（仍是 FAIL）** —— 沙箱内该事实既证不实也证不伪，据此转绿或转 skip
+  都会制造假绿。归因证据与 `_startup_failure_attribution` 同源，同样**不得**把
+  `--disable-gpu` 说成解法（2×2 对照已否证）。
+
+**Added**
+
+- `tests/unit/test_log_privacy.py`（**26 条**）：摘要函数的内容无关性/确定性/可区分性、
+  解析失败日志与载荷不含正文、`_raw` 生产者全部收口（AST）、第三方降噪**且**自家 DEBUG
+  仍在（**配对**断言）、`PBC_LOG_LEVEL` 驱动文件 handler 级别、`backend-boot.log` 上限。
+- `tests/unit/test_e2e_unpacked_guard.py` 新增 5 条：D3 必须**调用**归因函数（AST 调用名，
+  注释干扰不了）+ 防空转；无 GPU FATAL 时归因**必须为空**（否则会给真实缺陷贴「环境问题」
+  标签）；有 GPU FATAL 时必须点明沙箱且不得处方 `--disable-gpu`；日志缺失不得抛。
+  另将 `test_attribution_reads_the_stderr_log` 改为**更强**的两段判据（抽取后原断言假红
+  —— 「把纯重构当缺陷」的噪声，同 `e2e_frozen` 13b 的教训）。
+- 变异验证 `devlogs/_verify/mutation_145_log_privacy.py` ⇒ **9/9，9 条基线全绿**
+  （含一条**假修复**变异：把 root 抬到 WARNING 而非逐库降级 ⇒ 必须被抓）；
+  `devlogs/_verify/mutation_r68_d3_hint.py` ⇒ **6/6，7 条基线全绿**。
+
+**Build / 产物**
+
+- `#145` 动 `core/`/`llm/`/`electron/` ⇒ 按报告 §5.2 的规矩重建两份产物
+  （PyInstaller → `bundle_manifest --write/--check` → electron-builder → `gen_provenance.py`，
+  四步全绿，`git_head=acd25ed`）。⚠️ 第二段（`9768ae8`，只动 `tests/`）**没有**触发重建 ——
+  `tests/` 不在入包集合，`artifact_freshness` 仍绿，**不是漏跑**。
+
+**Test / 门禁**
+
+- 门禁终验：`overall=pass`、**11/11**、**3921 passed / 0 failed**、coverage **95.1%**
+  （`devlogs/gate_report_20261008_091744.json`，树 `9768ae8`）。
+  对账：`3889 → 3915` = **+26**（`test_log_privacy.py`），`3915 → 3921` = **+6**（e2e 驱动护栏）。
+- **构建物 e2e（①）内嵌后端**：`tests/e2e_frozen.py` 对
+  `dist-electron/win-unpacked/resources/pbc-server/pbc-server.exe` ⇒ **26 passed / 2 failed**；
+  2 条红同因 —— 上游 **HTTP 401 `Token is invalid`**（两段式探测确认为**凭据失效，非产品缺陷**）。
+  两份产物的 `pbc-server.exe` **sha256 完全相同** ⇒ 一次运行即两份产物的证据。
+- **构建物 e2e（②）Electron 应用层**：`tests/e2e_unpacked.py` ⇒ **3 passed / 3 failed**；
+  4 次复跑里 1 次 `/health` 就绪（9.44s，`version`/`git_head` 均与 PROVENANCE 一致），
+  其余 3 次**在 health 之前**就崩。四次均 `exitCode=0x80000003`（Chromium GPU 进程在受限沙箱内
+  起不来）⇒ **渲染层/窗口层在本环境无法取证**，须在真实终端复跑（TODO **0-2**）。
+- ⚠️ **未验证边界（不得读成已通过）**：`llm_pipeline` / `ocr_pipeline` 本轮均记 `failed`；
+  D3 新分支**未实机观测**（只有单元级 + 变异级证据）。
+
+**Docs**
+
+- `docs/TODO.md`：复核戳 Round 66 → **67**；`#145` 翻 `[x]` + 台账证据行
+  （§0.1.1 16 → **17** 条、§0.1.3 10 → **9** 条、`[ ]` 70 → **69**、`[x]` 92 → **93**）；
+  新增 **0-8**（轮换失效凭据后复跑）并更新 0-2 的 R68 复测证据。
+- 报告新增 §十二；§5.2 表格补两行并加「第六段对账」；§九 第 3 条**去掉会腐坏的剩余条数**，
+  改为指向 `docs/TODO.md` §0.1.1 台账。
+
 ### 分片路径补上配置级故障的 job 级提升（Round 66 第五批，2026-09-30）
 
 > 与第四批同属一类问题（**GMP 假阴性**），但**只在分片路径上**。
