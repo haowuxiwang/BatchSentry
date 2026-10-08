@@ -8,7 +8,9 @@
 背景与阈值依据见 `docs/RUNTIME_WATCHDOG.md`；模块契约见 `core/watchdog.py`。
 """
 
+import ast
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import aiosqlite
 import pytest
@@ -33,6 +35,32 @@ async def _insert_job(db, job_id="job-1", status="ocr_running",
         (job_id, "x.pdf", status, total_pages, last_activity_at),
     )
     await db.commit()
+
+
+def _watchdog_loop_anchors() -> tuple[int | None, int | None]:
+    """返回 `watchdog_loop` 内「首扫」与「最早等待」的行号（B4 结构断言用）。
+
+    为什么按 **AST 形状**而非源码子串：Trap 66 —— 子串断言可能被同函数内的
+    注释/文档串满足；而这里要断言的恰恰是调用**顺序**，只有语法树说得准。
+    """
+    tree = ast.parse(Path(watchdog.__file__).read_text(encoding="utf-8"))
+    fn = next(
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.AsyncFunctionDef) and n.name == "watchdog_loop"
+    )
+    scans: list[int] = []
+    waits: list[int] = []
+    for node in ast.walk(fn):
+        if not isinstance(node, ast.Call):
+            continue
+        f = node.func
+        name = getattr(f, "id", None) or getattr(f, "attr", None)
+        if name == "recover_stalled_jobs":
+            scans.append(node.lineno)
+        elif (name in ("wait_for", "sleep")
+              and getattr(getattr(f, "value", None), "id", None) == "asyncio"):
+            waits.append(node.lineno)
+    return (min(scans) if scans else None, min(waits) if waits else None)
 
 
 class TestStallLimitContract:
@@ -675,7 +703,58 @@ class TestWatchdogLoop:
             await task
 
 
+class TestStartupFirstScan:
+    """B4 / 缺陷 #125：看门狗必须**启动即首扫**，不留无保护窗口。
+
+    旧实现「先睡一个周期再首扫」（默认 60s）⇒ 重启后 `last_scan_at` 迟迟为
+    None，`/api/health/watchdog` 无法从第一秒起证明巡检还活着。
+    """
+
+    @pytest.mark.asyncio
+    async def test_loop_scans_immediately_before_first_interval(self, monkeypatch):
+        """判别性用例：interval 远大于等待窗口 —— 旧实现 0 次扫描，新实现 ≥1。"""
+        import asyncio
+
+        calls = []
+
+        async def _count(*, now=None):
+            calls.append(1)
+            return 0
+
+        monkeypatch.setattr(watchdog, "recover_stalled_jobs", _count)
+        monkeypatch.setattr(watchdog, "scan_interval_seconds", lambda: 5.0)
+        # 清掉上一轮的残留，让断言只反映本轮
+        watchdog._STATE.update(
+            {"total_scans": 0, "last_scan_at": None, "last_scan_error": None}
+        )
+
+        task = asyncio.create_task(watchdog.watchdog_loop())
+        try:
+            await asyncio.sleep(0.1)  # ≪ interval(5s)：旧实现此刻一次都没扫
+            assert len(calls) >= 1, (
+                "启动后应立刻首扫一次；旧实现先睡满 interval ⇒ 此处为 0"
+            )
+            assert watchdog._STATE["last_scan_at"] is not None
+            assert watchdog._STATE["total_scans"] >= 1
+        finally:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    def test_loop_waits_only_after_the_scan(self):
+        """结构钉：`watchdog_loop` 的最早等待必须晚于首扫（防被改回"先睡后扫"）。"""
+        scan, wait = _watchdog_loop_anchors()
+        # 反空转：两个锚点都必须找得到，否则"没找到"会被读成"通过"
+        assert scan is not None, "watchdog_loop 内找不到 recover_stalled_jobs 调用"
+        assert wait is not None, "watchdog_loop 内找不到 asyncio.wait_for/sleep 调用"
+        assert scan < wait, (
+            f"等待（L{wait}）出现在首扫（L{scan}）之前 ⇒ 重启后有保护空窗"
+            "（B4 / 缺陷 #125）"
+        )
+
+
 class TestConfigSwitches:
+
     def test_enabled_default_true_and_off_values(self, monkeypatch):
         monkeypatch.delenv("PBC_WATCHDOG_ENABLED", raising=False)
         assert watchdog.enabled() is True

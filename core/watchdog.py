@@ -447,6 +447,11 @@ async def recover_stalled_jobs(*, now: datetime | None = None) -> int:
 async def watchdog_loop(stop_event: asyncio.Event | None = None) -> None:
     """后台周期扫描。由 lifespan 以 task 形式启动，随进程退出而取消。
 
+    **启动即首扫**（B4 / 缺陷 #125）：旧实现先睡一个周期再首扫，会让进程
+    重启后有一段（默认 60s）无保护窗口 —— `last_scan_at` 迟迟不置位，
+    `/api/health/watchdog` 无法从第一秒起证明巡检还活着。故循环体为
+    "先扫后睡"。
+
     绝不因单次扫描失败而退出循环 —— 看门狗自己挂掉比 job 卡死更糟
     （用户会以为"有兜底"）。每轮异常只记日志，下一轮继续。
     """
@@ -459,16 +464,9 @@ async def watchdog_loop(stop_event: asyncio.Event | None = None) -> None:
     )
     try:
         while True:
+            # 先扫后睡（B4 / 缺陷 #125）：首扫必须发生在**任何等待之前** ——
+            # 否则进程重启后有一段无保护窗口，last_scan_at 迟迟不置位。
             try:
-                if stop_event is not None:
-                    try:
-                        await asyncio.wait_for(stop_event.wait(), timeout=interval)
-                        logger.info("[Watchdog] stop event set, exiting")
-                        return
-                    except asyncio.TimeoutError:
-                        pass
-                else:
-                    await asyncio.sleep(interval)
                 await recover_stalled_jobs()
                 _STATE["last_scan_error"] = None
             except asyncio.CancelledError:
@@ -481,6 +479,18 @@ async def watchdog_loop(stop_event: asyncio.Event | None = None) -> None:
             finally:
                 _STATE["total_scans"] += 1
                 _STATE["last_scan_at"] = _local_now_str()
+            # 本轮扫描已计入 total_scans/last_scan_at，之后才等待下一轮：
+            # 等待期间被取消不会把"没扫过的轮次"记成扫描。stop_event 版可被
+            # 立即唤醒 ⇒ 关停不拖满一个周期。
+            if stop_event is not None:
+                try:
+                    await asyncio.wait_for(stop_event.wait(), timeout=interval)
+                    logger.info("[Watchdog] stop event set, exiting")
+                    return
+                except asyncio.TimeoutError:
+                    pass
+            else:
+                await asyncio.sleep(interval)
     finally:
         _STATE["running"] = False
 
