@@ -215,7 +215,7 @@ Electron 33 于 **2025-04-29 EOL**（支持线 41/42/43）；Chromium 130 vs 稳
 |---|---|---|
 | Chromium CVE 清单 | 未逐条拉（只核了 EOL 日期） | 升到支持线后**自然消解**（SEC-3）；如果决定**不升级**，则本条**升格为阻断** |
 | `D8` 数据隔离 | `%APPDATA%\PBC\logs\backend-boot.log` 每轮被写（`app.getPath('appData')` 不受 env 控制） | 见 FUNC-8 |
-| 模板注入 | ⚠️ **R78 更正**：本行原写「`\|safe`/`Markup(`/`innerHTML` 均无命中，已复核，无需动作」—— 与实测**相反**（前端 R63/R65 **拆模块后** `innerHTML` 才出现，本行随之腐坏；这是"文档复述代码事实却无人绑定"的实例）。实测（`static/**/*.js` + `templates/**/*.html` + `main.py`）：`\|safe` **0 处**、`Markup(` **4 处**、`innerHTML` **46 处** | 已加护栏 `tests/unit/test_doc_release_plan_sec6_claim.py`（**重算三个计数并逐字比对** + 禁回原措辞）。`Markup(` 4 处属**一等对策**：`main.py:504-521` 先 `escape` 再只重注入页码锚点，`templates/report.html:72` 消费该结果。`innerHTML` 46 处**逐个依赖 `esc()` 纪律**、**尚无**机检 ⇒ 登记 **0-19** |
+| 模板注入 | ⚠️ **R78 更正**：本行原写「`\|safe`/`Markup(`/`innerHTML` 均无命中，已复核，无需动作」—— 与实测**相反**（前端 R63/R65 **拆模块后** `innerHTML` 才出现，本行随之腐坏；这是"文档复述代码事实却无人绑定"的实例）。实测（`static/**/*.js` + `templates/**/*.html` + `main.py`）：`\|safe` **0 处**、`Markup(` **4 处**、`innerHTML` **46 处** | 已加护栏 `tests/unit/test_doc_release_plan_sec6_claim.py`（**重算三个计数并逐字比对** + 禁回原措辞）。`Markup(` 4 处属**一等对策**：`main.py:504-521` 先 `escape` 再只重注入页码锚点，`templates/report.html:72` 消费该结果。`innerHTML` 46 处**逐个依赖 `esc()` 纪律**、**已加机检** `tests/unit/test_innerhtml_escaping.py`（三层判据 + tokenizer + 显式登记 + 站点数下限；变异 **10/10 达成**）|
 | SSRF / 路径穿越 / 签名 URL / 上传伪装 | **已有一等对策** | ✅ 已复核，**不要**因为 S1–S3 就把结论说成"安全很差" |
 
 ---

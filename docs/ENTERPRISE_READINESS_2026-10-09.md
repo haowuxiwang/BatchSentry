@@ -60,16 +60,17 @@ Electron `contextIsolation: true` / `nodeIntegration: false`；门禁 **11 项**
 | 17. Validate the `sender` of IPC messages | N/A（无 IPC / 无 preload） |
 | 19/20. Fuses / 不向不可信内容暴露 API | ⚠️ **未核**（见 §5） |
 
-## §3 本轮**已修**（4 项，全部带护栏 + 变异验证）
+## §3 已修（**5 项**，全部带护栏 + 变异验证）
 
 | 修复 | 内容 | 证据 |
 |---|---|---|
 | **F1** Electron 沙箱**显式化** | 两处 `webPreferences` 显式 `sandbox: true`（防隐式默认被连带关闭） | `tests/unit/test_electron_security_flags.py`（5 条）；变异 E1–E4 |
 | **F2** 全局异常处理器 | 未捕获异常由**纯文本 500** 改为与 `HTTPException` **同形**的 JSON，**只**回显请求号（`str(exc)` 可能含路径/上游 URL/密钥片段）；完整栈只进服务端日志 | `tests/unit/test_unhandled_exception_handler.py`（3 条）；变异 X1–X4 |
 | **F3** 上传**磁盘余量**守卫 | 入口预检（507），不足即拒；覆盖 chunked/撒谎头（流式写完后按真实字节数复核） | `tests/unit/test_upload_disk_headroom.py`（5 条）；变异 D1–D4 |
+| **F5** `innerHTML` 转义纪律**机检**（R79 第十九批补） | 前端拆模块后 `innerHTML` **46 处**（38 个赋值点）**逐个依赖 `esc()` 却无任何机检**。判据**三层显式**（纯字面量 / 含已知转义器 / 受审计渲染器且白名单函数确存在），未自动通过者**显式登记 + 陈旧检测**；扫描过 tokenizer（注释/字符串/模板 `${}`）；站点数下限防空转 | `tests/unit/test_innerhtml_escaping.py`（6 条）；变异 **10/10 达成**（`devlogs/_verify/r78_innerhtml_mutation.py`） |
 | **F4** §SEC-6 **文档漂移** | `RELEASE_READINESS_PLAN.md` 原写「`\|safe`/`Markup(`/`innerHTML` **零命中** → 已复核、无需动作」—— **与实测相反**（`innerHTML` **46 处**、`Markup(` **4 处**；前端 R63/R65 **拆模块后**才出现）。已更正并加**事实绑定**护栏 | `tests/unit/test_doc_release_plan_sec6_claim.py`（3 条）；变异 S1–S3 |
 
-> 变异合计 **15/15 CAUGHT + 基线绿**（`devlogs/_verify/r78_hardening_mutation.py`）。
+> 变异合计 **15/15 CAUGHT + 基线绿**（`devlogs/_verify/r78_hardening_mutation.py`，覆盖 F1–F4）；F5（0-19 机检）另有 **10/10 达成**（`devlogs/_verify/r78_innerhtml_mutation.py`）。
 > ⚠️ 首版 harness 曾把"临时树无 `.git` ⇒ 护栏自身报错"读成 CAUGHT ⇒ **基线红**暴露了
 > 这个**假 CAUGHT**；已把该护栏改为**不依赖 VCS** 的文件系统扫描。
 
@@ -78,7 +79,6 @@ Electron `contextIsolation: true` / `nodeIntegration: false`；门禁 **11 项**
 | # | 事项 | 建议 |
 |---|---|---|
 | **0-18** | **审计追踪不可删**（G2） | 二选一：① 软删除（job 行保留 + `deleted_at`）；② 删除前把该 job 的 `audit_log`/`llm_call_audit` **归档**到独立表。**属产品语义变更，须你拍板** |
-| **0-19** | `innerHTML` **46 处**逐个依赖 `esc()` 纪律，**无**机检 | 加护栏：`static/**/*.js` 里每个 `innerHTML = <expr>` 必须是空串 / 常量模板 / 含已知转义器调用 |
 | — | 无身份/RBAC/电子签名（G1） | 企业部署前必须有；至少先做"多账户下的数据隔离"评估 |
 | — | 无人工标注集（G3） | 需要领域数据；在此之前**不得**对外宣称任何精度/召回 |
 | — | `script-src 'unsafe-inline'` | 用 CSP nonce 重构（代码内已注明） |
@@ -91,7 +91,7 @@ Electron `contextIsolation: true` / `nodeIntegration: false`；门禁 **11 项**
 - 本评估基于**源码与文档**；三个代理**均未**运行应用做动态验证（除本轮 e2e）。
 - Electron `sandbox` 的**运行时**生效值未实测（本 agent 环境下 Electron 层 e2e 不可复现）。
 - `%APPDATA%/PBC/config.json` 的**实际 ACL** 未测（明文已知）。
-- `innerHTML` 的 46 处**未逐处**判定转义是否充分（只抽查了关键渲染器）。
+- `innerHTML` 的 46 处：**已有静态纪律机检**（每个站点要么含已知转义器、要么在 `_AUDITED` 显式登记），但**未逐处**证明转义**充分** —— 登记项按**人工理由**放行，且机检**不**验证渲染出的 HTML 无注入（见 0-19）。
 - 磁盘写满在 pipeline **中途**的确切行为无端到端证据。
 - Stage2 单页**最坏时长**可能超过 `analyzing` 看门狗阈值（代码推导：`(3+2)×480s = 2400s > 1800s`）
   ⇒ 存在**误判停滞**风险；本轮 e2e 实测到单页 `latency=313.3s` + fix-hint 重试，
