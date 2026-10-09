@@ -6,6 +6,22 @@
 ---
 
 ## [Unreleased]
+### 产物级**入口拒绝矩阵**：把 6 类入口守卫从「进程内单测」补到「冻结字节」（Round 77 第二十一批，2026-10-09）
+
+> 记录 → `docs/TODO.md` 的 **0-23**（属当前 backlog ⇒ 就地记 §0 表）。
+
+**定位**：`devlogs/_verify/smoke_packaged_server.py` 只打 `/health` —— 产物层**零**拒绝路径覆盖。R80 新加的保留设备名守卫，以及既有的扩展名白名单 / magic bytes / 尺寸下限 / 路径剥离 / 本机请求守卫，**全部**只在 `ASGITransport`（**进程内**、源码树）层被验过。冻结会改变 multipart 解析、异常文案编码、状态码传播与 `frozenset` 常量的行为，而**单测绿 ≠ 产物绿**。
+
+**修法**：新增**已提交**驱动 `tests/e2e_rejections.py`（刻意放 `tests/` 而非 `devlogs/` —— 后者被 gitignore，放那里的证据会随磁盘消失）。起真产物（`dist/pbc-server/pbc-server.exe`，与 electron-builder 内嵌那份**同 sha256**），用真 HTTP 打 16 例矩阵：
+
+- 保留设备名 5 例（`NUL.pdf` / `CON.pdf` / `COM1.pdf` / `LPT1.pdf` / `NUL .pdf`）⇒ **400 + 点名「保留设备名」+ 回显文件名**；
+- **阴性对照 5 例**（`null.pdf` / `console.pdf` / `com10.pdf` / `com0.pdf` / `auxiliary.pdf`）⇒ **200** —— 证明守卫**没有**写成前缀匹配而误伤；
+- `evil.exe`（内容是合法 PDF）⇒ 400 扩展名；`fake.pdf`（文本内容）⇒ 400 magic；`tiny.pdf`（2 字节）⇒ 400 过小；`../../evil.pdf` ⇒ **200 且回显 `evil.pdf`**（路径剥离生效、穿越不成立）；外来 `Origin` ⇒ **403**、本机 `Origin` ⇒ **200**。
+
+**结果**：**16/16 达成**（证据 `devlogs/e2e_rejections.json`）。每个被接受的用例**立刻 cancel**（1 页件；取消发生在 OCR 阶段 ⇒ 不烧 LLM 额度）；每个用例用**内容唯一**的 PDF（否则 md5 去重返回 409，会把对照读成失败）。
+
+**边界**：矩阵是**枚举**而非穷举 —— 只覆盖上表 6 类，**不**证明「没有其他绕过」；**未**覆盖超大文件（会真的占盘）。
+
 ### Electron **fuses 缺省即默认**（三个危险开关全开）+ 上传文件名的 **Windows 保留设备名**（Round 76 第二十批，2026-10-09）
 
 > 记录 → `docs/TODO.md` 的 **0-21**（fuses）与 **0-22**（保留设备名）（均属当前 backlog ⇒ 就地记 §0 表）。

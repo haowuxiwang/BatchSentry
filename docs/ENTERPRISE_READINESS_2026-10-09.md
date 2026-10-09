@@ -17,7 +17,7 @@
 （`main.py` 的 `LocalGuardMiddleware`，且注册次序有 **AST 护栏**）；请求体**流式**硬上限
 （`Content-Length` 非法值/重复头/负数一律拒 —— 对应 `CVE-2026-53540` 与走私形态）；
 CSP + `nosniff` + `X-Frame-Options` + `base-uri`；上传**三重**校验（扩展名 + **magic bytes**
-+ 尺寸/像素/页数上限）；SQL **全部参数化**；`GET /api/settings` **掩码**回显密钥；
++ 尺寸/像素/页数上限）；**且这些入口拒绝路径已在产物层验证**（16 例 HTTP 矩阵：保留设备名 / 扩展名 / magic bytes / 过小 / 路径剥离 / 本机请求，含 5 例阴性对照；`tests/e2e_rejections.py`，**16/16 达成**）；SQL **全部参数化**；`GET /api/settings` **掩码**回显密钥；
 Electron `contextIsolation: true` / `nodeIntegration: false`；门禁 **11 项**含
 依赖漏洞与运行时 EOL 的 **fail-closed** 机检。
 
