@@ -60,6 +60,31 @@ def _ensure_disk_headroom(needed_bytes: int) -> None:
             f"当前可用 {free // 1024 // 1024}MB。请清理磁盘后重试。",
         )
 
+# ── Windows 保留设备名守卫（R80 第二十批，对抗性审查）────────────────────
+# 为什么需要：`safe_name = Path(file.filename).name` 能挡路径分隔符，**挡不住**
+# Windows 保留设备名。实测（本机 Python 3.11 / Windows）：
+#   `NUL.pdf` / `CON.pdf`  → open(..., "wb") **成功**但写入被丢弃（落在设备上，
+#                            不产生文件）⇒ 回读 header 为空 ⇒ 落到
+#                            400「文件不是有效的 PDF（缺少 %PDF- 文件头）」（**误导**）
+#   `COM1.pdf` / `AUX.pdf` → open(..., "wb") 直接抛 FileNotFoundError
+#                            ⇒ 落到 500「上传失败（磁盘写入错误）」（**误导**）
+# 两种都不是真实原因，用户按提示无从下手（得改名）。GMP 场景宁缺勿滥 ⇒ 入口点名拒绝。
+_WIN_RESERVED_STEMS = frozenset(
+    ["CON", "PRN", "AUX", "NUL"]
+    + [f"COM{i}" for i in range(1, 10)]
+    + [f"LPT{i}" for i in range(1, 10)]
+)
+
+
+def _is_reserved_device_name(name: str) -> bool:
+    """`name`（含扩展名）是否是 Windows 保留设备名。
+
+    Windows 的匹配规则：取**第一个 `.` 之前**的部分，忽略**尾部空格/点**，大小写
+    不敏感 ⇒ `NUL.pdf`、`nul`、`NUL .txt`、`CON..x` 都算设备名；
+    而 `com0` / `com10` / `null.pdf` / `console.pdf` **不算**。
+    """
+    stem = name.split(".")[0].rstrip(" \t").upper()
+    return stem in _WIN_RESERVED_STEMS
 @router.post("")
 async def create_job(
     file: UploadFile = File(...),
@@ -104,6 +129,17 @@ async def create_job(
             "仅支持 PDF 或图片（jpg/jpeg/png/webp/bmp/tif/tiff）",
         )
     is_image = ext != ".pdf"
+
+    if _is_reserved_device_name(safe_name0):
+        # R80：保留设备名会让写盘落到设备（0 字节）或直接抛 OSError，最终表现为
+        # 误导性的 400/500。入口点名拒绝，用户改名即可（**不**静默改名 —— 那会让
+        # 界面显示的 filename 与用户实际上传的文件名不一致）。
+        logger.warning("Upload rejected: reserved device name %r", safe_name0)
+        raise HTTPException(
+            400,
+            f"文件名「{safe_name0}」是 Windows 保留设备名"
+            "（CON/PRN/AUX/NUL/COM1-9/LPT1-9），请重命名文件后重试。",
+        )
 
     # 友好拦截：未配置 LLM 服务商时拒绝上传。
     # 批记录审查核心价值是 LLM 结构化分析，未配置时上传必然在 analysis

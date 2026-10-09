@@ -1,4 +1,4 @@
-# 企业级就绪度评估（2026-10-09 · R78 第十八批）
+# 企业级就绪度评估（2026-10-09 · R80 第二十批）
 
 > **触发**：用户问「当前应用是否足够健壮？是否足够作为企业级的应用？」
 > **方法**：三个**只读**审计代理分头取证（安全面 / 鲁棒性 / 泛化与企业级），
@@ -58,9 +58,9 @@ Electron `contextIsolation: true` / `nodeIntegration: false`；门禁 **11 项**
 | 13/14. Disable/limit navigation & new windows | ✅ `setWindowOpenHandler` 仅放行 http(s) 转 `shell.openExternal`；`will-navigate` 拦非本机 |
 | 16. Use a current Electron version | ✅ Electron **43.7.4**（门禁 `runtime_eol` 机检在支持线 41/42/43 内） |
 | 17. Validate the `sender` of IPC messages | N/A（无 IPC / 无 preload） |
-| 19/20. Fuses / 不向不可信内容暴露 API | ⚠️ **未核**（见 §5） |
+| 19/20. Fuses / 不向不可信内容暴露 API | ✅ **已核并关闭**（R80 第二十批）—— `build.electronFuses` 显式关掉 `RunAsNode` / `EnableNodeOptionsEnvironmentVariable` / `EnableNodeCliInspectArguments`；**产物** fuse wire 逐位断言三项 OFF（`tests/unit/test_electron_fuses.py`，含合成伪二进制正负对照）；行为对照：`ELECTRON_RUN_AS_NODE=1 --version` 由 `v24.21.0`（Node）→ 以 Electron 启动。另三个改**启动语义**的 fuse **刻意未改**（见 §4） |
 
-## §3 已修（**5 项**，全部带护栏 + 变异验证）
+## §3 已修（**7 项**，全部带护栏 + 变异验证）
 
 | 修复 | 内容 | 证据 |
 |---|---|---|
@@ -69,8 +69,11 @@ Electron `contextIsolation: true` / `nodeIntegration: false`；门禁 **11 项**
 | **F3** 上传**磁盘余量**守卫 | 入口预检（507），不足即拒；覆盖 chunked/撒谎头（流式写完后按真实字节数复核） | `tests/unit/test_upload_disk_headroom.py`（5 条）；变异 D1–D4 |
 | **F5** `innerHTML` 转义纪律**机检**（R79 第十九批补） | 前端拆模块后 `innerHTML` **46 处**（38 个赋值点）**逐个依赖 `esc()` 却无任何机检**。判据**三层显式**（纯字面量 / 含已知转义器 / 受审计渲染器且白名单函数确存在），未自动通过者**显式登记 + 陈旧检测**；扫描过 tokenizer（注释/字符串/模板 `${}`）；站点数下限防空转 | `tests/unit/test_innerhtml_escaping.py`（6 条）；变异 **10/10 达成**（`devlogs/_verify/r78_innerhtml_mutation.py`） |
 | **F4** §SEC-6 **文档漂移** | `RELEASE_READINESS_PLAN.md` 原写「`\|safe`/`Markup(`/`innerHTML` **零命中** → 已复核、无需动作」—— **与实测相反**（`innerHTML` **46 处**、`Markup(` **4 处**；前端 R63/R65 **拆模块后**才出现）。已更正并加**事实绑定**护栏 | `tests/unit/test_doc_release_plan_sec6_claim.py`（3 条）；变异 S1–S3 |
+| **F6** Electron **fuses 显式化**（R80 第二十批补） | `build.electronFuses` 关掉 `RunAsNode` / `EnableNodeOptionsEnvironmentVariable` / `EnableNodeCliInspectArguments`（此前**未配置** ⇒ 保留 Electron 默认，三个全 ON ⇒ 产物可被 `ELECTRON_RUN_AS_NODE` 降级成纯 Node、并接收 `NODE_OPTIONS`） | `tests/unit/test_electron_fuses.py`（6 条，含读**真二进制** fuse wire 逐位断言）；变异 F1–F5 **全 CAUGHT**（`devlogs/_verify/r80_mutation.py`） |
+| **F7** 上传文件名 **Windows 保留设备名**守卫（R80 第二十批补） | `NUL.pdf` 写盘「成功」却不落文件 ⇒ 误导性 400；`COM1.pdf` 的 `open` 抛 ⇒ 误导性 500。入口改为**点名拒绝**（400 + 原因 + 回显文件名），且**先于**建目录/写盘 | `tests/unit/test_upload_reserved_names.py`（24 条真值表 + 防空转 + 端点 400 + 拒绝先于写盘 + 正常名对照）；变异 U1–U5 **全 CAUGHT** |
 
 > 变异合计 **15/15 CAUGHT + 基线绿**（`devlogs/_verify/r78_hardening_mutation.py`，覆盖 F1–F4）；F5（0-19 机检）另有 **10/10 达成**（`devlogs/_verify/r78_innerhtml_mutation.py`）。
+> R80 第二十批另有 **10/10 CAUGHT**（F1–F5 + U1–U5，`devlogs/_verify/r80_mutation.py`）+ 基线绿。
 > ⚠️ 首版 harness 曾把"临时树无 `.git` ⇒ 护栏自身报错"读成 CAUGHT ⇒ **基线红**暴露了
 > 这个**假 CAUGHT**；已把该护栏改为**不依赖 VCS** 的文件系统扫描。
 
@@ -85,6 +88,7 @@ Electron `contextIsolation: true` / `nodeIntegration: false`；门禁 **11 项**
 | — | 密钥明文落盘 | 可评估 Windows DPAPI；注意会改变配置格式与迁移路径 |
 | — | 无 DB 备份/导出端点、无 `LICENSE` 文件 | 分发前补 |
 | — | 磁盘满的**中途**行为、`-wal` 断电重放 | 无端到端证据（见 §5） |
+| — | Electron 另三个 fuse（`enableEmbeddedAsarIntegrityValidation` / `onlyLoadAppFromAsar` / `grantFileProtocolExtraPrivileges`）**未改** | 打开它们会改**启动语义**；本环境**无法**验证 Electron GUI ⇒ 需在**真实终端**先验证能启动，再逐个打开（**能改 ≠ 该改**） |
 
 ## §5 未验证边界（**不得**读成"已通过"）
 
@@ -97,3 +101,5 @@ Electron `contextIsolation: true` / `nodeIntegration: false`；门禁 **11 项**
   ⇒ 存在**误判停滞**风险；本轮 e2e 实测到单页 `latency=313.3s` + fix-hint 重试，
   但**尚未**观察到越过阈值（登记于 `docs/TODO.md` 的 **0-10**）。
 - `Qwen/Qwen3.5-35B-A3B` **从未**产品级验证通过（仅有 >930s 无日志挂起的历史记录）。
+- Electron fuses 的**运行时**语义只在本机受限环境验到「产物能起来 + 不再被 `ELECTRON_RUN_AS_NODE` 降级成 Node」；**GUI 层**（窗口/渲染）仍不可复现（见 0-2）。另三个 fuse 未改。
+- 保留设备名守卫只枚举 **ASCII 形态**（`CON`/`PRN`/`AUX`/`NUL`/`COM1-9`/`LPT1-9`）；Windows 文档提到的**上标数字变体**（如 `COM¹`）**未**覆盖 —— 本机**未实测**其行为，登记为已知缺口（不做未验证的断言）。

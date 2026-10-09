@@ -6,6 +6,37 @@
 ---
 
 ## [Unreleased]
+### Electron **fuses 缺省即默认**（三个危险开关全开）+ 上传文件名的 **Windows 保留设备名**（Round 76 第二十批，2026-10-09）
+
+> 记录 → `docs/TODO.md` 的 **0-21**（fuses）与 **0-22**（保留设备名）（均属当前 backlog ⇒ 就地记 §0 表）。
+> 教训 → `docs/PROJECT_PITFALLS.md` §四十八、§四十九。
+
+**定位（对抗性 recon，全部实测）**：
+
+1. **Electron fuses 停在默认值。** `package.json` 的 `build` 段**没有** `electronFuses` ⇒ `app-builder-lib` 的 `doAddElectronFuses` 直接早退，产物保留 Electron 默认融合值 —— `RunAsNode` / `EnableNodeOptionsEnvironmentVariable` / `EnableNodeCliInspectArguments` **三个都是 ON**。实测后果：`ELECTRON_RUN_AS_NODE=1 BatchSentry.exe --version` 打印 **`v24.21.0`**（**Node** 版本 —— 产物被一个环境变量降级成纯 Node：不初始化 Chromium、不加载 `app.asar`）；宿主注入的 `NODE_OPTIONS` 被产物接收，Electron 打印 `Most NODE_OPTIONs are not supported in packaged apps`。⚠️ **这条在本机是活的**：宿主（WorkBuddy）自身就以 `ELECTRON_RUN_AS_NODE=1` 运行、且注入 `NODE_OPTIONS`，两者都**继承给子进程**。
+2. **上传文件名可以是 Windows 保留设备名。** `safe_name = Path(file.filename).name` 只剥**路径分隔符**，不挡**设备名**。实测：`NUL.pdf` / `CON.pdf` 的 `open(..., "wb")` **成功但写入被丢弃**（落在设备上，不产生文件）⇒ 用户看到误导性的 400「不是有效的 PDF」；`COM1.pdf` / `AUX.pdf` / `LPT1.pdf` 的 `open` **直接抛** ⇒ 误导性的 500。对照 `null.pdf` 落 1100 字节（判别力）。
+
+**修法**：
+
+- `package.json` 加 `build.electronFuses{runAsNode:false, enableNodeOptionsEnvironmentVariable:false, enableNodeCliInspectArguments:false}`；**重建**产物（PyInstaller → `bundle_manifest` → electron-builder → `gen_provenance.py`）。**刻意不动**另外三个 fuse（`enableEmbeddedAsarIntegrityValidation` / `onlyLoadAppFromAsar` / `grantFileProtocolExtraPrivileges`）—— 它们改**启动语义**，而本环境**无法**验证 Electron 能否启动（受限沙箱跑不起 Electron GUI）⇒ 盲改有把产物改成「起不来」的风险，登记待真实终端。
+- `api/jobs/upload.py` 加 `_is_reserved_device_name` + 入口守卫：命中即 **400 + 点名原因 + 回显文件名**（**不**静默改名 —— 那会让界面显示的 filename 与用户实际选的文件不一致）。
+
+**证据（可复核）**：
+
+- 产物 fuse wire 逐位复读（`devlogs/_verify/r80_electron_fuses.py`）：三个目标位 **OFF**、`count` 字节保持 `9`、**第 9 位（`WasmTrapHandlers`）未被改写**。
+- **行为对照**：`ELECTRON_RUN_AS_NODE=1` 下改造前打印 `v24.21.0`，改造后**以 Electron 启动**；`NODE_OPTION` 报错计数 **1 → 0**。
+- 两份 `pbc-server.exe`（`dist/pbc-server` 与 `dist-electron/win-unpacked/resources/pbc-server`）sha256 一致。
+- 保留设备名探针 `devlogs/_verify/r80_nul_probe.py`。
+
+**护栏 + 变异**：
+
+- `tests/unit/test_electron_fuses.py`（**6 条**）—— 配置↔产物绑定：读**真二进制**的 fuse wire 逐位断言，另用**合成伪二进制**做正/负对照（证明读回器非空转）。
+- `tests/unit/test_upload_reserved_names.py`（**4 组**）—— 24 条真值表（12 真 + 12 假阴性对照）+ 防空转 + 端点 400 点名 + **拒绝先于写盘** + 正常名阴性对照。
+- 变异 `devlogs/_verify/r80_mutation.py` ⇒ **10/10 CAUGHT**（F1–F5 + U1–U5）+ 基线绿。
+- ⚠️ 变异 harness **自身**踩到两个坑（已修，见 PITFALLS §四十九）：① harness 进程**自己**缺 safe-delete 阈值 ⇒ 清临时树时被 SIGTERM、管道缓冲全丢（表现为「无输出」）；② U1（关掉守卫）后端点用例会**读回 `CON` 设备而永久阻塞** ⇒ 给 harness 加**每例硬超时**（新 `HUNG` 判决：挂死 ≠ 通过），并让端点用例**不碰** `CON` / `PRN`（语义覆盖由纯函数真值表承担）。
+
+**边界**：fuses 的**运行时**语义只在本机受限环境验到「产物能起来 + 不再被 `ELECTRON_RUN_AS_NODE` 降级成 Node」；**GUI 层**仍不可复现（见 TODO 0-2）。另三个 fuse 未改。
+
 
 ### `innerHTML` 转义纪律机检：把「不能静态证明安全」的站点改为**显式登记 + 陈旧检测**（Round 75 第十九批，2026-10-09）
 
