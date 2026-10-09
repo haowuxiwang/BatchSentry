@@ -17,7 +17,7 @@
 （`main.py` 的 `LocalGuardMiddleware`，且注册次序有 **AST 护栏**）；请求体**流式**硬上限
 （`Content-Length` 非法值/重复头/负数一律拒 —— 对应 `CVE-2026-53540` 与走私形态）；
 CSP + `nosniff` + `X-Frame-Options` + `base-uri`；上传**三重**校验（扩展名 + **magic bytes**
-+ 尺寸/像素/页数上限）；**且这些入口拒绝路径已在产物层验证**（16 例 HTTP 矩阵：保留设备名 / 扩展名 / magic bytes / 过小 / 路径剥离 / 本机请求，含 5 例阴性对照；`tests/e2e_rejections.py`，**16/16 达成**）；SQL **全部参数化**；`GET /api/settings` **掩码**回显密钥；
++ 尺寸/像素/页数上限）；**且这些入口拒绝路径已在产物层验证**（**34 例** HTTP 矩阵：保留设备名（含**带路径前缀**形态）/ 扩展名 / magic bytes / 过小 / 路径剥离 / 本机请求 / 去重，含 **7 例阴性对照**；`tests/e2e_rejections.py`，**34/34 达成**，连跑两次）；SQL **全部参数化**；`GET /api/settings` **掩码**回显密钥；
 Electron `contextIsolation: true` / `nodeIntegration: false`；门禁 **11 项**含
 依赖漏洞与运行时 EOL 的 **fail-closed** 机检。
 
@@ -102,4 +102,4 @@ Electron `contextIsolation: true` / `nodeIntegration: false`；门禁 **11 项**
   但**尚未**观察到越过阈值（登记于 `docs/TODO.md` 的 **0-10**）。
 - `Qwen/Qwen3.5-35B-A3B` **从未**产品级验证通过（仅有 >930s 无日志挂起的历史记录）。
 - Electron fuses 的**运行时**语义只在本机受限环境验到「产物能起来 + 不再被 `ELECTRON_RUN_AS_NODE` 降级成 Node」；**GUI 层**（窗口/渲染）仍不可复现（见 0-2）。另三个 fuse 未改。
-- 保留设备名守卫只枚举 **ASCII 形态**（`CON`/`PRN`/`AUX`/`NUL`/`COM1-9`/`LPT1-9`）；Windows 文档提到的**上标数字变体**（如 `COM¹`）**未**覆盖 —— 本机**未实测**其行为，登记为已知缺口（不做未验证的断言）。
+- 保留设备名守卫只枚举 **ASCII 形态**（`CON`/`PRN`/`AUX`/`NUL`/`COM1-9`/`LPT1-9`）；Windows 文档提到的**上标数字变体**（如 `COM¹`）**未**覆盖 —— 本机**未实测**其行为，登记为已知缺口（不做未验证的断言）。**另**：该守卫的「先剥离、后判定」**载荷顺序**现已**三重锁定**（单测 `TestEndpointStripsBeforeChecking` + 产物级 e2e **34 例** + 变异 **3/3**，且三条变异下**旧用例保持绿** ⇒ 新用例是唯一判别力来源）。

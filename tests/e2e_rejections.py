@@ -25,6 +25,8 @@ R80 新增的两条守卫（Electron fuses / Windows 保留设备名）与既有
 | magic bytes | `fake.pdf`（内容是文本） | 400「%PDF-」 |
 | 过小 | `tiny.pdf`（2 字节） | 400「过小」 |
 | 本机守卫 | 外来 `Origin` / 本机 `Origin` | **403** / **200** |
+| **带前缀设备名** | `../../NUL.pdf` / `..\..\NUL.pdf` / `C:\dir\NUL.pdf` / `/tmp/COM1.pdf` / UNC / `a/b/c/../AUX.pdf` | **400**（证明**先剥离、后判定**） |
+| 带前缀阴性对照 | `../../null.pdf` / `..\..\console.pdf` | **200** |
 
 **② 敌意文件名**（**不**逐例写死期望名，而断言**安全不变式**）
 
@@ -93,6 +95,19 @@ MATRIX = (
      403, "non-local", None),
     ("origin_local",   "ok_local.pdf",   "pdf", {"Origin": "http://localhost:1234"},
      200, None, "ok_local.pdf"),
+    # ── 带路径前缀的保留设备名（R82：锁定「**先** `Path().name` 剥离、**后**判定」的顺序）──
+    # 若顺序反了，`../../NUL.pdf` 的 stem 是 `../../NUL`（∉ 集合）⇒ 绕过守卫 ⇒ 仍写到
+    # `NUL` 设备（0 字节静默丢失）。裸名用例锁不住这个顺序（见 r82_mutation.py：3/3 CAUGHT
+    # 且旧用例保持绿）。
+    ("pfx_dev_nul",       "../../NUL.pdf",        "pdf", {}, 400, "保留设备名", "NUL.pdf"),
+    ("pfx_dev_win",       "..\\..\\NUL.pdf",      "pdf", {}, 400, "保留设备名", "NUL.pdf"),
+    ("pfx_dev_abs_win",   "C:\\dir\\NUL.pdf",     "pdf", {}, 400, "保留设备名", "NUL.pdf"),
+    ("pfx_dev_abs_posix", "/tmp/COM1.pdf",        "pdf", {}, 400, "保留设备名", "COM1.pdf"),
+    ("pfx_dev_unc",       "\\\\srv\\s\\LPT1.pdf", "pdf", {}, 400, "保留设备名", "LPT1.pdf"),
+    ("pfx_dev_deep",      "a/b/c/../AUX.pdf",     "pdf", {}, 400, "保留设备名", "AUX.pdf"),
+    # 阴性对照：带前缀但**不是**设备名 ⇒ 必须 200（否则「凡带斜杠就拒」也能过）
+    ("pfx_ctl_null",      "../../null.pdf",       "pdf", {}, 200, None, "null.pdf"),
+    ("pfx_ctl_console",   "..\\..\\console.pdf",  "pdf", {}, 200, None, "console.pdf"),
 )
 
 #: 敌意文件名 —— **只断言安全不变式**（见模块 docstring ②）。

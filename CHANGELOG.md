@@ -6,6 +6,29 @@
 ---
 
 ## [Unreleased]
+### 载荷顺序不变式：把「先剥离、后判保留名」钉住（Round 78 第二十二批，2026-10-09）
+
+> 记录 → `docs/TODO.md` 的 **0-24**（属当前 backlog ⇒ 就地记 §0 表）。
+
+**定位**：`api/jobs/upload.py` 的保留设备名守卫（R80 加）依赖一个**顺序**：
+
+```
+safe_name0 = Path(file.filename).name      # ① 剥离
+if _is_reserved_device_name(safe_name0):   # ② 判定
+```
+
+若 ② 早于 ①，`../../NUL.pdf` 的 stem 是 `../../NUL`（∉ `_WIN_RESERVED_STEMS`）⇒ **绕过** ⇒ `pdf_path = job_dir / "NUL.pdf"` 仍落到 `NUL` 设备（0 字节静默丢失、用户看到误导性的 400「过小」）。而 R80 的 24 例真值表**只喂裸名**（`NUL.pdf` / `nul` / `CON..x` …）⇒ 顺序反了它**全绿** ⇒ 这是一个**载荷但未锁**的不变式。
+
+**先说清楚：当前实现是正确的。** 真产物实测 **9/9**（`devlogs/_verify/r82_prefixed_reserved_probe.py`：6 例带前缀设备名 400 + 3 例带前缀阴性对照 200）。本批**不是**修 bug，是**把不变式钉住** —— 免得日后一次「顺手重构」把它悄悄改坏，而单测仍然全绿。
+
+**修法**（三层）：
+
+- **单测**：`tests/unit/test_upload_reserved_names.py` 新增 `TestEndpointStripsBeforeChecking` —— 6 例带前缀设备名 ⇒ **400 + 点名 + 回显剥离后的名字**；2 例带前缀阴性对照 ⇒ **200**。反斜杠 / 盘符 / UNC 三例标 `skipif(sys.platform != "win32")`（只有 Windows 把它们当分隔符）。
+- **产物级 e2e**：`tests/e2e_rejections.py` 的矩阵 **26 → 34 例**（+6 带前缀设备名、+2 阴性对照）⇒ **34/34**（连跑两次）。
+- **变异**：`devlogs/_verify/r82_mutation.py` ⇒ **3/3 CAUGHT**（M1 判原始名 / M2 不剥离 / M3 守卫过宽）。**关键点**：三条变异下**旧用例保持绿** ⇒ 新用例是**唯一**判别力来源（这正是「载荷但未锁」的证明）。
+
+**边界**：真值表仍是**枚举**而非穷举；Windows 上标数字变体（`COM¹`）未覆盖（无本机实测）。
+
 ### 产物级**入口拒绝矩阵**：把 6 类入口守卫从「进程内单测」补到「冻结字节」（Round 77 第二十一批，2026-10-09）
 
 > 记录 → `docs/TODO.md` 的 **0-23**（属当前 backlog ⇒ 就地记 §0 表）。
