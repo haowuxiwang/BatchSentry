@@ -8,6 +8,7 @@ job 删除时缓存项自然淘汰。
 字典迭代器失效或 key 覆盖。
 """
 import asyncio
+import hashlib
 import html
 import json
 import logging
@@ -107,18 +108,9 @@ async def _generate_report_md_cached(job_id: str) -> str:
         )
         total_pages = (await cursor.fetchone())[0]
 
-    # 缓存 key：findings 数量 + 最后一条 finding 的 id
-    last_id = findings[-1]["id"] if findings else 0
-    # Include status hash in cache key so review operations (confirm/reject/correct)
-    # invalidate the cache — without this, reports show stale finding statuses.
-    # 对抗审查 P1-A：必须把 corrected_text/reviewer_note/reviewed_at 也纳入 —
-    # 复核接口允许不改 status 单独更新这两个字段（同状态二次修正），原 key
-    # 只看 (id, status) → 修正内容变化后报告仍返回旧缓存文本（GMP 场景下
-    # 报告静默携带过期内容，用户以为导出的是最新版本）。
-    status_hash = hash(tuple(sorted(
-        (f["id"], f["status"], f.get("corrected_text") or "", f.get("reviewer_note") or "")
-        for f in findings
-    )))
+    # 缓存 key 的构成见后段 `cache_key`（对抗审查 R84 第二十四批：改为对
+    # **渲染输入**取内容摘要）。此处不再单独算 last_id / status_hash —— 二者
+    # 已被「整体 findings 摘要」覆盖；P1-A 的历史教训保留在 `cache_key` 注释。
 
     # 生成报告（在锁外执行，避免长时间持锁）
     exemptions = await _load_exemptions(db, job_id)
@@ -146,9 +138,41 @@ async def _generate_report_md_cached(job_id: str) -> str:
             continue
         if isinstance(sj, dict) and sj.get("_ocr_empty"):
             empty_pages += 1
-    # 缓存 key：findings 数量 + 最后一条 finding 的 id + status_hash +
-    # 豁免清单规模（记录/撤销豁免不改变 findings，但改变报告内容）。
-    cache_key = (job_id, len(findings), last_id, status_hash, len(exemptions))
+    # 缓存 key = **渲染输入的内容摘要**（对抗审查 R84 第二十四批）。
+    #
+    # 旧 key = (job_id, findings 数量, last_id, status_hash, 豁免**规模**)，
+    # 但 `_generate_markdown` 还消费：job 级元数据（status / 页数 / stage*_ms /
+    # 时间戳 / 文件名）、页面覆盖计数（empty_pages / unanalyzed_pages）、豁免
+    # **内容**。这些都能在 findings **不变**时改变 —— 例：job 终态含 1 页未完成
+    # 分析且 0 findings，用户 retry（status≠review ⇒ 不清 findings、不重置
+    # structured_json）⇒ Stage 2 重新分析该页成功 ⇒ unanalyzed_pages 1→0、
+    # findings 仍 0 ⇒ 旧 key 逐项相同 ⇒ report.md 静默返回**过期**内容
+    # （GMP 场景下携带过期的覆盖声明）。这与项目此前已修的 P1-A（同状态二次
+    # 修正后报告仍返回旧文本）**同源**：缓存 key 未覆盖**全部**渲染输入。
+    #
+    # 修法：对**恰好传给 `_generate_markdown` 的输入**取 SHA-256 摘要 ⇒ 任何
+    # 输入变化都使 key 失效（不会漏；代价仅是极端情况下多一次重算，远小于
+    # 静默返回过期报告的风险）。P1-A 的 corrected_text/reviewer_note 教训已由
+    # 「整体 findings 摘要」天然覆盖。
+
+    def _render_input_digest() -> str:
+        h = hashlib.sha256()
+        for part in (
+            (job["filename"], job["status"], job["total_pages"],
+             job["stage1_ms"], job["stage2_ms"], job["stage3_ms"],
+             job["created_at"], job["finished_at"]),
+            findings,
+            exemptions,
+            total_pages,
+            empty_pages,
+            unanalyzed_pages,
+            review_stats,
+        ):
+            h.update(repr(part).encode("utf-8", "replace"))
+            h.update(b"\x1f")
+        return h.hexdigest()
+
+    cache_key = (job_id, _render_input_digest())
 
     # 并发安全：用锁保护字典读写
     async with _report_cache_lock:

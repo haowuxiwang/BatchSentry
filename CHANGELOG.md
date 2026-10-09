@@ -6,6 +6,33 @@
 ---
 
 ## [Unreleased]
+### 报告缓存 key 未覆盖**全部渲染输入** ⇒ 重试后 `report.md` 静默返回过期内容（Round 80 第二十四批，2026-10-09）
+
+> 记录 → `docs/TODO.md` 的 **0-26**（属当前 backlog ⇒ 就地记 §0 表）。
+
+**定位**：`api/report.py::_generate_report_md_cached` 用模块级 `cache_key` 做报告缓存，
+旧 key = `(job_id, len(findings), last_id, status_hash, len(exemptions))`。但
+`_generate_markdown` 还消费 **`total_pages` / `empty_pages` / `unanalyzed_pages` /
+`job` 级字段（`filename`）** —— 这些**都不在** key 里。
+
+**风险**：这些输入能在 `findings` **完全不变**时改变 ⇒ key 不变 ⇒ 报告返回旧文本。
+可达路径：job 终态含 1 页未完成分析且 0 findings，用户 `retry`（`status != 'review'`
+⇒ 不清 findings、不重置 `structured_json`）⇒ Stage 2 重新分析该页成功 ⇒
+`unanalyzed_pages` 1 → 0、findings 仍 0 ⇒ 报告仍声明「1 页未完成分析」
+（GMP 场景下携带**过期的覆盖声明 / 页数**）。与已修的 **P1-A**（同状态二次修正后
+报告仍返回旧文本）**同源**：缓存 key 未覆盖全部渲染输入。
+
+**修法**：改为对**恰好传给 `_generate_markdown` 的输入**取 SHA-256 摘要
+（`_render_input_digest`）—— 任何输入变化都使 key 失效；P1-A 的
+`corrected_text`/`reviewer_note` 教训由「整体 findings 摘要」天然覆盖。
+
+**护栏**：新增 `tests/integration/test_report_cache_coverage.py`（**3 条**，逐输入
+判别力：`unanalyzed_pages` / `total_pages` / `empty_pages`）。**变异**
+`devlogs/_verify/r83c_mutation.py` ⇒ **4/4 CAUGHT**（M1 回旧 key / M2 去
+`unanalyzed_pages` / M3 去 `empty_pages` / M4 去 `total_pages`，逐例红在**目标断言**）。
+⚠️ M4 首版只删一处 `total_pages` 实测 **MISSED** —— 因为 `job["total_pages"]` 与裸
+`total_pages,` **携带同一个值**，属**变异自身无效**（非测试失效），已改为两处同删。
+
 ### `esc` 转义原语：三份副本**行为等价**上锁 + 修正误导注释（Round 79 第二十三批，2026-10-09）
 
 > 记录 → `docs/TODO.md` 的 **0-25**（属当前 backlog ⇒ 就地记 §0 表）。

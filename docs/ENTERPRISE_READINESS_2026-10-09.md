@@ -1,4 +1,4 @@
-# 企业级就绪度评估（2026-10-09 · R83 第二十三批）
+# 企业级就绪度评估（2026-10-09 · R84 第二十四批）
 
 > **触发**：用户问「当前应用是否足够健壮？是否足够作为企业级的应用？」
 > **方法**：三个**只读**审计代理分头取证（安全面 / 鲁棒性 / 泛化与企业级），
@@ -60,7 +60,7 @@ Electron `contextIsolation: true` / `nodeIntegration: false`；门禁 **11 项**
 | 17. Validate the `sender` of IPC messages | N/A（无 IPC / 无 preload） |
 | 19/20. Fuses / 不向不可信内容暴露 API | ✅ **已核并关闭**（R80 第二十批）—— `build.electronFuses` 显式关掉 `RunAsNode` / `EnableNodeOptionsEnvironmentVariable` / `EnableNodeCliInspectArguments`；**产物** fuse wire 逐位断言三项 OFF（`tests/unit/test_electron_fuses.py`，含合成伪二进制正负对照）；行为对照：`ELECTRON_RUN_AS_NODE=1 --version` 由 `v24.21.0`（Node）→ 以 Electron 启动。另三个改**启动语义**的 fuse **刻意未改**（见 §4） |
 
-## §3 已修（**7 项**，全部带护栏 + 变异验证）
+## §3 已修（**8 项**，全部带护栏 + 变异验证）
 
 | 修复 | 内容 | 证据 |
 |---|---|---|
@@ -71,6 +71,7 @@ Electron `contextIsolation: true` / `nodeIntegration: false`；门禁 **11 项**
 | **F4** §SEC-6 **文档漂移** | `RELEASE_READINESS_PLAN.md` 原写「`\|safe`/`Markup(`/`innerHTML` **零命中** → 已复核、无需动作」—— **与实测相反**（`innerHTML` **46 处**、`Markup(` **4 处**；前端 R63/R65 **拆模块后**才出现）。已更正并加**事实绑定**护栏 | `tests/unit/test_doc_release_plan_sec6_claim.py`（3 条）；变异 S1–S3 |
 | **F6** Electron **fuses 显式化**（R80 第二十批补） | `build.electronFuses` 关掉 `RunAsNode` / `EnableNodeOptionsEnvironmentVariable` / `EnableNodeCliInspectArguments`（此前**未配置** ⇒ 保留 Electron 默认，三个全 ON ⇒ 产物可被 `ELECTRON_RUN_AS_NODE` 降级成纯 Node、并接收 `NODE_OPTIONS`） | `tests/unit/test_electron_fuses.py`（6 条，含读**真二进制** fuse wire 逐位断言）；变异 F1–F5 **全 CAUGHT**（`devlogs/_verify/r80_mutation.py`） |
 | **F7** 上传文件名 **Windows 保留设备名**守卫（R80 第二十批补） | `NUL.pdf` 写盘「成功」却不落文件 ⇒ 误导性 400；`COM1.pdf` 的 `open` 抛 ⇒ 误导性 500。入口改为**点名拒绝**（400 + 原因 + 回显文件名），且**先于**建目录/写盘 | `tests/unit/test_upload_reserved_names.py`（24 条真值表 + 防空转 + 端点 400 + 拒绝先于写盘 + 正常名对照）；变异 U1–U5 **全 CAUGHT** |
+| **F8** 报告缓存 key **未覆盖全部渲染输入**（R84 第二十四批补） | 旧 key 只覆盖 findings 派生字段 + 豁免**规模**，漏了 `total_pages` / `empty_pages` / `unanalyzed_pages` / `filename` ⇒ 这些在 findings 不变时改变（`retry` 后重分析）会让 `report.md` 静默返回**过期**内容 | `tests/integration/test_report_cache_coverage.py`（3 条，逐输入判别力）；变异 **4/4 CAUGHT**（`devlogs/_verify/r83c_mutation.py`） |
 
 > 变异合计 **15/15 CAUGHT + 基线绿**（`devlogs/_verify/r78_hardening_mutation.py`，覆盖 F1–F4）；F5（0-19 机检）另有 **10/10 达成**（`devlogs/_verify/r78_innerhtml_mutation.py`）。
 > R80 第二十批另有 **10/10 CAUGHT**（F1–F5 + U1–U5，`devlogs/_verify/r80_mutation.py`）+ 基线绿。
