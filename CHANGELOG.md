@@ -36,6 +36,7 @@
 - ⚠️ 变异 harness **自身**踩到两个坑（已修，见 PITFALLS §四十九）：① harness 进程**自己**缺 safe-delete 阈值 ⇒ 清临时树时被 SIGTERM、管道缓冲全丢（表现为「无输出」）；② U1（关掉守卫）后端点用例会**读回 `CON` 设备而永久阻塞** ⇒ 给 harness 加**每例硬超时**（新 `HUNG` 判决：挂死 ≠ 通过），并让端点用例**不碰** `CON` / `PRN`（语义覆盖由纯函数真值表承担）。
 
 **边界**：fuses 的**运行时**语义只在本机受限环境验到「产物能起来 + 不再被 `ELECTRON_RUN_AS_NODE` 降级成 Node」；**GUI 层**仍不可复现（见 TODO 0-2）。另三个 fuse 未改。
+**产物级验证（本轮收尾）**：重建后对**内嵌产物**（`dist-electron/win-unpacked/resources/pbc-server/pbc-server.exe`，与 `dist/pbc-server` **同 sha256**）复跑 **7 轮** e2e（`pdf,img,mineru,rot,robust,cancel,dual`；`PBC_E2E_REQUIRE_LLM=1`；模型 `deepseek-ai/DeepSeek-V3.2`）⇒ **7/7 全部达成**、`llm_failed` 全 0（`pdf 8/8`、`img 2/2`、`mineru 7/7`、`rot 5/5`、`robust 4/4（复合）`、`dual 7/7`；`cancel` 按设计豁免）。证据 `devlogs/_verify/r78_e2e_postbuild.json`。门禁在提交 `fdf44fa` 上 **11/11 PASS**（`4045 passed, 0 failed, coverage 95.09%`）。
 
 
 ### `innerHTML` 转义纪律机检：把「不能静态证明安全」的站点改为**显式登记 + 陈旧检测**（Round 75 第十九批，2026-10-09）
