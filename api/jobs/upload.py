@@ -6,6 +6,7 @@ import hashlib
 import logging
 import shutil
 import uuid
+from pathlib import Path
 
 import fitz  # PyMuPDF — 图片合成 PDF
 
@@ -24,6 +25,40 @@ from api.jobs import (
 )
 
 logger = logging.getLogger(__name__)
+
+# ── 磁盘余量守卫（R78 第十八批，对抗性审查）────────────────────────────────
+# 为什么需要：全仓此前**没有任何**剩余空间检查（grep 无 `disk_usage`）⇒ 磁盘写满时
+# 会在 pipeline 中途失败（OCR JSONL / 页面渲染图 / SQLite 行都要落盘），
+# 用户看到的是一个跑到一半的 error，而不是入口处的明确拒绝。
+#
+# 系数 3：产物不止原始 PDF —— OCR 原始 JSONL、渲染图、DB 行都要空间。
+# 余量 256MB：留给 SQLite WAL 与日志轮转（`backupCount=5`）。
+_DISK_HEADROOM_FACTOR = 3
+_DISK_HEADROOM_MARGIN_BYTES = 256 * 1024 * 1024
+
+
+def _ensure_disk_headroom(needed_bytes: int) -> None:
+    """输出目录所在卷剩余空间不足时**在入口拒绝**（507），而不是中途炸。
+
+    ⚠️ 检查**自身**失败（拿不到 `output_dir` 的用量）时 **fail-open**：记 warning
+    后放行。理由：这是**容量预检**、不是正确性判据 —— 一个坏掉的预检不该把
+    所有上传都拦死；真正的写入失败仍有既有路径兜底（500「磁盘写入错误」）。
+    与"判不了 ≠ 已验"那类 fail-closed 判据**刻意不同**，此处已记日志、非静默。
+    """
+    root = Path(config["app"].output_dir)
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        free = shutil.disk_usage(str(root)).free
+    except OSError as e:                       # 预检自身坏了 ⇒ 不阻断
+        logger.warning("磁盘余量预检跳过（%s）", e)
+        return
+    required = needed_bytes * _DISK_HEADROOM_FACTOR + _DISK_HEADROOM_MARGIN_BYTES
+    if free < required:
+        raise HTTPException(
+            507,
+            f"服务器磁盘空间不足：本文件约需 {required // 1024 // 1024}MB，"
+            f"当前可用 {free // 1024 // 1024}MB。请清理磁盘后重试。",
+        )
 
 @router.post("")
 async def create_job(
@@ -125,6 +160,16 @@ async def create_job(
     logger.info(f"[{job_id}] Upload start: name={safe_name}")
     pdf_path = job_dir / safe_name
 
+    # 入口磁盘预检（best-effort）：仅在客户端**声明**了合法 Content-Length 时生效。
+    # 权威检查在流式写完之后（真实字节数，覆盖 chunked / 缺失 / 撒谎的头）。
+    _declared = None
+    if request is not None:
+        _raw_len = request.headers.get("content-length")
+        if _raw_len and _raw_len.isdigit():
+            _declared = int(_raw_len)
+    if _declared:
+        _ensure_disk_headroom(_declared)
+
     # Stream to disk in chunks; enforce size limit without loading full file
     total_bytes = 0
     file_md5 = hashlib.md5()
@@ -155,6 +200,8 @@ async def create_job(
         # Don't leak internal paths/exception details to client
         logger.error(f"Upload write failed: {e}", exc_info=True)
         raise HTTPException(500, "上传失败（磁盘写入错误）")
+    # 权威磁盘检查：真实字节数（覆盖 chunked / 缺失 / 撒谎的 Content-Length）
+    _ensure_disk_headroom(total_bytes)
     content_md5 = file_md5.hexdigest()
 
     # Magic bytes check: PDF 以 %PDF- 开头；图片按格式白名单匹配。

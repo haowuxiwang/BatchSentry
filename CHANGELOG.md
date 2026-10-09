@@ -7,6 +7,34 @@
 
 ## [Unreleased]
 
+### 验证 harness 的「真凭据」来源被 SUT 自身覆写：负控污染 + 断言退化（Round 74 第十八批，2026-10-09）
+
+> 记录 → `docs/TODO.md` 的 **0-17**（属当前 backlog ⇒ 就地记 §0 表）。
+> 教训 → 技能 `verification-integrity` Trap 92；`docs/PROJECT_PITFALLS.md` §四十六。
+
+**定位**：`devlogs/_verify/r77_e2e_llm_audit_live.py::_creds()` 从 `%TEMP%/pbc_e2e_appdata/PBC/config.json` 读「真凭据」—— **但那正是 driver 自己会覆写的文件**（`POST /api/settings` 落盘）。r77 的**负控**把 `BAD_KEY` 写进去后没有撤销 ⇒ 「真凭据」位被污染。两个后果都**静默**：
+
+1. **归因错位**：任何重跑的 A 正控会读到毒 key ⇒ `401` ⇒ 被读成产品缺陷（实为 harness 缺陷）；
+2. **断言退化**：`assert sf_key in (real_sf, BAD_KEY)` 在 `real_sf == BAD_KEY` 时**恒真** ⇒ 恰好放过它要抓的污染。
+
+**定位证据**（不是猜）：掩码显示 `…0000`，与 `BAD_KEY` 后缀同 → 精确比对 `config["SILICONFLOW_API_KEY"] == BAD_KEY` ⇒ **True**（len=44）。即 r77 的**存档证据仍有效**（A 正控当时用的是真 key），只是脚本**原先不可重跑**。
+
+**修法**：① 数据面 —— 把真 key 字节还原进 `config.json`（`count==1` 字节替换），直连探针 `GET https://api.siliconflow.cn/v1/models` ⇒ **200**；② 脚本面 —— 加**污染金丝雀**（`_creds()` 起跑即断言 key 不是负控串）+ `_snapshot_cfg`/`_restore_cfg`（**只还原 SF key 那一处**，保留 driver 期间合法的 OCR 后端切换）。
+
+**测试**：`devlogs/_verify/r78_harness_selftest.py`（金丝雀 + 外科式还原 + 幂等）；**变异** `r78_harness_mutation.py` ⇒ **4/4 CAUGHT** + 阴性对照绿；`--verify-only` 重判 r77 存档 ⇒ 仍「全部达成」。
+
+**同批（验证）**：**多轮 e2e**（`devlogs/_verify/r78_e2e_multiround.py`；轮次 `pdf,img,mineru,rot,robust,cancel,dual`；`PBC_E2E_REQUIRE_LLM=1`；模型 `deepseek-ai/DeepSeek-V3.2`；产物 `dist/pbc-server/pbc-server.exe`，`sha256[:12]=46a589a2201d`，与 Electron 内嵌那份**同字节**）：`pdf` ok=True `llm_ok=7/7`；`img` ok=True `llm_ok=3/3`；`mineru` ok=True `llm_ok=9/9`；`rot` ok=True `llm_ok=5/5`；`robust` ok=True `llm_ok=4/4`；`cancel` ok=True（豁免轮，无 LLM 审计键）；`dual` ok=True `llm_ok=8/8`。driver rc=0（0 = 全轮通过）。
+
+### e2e 多轮判据误伤「复合轮」（`robust`）：判据必须认得轮次形态（Round 74 第十八批，2026-10-09）
+
+> 记录 → `docs/TODO.md` 的 **0-20**（属当前 backlog ⇒ 就地记 §0 表）。
+
+**定位**：`devlogs/_verify/r78_e2e_multiround.py` 首跑 7 轮 ⇒ **6/7**，唯一「未达成」是判据**自身误伤**：`robust` 轮**不是**单次 `run_upload`，而是**包了** `o6`/`o1` 两个 upload 并只把 `llm_*` 留在**子字典**里 ⇒ 只看顶层就报「结果字典缺 llm_calls（判据没接上？）」。这正是脚本 docstring 预告要暴露的风险（「按设计无 LLM 调用会被误判成红」）—— 本次真的暴露了，只是形态是「**有** LLM 调用但埋在子字典」，而非「没有」。
+
+**修法**：① 新增 `_llm_audit()` —— 优先顶层；否则**下钻一层**取子轮聚合，`kind ∈ {flat, composite, none}`；② `all_pass` 取子轮**逻辑与**（**不是**求和）：求和会让 `0/2 + 2/2` 变成 `2/4` 看着「还行」，**掩盖**某一路零成功；③ `_judge` 改判 `all_pass`。**下钻不放行**：任何一层都没有 `llm_calls` ⇒ 仍判红。
+
+**测试**：`devlogs/_verify/r78_judge_composite_selftest.py`（**13 检查**，含 5 条负控：`o6` 零成功 / 扁平轮缺 `llm_*` / 子轮全无 `llm_*` / `cancel` 带 `llm_*` / 三态判别非空转）。**重判**（`--verify-only`，从存档日志）⇒ **7/7 全部达成**。
+
 ### `real_baselines` 契约：基线计数不得当判据（Round 73 第十七批，2026-10-09）
 
 > 记录 → `docs/TODO.md` 的 **0-15**（属当前 backlog ⇒ 就地记 §0 表；本轮只完成**结构性一半**）。

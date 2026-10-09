@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from fastapi.responses import HTMLResponse, FileResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, FileResponse, RedirectResponse, JSONResponse
 from markupsafe import Markup
 
 from config import config, UPLOAD_LIMITS
@@ -467,6 +467,27 @@ class LocalGuardMiddleware:
 
 
 app.add_middleware(LocalGuardMiddleware, max_body_bytes=_GUARD_MAX_BODY_BYTES)
+
+# ── 全局未捕获异常处理器（R78 第十八批，对抗性审查）───────────────────────
+# 为什么需要：未捕获异常此前交给 Starlette 的 `ServerErrorMiddleware`，返回
+# **纯文本** "Internal Server Error" —— 非 JSON ⇒ 前端 `r.json()` 会**再抛**
+# 一次，真实错误在客户端彻底丢失；且没有集中的服务端钩子。
+#
+# 本处理器统一成与 `HTTPException` **同形**的 `{"detail": ...}`，并**只**回显
+# 请求号：异常文本可能含路径 / 上游 URL / 密钥片段（`str(exc)` 不可信）。
+#
+# 边界（不会被改写）：`HTTPException` 有自己的处理器；本地守卫的 403/413 由
+# `_send_plain` 直发；校验失败走 422 —— 都**不**经过这里。
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    rid = request_id_var.get("-")
+    # 完整栈只进服务端日志（`logger.exception` 带 exc_info）
+    logger.exception("[%s] 未捕获异常 %s %s", rid, request.method, request.url.path)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"服务器内部错误（请求号 {rid}）"},
+    )
+
 
 # Templates
 templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))

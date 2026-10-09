@@ -444,6 +444,12 @@ function createSplashWindow() {
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
+      // R78 第十八批：Electron 官方安全清单第 4 项「Enable process sandboxing」。
+      // Electron ≥20 默认即 true —— 这里**显式**写出，使"沙箱开着"成为
+      // 机检锁定的不变式，防未来改动静默关掉（`nodeIntegration: true` 会
+      // 连带关闭沙箱，而 `sandbox: false` 是静默的）。渲染层是纯网页、
+      // 不使用任何 Electron API（无 preload / contextBridge），故零行为变更。
+      sandbox: true,
     },
   });
 
@@ -574,6 +580,12 @@ function createWindow() {
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
+      // R78 第十八批：Electron 官方安全清单第 4 项「Enable process sandboxing」。
+      // Electron ≥20 默认即 true —— 这里**显式**写出，使"沙箱开着"成为
+      // 机检锁定的不变式，防未来改动静默关掉（`nodeIntegration: true` 会
+      // 连带关闭沙箱，而 `sandbox: false` 是静默的）。渲染层是纯网页、
+      // 不使用任何 Electron API（无 preload / contextBridge），故零行为变更。
+      sandbox: true,
     },
   };
   try {
