@@ -36,9 +36,25 @@ LLM 跑通**：产品在 LLM 失败时**按设计降级**（把“LLM 调用失�
 阴性对照（EOF 追加注释）**不被抓**；临时树 + 每例独立子进程，只认 `rc==1`
 （`rc==2` 记 INVALID）。
 
-**未验证边界**：本批**未**在产物上重跑 e2e（`e2e_run.py` 与 `tests/` 均不在
-`BUNDLE_SOURCES` 内 ⇒ `artifact_freshness` 不受影响，无需重建）。driver 侧的新判据
-要在**下一次真实 e2e 轮次**才会首次作用于真实 job。
+**真实 job 两跑**（`devlogs/_verify/r77_e2e_llm_audit_live.py`；产物
+`dist/pbc-server/pbc-server.exe`；模型 `deepseek-ai/DeepSeek-V3.2`；`PBC_E2E_REQUIRE_LLM=1`；
+凭据取自 appdata 的 `PBC/config.json`，经**环境变量**传入 —— **不写命令行**）：
+
+| 跑 | job | 凭据 | 终态 | `llm_audit` | driver 自判 |
+|---|---|---|---|---|---|
+| 正控 | `091249fd-040` | 真 | `review`（1007s / 6 页 / 27 findings / `paddle`） | `success=7/7（失败 0 次）` ⇒ OK | `ALL ROUNDS PASSED` |
+| 负控 | `903598cd-d0f` | SF key 换成明显无效串 | `error`（100s） | `0/5` 成功，note 点名 `401 code 30014 Token is invalid.` ⇒ FAIL | `FAILED rounds: ['pdf']` |
+
+⇒ 判据在**真实 job** 上确实会响（不只是单测里成立）。
+
+⚠️ **判据脚本自身首版有 bug**：写成 `if neg["llm_ok"] is not False` —— JSON 解析出的
+是 int `0`，而 `0 is not False` 在 Python 里是 **True** ⇒ 误报「未达成」。已改 `!= 0`，
+并加 `--verify-only`（从**已保存日志重判**，不必为一次断言修正重烧 19 分钟）。
+
+**未验证边界**：负控走的是 **401 ⇒ 硬 `error`** 路径；**「零成功 + 终态仍绿」**
+（**402 欠费** ⇒ 产品按设计降级到 `review`，即 B11-11 那种假绿）**未在真实 job 上复现**
+—— 402 无法伪造，该分支只在**单测 / 变异**层被覆盖。`e2e_run.py` 与 `tests/` 均不在
+`BUNDLE_SOURCES` 内 ⇒ **无需重建**。
 
 ### A3 前提否证 + B6-1 泛化验证（第 2 份真实批记录）（Round 72 第十六批，2026-10-09）
 
