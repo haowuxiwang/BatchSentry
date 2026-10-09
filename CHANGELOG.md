@@ -35,6 +35,8 @@
 
 **测试**：`devlogs/_verify/r78_judge_composite_selftest.py`（**13 检查**，含 5 条负控：`o6` 零成功 / 扁平轮缺 `llm_*` / 子轮全无 `llm_*` / `cancel` 带 `llm_*` / 三态判别非空转）。**重判**（`--verify-only`，从存档日志）⇒ **7/7 全部达成**。
 
+**重打包后复跑（对实际分发的产物）**：重打包（PyInstaller + electron-builder，HEAD `c549111`）后，对**内嵌产物** `dist-electron/win-unpacked/resources/pbc-server/pbc-server.exe`（与 `dist/pbc-server` 那份**同 sha256** = `bf8f50cf6af4…`）再跑同 7 轮 ⇒ **7/7 全部达成**（`pdf 7/7`、`img 2/2`、`mineru 7/7`、`rot 5/5`、`robust 4/4`、`dual 7/7`；`cancel` 按设计豁免）。证据 → `devlogs/_verify/r78_e2e_postbuild.json`；门禁 **11/11 PASS**（`4002 passed, 0 failed, coverage 95.09%`）。
+
 ### `real_baselines` 契约：基线计数不得当判据（Round 73 第十七批，2026-10-09）
 
 > 记录 → `docs/TODO.md` 的 **0-15**（属当前 backlog ⇒ 就地记 §0 表；本轮只完成**结构性一半**）。
