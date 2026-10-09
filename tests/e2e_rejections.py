@@ -1,4 +1,4 @@
-"""产物级**入口拒绝矩阵**（R81 第二十一批 → TODO 0-23）。
+r"""产物级**入口拒绝 / 输入敌意矩阵**（R81 第二十一批 → TODO 0-23）。
 
 ## 为什么需要
 
@@ -13,7 +13,9 @@ R80 新增的两条守卫（Electron fuses / Windows 保留设备名）与既有
 本驱动把这条缝补上，并作为**可重跑的回归**留在仓里（`devlogs/` 被 gitignore
 ⇒ 放在那里的证据会随磁盘消失）。
 
-## 矩阵
+## 三组判据
+
+**① 拒绝矩阵**（逐例断言状态码 + 文案 + 回显）
 
 | 组 | 用例 | 期望 |
 |---|---|---|
@@ -22,11 +24,22 @@ R80 新增的两条守卫（Electron fuses / Windows 保留设备名）与既有
 | 扩展名 | `evil.exe`（内容是合法 PDF） | 400「仅支持 PDF 或图片」 |
 | magic bytes | `fake.pdf`（内容是文本） | 400「%PDF-」 |
 | 过小 | `tiny.pdf`（2 字节） | 400「过小」 |
-| 路径剥离 | `../../evil.pdf` | **200** 且回显 `filename == "evil.pdf"`（穿越不成立） |
 | 本机守卫 | 外来 `Origin` / 本机 `Origin` | **403** / **200** |
 
+**② 敌意文件名**（**不**逐例写死期望名，而断言**安全不变式**）
+
+`../../evil.pdf`、`..\..\x.pdf`、`C:\Windows\x.pdf`、`/etc/x.pdf`、
+`\\srv\share\x.pdf`、`..%2f..%2f x.pdf`、`....//....//x.pdf`
+⇒ 内容合法 ⇒ 必须 **200**，且回显的 `filename` **不得含** `/` `\` `:`、
+不得为空 / `.` / `..`（即**落盘路径不可由客户端控制**）；
+另断言**任何用例都不得 5xx**（用户输入问题报 5xx 一律是缺陷）。
+
+**③ 去重 / `force`**：同一份内容连传两次 ⇒ 第 2 次 **409**；带 `force=1` ⇒ **200**。
+
 ⚠️ 每个被接受的用例**立刻 cancel**（1 页件；取消发生在 OCR 阶段 ⇒ 不烧 LLM 额度）。
-⚠️ 每个用例用**内容唯一**的 PDF（否则 md5 去重会返回 409，把对照读成失败）。
+⚠️ 每个用例的 PDF 内容**由构造保证唯一**（嵌入 `uuid4` nonce）—— 不依赖
+`fitz` 的随机 `/ID`。否则 md5 去重会返回 409，把阴性对照读成失败
+（且那会是一处**静默**的环境依赖：换个静态 fixture 就翻车）。
 
 跑法（**需先有产物**；与 `e2e_run.py` 同端口约定，避免撞上开发实例）：
     python tests/e2e_rejections.py
@@ -42,6 +55,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from pathlib import Path
 
 import httpx
@@ -75,12 +89,25 @@ MATRIX = (
     ("ext_exe",        "evil.exe",   "pdf",  {}, 400, "仅支持 PDF 或图片", None),
     ("magic_bad",      "fake.pdf",   "text", {}, 400, "%PDF-", None),
     ("too_small",      "tiny.pdf",   "tiny", {}, 400, "过小", None),
-    ("traversal",      "../../evil.pdf", "pdf", {}, 200, None, "evil.pdf"),
     ("origin_foreign", "ok_foreign.pdf", "pdf", {"Origin": "http://evil.example.com"},
      403, "non-local", None),
     ("origin_local",   "ok_local.pdf",   "pdf", {"Origin": "http://localhost:1234"},
      200, None, "ok_local.pdf"),
 )
+
+#: 敌意文件名 —— **只断言安全不变式**（见模块 docstring ②）。
+HOSTILE = (
+    ("host_posix_rel",  "../../evil_rel.pdf"),
+    ("host_backslash",  "..\\..\\evil_bs.pdf"),
+    ("host_abs_win",    "C:\\Windows\\evil_abs.pdf"),
+    ("host_abs_posix",  "/etc/passwd_abs.pdf"),
+    ("host_unc",        "\\\\srv\\share\\evil_unc.pdf"),
+    ("host_encoded",    "..%2f..%2fevil_enc.pdf"),
+    ("host_dots",       "....//....//evil_dots.pdf"),
+    ("host_drive_only", "C:evil_drive.pdf"),
+)
+
+_BAD_NAME_CHARS = ("/", "\\", ":")
 
 
 def _sha12(p: Path) -> str:
@@ -88,10 +115,14 @@ def _sha12(p: Path) -> str:
 
 
 def _unique_pdf(tag: str) -> bytes:
-    """每个用例一份**内容唯一**的最小合法 PDF（避开 md5 去重 409）。"""
+    """最小合法 PDF；内容**由构造保证唯一**（嵌入 uuid4 nonce）。
+
+    ⚠️ 不要改成静态 fixture：服务端有内容 md5 去重（同内容第二次返回 409），
+    静态字节会把阴性对照读成失败 —— 而且那是**静默**的（换台机器才炸）。
+    """
     import fitz
     doc = fitz.open()
-    doc.new_page().insert_text((50, 50), f"probe {tag}")
+    doc.new_page().insert_text((50, 50), f"probe {tag} {uuid.uuid4().hex}")
     buf = doc.tobytes()
     doc.close()
     return buf
@@ -105,6 +136,18 @@ def _body(kind: str, tag: str) -> bytes:
     if kind == "tiny":
         return b"ab"
     raise AssertionError(kind)
+
+
+def _name_ok(name) -> tuple[bool, str]:
+    """落盘名安全不变式：非空、非 `.`/`..`、不含任何路径分隔符或盘符冒号。"""
+    if not isinstance(name, str) or not name:
+        return False, f"filename 为空或非字符串：{name!r}"
+    for ch in _BAD_NAME_CHARS:
+        if ch in name:
+            return False, f"filename 含路径分隔符 {ch!r}：{name!r}"
+    if name in (".", ".."):
+        return False, f"filename 是 {name!r}"
+    return True, ""
 
 
 def _port_busy() -> bool:
@@ -128,6 +171,15 @@ def _wait_health(c: httpx.Client, timeout: float = 60.0) -> bool:
             pass
         time.sleep(0.5)
     return False
+
+
+def _cancel(c: httpx.Client, r: httpx.Response):
+    """立刻取消，别烧 OCR/LLM 额度。返回 cancel 的状态码（失败记字符串）。"""
+    try:
+        jid = r.json().get("job_id")
+        return c.post(f"{_API}/api/jobs/{jid}/cancel", timeout=15).status_code
+    except Exception as e:                                       # noqa: BLE001
+        return f"ERR {type(e).__name__}"
 
 
 def _run_matrix(c: httpx.Client) -> list[dict]:
@@ -160,25 +212,89 @@ def _run_matrix(c: httpx.Client) -> list[dict]:
                 if not echo_ok:
                     problems.append(f"错误消息未回显 {want_echo!r}")
 
-        cancelled = None
-        if status == 200:                       # 立刻取消，别烧 OCR/LLM 额度
-            try:
-                jid = r.json().get("job_id")
-                cancelled = c.post(f"{_API}/api/jobs/{jid}/cancel", timeout=15).status_code
-            except Exception as e:                               # noqa: BLE001
-                cancelled = f"ERR {type(e).__name__}"
-
+        cancelled = _cancel(c, r) if status == 200 else None
         rows.append({
-            "case": name, "filename": fname, "status": status,
-            "want_status": want_status, "echo_ok": echo_ok,
-            "cancelled": cancelled, "ok": not problems,
-            "problems": problems, "body_head": text[:160].replace("\n", " "),
+            "group": "matrix", "case": name, "filename": fname, "status": status,
+            "want_status": want_status, "echo_ok": echo_ok, "cancelled": cancelled,
+            "ok": not problems, "problems": problems,
+            "body_head": text[:160].replace("\n", " "),
         })
-        flag = "OK  " if not problems else "FAIL"
-        print(f"  {flag} {name:15s} {fname:20s} -> {status}"
-              f"{'  cancel=' + str(cancelled) if cancelled is not None else ''}"
-              f"{'  ' + '; '.join(problems) if problems else ''}", flush=True)
+        _emit(rows[-1])
     return rows
+
+
+def _run_hostile(c: httpx.Client) -> list[dict]:
+    """敌意文件名：合法内容 ⇒ 必须 200 且落盘名满足安全不变式；且**不得** 5xx。"""
+    rows: list[dict] = []
+    for name, fname in HOSTILE:
+        files = {"file": (fname, _unique_pdf(name), "application/pdf")}
+        try:
+            r = c.post(f"{_API}/api/jobs", files=files, timeout=60)
+            status, text = r.status_code, r.text
+        except Exception as e:                                   # noqa: BLE001
+            status, text = -1, f"{type(e).__name__}: {e}"
+
+        problems: list[str] = []
+        got = None
+        if status != 200:
+            problems.append(f"状态码 {status}（期望 200 —— 合法 PDF 不该被拒）")
+        else:
+            try:
+                got = r.json().get("filename")
+            except Exception:                                    # noqa: BLE001
+                got = None
+            good, why = _name_ok(got)
+            if not good:
+                problems.append(why)
+        if status >= 500:
+            problems.append(f"**5xx**（用户输入不得报 5xx）：{text[:120]}")
+
+        cancelled = _cancel(c, r) if status == 200 else None
+        rows.append({
+            "group": "hostile", "case": name, "filename": fname, "status": status,
+            "stored_name": got, "cancelled": cancelled,
+            "ok": not problems, "problems": problems,
+            "body_head": text[:160].replace("\n", " "),
+        })
+        _emit(rows[-1])
+    return rows
+
+
+def _run_dedup(c: httpx.Client) -> list[dict]:
+    """去重 / `force`：同一份内容连传两次 ⇒ 第 2 次 409；带 force=1 ⇒ 200。"""
+    payload = _unique_pdf("dedup_shared")        # 同一次运行内**刻意复用**
+    rows: list[dict] = []
+
+    def post(force: bool, tag: str):
+        files = {"file": (f"dedup_{tag}.pdf", payload, "application/pdf")}
+        url = f"{_API}/api/jobs" + ("?force=1" if force else "")
+        r = c.post(url, files=files, timeout=60)
+        if r.status_code == 200:
+            _cancel(c, r)
+        return r.status_code, r.text
+
+    s1, _ = post(False, "first")
+    s2, t2 = post(False, "second")
+    s3, _ = post(True, "forced")
+    for case, got, want, extra in (
+        ("dedup_first",  s1, 200, "首次上传应被接受"),
+        ("dedup_second", s2, 409, "同内容第二次应被 409 去重拒绝"),
+        ("dedup_forced", s3, 200, "force=1 应绕过去重"),
+    ):
+        problems = [] if got == want else [f"状态码 {got}（期望 {want}）：{extra}"]
+        rows.append({"group": "dedup", "case": case, "status": got,
+                     "want_status": want, "ok": not problems, "problems": problems,
+                     "body_head": (t2 if case == "dedup_second" else "")[:160]})
+        _emit(rows[-1])
+    return rows
+
+
+def _emit(r: dict) -> None:
+    flag = "OK  " if r["ok"] else "FAIL"
+    extra = f"  stored={r['stored_name']!r}" if r.get("stored_name") is not None else ""
+    print(f"  {flag} {r['case']:16s} {r.get('filename', ''):24s} -> {r['status']}"
+          f"{extra}{'  cancel=' + str(r['cancelled']) if r.get('cancelled') is not None else ''}"
+          f"{'  ' + '; '.join(r['problems']) if r['problems'] else ''}", flush=True)
 
 
 def main(argv: list[str]) -> int:
@@ -203,6 +319,11 @@ def main(argv: list[str]) -> int:
             print("!! 两份产物 exe sha256 不同 —— 一次探测不能同时代表两份")
             return 2
 
+    # 防空转：payload 唯一性由构造保证 —— 造两个必须不同，否则去重会把对照读成失败
+    assert _unique_pdf("selfcheck") != _unique_pdf("selfcheck"), (
+        "payload 唯一性自检失败 ⇒ 内容 md5 去重会把阴性对照读成 409"
+    )
+
     if _port_busy():
         print(f"!! 端口 {_PORT} 已被占用 —— 疑似残留 pbc-server.exe，结果不可信。"
               f"请先释放（或换 PBC_E2E_PORT）。fail-closed。")
@@ -223,8 +344,12 @@ def main(argv: list[str]) -> int:
                         if _LOG.is_file() else "")
                 print(f"!! /health 超时。日志尾：\n{tail}")
                 return 3
-            print("[probe] health OK，开始入口矩阵")
-            rows = _run_matrix(c)
+            print("[probe] health OK —— ① 拒绝矩阵")
+            rows += _run_matrix(c)
+            print("[probe] ② 敌意文件名（安全不变式）")
+            rows += _run_hostile(c)
+            print("[probe] ③ 去重 / force")
+            rows += _run_dedup(c)
     finally:
         if proc.poll() is None:
             subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
@@ -234,10 +359,12 @@ def main(argv: list[str]) -> int:
     bad = [r for r in rows if not r["ok"]]
     _VERDICT.write_text(json.dumps(
         {"total": len(rows), "ok": len(rows) - len(bad),
+         "groups": {g: sum(1 for r in rows if r["group"] == g)
+                    for g in ("matrix", "hostile", "dedup")},
          "exe_sha256_12": _sha12(_DIRECT), "port": _PORT, "rows": rows},
         ensure_ascii=False, indent=2), encoding="utf-8")
     print("=" * 78)
-    print(f"入口拒绝矩阵：{len(rows) - len(bad)}/{len(rows)} 达成"
+    print(f"入口拒绝 / 输入敌意矩阵：{len(rows) - len(bad)}/{len(rows)} 达成"
           f"（判定源：{_VERDICT.name}）")
     for r in bad:
         print(f"  !! {r['case']}: {'; '.join(r['problems'])}")

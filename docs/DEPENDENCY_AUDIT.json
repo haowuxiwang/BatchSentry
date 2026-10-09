@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "generated_at": "2026-09-23T17:16:47",
+  "generated_at": "2026-10-09T14:00:52",
   "source": "pip-audit（PyPI 公告库）",
   "requirements_sha256": "8a3638af4cac6aa2c7399e2b79ab27a699d4c8709a31fb3ce42301a331427e99",
   "locked": {
