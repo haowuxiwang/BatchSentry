@@ -163,8 +163,10 @@
     }
   ],
   "real_baselines": {
-    "note": "真实 job 的类型分布基线（回归对照，非真值）。truth=false 表示未人工裁决，只用于检测'类型分布漂移'。noise_reduction 为把该 job 的 findings **离线重放**过 core.finding_noise 的实测前后（非重新跑流水线，故为模型化估计）。",
+    "note": "真实 job 的类型分布基线（回归对照，非真值）。truth=false 表示未人工裁决，只用于检测'类型分布漂移'。noise_reduction 为把该 job 的 findings **离线重放**过 core.finding_noise 的实测前后（非重新跑流水线，故为模型化估计）。⚠️ 本块**不是判据**（见 `criterion` / `criterion_note`）：真实 job 计数**非确定**（同输入两次跑实测 41 vs 51），单次值不得当阈值。",
     "truth": false,
+    "criterion": false,
+    "criterion_note": "**本块不参与任何 pass/fail。** 唯一的判据是 `cases`（合成语料、规则层、零 LLM/零 OCR、逐位可复现）的 F1（`scripts/eval_findings.py --min-f1`）。真实 job 的 findings 数**非确定**：同输入/同产物/同后端/同模型两次跑实测 **41 vs 51**（+24%，见 jobs[1].observed_total_range）⇒ 任何**单次**计数都不得当阈值或回归判据。",
     "jobs": [
       {
         "job_id": "749ead79-7b8",
@@ -184,6 +186,18 @@
           "batch_inconsistency": 1
         },
         "noise_ratio": 0.8648,
+        "provenance": {
+          "measured_at": "≤ 2026-09-11（无独立记录）",
+          "ocr_backend": "mineru",
+          "llm_model": "unknown",
+          "app_version": "unknown",
+          "reproducible": false,
+          "reason": "数字只存在于本文件：全仓无脚本重算它（R77 实测无代码消费者）⇒ 不可复现"
+        },
+        "comparable_to_current": false,
+        "runs": 1,
+        "observed_total_range": [784, 784],
+        "non_comparable_reason": "**跨版本 + 跨后端**：当前版本 + `paddle` 对**同一份**文件实测 **208** 条（R76）⇒ 与 784 的差是版本/后端差异，**不是回归**。拿 784 当基线去“修回归”会白干。",
         "noise_reduction": {
           "method": "离线重放 reduce_completeness_noise（含 spec_unverifiable 重分类）",
           "before": 784,
@@ -205,6 +219,23 @@
             "signature_mismatch", "user_rule", "batch_inconsistency"
           ]
         }
+      },
+      {
+        "job_id": "012e351f-1ea",
+        "filename": "试用批记录.pdf",
+        "total_pages": 10,
+        "runs": 2,
+        "total_findings": 51,
+        "observed_total_range": [41, 51],
+        "provenance": {
+          "measured_at": "2026-10-09",
+          "ocr_backend": "paddle",
+          "llm_model": "deepseek-ai/DeepSeek-V3.2",
+          "app_version": "dist/pbc-server/pbc-server.exe sha256[:12]=46a589a2201d",
+          "reproducible": true,
+          "reason": "driver `devlogs/_verify/r76_b6_real2.py` 可复跑；但两次跑结果不同 ⇒ 单次计数不得当阈值"
+        },
+        "comparable_to_current": true
       }
     ]
   }

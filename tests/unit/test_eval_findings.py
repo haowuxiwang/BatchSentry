@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import ast
 import importlib.util
 import sys
 from pathlib import Path
@@ -152,6 +153,107 @@ class TestGroundTruthContract:
         gt = ef.load_ground_truth()
         rb = gt["real_baselines"]
         assert rb["truth"] is False and rb["jobs"]
+
+
+class TestRealBaselineContract:
+    """`real_baselines` 是**惰性数据**：不进判据，且数字自带可比性 / 非确定披露。
+
+    为什么锁这条（R77 第十七批，报告 §6 R-B / 待办 **0-15**）：该块的
+    `total_findings: 784` 是**历史版本 + `mineru`** 的实测，而当前版本 + `paddle`
+    对**同一份**文件实测只有 **208** 条；且真实 job 计数**非确定**（同输入 / 同产物 /
+    同后端两次跑 **41 vs 51**）。该块**没有任何代码消费者**（判据只走合成语料的 F1），
+    但 JSON 的 `description` 自称"金标"、块的 `note` 自称"回归对照"
+    ⇒ 一个照着 784 去"修回归"的人会白干几天。
+    """
+
+    def _rb(self) -> dict:
+        return ef.load_ground_truth()["real_baselines"]
+
+    def test_block_declares_it_is_not_a_criterion(self):
+        rb = self._rb()
+        assert rb.get("criterion") is False, (
+            "real_baselines 必须**显式**声明 `criterion: false` —— 缺了它，这一块读起来就像阈值"
+        )
+        assert rb.get("criterion_note"), "必须写明'为什么不是判据'，否则下一个人还会去比"
+
+    def test_criterion_path_never_reads_real_baselines(self):
+        """**唯一判据是合成语料的 F1** —— 判据路径不得引用 `real_baselines`。
+
+        用 **AST 查名字**（不是文本搜）：注释 / docstring 里提到它不算消费。
+        为什么必须挡：真实 job 计数**非确定**（同输入两次跑差 >20%）⇒ 一旦接进
+        pass/fail，门禁会**随机红 / 绿**，而"随机红"会被当成"产品回归"去修。
+        """
+        tree = ast.parse(_EVAL.read_text(encoding="utf-8"))
+        judge_fns = {"evaluate", "aggregate", "score_case", "validate_cases",
+                     "load_ground_truth", "main"}
+        consumers = []
+        for fn in (n for n in ast.walk(tree)
+                   if isinstance(n, ast.FunctionDef) and n.name in judge_fns):
+            refs = {n.id for n in ast.walk(fn) if isinstance(n, ast.Name)}
+            refs |= {n.value for n in ast.walk(fn)
+                     if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+            if "real_baselines" in refs:
+                consumers.append(fn.name)
+        assert not consumers, (
+            f"判据路径引用了 real_baselines：{consumers} —— 真实 job 计数**非确定**，"
+            "把它接进 pass/fail 会让门禁随机红 / 绿"
+        )
+
+    def test_consumer_detector_is_not_vacuous(self):
+        """防空转：给一段**确实**消费它的源码，检测器必须报出来。"""
+        bad = "def evaluate():\n    gt = load()\n    return gt['real_baselines']\n"
+        parsed = ast.parse(bad)
+        refs = {n.id for n in ast.walk(parsed) if isinstance(n, ast.Name)}
+        refs |= {n.value for n in ast.walk(parsed)
+                 if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+        assert "real_baselines" in refs, "检测器连构造样例都认不出 ⇒ 上一条是空断言"
+
+    def test_every_job_declares_provenance_and_comparability(self):
+        """每个条目必须自报**测量环境** + 是否与当前版本可比。"""
+        for j in self._rb()["jobs"]:
+            jid = j.get("job_id")
+            p = j.get("provenance")
+            assert isinstance(p, dict) and p, f"{jid} 缺 provenance"
+            for k in ("measured_at", "ocr_backend", "llm_model", "app_version",
+                      "reproducible", "reason"):
+                assert k in p, f"{jid} 的 provenance 缺 {k!r}"
+            assert isinstance(p["reproducible"], bool), f"{jid}: reproducible 必须是布尔"
+            assert "comparable_to_current" in j, (
+                f"{jid} 必须显式声明是否与当前版本可比（缺了就会有人默认'可比'）"
+            )
+
+    def test_counts_carry_runs_and_a_range(self):
+        """计数必须带 `runs` + `observed_total_range` —— **单次计数不得当阈值**。"""
+        for j in self._rb()["jobs"]:
+            jid = j.get("job_id")
+            runs = j.get("runs")
+            assert isinstance(runs, int) and runs >= 1, f"{jid}: runs 缺失或非法"
+            rng = j.get("observed_total_range")
+            assert (isinstance(rng, list) and len(rng) == 2
+                    and all(isinstance(x, int) for x in rng)
+                    and rng[0] <= rng[1]), f"{jid}: observed_total_range 非法：{rng!r}"
+            if "total_findings" in j:
+                assert rng[0] <= j["total_findings"] <= rng[1], (
+                    f"{jid}: total_findings={j['total_findings']} 不在 {rng} 内"
+                )
+            if "by_type" in j:
+                assert isinstance(j["by_type"], dict) and all(
+                    isinstance(v, int) for v in j["by_type"].values()
+                ), f"{jid}: by_type 必须是 {type: int}"
+
+    def test_a_multi_run_entry_exists(self):
+        """至少要有一条 `runs >= 2` 的条目 —— 否则"区间"这个概念是空转的。"""
+        multi = [j for j in self._rb()["jobs"] if j.get("runs", 1) >= 2]
+        assert multi, (
+            "没有任何多跑条目 ⇒ observed_total_range 永远退化成点，"
+            "「真实 job 非确定」这件事就没有现场证据"
+        )
+        for j in multi:
+            lo, hi = j["observed_total_range"]
+            assert lo != hi, (
+                f"{j['job_id']}: runs={j['runs']} 却给出退化的区间 [{lo}, {hi}] —— "
+                "若真的一样，请改回 runs=1 并在 reason 里说明"
+            )
 
 
 # ── 端到端：规则层跑通且基线可复现 ─────────────────────────────────────────

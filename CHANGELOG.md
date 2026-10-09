@@ -7,6 +7,39 @@
 
 ## [Unreleased]
 
+### `real_baselines` 契约：基线计数不得当判据（Round 73 第十七批，2026-10-09）
+
+> 记录 → `docs/TODO.md` 的 **0-15**（属当前 backlog ⇒ 就地记 §0 表；本轮只完成**结构性一半**）。
+
+**定位（报告 §6 R-B）**：`docs/FINDING_GROUND_TRUTH.json::real_baselines` 记的
+**784 条**是**历史版本 + `mineru`** 的实测，而当前版本 + `paddle` 对**同一份**文件
+实测只有 **208** 条（R76）。该块**没有任何代码消费者** —— 唯一判据是 `cases`
+（合成语料、规则层、逐位可复现）的 F1。但文件 `description` 自称“Finding 质量**金标**”、
+块的 `note` 自称“**回归对照**” ⇒ 一个照着 784 去“修回归”的人会白干几天；
+且真实 job 计数**非确定**（同输入两次跑 **41 vs 51**，+24%）⇒ 单次计数本就不能当阈值。
+
+**改动**：
+
+| 位置 | 改动 |
+|---|---|
+| `real_baselines` | 加 `criterion: false` + `criterion_note`（写明唯一判据是合成语料 F1） |
+| 每个 job | 加 `provenance`（`measured_at` / `ocr_backend` / `llm_model` / `app_version` / `reproducible` / `reason`）+ `comparable_to_current` |
+| 每个 job | 加 `runs` + `observed_total_range`（**区间，不是点**） |
+| 新增 job | `试用批记录.pdf`（`012e351f-1ea`，`runs: 2`，**41–51**）—— 非确定的现场证据 |
+
+**护栏**：`tests/unit/test_eval_findings.py::TestRealBaselineContract`（**6 条**）——
+含 **AST 机检「判据路径（`evaluate` / `aggregate` / `score_case` / `validate_cases` /
+`load_ground_truth` / `main`）不得引用 `real_baselines`」**（防门禁随机红 / 绿）
++ 防空转对照。
+
+**变异**：`devlogs/_verify/r77_eval_baseline_mutation.py` ⇒ **7/7 CAUGHT** +
+阴性对照绿（临时树 + 独立子进程，只跑 `-k TestRealBaselineContract`；**不筛掉**那条
+端到端用例会因临时树缺 `core` 包而每例都红 ⇒ **假的 100%**）。
+
+**未验证边界**：「对照类结论必须带重复次数」目前只对 `real_baselines` 机检，
+**尚未**成为通用护栏（`docs/B6-1_GENERALIZATION_REPORT.md` §2 那类对照仍是人工披露）。
+`docs/` 不在 `BUNDLE_SOURCES` 内 ⇒ **无需重建**。
+
 ### e2e driver 补「LLM 真被调用且成功」判据（Round 73 第十七批，2026-10-09）
 
 > 记录 → `docs/TODO.md` 的 **0-16**（属当前 backlog ⇒ 就地记 §0 表）。
