@@ -1,6 +1,6 @@
 # TODO —— 活的待办清单
 
-> **复核戳：Round 72（2026-10-09，第十六批）** ← `tests/unit/test_todo_freshness.py` 机检读这一行；
+> **复核戳：Round 73（2026-10-09，第十七批）** ← `tests/unit/test_todo_freshness.py` 机检读这一行；
 > 该戳**不得落后于 `CHANGELOG.md` 的最新 Round**。
 >
 > **状态（R66 复核，2026-09-30）——本文件分两层，别混读**：
@@ -37,6 +37,13 @@
 >   **未发现过拟合的正向证据**，但第 2 份**无人工标注** ⇒ **召回不可测**，
 >   故**不宣称「泛化通过」**。另记 **0-15**（本轮**新发现**：流水线**非确定** ——
 >   同输入 / 同产物 / 同后端两次跑 **41 vs 51** 条 ⇒ 单次计数不得当回归判据）。
+> - **R77 第十七批（2026-10-09）**：补上 **B1 的 driver 侧对偶** —— `e2e_run.py` 此前
+>   **零处**引用 `llm_audit`（终态绿**不蕴含** LLM 跑通：产品在 LLM 失败时按设计降级）。
+>   已加纯函数 `llm_audit_verdict` + `fetch_llm_audit`，在**共享 `run_upload` 内**接入
+>   （所有轮次自动继承），取不到端点**一律 fail-closed**（与开关无关）；开关走单一真值
+>   `tests/e2e_coverage.REQUIRE_LLM_ENV`。护栏 `tests/unit/test_e2e_llm_audit_assert.py`
+>   （14 条）；变异 `devlogs/_verify/r76_llm_audit_mutation.py` ⇒ **8/8 CAUGHT** + 负控绿。
+>   属**当前 backlog** ⇒ **就地记 §0 表（新增 0-16）**，**不进 §0.1 台账**。
 > - **§A 及以下 = Round 59（2026-09-23）的快照**，**已做过一轮核销，但未逐条复核**。
 >   核销过的条目带 **`—— **R66 已核销**（证据见 §0.1）`** 尾注；
 >   **其余仍标 `[ ]` 的，按"未复核"对待，不要当成当前事实。**
@@ -85,6 +92,7 @@
 | **0-13** | LLM 归因的 `ok` 分支**越过证据**断言「产品缺陷」：探针只证"凭据 + 额度可用"，却据此结论"产品缺陷"，隐含"探针极小请求 ≡ 真实长请求"这一未声明且已为假的前提 | **P2** | **✅ 已完成（R74 第十四批核销）** | `ok` 文案只陈述证到了什么（排除 401/402）+ 点名盲区 + 给出下一步判据，且保留条件式归因 | **R74 第十四批（2026-10-08）：达成。** **定位**：产物级 e2e 两次 `status=error`，报告**自相矛盾** —— 归因写"故此处失败是**产品缺陷**"，而同一行 `error_message` 与 `llm_call_audit.error` 是上游 ALB 的 `<title>504 Gateway Time-out</title>` **HTML 页**（`page_analysis`，~3127 prompt tokens，成功时 77s）。`ok` 的判据是"免费 + 计费端点双双 200"，而计费段是 `max_tokens=1` 的**极小请求** ⇒ 看不到长请求的网关超时。**修法**：`tests/e2e_proc.py` 的 `ok` 分支改为"凭据有效、额度可用 ⇒ 排除 401/402 类环境问题" + 点名盲区（附实测样本）+ "先看 `llm_call_audit.error` 是否 JSON" + 条件式"…⇒ 才是产品缺陷"。**护栏**：`test_llm_failure_attribution.py::test_ok_text_does_not_overclaim_from_a_tiny_probe`。**变异** `devlogs/_verify/mutate_r72_ok_attribution_scope.py` ⇒ **5/5 CAUGHT** + 负控绿 + 还原 sha256 一致。**产物实测**：强制 `error` 场景下新文案原样打印。**未重建**（`tests/` 不入包）。 |
 | **0-14** | 第十四批的修正**只做了 1/4**：同一条归因结论写在 4 处，残留 3 处与实现**相反**（含**纪律文档** `docs/PROJECT_PITFALLS.md`）⇒ 违反本项目自己的「同一语义写两处必然漂移」 | **P2** | **✅ 已完成（R75 第十五批核销）** | 被禁措辞在**全部被跟踪文本文件**里零命中；豁免只给 append-only 历史，且须「仍被需要」 | **R75 第十五批（2026-10-08）：达成。** **定位**：沿同一条结论 grep 全部落点 ⇒ 6 处残留（`tests/e2e_proc.py` 3 处 / `tests/e2e_frozen.py` 1 处 / `docs/PROJECT_PITFALLS.md` 1 处 / `tests/unit/test_llm_failure_attribution.py` 1 处）。**修法**：六处一律改为「必要条件，非充分条件」表述或直接指向唯一实现；新增机检 `tests/unit/test_attribution_single_source.py`（**6 条**：全库扫描 + 扫描覆盖 + 判据非空转的正负对照 + 豁免反腐 + `ok` 文案有界性 ×2）。**护栏首跑即抓出 2 处人工清单漏掉的引述行**（`docs/TODO.md` 的 0-13 行与 `test_llm_failure_attribution.py` 的 docstring）⇒ 非空转现场证据。**变异** `devlogs/_verify/mutate_r71_attribution_single_source.py` ⇒ **10/10 CAUGHT**（3 处活文件退回旧断言 / `ok` 文案退回无条件 / 抹掉「必要条件」/ 抽掉 CHANGELOG 豁免 / 扩展名表部分与全部塌缩 / 关掉同行豁免 / 豁免表加死条目）+ 阴性对照绿 + 还原逐文件 sha256 一致。**自审修掉护栏自身 fail-open**：初版在扫描范围塌缩时会 `pytest.skip`（把「范围塌缩」误当「git 不可用」）⇒ 改为 `git ls-files` 为空才 skip、扩展名表匹配不到任何文件**一律 FAIL**（变异 M7b 专压这条分支）。**未重建**（`tests/`、`docs/` 均不在 `BUNDLE_SOURCES` 内，`artifact_freshness` 不受影响）。 |
 | **0-15** | 流水线**非确定**：同输入 / 同产物 / 同后端 / 同模型，两次跑 findings 数差 **+24%**（41 vs 51），且**类型集合也不同** ⇒ 单次计数**不得**当回归判据 | **P2** | 无 | 对照类结论必须带重复次数；或把非确定度量化（多次跑给出区间） | **R76 定位（未修）**：`试用批记录.pdf` 两次跑 —— `387a9abc`（日志）41 条 vs `012e351f-1ea`（DB 快照）51 条；`equipment_state` / `year_contradiction` 只在第 2 次出现。证据 → `docs/B6-1_GENERALIZATION_REPORT.md` §2/§6 |
+| **0-16** | e2e driver 只断言终态、**不校验 LLM 是否真跑通**（`e2e_run.py` 全文零处引用 `llm_audit`） | **P2** | **✅ 已完成（R77 第十七批核销）** | 每轮取产品自己的 `GET /api/jobs/{job_id}/llm_audit` 的 `entries`；`require_llm` 置真时“无成功调用”⇒ FAIL；端点取不到**一律 fail-closed**（与开关无关） | **R77 第十七批（2026-10-09）：达成。** **定位**：`e2e_run.py` 全文零处 `llm_audit`，而 `tests/e2e_frozen.py` 早已用它当权威判据（B11-11 第一次翻车就是这种假绿 —— 终态绿**不蕴含** LLM 跑通，产品失败时按设计降级）。**修法**：新增纯函数 `llm_audit_verdict(entries, require_llm)` + `fetch_llm_audit(c, job_id)`；在**共享 `run_upload` 内**接入（⇒ 所有轮次自动继承），`llm_ok` 参与 `ok` 判定；主结果字典带 `llm_calls/llm_ok/llm_failed/llm_note`。开关复用 `tests.e2e_coverage.REQUIRE_LLM_ENV`（**不写字面量**）。**护栏** `tests/unit/test_e2e_llm_audit_assert.py`（**14 条**：语义 6 + 结构 4 + 单一真值 3 + 防空转 1）。**变异** `devlogs/_verify/r76_llm_audit_mutation.py` ⇒ **8/8 CAUGHT** + 阴性对照绿（临时树 + 独立子进程，只认 `rc==1`）。**未重建**（`e2e_run.py` 与 `tests/` 均不在 `BUNDLE_SOURCES` 内 ⇒ `artifact_freshness` 不受影响）。 |
 
 > 用法：完成一条就把 `[ ]`/状态改掉并补证据列。**0-1 / 0-2 是用户动作，agent 不代做。**
 

@@ -38,6 +38,11 @@ from pathlib import Path
 
 import httpx
 
+# 硬要求开关与"真值环境变量"的**单一实现**在 tests/e2e_coverage.py ——
+# 这里刻意不再写一份（`bool(os.environ.get(...))` 会把 "0" 读成 True，
+# 本项目已为此立过护栏 test_e2e_coverage.py::test_env_flag_falsy）。
+from tests.e2e_coverage import REQUIRE_LLM_ENV, env_flag  # noqa: E402
+
 # 端口单一真值：driver、被测进程、健康检查必须一致（曾各自写死 58799）
 PORT = int(os.environ.get("PBC_E2E_PORT", "58799"))
 API = f"http://127.0.0.1:{PORT}"
@@ -98,6 +103,50 @@ def backend_mismatch(expect_backend, used_backend):
     if not expect_backend or used_backend == expect_backend:
         return None
     return f"expected {expect_backend}, got {used_backend}"
+
+
+def fetch_llm_audit(c, job_id):
+    """取 ``GET /api/jobs/{id}/llm_audit`` 的 ``entries``；**取不到返回 None**。
+
+    ``None`` 是**有意义的事实**（判不了），与空列表（确实没调用过）必须可区分
+    —— 否则"端点挂了"会被读成"LLM 没被调用"，两种事故的归因完全不同。
+    """
+    try:
+        r = c.get(f"{API}/api/jobs/{job_id}/llm_audit", timeout=15)
+        if r.status_code != 200:
+            return None
+        return r.json().get("entries") or []
+    except Exception:  # noqa: BLE001 — 判不了 ⇒ 交给判据侧 fail-closed
+        return None
+
+
+def llm_audit_verdict(entries, require_llm):
+    """`llm_audit` 的 entries → ``(ok, note, detail)``。
+
+    为什么需要它（2026-10-09 实测缺口）：**终态绿不蕴含 LLM 跑通** —— 产品在
+    LLM 失败时**按设计降级**（把"LLM 调用失败"写成 finding）并照常走到
+    ``review``。只断言终态的轮次会把"LLM 从未成功"记成通过（B11-11 第一次
+    翻车就是这种假绿）。证据一律取**产品自己的记录**，不另起一套真值。
+
+    ``entries is None``（端点取不到）⇒ **fail-closed**：判不了 ≠ 已验。
+    ``require_llm`` 为假时只**记录**不判红（弱环境/无凭据的日常跑）；
+    置真（``PBC_E2E_REQUIRE_LLM``，与冻结冒烟**同一个开关**）才升格为硬失败。
+    """
+    if entries is None:
+        return (False, "取不到 llm_audit（fail-closed：判不了 ≠ 已验）",
+                {"llm_calls": None, "llm_ok": None, "llm_failed": None})
+    okc = sum(1 for e in entries if e.get("success"))
+    bad = [e for e in entries if not e.get("success")]
+    detail = {"llm_calls": len(entries), "llm_ok": okc, "llm_failed": len(bad)}
+    if okc:
+        return (True, f"success={okc}/{len(entries)}（失败 {len(bad)} 次）", detail)
+    why = str((bad[0].get("error") if bad else "") or "审计表里没有任何 LLM 调用")
+    if not require_llm:
+        return (True, f"无成功的 LLM 调用（共 {len(entries)} 条）"
+                      f"；本轮未要求 LLM：{why[:160]}", detail)
+    return (False, f"**没有任何成功的 LLM 调用**（共 {len(entries)} 条）"
+                   f"⇒ 终态是靠降级达成的，LLM 链路未验；首条错误：{why[:220]}",
+            detail)
 
 
 def _sse_recorder(job_id, out_path, stats):
@@ -513,7 +562,7 @@ def _round_budget_s(path: str, kind: str) -> int:
 
 
 def run_upload(c, path, mime, expect_types, force, timeout_s=None, page_chars=False,
-               expect_backend=None, budget_kind="pdf"):
+               expect_backend=None, budget_kind="pdf", require_llm=None):
     """上传 → 跑到终态 → 汇总证据。
 
     ``expect_backend``：断言 ``jobs.ocr_backend_used`` 等于该值。
@@ -525,6 +574,10 @@ def run_upload(c, path, mime, expect_types, force, timeout_s=None, page_chars=Fa
 
     ``budget_kind``：``timeout_s`` 未显式给出时，用它选 `_ROUND_BUDGETS`
     里的斜率（``pdf`` / ``rot`` / ``real``）。
+
+    ``require_llm``：``None``（默认）⇒ 取环境开关 ``PBC_E2E_REQUIRE_LLM``；
+    置真时"没有任何成功的 LLM 调用"⇒ 本轮判 **FAIL**。取不到审计端点一律
+    fail-closed（判不了 ≠ 已验），与开关无关。
     """
     if timeout_s is None:
         timeout_s = _round_budget_s(path, budget_kind)
@@ -602,6 +655,15 @@ def run_upload(c, path, mime, expect_types, force, timeout_s=None, page_chars=Fa
         ok = False
         print(f"[e2e] {path}: BACKEND MISMATCH — {backend_err}"
               f"（主后端失败已 failover；本轮**不得**记为 {expect_backend} 的成果）")
+    # LLM 链路判据：终态绿**不蕴含** LLM 跑通（产品会降级），故取产品自己的
+    # 审计表（与 tests/e2e_frozen.py 同一判据、同一开关）。
+    if require_llm is None:
+        require_llm = env_flag(REQUIRE_LLM_ENV)
+    llm_ok, llm_note, llm_detail = llm_audit_verdict(
+        fetch_llm_audit(c, job_id), require_llm)
+    print(f"[e2e] {path}: llm_audit {llm_note} -> {'OK' if llm_ok else 'FAIL'}")
+    if not llm_ok:
+        ok = False
     # SSE 证据摘要：事件数 / phase 迁移链 / 终帧
     phases = [t.split(":")[0] for t in sse_stats["transitions"]]
     sse_ok = bool(sse_stats["events"]) and "done" in phases
@@ -614,6 +676,10 @@ def run_upload(c, path, mime, expect_types, force, timeout_s=None, page_chars=Fa
             "job_id": job_id,
             "ocr_backend_used": used_backend,
             "backend_mismatch": backend_err,
+            "llm_calls": llm_detail.get("llm_calls"),
+            "llm_ok": llm_detail.get("llm_ok"),
+            "llm_failed": llm_detail.get("llm_failed"),
+            "llm_note": llm_note,
             "types": types, "gmp_basis": with_basis, "missing": missing,
             "sparse_pages": len(sparse_pages),
             "sse_events": sse_stats["events"],

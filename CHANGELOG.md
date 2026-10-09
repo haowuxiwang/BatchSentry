@@ -7,6 +7,39 @@
 
 ## [Unreleased]
 
+### e2e driver 补「LLM 真被调用且成功」判据（Round 73 第十七批，2026-10-09）
+
+> 记录 → `docs/TODO.md` 的 **0-16**（属当前 backlog ⇒ 就地记 §0 表）。
+
+**缺口（R76 定位）**：`e2e_run.py` 全文**零处**引用 `llm_audit` —— 而
+`tests/e2e_frozen.py` 早已用 `entries[].success` 当权威判据。**终态绿不蕴含
+LLM 跑通**：产品在 LLM 失败时**按设计降级**（把“LLM 调用失败”写成 finding）
+并照常走到 `review` ⇒ 只断言终态的轮次会把“LLM 从未成功”记成通过
+（`docs/TODO.md` B11-11 第一次翻车即此）。
+
+**改动**（`e2e_run.py`，纯 dev driver，**不入 PyInstaller 产物**）：
+
+| 新增 | 作用 |
+|---|---|
+| `fetch_llm_audit(c, job_id)` | 取产品自己的 `GET /api/jobs/{job_id}/llm_audit` 的 `entries`；**取不到返回 `None`**（判不了 ≠ 空表） |
+| `llm_audit_verdict(entries, require_llm)` | → `(ok, note, detail)`；`entries is None` ⇒ **fail-closed**（与开关无关）；`require_llm` 为假只记录不判红 |
+| `run_upload(..., require_llm=None)` | 在**共享 helper 内**接入 ⇒ 所有轮次自动继承；`llm_ok` 参与 `ok` 判定；结果字典带 `llm_calls/llm_ok/llm_failed/llm_note` |
+
+开关复用**单一真值** `tests.e2e_coverage.REQUIRE_LLM_ENV`（与冻结冒烟同一开关，
+**不在 driver 里写字面量**）。
+
+**护栏**：`tests/unit/test_e2e_llm_audit_assert.py`（**14 条**）——
+语义 6（含 fail-closed 反例）+ AST 结构 4（判定在共享 helper 内 / 判定真的 gate
+`ok` / 主结果字典四键 / 包装轮次不得丢掉 `ok` 门）+ 单一真值 3 + 防空转 1。
+
+**变异**：`devlogs/_verify/r76_llm_audit_mutation.py` ⇒ **8/8 CAUGHT** +
+阴性对照（EOF 追加注释）**不被抓**；临时树 + 每例独立子进程，只认 `rc==1`
+（`rc==2` 记 INVALID）。
+
+**未验证边界**：本批**未**在产物上重跑 e2e（`e2e_run.py` 与 `tests/` 均不在
+`BUNDLE_SOURCES` 内 ⇒ `artifact_freshness` 不受影响，无需重建）。driver 侧的新判据
+要在**下一次真实 e2e 轮次**才会首次作用于真实 job。
+
 ### A3 前提否证 + B6-1 泛化验证（第 2 份真实批记录）（Round 72 第十六批，2026-10-09）
 
 > 记录 → `docs/TODO.md` 的 **A3** 与 **B6-1**（均属 §A 及以下 ⇒ 进 §0.1 台账），
