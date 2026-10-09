@@ -1,6 +1,6 @@
 # TODO —— 活的待办清单
 
-> **复核戳：Round 71（2026-10-08，第十五批）** ← `tests/unit/test_todo_freshness.py` 机检读这一行；
+> **复核戳：Round 72（2026-10-09，第十六批）** ← `tests/unit/test_todo_freshness.py` 机检读这一行；
 > 该戳**不得落后于 `CHANGELOG.md` 的最新 Round**。
 >
 > **状态（R66 复核，2026-09-30）——本文件分两层，别混读**：
@@ -29,6 +29,14 @@
 >   `tests/unit/test_attribution_single_source.py`（遍历全部被跟踪文本文件；断言/引述/数据三分；
 >   整文件豁免只给 append-only 的 `CHANGELOG.md`，并配「豁免须仍被需要」的反腐检查）。
 >   属**当前 backlog** ⇒ **就地记 §0 表**，**不进 §0.1 台账**。
+> - **R76 第十六批（2026-10-09）**：核销 **§A 的 A3**（**前提否证**：仓库里**早就有**
+>   第 2 份真实批记录 `试用批记录.pdf` ⇒「只有一份」是错的，且它把一件**可做**的事
+>   挂在「等用户」）与 **§B6 的 B6-1**（用第 2 份记录做泛化验证 —— **跑通**：`review`、
+>   **51 条** findings、`paddle`、220s）。两者都属 **§A 及以下** ⇒ **进 §0.1 台账**
+>   （不变式 E 的 1:1 同步 **+2**）。对比报告 → `docs/B6-1_GENERALIZATION_REPORT.md`；
+>   **未发现过拟合的正向证据**，但第 2 份**无人工标注** ⇒ **召回不可测**，
+>   故**不宣称「泛化通过」**。另记 **0-15**（本轮**新发现**：流水线**非确定** ——
+>   同输入 / 同产物 / 同后端两次跑 **41 vs 51** 条 ⇒ 单次计数不得当回归判据）。
 > - **§A 及以下 = Round 59（2026-09-23）的快照**，**已做过一轮核销，但未逐条复核**。
 >   核销过的条目带 **`—— **R66 已核销**（证据见 §0.1）`** 尾注；
 >   **其余仍标 `[ ]` 的，按"未复核"对待，不要当成当前事实。**
@@ -64,7 +72,7 @@
 |---|---|---|---|---|---|
 | **0-1** | 推送本地未推送提交到 `origin/main` | **P1** | **用户决策** —— 推送是对外发布，agent 不擅自做 | `git rev-list --left-right --count origin/main...HEAD` ⇒ `0	0` | R66 复核时 `0	9`（HEAD `dd33330`）；**该数每提交 +1，是快照、不追求实时** —— 取当前值请跑左侧命令 |
 | **0-2** | Electron 应用层 e2e 在**真实终端**复跑 | **P1** | 需**非沙箱**终端（本 agent 环境做不到） | `tests/e2e_unpacked.py` 两跑均 `health` 非 `null` 且 `exitCode == 0` | **R68 第六批复测（4 次）**：1 次 `/health` 就绪（9.44s）后在渲染层崩、3 次**在 health 之前**就崩（5.15/5.15/5.27s）⇒ 沙箱内**不稳定**；4 次均 `exitCode=2147483651`（`0x80000003`）、`renderer_count=0`、窗口数恒 0（`devlogs/e2e_unpacked_20261008_085800.json`）。⚠️ 唯一到达 D3 的那次暴露了**驱动自身**的假红（见 0-8 尾注） |
-| **0-3** | 逐条复核 §A 及以下的未复核项 | **P2 → 进行中** | 无（纯复核工作） | 每条要么 `[x]` + 证据，要么移入"已确认仍开放"并注明为何仍未做 | **R66/R67 已核销 19 条**（见 §0.1，其中 `#146`/`#144` 为**第四批**、`#145` 为**第六批**、`B4`+`B5-2` 为**第七批**同缺陷双登记；**R72 第十二批又核销 `#169`/`C4`**）；统计 `[ ]` **86 → 65**、`[x]` **76 → 97**。**剩余 65 条未逐条复核** |
+| **0-3** | 逐条复核 §A 及以下的未复核项 | **P2 → 进行中** | 无（纯复核工作） | 每条要么 `[x]` + 证据，要么移入"已确认仍开放"并注明为何仍未做 | **R66/R67 已核销 19 条**（见 §0.1，其中 `#146`/`#144` 为**第四批**、`#145` 为**第六批**、`B4`+`B5-2` 为**第七批**同缺陷双登记；**R72 第十二批又核销 `#169`/`C4`**；**R76 第十六批核销 `A3`（前提否证）+ `B6-1`（泛化验证完成）**）；统计 `[ ]` **86 → 62**、`[x]` **76 → 100**。**剩余 62 条未逐条复核** |
 | **0-4** | 跨页总览增强（后端 `status` 过滤 / 关键词搜索） | P3 | 无 | 后端支持 `status` 查询参数；前端可筛选且空态文案正确 | R65 backlog（可选） |
 | **0-5** | 上传批次并发提交 | P3 | 后端配额 3 | 单例进度条拆为每文件一条后，3 路并发且不撞配额 | **不建议先做**：当前串行不撞配额，无实测收益 |
 | **0-6** | 把「失败性质」提升为 **job 级列 `error_kind`**（替代「每个调用点都得记得传 `config_error`」） | P2 | 无；建议在 `#144` 结案后单独做 | `jobs` 增列 + 迁移；`error_kind` 由异常类型在**写入处**统一判定，调用点无需传参；`#127`/`#144` 的行为护栏**不改动**即仍绿 | R66 第五批：`#144` 逐点修法已结案，但**结构性遗漏仍开放**（见 `#144` 条目尾注） |
@@ -76,6 +84,7 @@
 | **0-12** | 冻结冒烟的 OCR **就绪真值只看 env**、忽略应用已有配置 ⇒ 覆盖清单**低报**（跑过 OCR 却记 skipped）+ 真实 `error` 被吞成「预期降级」**不记 FAIL**（**fail-open**） | **P2** | **✅ 已完成（R73 第十三批核销）** | 就绪真值取自**应用自报**；`error` 且应用已配 ⇒ 必须记 FAIL（不得只打印 `[SKIP]`） | **R73 第十三批（2026-10-08）：达成。** **定位**：e2e appdata 固定复用 ⇒ 上轮凭据残留，而 `OCR_CONFIGURED = bool(_paddle or _mineru)` 只认 env；实测未注入 OCR env 时流水线仍到 `review`（`ocr_backend_used=paddle`、`llm_audit success=3/3`），清单却记 `[skipped] ocr_pipeline`。**修法**：`tests/e2e_proc.py` 新增纯函数 `ocr_ready_from_settings()`（读 `ocr.{paddle,mineru}.configured`，非真布尔 `True` 一律 fail-closed）；`tests/e2e_frozen.py` 就绪真值改由它派生 + 新增 `ocr_ready_self_report` 断言 + 修正 `ocr_config` 的 reason。**护栏**：`test_e2e_proc_helper.py::TestOcrReadyFromSettings`（**8 条**）+ `test_e2e_frozen_derives_ocr_ready_from_app_not_env`（接线，源码扫描）。**变异** `devlogs/_verify/mutate_r72_ocr_ready_truth.py` ⇒ **7/7 CAUGHT** + 负控绿 + 还原 sha256 一致。**行为对照**（`devlogs/_verify/r72_ocr_ready_failopen_probe.py`）：成功路径 `[skipped]`→`[covered]`；error 路径 `[SKIP] pipeline_terminal`（不记 FAIL）→ `FAIL pipeline_terminal` + `[failed ] ocr_pipeline`。**未重建**（`tests/` 不入包，`artifact_freshness` 不受影响）。 |
 | **0-13** | LLM 归因的 `ok` 分支**越过证据**断言「产品缺陷」：探针只证"凭据 + 额度可用"，却据此结论"产品缺陷"，隐含"探针极小请求 ≡ 真实长请求"这一未声明且已为假的前提 | **P2** | **✅ 已完成（R74 第十四批核销）** | `ok` 文案只陈述证到了什么（排除 401/402）+ 点名盲区 + 给出下一步判据，且保留条件式归因 | **R74 第十四批（2026-10-08）：达成。** **定位**：产物级 e2e 两次 `status=error`，报告**自相矛盾** —— 归因写"故此处失败是**产品缺陷**"，而同一行 `error_message` 与 `llm_call_audit.error` 是上游 ALB 的 `<title>504 Gateway Time-out</title>` **HTML 页**（`page_analysis`，~3127 prompt tokens，成功时 77s）。`ok` 的判据是"免费 + 计费端点双双 200"，而计费段是 `max_tokens=1` 的**极小请求** ⇒ 看不到长请求的网关超时。**修法**：`tests/e2e_proc.py` 的 `ok` 分支改为"凭据有效、额度可用 ⇒ 排除 401/402 类环境问题" + 点名盲区（附实测样本）+ "先看 `llm_call_audit.error` 是否 JSON" + 条件式"…⇒ 才是产品缺陷"。**护栏**：`test_llm_failure_attribution.py::test_ok_text_does_not_overclaim_from_a_tiny_probe`。**变异** `devlogs/_verify/mutate_r72_ok_attribution_scope.py` ⇒ **5/5 CAUGHT** + 负控绿 + 还原 sha256 一致。**产物实测**：强制 `error` 场景下新文案原样打印。**未重建**（`tests/` 不入包）。 |
 | **0-14** | 第十四批的修正**只做了 1/4**：同一条归因结论写在 4 处，残留 3 处与实现**相反**（含**纪律文档** `docs/PROJECT_PITFALLS.md`）⇒ 违反本项目自己的「同一语义写两处必然漂移」 | **P2** | **✅ 已完成（R75 第十五批核销）** | 被禁措辞在**全部被跟踪文本文件**里零命中；豁免只给 append-only 历史，且须「仍被需要」 | **R75 第十五批（2026-10-08）：达成。** **定位**：沿同一条结论 grep 全部落点 ⇒ 6 处残留（`tests/e2e_proc.py` 3 处 / `tests/e2e_frozen.py` 1 处 / `docs/PROJECT_PITFALLS.md` 1 处 / `tests/unit/test_llm_failure_attribution.py` 1 处）。**修法**：六处一律改为「必要条件，非充分条件」表述或直接指向唯一实现；新增机检 `tests/unit/test_attribution_single_source.py`（**6 条**：全库扫描 + 扫描覆盖 + 判据非空转的正负对照 + 豁免反腐 + `ok` 文案有界性 ×2）。**护栏首跑即抓出 2 处人工清单漏掉的引述行**（`docs/TODO.md` 的 0-13 行与 `test_llm_failure_attribution.py` 的 docstring）⇒ 非空转现场证据。**变异** `devlogs/_verify/mutate_r71_attribution_single_source.py` ⇒ **10/10 CAUGHT**（3 处活文件退回旧断言 / `ok` 文案退回无条件 / 抹掉「必要条件」/ 抽掉 CHANGELOG 豁免 / 扩展名表部分与全部塌缩 / 关掉同行豁免 / 豁免表加死条目）+ 阴性对照绿 + 还原逐文件 sha256 一致。**自审修掉护栏自身 fail-open**：初版在扫描范围塌缩时会 `pytest.skip`（把「范围塌缩」误当「git 不可用」）⇒ 改为 `git ls-files` 为空才 skip、扩展名表匹配不到任何文件**一律 FAIL**（变异 M7b 专压这条分支）。**未重建**（`tests/`、`docs/` 均不在 `BUNDLE_SOURCES` 内，`artifact_freshness` 不受影响）。 |
+| **0-15** | 流水线**非确定**：同输入 / 同产物 / 同后端 / 同模型，两次跑 findings 数差 **+24%**（41 vs 51），且**类型集合也不同** ⇒ 单次计数**不得**当回归判据 | **P2** | 无 | 对照类结论必须带重复次数；或把非确定度量化（多次跑给出区间） | **R76 定位（未修）**：`试用批记录.pdf` 两次跑 —— `387a9abc`（日志）41 条 vs `012e351f-1ea`（DB 快照）51 条；`equipment_state` / `year_contradiction` 只在第 2 次出现。证据 → `docs/B6-1_GENERALIZATION_REPORT.md` §2/§6 |
 
 > 用法：完成一条就把 `[ ]`/状态改掉并补证据列。**0-1 / 0-2 是用户动作，agent 不代做。**
 
@@ -91,7 +100,7 @@
 > 抽查时它们**确为开放**，本批才结案 ⇒ 已移出 §0.1.3、并入 §0.1.1。
 > **这不是"抽查错了"，是先后顺序。**
 
-### 0.1.1 已核销（22 条）
+### 0.1.1 已核销（24 条）
 
 | 条目 | 优先级 | 证据（R66 实测） |
 |---|---|---|
@@ -117,6 +126,8 @@
 | **#165** `TYPE_QUERIES`/`GMP_BASIS_MAP` 的 3 个非规范键 | P2 | **R71 第十一批**：**前提否证** —— 它们**不是死键**，而是 LLM 自由枚举的**前置富集键**（富集先于归一：`stage2.py` 442/453→465、`stage3.py` 132/144→191/203）。实测 raw `batch_logic` ⇒ `gmp_basis` 非空 + `kb_refs=4`。**真缺口**：这条顺序不变式此前**无人守** ⇒ 新增 `test_type_sync.py::TestRawEnumEnrichmentContract`（3 条：非规范键集棘轮 + 按集合的源码级顺序不变式 + 正负对照），变异 `devlogs/_verify/mutate_r71_raw_enum_enrichment.py` ⇒ **3/3 CAUGHT** + 负控绿 + 还原字节一致 |
 | **#169** `kb_prompt_inject` 开关不可达 | P2 | **R72 第十二批（2026-10-08）**修：`_STATIC_FIELDS` 补 `kb_prompt_inject → KB_PROMPT_INJECT`、`SettingsUpdate` 声明 `Optional[bool]`、`read.py` 的 GET 暴露 `kb.prompt_inject`、`templates/settings.html` 知识库分区加复选框（`static/settings-ocr.js` 读 GET / 写 POST，失败回滚）。护栏 `tests/unit/test_settings_write_whitelist.py`（**7 条**，含「`SettingsUpdate` 声明的每个字段都必须可达」的**类级**护栏 + 防空转）+ `test_settings_js.py::TestKbInjectToggle`（3 条行为用例）+ `test_api_settings.py`（GET 暴露 / POST→GET→落盘往返 / 未知字段回显）。变异 `devlogs/_verify/mutate_r72_c4_kb_prompt_inject.py` ⇒ **7/7 CAUGHT** + 负控绿 + 还原字节一致 |
 | **C4** provider 静默改写 + `kb_prompt_inject` 不可达 | P2 | **R72 第十二批（2026-10-08）**：**两半分别结案**。①「provider 静默改写」**已由 B4-4 关闭** —— `config._resolve_active_provider` 是**唯一决策点**（**显式选择绝不改写**，只回传 `applied=false` 的告知），事实经 `GET /api/settings` 的 `llm.auto_activated` 回传前端（护栏 `test_api_settings.py::TestGetSettings::test_llm_exposes_auto_activated_notice`）；写入侧对**未注册** provider 直接 **400**（护栏 `test_api_settings_write_coverage.py::test_unregistered_llm_provider_rejected`）。残余仅 `llm/client.py` 的**防御性**兜底（记 WARNING，非用户可见的静默改写）。②「`kb_prompt_inject` 不可达」**本轮修**（证据见 `#169` 行） |
+| **A3** 「目前只有一份真实批记录」 | P2 | **R76（2026-10-09）前提否证**：仓库根 `试用批记录.pdf`（10 页扫描件；海正药业 海博麦布片 10mg / 批号 72408219 / 记录号 H5-MPD-40038-R04）**一直就在**，且**同一份文件**的 §B6-1 早已点名要用它 ⇒ 前提错、且把**可做**的事挂在「等用户」。实测已跑通，见下一行 |
+| **B6-1** 第 2 份真实批记录泛化验证 | P2 | **R76（2026-10-09）**：报告 `docs/B6-1_GENERALIZATION_REPORT.md`；第 2 份 `review` / **51 条** / `paddle` / 220s，第 1 份**同版本**基线 **208 条** / 1287s；**无过拟合正向证据**，但**无标注 ⇒ 召回不可测**；快照 `devlogs/_verify/_e2e_appdata_b6_both.db`（SQLite backup API） |
 
 ### 0.1.2 只部分完成（保持 `[ ]`，已就地加注）
 
@@ -236,9 +247,17 @@
       见 `config.py:_config_path()`）⇒ 开发模式 / 走仓库配置的 e2e 会拿到一把**死 key**，
       表现为 `30014` 假红。已登记为 **B4-3**。
       `config.json.bak_pre_key_rotation` 保留不动（被 `%TEMP%/pbc_127_accept.py` 用来复现 #127 触发条件）。
-- [ ] **A3 提供第 2 份真实批记录 PDF 用于泛化验证（缺陷 #126）。**
-      目前**只有一份**真实批记录（丝裂霉素提取批记录，51 页）⇒ 规则/OCR 的泛化性
-      **未经检验**。缺它就无法回答"换一份记录还准不准"。
+- [x] **A3 提供第 2 份真实批记录 PDF 用于泛化验证（缺陷 #126）。** —— **R76 已核销**（证据见 §0.1）
+      ✅ **R76（2026-10-09）前提否证：第 2 份记录早就在仓库里，不需要用户动作。**
+      `试用批记录.pdf`（2.9 MB / **10 页**扫描件，`.gitignore:132` 忽略）是一份真实的
+      GMP 批生产记录 —— 首页实测：海正药业（HISUN）**海博麦布片 10mg**
+      （Hybutimibe Tablets）、批号 **72408219**、批记录编号 **H5-MPD-40038-R04**、
+      批量 **960,000 片**、版本 04，带手写签名与日期（2025.06.03）。
+      与第 1 份（丝裂霉素，发酵工艺）是**不同产品 / 不同工艺 / 不同版式**。
+      ⚠️ 本条原写"目前**只有一份**"是**错的**，且与**同一份文件**的 **§B6-1**
+      （早已点名要用它）、以及 `.workbuddy/memory/2026-09-17.md:55`
+      （"第 2 份真实批记录，泛化样本"）**自相矛盾** ⇒ 一件**可做**的事被误挂成
+      "等用户"。实测已跑通，证据与对比见 **§B6-1**。
 - [x] **A4（阻塞"需真实 findings 的多轮 e2e"）硅基流动账户余额不足（402）—— 2026-09-18 已解除。** —— **R66 已核销**（证据见 §0.1）
       > **✅ 2026-09-18 复核：key 已恢复可用。** 实测 `POST /v1/chat/completions`
       > `model=deepseek-ai/DeepSeek-V3.2` → **HTTP 200**，正常返回内容（usage 18 tokens）。
@@ -2279,10 +2298,17 @@
 
 ### B6 泛化（#126）
 
-- [ ] **B6-1 用「试用批记录.pdf」做第 2 份真实批记录验证**
+- [x] **B6-1 用「试用批记录.pdf」做第 2 份真实批记录验证** —— **R76 已核销**（证据见 §0.1）
   理由：目前**只有一份真实批记录**（丝裂霉素），泛化未验证；规则/阈值可能过拟合。
   动作：跑完整链路，记录：轮次、误报、漏检、耗时；与第 1 份对比。
   验收：产出一份对比报告；若发现过拟合 ⇒ 立刻登记缺陷。
+  ✅ **R76 完成**：报告 → `docs/B6-1_GENERALIZATION_REPORT.md`。
+  第 2 份 `试用批记录.pdf`（10 页，海正药业 海博麦布片 10mg / 批号 72408219）跑通：
+  `review` / **51 条** findings / `paddle` / 220s / `gmp_basis 49/51` / 稀疏 OCR 页 0。
+  第 1 份**同版本**基线复跑：`review` / **208 条** / 1287s / `gmp_basis 208/208`。
+  **未发现过拟合的正向证据**（密度 4.08 vs 5.10 条/页；类型各覆盖 10+ 种；零 findings 页均为 0）。
+  ⚠️ 但**两份都无人工标注** ⇒ **召回不可测** ⇒ **不宣称「泛化通过」**；
+  本轮实测风险（非确定 41↔51、基线跨版本、快照丢 WAL）已在报告 §6/§7 登记。
 
 ### B7 测试与静态检查的基础设施（Round 48 提交前复核新发现）
 
@@ -2781,7 +2807,7 @@
      都只能在"抽样 + 代理指标"层级谈（见 B10-6）；随后 B1-15 / B1-17（根因级噪声源）、
      降噪 KPI 补齐（`finding_suppressions` 落库）。
   3. 工程与性能：B2-3 / B2-4（CPU 移出事件循环）｜B7-2（ruff 105 进门禁）｜
-     B8（发版 7 条不变量）｜B9-2/3/4（关闭语义收尾）｜C2（≥120 页实跑）｜A3（第 2 份真实批记录）。
+     B8（发版 7 条不变量）｜B9-2/3/4（关闭语义收尾）｜C2（≥120 页实跑）。
 
 - [ ] **B10-6 精度现状：**没有任何可外推的 P/R 数字**（P1，2026-09-23 复核）**
   唯一的 `P/R/F1 = 1.0/1.0/1.0（TP=10, FP=0, FN=0）`来自**合成集**
