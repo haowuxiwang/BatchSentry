@@ -6,6 +6,46 @@
 ---
 
 ## [Unreleased]
+### `esc` 转义原语：三份副本**行为等价**上锁 + 修正误导注释（Round 79 第二十三批，2026-10-09）
+
+> 记录 → `docs/TODO.md` 的 **0-25**（属当前 backlog ⇒ 就地记 §0 表）。
+
+**定位**：`static/*.js` 有 **38 个 `innerHTML` 赋值点**，其安全**全部**依赖 `esc()` 纪律
+（`tests/unit/test_innerhtml_escaping.py` 机检）。但 `esc` 本身在**三个页面 bundle 里各有
+一份独立实现**：
+
+| 文件 | 形态 | 页面 |
+|---|---|---|
+| `findings-map.js` | `function esc(s)`（导出 `PbcFindingsMap.esc`） | review |
+| `settings-state.js` | `const esc = (s) =>` | settings |
+| `upload-jobs.js` | `function esc(s)` | upload |
+
+而**没有任何机检**保证三份一致 —— 且 `findings-map.js` 的注释写着「esc 曾有 6 份副本，
+**收敛到这里**」，读者会以为已单一真值（**实际还有 3 份**）。
+
+**风险**：日后只给一份补转义（例如属性上下文要额外转反引号 / `=`），另两份**静默**留在
+较弱版本 ⇒ 那两页的 `innerHTML` 站点重新开洞。这正是「同一语义写两处必然漂移」。
+
+**为什么不直接合并**：三份并存是**结构性**的 —— `templates/*.html` 已核，settings 页与
+upload 页**不**加载 `findings-map.js`，仓里没有公共基座脚本。合并需新增公共脚本并改 3 个
+模板的 `<script>`（改**加载语义**：某页漏引则该页 `esc` 变 `undefined` ⇒ 运行期炸）。
+故本批**先把「三份必须等价」机检锁住**，真单一真值登记为 **0-25 待决策**。
+
+**修法**：
+
+- 新增 `tests/unit/test_esc_single_source.py`（**6 条**）：① 副本集合**恰好**等于登记
+  （新增/消失都红）；② 每份替换链**逐项按序**等于规范 5 对（`&` 最先）；③ 三份互相等价；
+  ④ 反空转（链长 5 + 提取器非空）；⑤ 转义器产出实体 **⊆** 解码器可解实体；⑥ 解码器
+  `&amp;` 必须**最后**（`&amp;lt;` 二次解码的顺序陷阱）。
+- `static/findings-map.js` 注释改为**如实**陈述（3 份 / 为什么 / 指向机检与 0-25）。
+- 变异 `devlogs/_verify/r83_mutation.py` ⇒ **4/4 CAUGHT**。
+
+⚠️ **改了入包源**（`static/findings-map.js`）⇒ **必须重建产物**，否则 `artifact_freshness`
+逐字节比对判红（这是门禁**正确**的行为，不是误报）。
+
+**边界**：锁的是**文本等价**；这个原语是纯字面量替换链（无控制流、无外部依赖）⇒ 链相同
+即行为相同。跨 bundle 的**真**单一真值未做（见 0-25）。
+
 ### 载荷顺序不变式：把「先剥离、后判保留名」钉住（Round 78 第二十二批，2026-10-09）
 
 > 记录 → `docs/TODO.md` 的 **0-24**（属当前 backlog ⇒ 就地记 §0 表）。

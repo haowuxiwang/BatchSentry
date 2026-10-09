@@ -101,7 +101,13 @@
    * f.type / f.description / f.ocr_text / f.gmp_basis / kb_refs.label 均来自
    * LLM 或规则输出，属于不可信文本 —— 注入 HTML 前必须转义。
    * 此前在 review.js 内有两个局部副本（renderFindings / renderSuppressions
-   * 各一份），收敛到这里；历史背景见缺陷 #139（esc 曾有 6 份副本）。 */
+   * 各一份），收敛到这里；历史背景见缺陷 #139（esc 曾有 6 份副本）。
+   * ⚠️ 这**不是全仓唯一**副本：历史缺陷 #139 从 6 份收敛到 **3 份**，剩下的
+   * 两份在 `settings-state.js` / `upload-jobs.js` —— 因为 settings 页与 upload 页
+   * **不**加载本文件，仓里没有公共基座脚本（**结构性**原因，非疏忽）。
+   * 三份的**行为等价**由机检锁定（`tests/unit/test_esc_single_source.py`：逐项按序
+   * 比对替换链 + 副本集合登记 + 解码器镜像）；跨 bundle 的真单一真值需新增公共
+   * 脚本并改 3 个模板，登记于 `docs/TODO.md` 的 **0-25**。 */
   function esc(s) {
     return String(s == null ? "" : s)
       .replace(/&/g, "&amp;")
