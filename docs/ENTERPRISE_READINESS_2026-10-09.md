@@ -60,7 +60,7 @@ Electron `contextIsolation: true` / `nodeIntegration: false`；门禁 **11 项**
 | 17. Validate the `sender` of IPC messages | N/A（无 IPC / 无 preload） |
 | 19/20. Fuses / 不向不可信内容暴露 API | ✅ **已核并关闭**（R80 第二十批）—— `build.electronFuses` 显式关掉 `RunAsNode` / `EnableNodeOptionsEnvironmentVariable` / `EnableNodeCliInspectArguments`；**产物** fuse wire 逐位断言三项 OFF（`tests/unit/test_electron_fuses.py`，含合成伪二进制正负对照）；行为对照：`ELECTRON_RUN_AS_NODE=1 --version` 由 `v24.21.0`（Node）→ 以 Electron 启动。另三个改**启动语义**的 fuse **刻意未改**（见 §4） |
 
-## §3 已修（**10 项**，全部带护栏 + 变异验证）
+## §3 已修（**11 项**，全部带护栏 + 变异验证）
 
 | 修复 | 内容 | 证据 |
 |---|---|---|
@@ -74,6 +74,7 @@ Electron `contextIsolation: true` / `nodeIntegration: false`；门禁 **11 项**
 | **F8** 报告缓存 key **未覆盖全部渲染输入**（R84 第二十四批补） | 旧 key 只覆盖 findings 派生字段 + 豁免**规模**，漏了 `total_pages` / `empty_pages` / `unanalyzed_pages` / `filename` ⇒ 这些在 findings 不变时改变（`retry` 后重分析）会让 `report.md` 静默返回**过期**内容 | `tests/integration/test_report_cache_coverage.py`（3 条，逐输入判别力）；变异 **4/4 CAUGHT**（`devlogs/_verify/r83c_mutation.py`） |
 | **F9** 判定产出**采样温度未固定**（R85 第二十五批补） | 页面分析（`core/page_analyzer.py` 2 处）与跨页语义检查（`core/rules/llm_checks.py` 2 处）都传 `temperature=0.1` ⇒ 采样随机性逐页累积 ⇒ 同输入两次跑 findings **41 vs 51（+24%）**。修法：单一真值 `llm.client.DETERMINISTIC_TEMPERATURE = 0.0` | `tests/unit/test_llm_determinism.py`（4 条：常量 + 2 处**行为**断言 + 源码扫描）；变异 **5/5 CAUGHT**（`devlogs/_verify/r85_mutation.py`） |
 | **F10** 并发额度默认 **3 → 5**（R85 第二十五批补） | `api/jobs._MAX_CONCURRENT_JOBS` 默认 3 ⇒ 第 4 个并发审核任务起 **409 硬拒绝**，不满足“5 个文件并发”。修法：默认 5（env 可覆盖）+ 兜底分支同步；并更正原注释“~2GB”的错误归因（实测单 job ≈ 102MB） | `tests/unit/test_upload_quota_contract.py::TestDefaultQuotaSupportsFiveConcurrentReviews`（默认 ≥ 5 + 兜底 ≥ 5）；变异 M4/M5 CAUGHT |
+| **F11** 第三方日志降噪名单**不完整**（R85 第二十五批补） | `logging_config._NOISY_THIRD_PARTY_LOGGERS`（#145）漏掉 `aiosqlite`（历史 8,116 行）与 `chardet`（当天 `pharma.log` 100%）⇒ 有效级别仍 `DEBUG`（继承 root），#145「把自家 DEBUG 挤出去」未达成。修法：两者补入名单 | `tests/unit/test_logging_config.py::TestThirdPartyNoiseSuppression`（3 条：名单完整性 + `setup_logging` **行为**断言 + 子 logger 继承）；变异 M6–M9 CAUGHT（累计 **9/9**） |
 
 > 变异合计 **15/15 CAUGHT + 基线绿**（`devlogs/_verify/r78_hardening_mutation.py`，覆盖 F1–F4）；F5（0-19 机检）另有 **10/10 达成**（`devlogs/_verify/r78_innerhtml_mutation.py`）。
 > R80 第二十批另有 **10/10 CAUGHT**（F1–F5 + U1–U5，`devlogs/_verify/r80_mutation.py`）+ 基线绿。

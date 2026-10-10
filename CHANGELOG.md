@@ -6,7 +6,7 @@
 ---
 
 ## [Unreleased]
-### 判定产出**采样温度未固定** ⇒ 同输入两次跑 findings 差 +24%；并发额度默认 3 → 5（Round 81 第二十五批，2026-10-10）
+### 判定产出**采样温度未固定** ⇒ 同输入两次跑 findings 差 +24%；并发额度默认 3 → 5；日志第三方噪声抑制名单补全（Round 81 第二十五批，2026-10-10）
 
 > 记录 → `docs/TODO.md` 的 **0-15**（核销）与 **0-27**（新增）（属当前 backlog ⇒ 就地记 §0 表）。
 
@@ -40,6 +40,22 @@ M2 跨页温度回 0.1 / M3 常量改 0.1 / M4 默认回 3 / M5 兜底回 3）+ 
 **未验证边界**：0.0 消除的是**客户端采样**这一已知随机源；**服务端**残余方差
 （批处理 / MoE 路由 / 浮点非结合）**未测** ⇒ **不宣称“非确定性已消除”**。
 本批同时改了两处**入包源**（`core/`、`llm/`）⇒ **必须重建产物**。
+
+**日志噪声（0-28）**：`logging_config._NOISY_THIRD_PARTY_LOGGERS`（#145 的逐库降噪名单）
+**漏掉了实测刷屏的两个库** ⇒ 有效级别仍是 `DEBUG`（继承 root），#145 的目标未真正达成：
+
+- `aiosqlite` —— 历史累计 **8,116 行**（每条 SQL 一行 DEBUG），全仓第一大噪声源；
+- `chardet` —— `logs/pharma.log` **当天 613 行日志的 100%**（`chardet.charsetprober`
+  逐候选编码打印置信度）；它是 `requests` 的**传递依赖**，故不在直接依赖清单里。
+
+**修法**：把两者加进名单（`setup_logging` 已按名单逐库 `setLevel(WARNING)`）。
+**护栏** `tests/unit/test_logging_config.py::TestThirdPartyNoiseSuppression`（3 条：
+名单完整性 / `setup_logging` **行为**断言 / 子 logger `chardet.charsetprober` 继承抑制）。
+**变异** M6–M9 ⇒ CAUGHT（累计 **9/9**）。
+⚠️ 该行为断言**必须先清到 NOTSET** —— `logging` 的 logger 是**全局单例**，前面用例调过
+`setup_logging` 会把级别留在 WARNING，否则删除抑制循环也不会红（**变异漏检**，
+M8 实测暴露）。
+⚠️ 本批同时改了**入包源**（`logging_config.py`）⇒ 与上文一并**重建产物**。
 ### 报告缓存 key 未覆盖**全部渲染输入** ⇒ 重试后 `report.md` 静默返回过期内容（Round 80 第二十四批，2026-10-09）
 
 > 记录 → `docs/TODO.md` 的 **0-26**（属当前 backlog ⇒ 就地记 §0 表）。

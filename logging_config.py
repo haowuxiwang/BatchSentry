@@ -95,6 +95,14 @@ def generate_request_id() -> str:
 # 全量落进 pharma.log（10MB × 5 份很快滚完），把自家 DEBUG 挤出去。
 # ⚠️ **必须显式设**：root 得留在 DEBUG，否则 `core.*`/`llm.*` 的 DEBUG 也一起没了
 # —— 那才是排障真正要看的东西。所以这里是「逐库降级」，不是「抬高 root」。
+#
+# ⚠️ **这份名单必须覆盖实测刷屏者**（2026-10-10 复核 logs/pharma.log）：
+#   · aiosqlite —— 历史累计 8,116 行（每条 SQL 一行 DEBUG），全仓第一大噪声源；
+#   · chardet   —— 当天 613 行日志的 **100%**（`chardet.charsetprober` 逐候选
+#                  编码打印置信度）；它是 requests 的传递依赖，故不在直接依赖里。
+# 两者此前**漏在名单外** ⇒ 有效级别仍是 DEBUG（继承 root）⇒ #145 想解决的
+# 「第三方把自家 DEBUG 挤出去」并未真正达成。护栏：
+# tests/unit/test_logging_config.py::TestThirdPartyNoiseSuppression
 _NOISY_THIRD_PARTY_LOGGERS = (
     "httpx",
     "httpcore",
@@ -103,6 +111,8 @@ _NOISY_THIRD_PARTY_LOGGERS = (
     "urllib3",
     "requests",
     "asyncio",
+    "aiosqlite",
+    "chardet",
 )
 
 # `PBC_LOG_LEVEL` 的合法取值（#145）。不合法时**不静默当 DEBUG**，而是报一声再回退，

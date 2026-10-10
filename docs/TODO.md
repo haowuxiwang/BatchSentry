@@ -72,7 +72,13 @@
 >   `tests/unit/test_llm_determinism.py`（4 条）+ `test_upload_quota_contract.py::
 >   TestDefaultQuotaSupportsFiveConcurrentReviews`（2 断言）；**变异**
 >   `devlogs/_verify/r85_mutation.py` ⇒ **5/5 CAUGHT**。属**当前 backlog** ⇒
->   **就地记 §0 表（0-15 核销 + 新增 0-27）**，**不进 §0.1 台账**。
+>   **就地记 §0 表（0-15 核销 + 新增 0-27 / 0-28）**，**不进 §0.1 台账**。
+>   **另（0-28）**：`logging_config._NOISY_THIRD_PARTY_LOGGERS`（#145 的逐库降噪名单）
+>   漏掉实测刷屏的两个库 ⇒ 有效级别仍是 `DEBUG`（继承 root），#145 的目标未真正达成：
+>   `aiosqlite`（历史累计 **8,116 行**，每条 SQL 一行 DEBUG）与 `chardet`（当天
+>   `pharma.log` **613 行 = 100%**，`chardet.charsetprober` 逐候选编码打印置信度）。
+>   已把两者补入名单；护栏 `tests/unit/test_logging_config.py::TestThirdPartyNoiseSuppression`
+>   （3 条）+ 变异 M6–M9 CAUGHT（累计 **9/9**）。
 > - **§A 及以下 = Round 59（2026-09-23）的快照**，**已做过一轮核销，但未逐条复核**。
 >   核销过的条目带 **`—— **R66 已核销**（证据见 §0.1）`** 尾注；
 >   **其余仍标 `[ ]` 的，按"未复核"对待，不要当成当前事实。**
@@ -133,6 +139,7 @@
 | **0-25** | **`esc` 转义原语在 3 个页面 bundle 里各有一份**（`findings-map.js` / `settings-state.js` / `upload-jobs.js`），**无一致性机检**；且 `findings-map.js` 注释称「已收敛」⇒ **假保证**（实际 6→3） | **P2** | **✅ 已完成（R83 第二十三批）** | 机检锁「三份等价 + 副本集合登记 + 解码器镜像」；**真单一真值**（合并为公共脚本）登记为**待决策**（需改 3 个模板的 `<script>`，会改加载语义） | **R83 第二十三批（2026-10-09）：达成。** 新增 `tests/unit/test_esc_single_source.py`（**6 条**）⇒ 变异 **4/4 CAUGHT**（E1 弱化一份 / E2 另一份漂移 / E3 副本改名 / E4 解码器 `&amp;` 不再最后）；`static/findings-map.js` 注释改为**如实**陈述（3 份 + 为什么 + 指向机检与 0-25）。⚠️ **边界**：锁的是**文本等价**（纯字面量替换链 ⇒ 链同即行为同）；跨 bundle 的真单一真值**未做**。 |
 | **0-26** | **报告缓存 key 未覆盖全部渲染输入**：`api/report.py` 的 `cache_key` 旧形态 = `(job_id, len(findings), last_id, status_hash, len(exemptions))`，**不含** `total_pages` / `empty_pages` / `unanalyzed_pages` / `filename` ⇒ 这些在 findings 不变时改变（`retry` 后重分析）会让 `report.md` 静默返回**过期**内容 | **P2** | **✅ 已完成（R84 第二十四批）** | key 必须覆盖**恰好传给渲染器的全部输入**（改为内容摘要）；护栏逐输入判别力 + 变异 4/4 | **R84 第二十四批（2026-10-09）：达成。** 定位：首写**失败测试**即复现（日志 `Report.md cache hit (findings=0)`）。修法：`_render_input_digest()` = 对 (job 渲染字段, findings, exemptions, total_pages, empty_pages, unanalyzed_pages, review_stats) 取 SHA-256。护栏 `tests/integration/test_report_cache_coverage.py`（3 条）。变异 `devlogs/_verify/r83c_mutation.py` ⇒ **4/4 CAUGHT**。⚠️ M4 首版删单处 `total_pages` **MISSED** ⇒ 该输入被 `job["total_pages"]` 与裸值**冗余覆盖**，属变异无效（非测试失效），已改两处同删。 |
 | **0-27** | **并发额度默认 3 不满足「5 个文件并发审核」**：`api/jobs._MAX_CONCURRENT_JOBS` 默认 3，第 4 个并发任务起 **409 硬拒绝**（**不排队**） | **P2** | **✅ 已完成（R85 第二十五批）** | 默认 ≥ 5（env 可覆盖）；且**兜底分支**（env 值非法时走的那条）也必须 ≥ 5 | **R85 第二十五批（2026-10-10）：达成。** 定位：`api/jobs/__init__.py` 两处默认值均为 3。修法：`os.getenv("MAX_CONCURRENT_JOBS", "5")` + 兜底 `_MAX_CONCURRENT_JOBS = 5`；顺带更正原注释的“~2GB”**错误归因**（实测单 job ≈ 102MB，见 MEMORY-DETAIL §7）。护栏 `tests/unit/test_upload_quota_contract.py::TestDefaultQuotaSupportsFiveConcurrentReviews`（默认 ≥ 5 + 兜底 ≥ 5）。变异 **M4/M5 CAUGHT**。⚠️ **未测**：5 个 job 同时跑对上游（SiliconFlow / OCR）的**实际速率影响**与端到端时延 —— 本批只保证**准入**不再拒第 4/5 个。 |
+| **0-28** | **第三方日志噪声抑制名单不完整**：`logging_config._NOISY_THIRD_PARTY_LOGGERS`（#145）漏掉 `aiosqlite`（历史 8,116 行）与 `chardet`（当天 `pharma.log` 100%）⇒ 有效级别仍 `DEBUG`（继承 root）⇒ #145「把自家 DEBUG 挤出去」未达成 | **P3** | **✅ 已完成（R85 第二十五批）** | 名单必须覆盖**实测刷屏者**（按 logger 名计数审计）；且「在名单里」≠「已生效」（须**行为**断言读 `getEffectiveLevel()`） | **R85 第二十五批（2026-10-10）：达成。** 定位：`logs/pharma.log` 17,406 行中 92% 是 DEBUG；`aiosqlite` 8,116 行、`chardet` 613 行（**当天全部**）；实测 `getEffectiveLevel()` = DEBUG，而名单内各库 = WARNING。修法：两者补入名单。护栏 `tests/unit/test_logging_config.py::TestThirdPartyNoiseSuppression`（3 条：名单完整性 + `setup_logging` **行为**断言 + 子 logger `chardet.charsetprober` 继承）。变异 M6–M9 ⇒ CAUGHT（累计 **9/9**）。⚠️ 行为断言**须先清 NOTSET**（logger 是全局单例）否则 M8 漏检。 |
 
 > 用法：完成一条就把 `[ ]`/状态改掉并补证据列。**0-1 / 0-2 是用户动作，agent 不代做。**
 
