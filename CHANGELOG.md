@@ -71,9 +71,14 @@ Electron 产物重建（实测 `1 failed, 4101 passed, 4 skipped`）。⇒ **R86
 理由比它写的更硬**（不是"清单 +1"，而是"有一条单测专门盯这个文件"）。已**回退**该改动；
 0-34 **保持开放**，条目里补上这条实测证据。
 
-**⚠️ 本轮再次改动入包源**（`static/upload.js` / `templates/settings.html` /
-`static/settings.js` / `electron/main.js`）⇒ 现有产物**必然过期**，`artifact_freshness`
-的失效面由 3 个文件扩到 **7 个**；分发前**必须重建**（需宿主退出）。
+**实测（门禁 10/11）**：`tests_coverage` = **4102 passed, 0 failed, coverage 95.09%**
+（门禁 95%，junit `devlogs/gate_junit_20261010_151443.xml`）；变异 **7/7 + 5/5 CAUGHT**。
+唯一红 = `artifact_freshness`（见下）。报告 `devlogs/gate_report_20261010_151405.json`。
+
+**⚠️ 本轮再次改动入包源**（`api/jobs/listings.py` / `core/procpool.py` /
+`static/upload.js` / `templates/settings.html` / `static/settings.js`）⇒ 现有产物
+**必然过期**。`artifact_freshness` 的失效面由 **3 → 8 个**文件（3 个既有 +
+本轮 5 个，**以门禁实测为准**）；分发前**必须重建**（需宿主退出）。
 
 ### 分发/UX 评估 + 首启体验纠偏（Round 82 第二十六批，2026-10-10）
 
