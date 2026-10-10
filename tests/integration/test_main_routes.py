@@ -263,3 +263,54 @@ class TestLiveRouteNotShadowed:
             f"route order broken: {paths} — listings must load before status "
             "(listings.py must not top-level import status)"
         )
+
+
+class TestIndexOcrGuidance:
+    """GET / — 首启 OCR 引导横幅（R86）。
+
+    上传页此前只对"未配置 LLM"给引导，而 PDF 无 OCR 配置必然在 Stage 1 失败
+    ⇒ 用户先白传大文件再拿到中途错误。本用例**双向**验证（未配置→有横幅 /
+    已配置→无横幅），防"一刀切恒显示"式假绿。
+    """
+
+    @pytest.mark.asyncio
+    async def test_banner_shown_when_ocr_unconfigured(self, test_db, monkeypatch):
+        from config import config as _cfg
+        p, m = _cfg["paddle_ocr"], _cfg["mineru"]
+        saved = (p.api_url, p.token, m.token)
+        p.api_url = p.token = m.token = ""
+        monkeypatch.setattr(
+            "core.pipeline.ocr_support.is_backend_available", lambda n: False
+        )
+        try:
+            from main import app
+            async with AsyncClient(
+                transport=ASGITransport(app=app), base_url="http://localhost:8000"
+            ) as c:
+                r = await c.get("/")
+            assert r.status_code == 200
+            assert "尚未配置 OCR 解析服务" in r.text, (
+                "OCR 未配置时上传页应显示引导横幅（否则用户会白传一份大文件，"
+                "再在 Stage 1 拿到一个中途错误）"
+            )
+        finally:
+            p.api_url, p.token, m.token = saved
+
+    @pytest.mark.asyncio
+    async def test_banner_hidden_when_ocr_configured(self, test_db):
+        from config import config as _cfg
+        p, m = _cfg["paddle_ocr"], _cfg["mineru"]
+        saved = (p.api_url, p.token, m.token)
+        p.api_url, p.token = "https://paddle.api", "tok"
+        try:
+            from main import app
+            async with AsyncClient(
+                transport=ASGITransport(app=app), base_url="http://localhost:8000"
+            ) as c:
+                r = await c.get("/")
+            assert r.status_code == 200
+            assert "尚未配置 OCR 解析服务" not in r.text, (
+                "OCR 已配置（paddle url+token）时不应再显示引导横幅"
+            )
+        finally:
+            p.api_url, p.token, m.token = saved

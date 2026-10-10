@@ -6,6 +6,52 @@
 ---
 
 ## [Unreleased]
+### 分发/UX 评估 + 首启体验纠偏（R86 第二十六批，2026-10-10）
+
+> 记录 → `docs/DISTRIBUTION_UX_ASSESSMENT_2026-10-10.md`（新增）。
+> 本轮回答用户五问：能否分发/作基线、距分发缺口、进度总结、前端设置与首启体验、UX 改善。
+
+**评估结论（有证据）**：作为**便携目录包 / 单机单用户桌面工具**，D-Gate 六条不变量当前
+**全部满足**（门禁 11/11：依赖 **0** 公告 / Electron **43.7.4** 在支持线 / **1 份完整产物**
+且与源码**逐字节一致**）。⚠️ 本轮改了**入包源** ⇒ 现有产物**已过期**，分发前**必须重建**
+（需宿主退出）。距"分发"另缺：`LICENSE` 文件、**分发形态决策**、判定质量**无标注集**。
+
+**修复 1 · 首启 OCR 引导（真实摩擦点）**：上传页的首启横幅此前**只看 LLM**
+（`main.py::index` 的 `needs_setup`），而 PDF **无 OCR 配置必然在 Stage 1 失败** ⇒ 用户先
+白传大文件（实测样本 138MB / 51 页）才拿到中途错误。修法：
+`core/pipeline/ocr_support.ocr_chain_configured()`（**复用**既有 `remote_backend_configured`
+/ `is_backend_available` —— 单一来源、不发网络探测）+ `main.py::index` 下发
+`ocr_setup_needed` + `templates/upload.html` 第二横幅。
+⚠️ **不改上传拒绝语义**（后端仍只对无 LLM 返回 400）—— 把 OCR 也做成后端前置门属
+**语义变更**，会波及产物级入口矩阵 `tests/e2e_rejections.py`（34 例的 seed 与期望需重验）
+⇒ **登记为待办**，不在本轮擅自改。
+
+**修复 2 · 首启文档纠偏（用户解压后第一份会读的文档）**：`PORTABLE_README.txt` 写
+「并发处理 **3** 个任务」（代码默认已是 **5**）、「缺页超过 **20%**」（代码是
+`missing > max(2, int(pdf_total * 0.1))` ⇒ **10%**）、「可在设置页面调整 LLM 并发数」
+（**设置页无此入口**；页级并发是 env `LLM_CONCURRENCY`、任务级是 env
+`MAX_CONCURRENT_JOBS`）⇒ 三处纠正；`README.md` 配置表 `max_concurrent_jobs` **3 → 5**
+并改标为 env（`MAX_CONCURRENT_JOBS`），补 `LLM_CONCURRENCY` 行。
+
+**护栏 + 变异**：
+`tests/unit/test_distribution_parity.py::test_portable_readme_concurrency_matches_code_default`
+（文档数字 == **从源码重算**的默认值 —— no-op 检验，防再次静默腐坏）；
+`tests/integration/test_main_routes.py::TestIndexOcrGuidance`（**行为**双向：未配置→有横幅 /
+已配置→无横幅，防"一刀切恒显示"式假绿）。
+变异 `devlogs/_verify/r86d_mutation.py`：**基线绿 + 4/4 CAUGHT**
+（M1 文档数 5→3 / M2 谓词恒不配置 / M3 模板恒显示 / M4 路由恒隐藏）。
+
+**测试**：全量 pytest **4074 passed / 0 failed**（4 skipped；较上批 4071 **+3** = 新增用例）。
+⚠️ 本轮改了入包源（`main.py` / `core/pipeline/ocr_support.py` / `templates/upload.html`）
+⇒ 门禁 `artifact_freshness` 在**重建前必红**（**设计如此，非回归**）。
+
+**踩坑（已记入 `docs/PROJECT_PITFALLS.md` §五十九）**：插入式改写的**锚点**是结果的
+**前缀** ⇒ 用"old 还在不在"判幂等会**重复插入**（实测 `main.py` / `templates/upload.html`
+各多出一整份，已回滚）；正确判据是"**插入后才会出现的 marker**"。
+
+**未完成 / 阻塞**：推送 8 个提交（`dd108b2..551287c`）仍卡在**缺 GitHub 凭据**
+（`could not read Username`，**非**代理 —— 7897 可达）；产物重建需**宿主退出**。
+
 ### 判定产出**采样温度未固定** ⇒ 同输入两次跑 findings 差 +24%；并发额度默认 3 → 5；日志第三方噪声抑制名单补全（Round 81 第二十五批，2026-10-10）
 
 > 记录 → `docs/TODO.md` 的 **0-15**（核销）与 **0-27**（新增）（属当前 backlog ⇒ 就地记 §0 表）。

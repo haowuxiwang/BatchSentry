@@ -211,6 +211,24 @@ def remote_backend_configured(name: str) -> bool:
     return False
 
 
+def ocr_chain_configured() -> bool:
+    """整条 OCR 主备链是否**至少有一个**可用后端（首启引导的前置判定）。
+
+    口径复用 `remote_backend_configured()` 与 `is_backend_available()`，
+    与 `_get_ocr_chain` 的可用性来源一致（不另写一份判据）：任一远程后端
+    凭据完整，或本地 docling 依赖已安装 ⇒ 流水线**可能**完成 OCR。
+    **不发起网络探测** —— 只回答"配置层面能否跑通"；连通性由设置页的
+    「测试连接」负责。
+
+    为什么需要它：上传页的首启横幅此前只看 LLM，而 PDF 无 OCR 配置必然在
+    Stage 1 失败 ⇒ 用户会先白传一份几百 MB 的文件、等一会儿，才拿到一个
+    中途错误。本判定让引导在**上传之前**就把 OCR 缺口说清楚。
+    """
+    if any(remote_backend_configured(n) for n in _REMOTE_BACKENDS):
+        return True
+    return is_backend_available("docling")
+
+
 def _get_ocr_backend():
     """根据配置返回 OCR 后端的 run_ocr 函数。
 

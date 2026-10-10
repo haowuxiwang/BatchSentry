@@ -81,6 +81,33 @@
       </div>
       {% endif %}
 
+      {% if ocr_setup_needed %}
+      <!-- 首启引导（OCR）— 与 LLM 横幅并列。PDF 无 OCR 配置会在 Stage 1
+           失败（主备链两个远程后端都没凭据）⇒ 在上传前先说明。 -->
+      <div
+        class="stagger-in hover-lift bg-card border border-warning/40 rounded-lg p-4 mb-6 flex items-start gap-3"
+        style="--i: 0"
+      >
+        <div
+          class="shrink-0 w-5 h-5 rounded-full bg-warning/15 flex items-center justify-center mt-0.5"
+        >
+          <span class="text-warning text-[11px] font-semibold">!</span>
+        </div>
+        <div class="flex-1 min-w-0">
+          <p class="text-[13px] font-medium">尚未配置 OCR 解析服务</p>
+          <p class="text-[12px] text-muted-foreground mt-0.5">
+            上传 PDF 后将无法识别文字，请至少配置 PaddleOCR 或 MinerU 之一
+          </p>
+        </div>
+        <a
+          href="/settings"
+          class="btn-press shrink-0 text-[12px] font-medium text-foreground hover:text-muted-foreground transition-colors"
+        >
+          前往配置 →
+        </a>
+      </div>
+      {% endif %}
+
       <!-- ═══════════════════════════════════════════════════
            上传卡片 — Notion 风格:圆角卡片 + 柔和阴影 + hover 上浮
            ═══════════════════════════════════════════════════ -->

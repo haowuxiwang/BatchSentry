@@ -590,6 +590,11 @@ async def index(request: Request, page: int = 1):
     # 检查是否需要首次配置（无 provider 配置了 API key）
     providers = config["providers"]
     needs_setup = not any(p.api_key for p in providers.values())
+    # 首启引导（OCR）：PDF 无 OCR 配置必然在 Stage 1 失败 ⇒ 与 LLM 并列提示。
+    # 判定复用单一来源 core.pipeline.ocr_support.ocr_chain_configured。
+    from core.pipeline.ocr_support import ocr_chain_configured
+
+    ocr_setup_needed = not ocr_chain_configured()
     # robustness-C8: 日志路径暴露到页面底部，frozen/开发模式路径均可见
     from logging_config import _default_log_dir
 
@@ -600,6 +605,7 @@ async def index(request: Request, page: int = 1):
         {
             "jobs": jobs,
             "needs_setup": needs_setup,
+            "ocr_setup_needed": ocr_setup_needed,
             "page": page,
             "total_pages": total_pages,
             "total_jobs": total_jobs,

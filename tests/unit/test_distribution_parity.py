@@ -373,3 +373,28 @@ def test_e2e_drivers_can_target_the_shipped_artifact():
         f"以下 e2e 驱动无法指向要分发的产物副本"
         f"（应支持 PBC_E2E_EXE 覆盖或复用 tests.e2e_proc.resolve_exe）：{missing}"
     )
+
+
+def test_portable_readme_concurrency_matches_code_default():
+    """PORTABLE_README.txt 的"并发处理 N 个任务"必须等于代码默认（防漂移）。
+
+    实测（2026-10-10）：文档写 3，代码已是 5（`api/jobs/__init__.py`）——
+    版本戳有 `test_portable_readme_version_matches_app_version` 守着，并发数
+    却没有任何机检，于是**静默腐坏了整整一个批次**的交付说明。默认值从源码
+    **重算**（不写死字面量），与"文档复述代码事实却无人绑定"的教训对齐。
+    """
+    src = (_ROOT / "api" / "jobs" / "__init__.py").read_text(encoding="utf-8")
+    m = re.search(r'os\.getenv\(\s*"MAX_CONCURRENT_JOBS"\s*,\s*"(\d+)"\s*\)', src)
+    assert m, (
+        "未从 api/jobs/__init__.py 解析到 MAX_CONCURRENT_JOBS 默认值"
+        "（解析方式可能已过时）"
+    )
+    default = m.group(1)
+    txt = (_ROOT / "PORTABLE_README.txt").read_text(encoding="utf-8", errors="replace")
+    m2 = re.search(r"并发处理\s*(\d+)\s*个任务", txt)
+    assert m2, "PORTABLE_README.txt 未声明并发任务数（用户解压后第一份会读的文档）"
+    assert m2.group(1) == default, (
+        f"PORTABLE_README.txt 写「并发处理 {m2.group(1)} 个任务」，"
+        f"而代码默认是 {default}（api/jobs/__init__.py）—— "
+        f"交付说明与实际不符。改代码默认值时必须同步改文档。"
+    )

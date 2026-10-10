@@ -136,7 +136,8 @@ npm run dev
 |------|------|--------|
 | `llm_provider` | 默认 LLM 服务商 | `deepseek` |
 | `ocr_backend` | OCR 后端 (`paddle`/`mineru`) | `paddle` |
-| `max_concurrent_jobs` | 最大并发任务数 | `3` |
+| `MAX_CONCURRENT_JOBS`（env） | 最大并发**审核任务**数 | `5` |
+| `LLM_CONCURRENCY`（env） | Stage 2 逐页 LLM 分析并发数 | `5` |
 | `MAX_UPLOAD_BYTES`（env） | 单文件体积上限 | `200 MB` |
 | `MAX_UPLOAD_PAGES`（env） | 单文件**页数**上限（超出即拒绝，提示含真实页数与拆分建议） | `200` |
 | `WARN_UPLOAD_PAGES`（env） | 页数软阈值（超出则放行但告知预估耗时） | `80` |
