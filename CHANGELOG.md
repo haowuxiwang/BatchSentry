@@ -108,6 +108,13 @@ UI `/` + `/static/app.css` + `/api/jobs` 均 200（css 与磁盘**逐字节一�
 存储层按 job 隔离（findings 逐 job `[1,1,1,18,25]`，合计 46 = 端点合计 46）；
 **总墙钟 715s < 各 job 之和 1260s**（并行收益 1.76×）；无残留非终态 job。
 ⚠️ 5 个文件为**小样本**（1–6 页）⇒ **51 页大记录 ×5** 的上游速率影响**仍未测**。
+**额度槽位回收（0-27 的另一半，产物级）**：`devlogs/_verify/r85h_slot_recycle.py` ⇒ **6/6** ——
+占满 5 后第 6 份 **409 配额**（同轮**负控**）；`cancel` 一个 ⇒ 该 job 进 `cancelled`，
+**其余 4/4 仍在跑**时重传第 6 份即 **200** 且为**新 job_id** ⇒ 额度**动态回收**
+（无需等全部跑完）。此前只钉了「占满 ⇒ 409」这**一半**，回收方向**无任何断言**。
+永久护栏 `TestQuotaSlotIsReleasedWhenAJobReachesTerminal`（自带同轮负控）；
+变异 `devlogs/_verify/r85i_quota_recycle_mutation.py` ⇒ **3/3**（M0 绿 / M1·M2 CAUGHT）。
+
 
 ### 报告缓存 key 未覆盖**全部渲染输入** ⇒ 重试后 `report.md` 静默返回过期内容（Round 80 第二十四批，2026-10-09）
 

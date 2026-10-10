@@ -171,3 +171,50 @@ def _pdf_upload():
         filename="contract.pdf",
         headers=Headers({"content-type": "application/pdf"}),
     )
+
+
+class TestQuotaSlotIsReleasedWhenAJobReachesTerminal:
+    """额度**回收**方向：占额度的 job 进入终态后，空出的槽位必须能被新上传用上。
+
+    为什么要单列：`test_retry_respects_concurrency_limit` 与并发上传用例只钉了
+    「占满 ⇒ 409」这**一半**。若 `_count_active_jobs` 的 `IN (ACTIVE_STATUSES)`
+    被改成 `NOT IN (TERMINAL)`（或 ACTIVE 集里混入终态），额度会**永久占满**、
+    第 6 个文件再也传不进来 —— 而现有用例**全绿**。本条钉住另一半。
+
+    ⚠️ 用例自带**同轮负控**：终态化**之前**必须 409。否则「槽位被回收」与
+    「压根没限额」会给出同样的绿色结果（**无判别力**）。
+    """
+
+    @pytest.mark.asyncio
+    async def test_terminal_job_frees_the_slot(self, test_db):
+        from fastapi import HTTPException
+
+        from api.jobs import _ACTIVE_STATUSES, _count_active_jobs, create_job
+
+        db = test_db  # 隔离临时库（否则读到真实 app DB 的残留 active job）
+        await db.execute(
+            "INSERT OR REPLACE INTO jobs (id, filename, pdf_path, status) "
+            "VALUES ('occupy-slot', 'busy.pdf', '/tmp/busy.pdf', 'pending')"
+        )
+        await db.commit()
+
+        with patch("api.jobs._MAX_CONCURRENT_JOBS", 1), \
+                patch("api.jobs.launch_pipeline"):
+            # ── 负控：占用者仍活跃 ⇒ 必须 409（否则本用例无判别力）──
+            with pytest.raises(HTTPException) as ei:
+                await create_job(file=_pdf_upload(), force=False, request=None)
+            assert ei.value.status_code == 409, ei.value.detail
+            assert "上限为 1" in str(ei.value.detail), ei.value.detail
+
+            # ── 占用者进入终态 ⇒ 必须**不再**计入活跃额度 ──
+            await db.execute(
+                "UPDATE jobs SET status='cancelled' WHERE id='occupy-slot'"
+            )
+            await db.commit()
+            active = await _count_active_jobs(db, _ACTIVE_STATUSES)
+            assert active == 0, f"终态 job 仍被计入活跃额度：active={active}"
+
+            # ── 正向：同一份上传现在必须被接受（槽位已回收）──
+            job = await create_job(file=_pdf_upload(), force=False, request=None)
+
+        assert job.get("job_id"), f"槽位未回收，上传仍被拒：{job!r}"
