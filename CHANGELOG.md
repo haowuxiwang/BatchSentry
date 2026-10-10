@@ -6,6 +6,34 @@
 ---
 
 ## [Unreleased]
+### 诊断报文不得低报：`artifact_freshness` 的路径清单截断改为**显式声明**（Round 84 第二十八批，2026-10-10）
+
+> 承 R87（Round 83）。本轮修的是**上一轮我自己踩到**的缺陷：门禁报文说"**8 个**源文件与
+> 清单不符"，却只列 **5** 个 ⇒ 我据此以为失效面是 5 个。
+
+**缺陷**：`scripts/bundle_manifest.py` 有 5 处报文写成 `f"{len(x)} 个…：{x[:5]}"` ——
+`len()` 是真值、`[:5]` 只显示 5 个。**数量与清单互相矛盾，而清单更显眼 ⇒ 读者信清单**。
+该报文的**唯一作用**就是告诉读者"哪些文件要重建"，藏起 3 个即**无法据以行动**。
+门禁侧 `release_gate.py` 的 `problems[:4]` 属同类。
+
+**修法（判据不变，只让报文诚实）**：新增 `_fmt_paths(items)` —— ≤ 上限（20）全列；
+> 上限列前 N 个并**明说**"另有 M 个未显示，共 K 个"；门禁侧补"另有 N 项未显示"。
+
+**护栏 + 变异**
+
+  · `tests/unit/test_bundle_manifest.py::TestProblemReportDoesNotUnderReport`（**3 条**）：
+    上限内全列 / 超限**明说**余量 / 端到端 **6 个失配源**时每个路径都出现（旧 `[:5]` 会吞掉第 6 个起）。
+  · `tests/unit/test_release_gate.py::TestArtifactFreshness::
+    test_truncated_problem_list_declares_the_remainder`（**1 条**）：7 项时明细必须写"另有 3 项未显示"。
+  · 变异 `devlogs/_verify/r88a_mutation_underreport.py` ⇒ **基线绿 + 3/3 CAUGHT**
+    （M1 回退 `[:5]` / M2 去掉上限 / M3 去掉门禁标记）。
+
+**实测**：`--skip-tests` 门禁的报文现在**列全 8 个** —— `['api/jobs/listings.py',
+'core/pipeline/ocr_support.py', 'core/procpool.py', 'main.py', 'static/settings.js',
+'static/upload.js', 'templates/settings.html', 'templates/upload.html']`。
+⚠️ 本轮只改 `scripts/**` 与 `tests/**`（**均不入包**）⇒ **不扩大** `artifact_freshness`
+失效面（仍是那 8 个）；产物过期状态**不变**，分发前仍需重建。
+
 ### 一次参数变更的清扫只做了 1/5 + settings「测试连接」窄屏不可达（Round 83 第二十七批，2026-10-10）
 
 > 承 R86（Round 82）的分发/UX 评估。本轮按 **先定位 → 再解决 → 后测试** 推进；

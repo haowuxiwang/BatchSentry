@@ -340,6 +340,24 @@ def read_manifest(path) -> dict:
 
 # ── 校验（门禁与本模块 CLI 共用的唯一实现）──────────────────────────────────
 
+#: 诊断报文里**路径清单**的显示上限。⚠️ 超过上限**必须显式声明还有多少未显示** ——
+#: 报文低报路径会让读者无法据以行动。实测（2026-10-10）：本仓有 8 个失配源文件，
+#: 而报文写「8 个源文件与清单不符」却只列了 **5** 个（`[:5]`），读者据此以为只有 5 个
+#: ⇒ 这正是本项要防的「静默低报」在**报文自身**上复发。
+_PATH_LIST_CAP = 20
+
+
+def _fmt_paths(items: list[str]) -> str:
+    """把路径清单渲染成一行，**永不静默丢项**。
+
+    ≤ 上限 ⇒ 全列；> 上限 ⇒ 列前 ``_PATH_LIST_CAP`` 个**并明说**余下几个，
+    使读者既拿到可行动的路径、也知道清单是**部分**的（低报 = 缺陷，不是简洁）。
+    """
+    if len(items) <= _PATH_LIST_CAP:
+        return str(items)
+    hidden = len(items) - _PATH_LIST_CAP
+    return (f"{items[:_PATH_LIST_CAP]} …（另有 {hidden} 个未显示，共 {len(items)} 个）")
+
 
 def verify_artifact(artifact_dir, root) -> list[str]:
     """校验一份产物是否**新鲜**。返回问题清单（空 = 新鲜）。
@@ -379,9 +397,9 @@ def verify_artifact(artifact_dir, root) -> list[str]:
     missing = sorted(set(expected) - set(files))
     extra = sorted(set(files) - set(expected))
     if missing:
-        problems.append(f"{len(missing)} 个入包源文件不在清单里（构建后新增？）：{missing[:5]}")
+        problems.append(f"{len(missing)} 个入包源文件不在清单里（构建后新增？）：{_fmt_paths(missing)}")
     if extra:
-        problems.append(f"{len(extra)} 个清单条目已不在入包集合（规则变更？）：{extra[:5]}")
+        problems.append(f"{len(extra)} 个清单条目已不在入包集合（规则变更？）：{_fmt_paths(extra)}")
 
     common = sorted(set(files) & set(expected))
 
@@ -389,7 +407,7 @@ def verify_artifact(artifact_dir, root) -> list[str]:
     diverged_src = [rel for rel in common if sha256_file(root / rel) != files[rel]]
     if diverged_src:
         problems.append(f"{len(diverged_src)} 个源文件与清单不符"
-                        f"（**源码改动后未重建**）：{diverged_src[:5]}")
+                        f"（**源码改动后未重建**）：{_fmt_paths(diverged_src)}")
 
     # 4. 产物内可读副本逐字节（抓「产物陈旧」—— 这是唯一的字节级铁证）
     asar = asar_path_for_artifact(artifact_dir)
@@ -414,10 +432,10 @@ def verify_artifact(artifact_dir, root) -> list[str]:
             if sha256_bytes(blob) != want:
                 diverged_art.append(rel)
     if absent:
-        problems.append(f"{len(absent)} 个入包副本在产物内缺失：{absent[:5]}")
+        problems.append(f"{len(absent)} 个入包副本在产物内缺失：{_fmt_paths(absent)}")
     if diverged_art:
         problems.append(f"{len(diverged_art)} 个产物副本与源码不一致"
-                        f"（**产物陈旧**）：{diverged_art[:5]}")
+                        f"（**产物陈旧**）：{_fmt_paths(diverged_art)}")
 
     # 5. asar 的 version 必须与清单一致（asar 与嵌入后端是否同一次构建）
     if asar is not None:

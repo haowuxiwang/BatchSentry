@@ -23,6 +23,7 @@ sys.path.insert(0, str(_ROOT))
 
 from scripts.bundle_manifest import (  # noqa: E402
     D_ASAR, D_INTERNAL, D_PYZ, MANIFEST_NAME, MANIFEST_SCHEMA,
+    _PATH_LIST_CAP, _fmt_paths,
     asar_path_for_artifact, discover_artifacts, disposition_of, iter_bundle_entries,
     iter_bundle_sources, read_app_version, read_asar_index, read_asar_member,
     read_asar_version, read_manifest, sha256_bytes, sha256_file, verify_artifact,
@@ -405,3 +406,41 @@ class TestDiscoverArtifacts:
 
     def test_empty_when_nothing_built(self, tmp_path):
         assert discover_artifacts(tmp_path) == []
+
+
+class TestProblemReportDoesNotUnderReport:
+    """诊断报文**不得低报**路径清单。
+
+    实测（2026-10-10）：本仓有 **8** 个失配源文件，报文却写「8 个源文件与清单不符」
+    而只列 **5** 个（`[:5]`）⇒ 读者据此以为只有 5 个、无法对其余 3 个采取行动。
+    「报文自己低报」正是本项要防的那类缺陷，故这里反向锁住。
+    """
+
+    def test_all_paths_shown_when_within_cap(self):
+        items = [f"f{i}.py" for i in range(_PATH_LIST_CAP)]
+        s = _fmt_paths(items)
+        assert all(i in s for i in items)
+        assert "未显示" not in s
+
+    def test_over_cap_declares_the_hidden_remainder(self):
+        n = _PATH_LIST_CAP + 3
+        items = [f"f{i}.py" for i in range(n)]
+        s = _fmt_paths(items)
+        # 必须**明说**还有几个未显示、总共几个 —— 否则读者以为清单是完整的
+        assert "另有 3 个未显示" in s and f"共 {n} 个" in s
+        assert items[0] in s and items[-1] not in s      # 尾部确实被省略
+
+    def test_more_than_five_diverged_sources_are_all_reported(self, built):
+        """端到端回归：>5 个失配源时**每个**路径都要出现（旧 `[:5]` 会吞掉第 6 个起）。"""
+        root, artifact = built
+        touched = ["main.py", "server.py", "config.py", "static/app.js",
+                   "templates/upload.html", "db/schema.sql"]
+        for rel in touched:
+            p = root / rel
+            p.write_bytes(p.read_bytes() + b"\n# touched\n")
+        problems = verify_artifact(artifact, root)
+        msg = next(p for p in problems if "源码改动后未重建" in p)
+        omitted = [rel for rel in touched if rel not in msg]
+        assert not omitted, f"报文低报，漏报：{omitted}"
+        # 反空转：确认这次确实 >5（否则本用例证明不了截断被修好）
+        assert len(touched) > 5

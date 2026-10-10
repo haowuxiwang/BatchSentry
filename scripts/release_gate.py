@@ -786,11 +786,18 @@ def check_artifact_freshness(root: Path = REPO_ROOT) -> CheckResult:
         blocked = []
 
     if problems:
+        shown = problems[:4]
         detail = (f"{len(artifacts)} 份产物中 {len(problems)} 项不符："
-                  + " ｜ ".join(problems[:4]))
+                  + " ｜ ".join(shown))
+        # ⚠️ 低报即缺陷：截断必须**显式声明**，否则读者以为"不符项就这么几条"。
+        if len(problems) > len(shown):
+            detail += f"；另有 {len(problems) - len(shown)} 项未显示"
         if blocked:
+            shown_b = blocked[:2]
             detail += ("；另有 " + f"{len(blocked)} 份陈旧但**不可替换**（被外部持有，"
-                       "未计入本项，需先释放持有者）：" + " ｜ ".join(blocked[:2]))
+                       "未计入本项，需先释放持有者）：" + " ｜ ".join(shown_b))
+            if len(blocked) > len(shown_b):
+                detail += f"（另有 {len(blocked) - len(shown_b)} 份未显示）"
         return CheckResult("artifact_freshness", FAIL, detail, _ms() - t0)
 
     if blocked:

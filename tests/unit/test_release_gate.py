@@ -710,6 +710,17 @@ class TestArtifactFreshness:
         assert r.status == rg.FAIL
         assert "dist/pbc-server" in r.detail and "产物陈旧" in r.detail
 
+    def test_truncated_problem_list_declares_the_remainder(self, tmp_path, monkeypatch):
+        """报文只显示前 4 项时**必须明说**还有几项未显示 —— 低报即缺陷。"""
+        self._artifact(tmp_path)
+        monkeypatch.setattr(rg, "verify_artifact",
+                            lambda a, root: [f"problem-{i}" for i in range(7)])
+        r = rg.check_artifact_freshness(root=tmp_path)
+        assert r.status == rg.FAIL
+        assert "另有 3 项未显示" in r.detail
+        # 反空转：前 4 项在报文里，第 7 项确实被省略（否则本用例证明不了截断被修好）
+        assert "problem-0" in r.detail and "problem-6" not in r.detail
+
     def test_synced_artifact_is_pass(self, tmp_path, monkeypatch):
         self._artifact(tmp_path)
         monkeypatch.setattr(rg, "verify_artifact", lambda a, root: [])

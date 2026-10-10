@@ -1,6 +1,6 @@
 # TODO —— 活的待办清单
 
-> **复核戳：Round 83（2026-10-10，第二十七批）** ← `tests/unit/test_todo_freshness.py` 机检读这一行；
+> **复核戳：Round 84（2026-10-10，第二十八批）** ← `tests/unit/test_todo_freshness.py` 机检读这一行；
 > 该戳**不得落后于 `CHANGELOG.md` 的最新 Round**。
 >
 > **状态（R66 复核，2026-09-30）——本文件分两层，别混读**：
@@ -98,6 +98,14 @@
 >   `tests/unit/test_settings_mobile_test_conn.py`（5 条，变异 **5/5 CAUGHT**）。
 >   另**复核 0-34**：R86 的延后判断**正确**（改 `electron/main.js` 会让 asar 一致性单测变红，见条目）。
 >   属**当前 backlog** ⇒ **就地记 §0 表（新增 0-35 / 0-36）**，**不进 §0.1 台账**。
+> - **R88 第二十八批（2026-10-10）**：修**上一轮我自己踩到**的**报文低报**缺陷 ——
+>   `artifact_freshness` 报「**8 个**源文件与清单不符」却只列 **5** 个（`scripts/bundle_manifest.py`
+>   的 `diverged_src[:5]`）⇒ 读者据此以为失效面是 5 个。**"数量"与"清单"矛盾时读者信清单**，
+>   而该报文的唯一作用就是给出"要重建哪些文件" ⇒ 藏项即**无法据以行动**；门禁 `problems[:4]` 同类。
+>   修法：`_fmt_paths()`（≤上限 20 全列；>上限**明说**"另有 M 个未显示，共 K 个"）+ 门禁侧同类标记。
+>   护栏 3+1 条（含端到端 **6 个失配源**的反向用例 —— 旧 `[:5]` 会吞掉第 6 个起）+ 变异
+>   `devlogs/_verify/r88a_mutation_underreport.py` ⇒ **3/3 CAUGHT**。只改 `scripts/**`+`tests/**`
+>   （**均不入包**）⇒ **不扩大**失效面。属当前 backlog ⇒ 就地记 §0 表（新增 **0-37**）。
 > - **§A 及以下 = Round 59（2026-09-23）的快照**，**已做过一轮核销，但未逐条复核**。
 >   核销过的条目带 **`—— **R66 已核销**（证据见 §0.1）`** 尾注；
 >   **其余仍标 `[ ]` 的，按"未复核"对待，不要当成当前事实。**
@@ -175,6 +183,7 @@ Electron 产物重建**同批**做，不能提前。另记：`180s` 仍**复述�
 否则再调 `READY_TIMEOUT_MS` 时这 3 处会一起漂移。 |
 | **0-35** | **一次参数变更的「清扫」只做了 1/5**：R85 把 `MAX_CONCURRENT_JOBS` 默认 3 → 5，只扫了 `README.md` 与 `tests/unit/test_upload_quota_contract.py` 的 docstring；全库仍残留 **7 处「默认 3」**（`CLAUDE.md` ×2、`static/upload.js`、`core/procpool.py`、`api/jobs/listings.py`、3 个测试 docstring），且**蕴含**了「选 5 份 ⇒ 第 4、5 份必然吃 409」变成**假命题** | **P2** | **✅ 已完成（R87 第二十七批）** | 活文件集合内不得再出现与代码不一致的默认值；由默认值**派生**的序数/条数不得写进文档 | **R87 第二十七批（2026-10-10）**：10 处一次扫净（`devlogs/_verify/r87a_concurrency_sweep.py`）+ 2 处歧义形态改写为显式（`r87b_reword_claims.py`）；护栏 `tests/unit/test_concurrency_default_claims.py`（**9 条**，默认值从 `api/jobs/__init__.py` **重算**，含反空转与「`=N` 只留给覆盖示例」约定）；变异 `devlogs/_verify/r87c_mutation.py` ⇒ **7/7 CAUGHT**。⚠️ 改到**入包源** `static/upload.js` ⇒ 产物失效面 +1（重建时一并处理）。 |
 | **0-36** | **settings 页「测试连接」在窄屏完全不可达**：唯一入口 `#test-conn-btn` 在 `<nav class="settings-nav hidden md:flex …">` 内，窄屏侧栏整体 `hidden`，而 `.settings-nav-mobile` 只有 5 个 section 锚点 ⇒ <768px 用户**无法**检测 OCR/LLM 连通性 | **P2** | **✅ 已完成（R87 第二十七批）** | 功能性入口在**窄屏**也必须可达；「元素存在」≠「元素可达」（e2e 只在桌面视口跑 ⇒ 缺陷不可见） | **R87 第二十七批（2026-10-10）**：加 `md:hidden` 的 `#test-conn-btn-mobile`（`templates/settings.html`）+ 抽出具名 `runConnectionTests(btn, scrollToMessage)` 供两入口**共用**（`static/settings.js`）+ 移动入口触发后把结果滚动到可视区；重构由 `devlogs/_verify/r87e_refactor_lossless.py` 机检**旧逻辑零丢失**（64→64 行，集合差空）；护栏 `tests/unit/test_settings_mobile_test_conn.py`（**5 条**）；变异 `devlogs/_verify/r87f_mutation_mobile.py` ⇒ **5/5 CAUGHT**。⚠️ **未在真机窄屏做浏览器级复验**（本环境无 GUI）⇒ 只宣称「入口存在 + 共用同一实现 + 有窄屏可见性机检」，**不宣称「移动端已可用」**。 |
+| **0-37** | **诊断报文低报**：`artifact_freshness` 报「8 个源文件与清单不符」却只列 **5** 个（`scripts/bundle_manifest.py` 的 `diverged_src[:5]`）；门禁 `release_gate.py` 的 `problems[:4]` 同类 ⇒ 读者**无法据以行动**（得再跑一次工具才能拿到全部路径） | **P2** | **✅ 已完成（R88 第二十八批）** | 报文的「数量」与「清单」**不得互相矛盾**；任何截断必须**显式声明**余量（低报即缺陷） | **R88 第二十八批（2026-10-10）**：`scripts/bundle_manifest.py` 新增 `_fmt_paths()`（≤上限 20 全列；>上限列前 N 并**明说**「另有 M 个未显示，共 K 个」），**5 处**报文改用它；`scripts/release_gate.py` 的 `problems[:4]` / `blocked[:2]` 补「另有 N 项未显示」。护栏 `tests/unit/test_bundle_manifest.py::TestProblemReportDoesNotUnderReport`（**3 条**）+ `tests/unit/test_release_gate.py::TestArtifactFreshness::test_truncated_problem_list_declares_the_remainder`（**1 条**）；变异 `devlogs/_verify/r88a_mutation_underreport.py` ⇒ **3/3 CAUGHT**。实测报文现**列全 8 个**。只改 `scripts/**` + `tests/**`（**均不入包**）⇒ **不扩大**失效面。 |
 
 > 用法：完成一条就把 `[ ]`/状态改掉并补证据列。**0-1 / 0-2 是用户动作，agent 不代做。**
 

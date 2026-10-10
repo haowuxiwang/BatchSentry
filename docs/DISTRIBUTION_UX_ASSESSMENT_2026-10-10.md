@@ -262,8 +262,11 @@ CSS（未改 templates/static 的 CSS 源，可跳过）→ PyInstaller → `bun
 **10/11 PASS**，唯一红 = `artifact_freshness`；`tests_coverage` = **4102 passed / 0 failed /
 coverage 95.09%**（门禁 95%）。
 
-⚠️ 门禁 detail 只显示 `diverged_src[:5]`（`scripts/bundle_manifest.py:392`）——报"**8 个**"
-却只列 **5** 个。**完整 8 项**由直接复算 `verify_artifact` 的 `diverged_src` 得到：
+⚠️ 门禁 detail 当时只显示 `diverged_src[:5]`（`scripts/bundle_manifest.py`）——报"**8 个**"
+却只列 **5** 个。**R88（同日第二十八批）已修**：新增 `_fmt_paths()`（≤上限全列 / >上限明说
+"另有 M 个未显示"）⇒ 报文现在**列全 8 个**（详见 `CHANGELOG.md` Round 84 与
+`docs/PROJECT_PITFALLS.md` §六十四）。**完整 8 项**（当时由直接复算 `verify_artifact` 的
+`diverged_src` 得到，现已由报文直接给出）：
 
 | 来源 | 文件 |
 |---|---|
