@@ -35,6 +35,12 @@ E. **核销必须留痕**：`[x]` 且带核销尾注的条目数 == `§0.1.1 已
 F. **`docs/TODO.md` 里不得有前端行号锚点**：R63/R65 把前端拆成模块后，
    那种「模块名 + 冒号 + 行号」的指路**必然失效**（R66 已在清单里清干净）。
    注：只查**这一份活清单**；`docs/ADVERSARIAL_REVIEW_*.md` 是历史证据，**不回改**。
+G. **交叉引用必须解析到真实条目**：`见 <id>` / `见 §N 的 <id>` 不得悬空
+   （`TestCrossReferencesResolve`）。
+H. **CHANGELOG 的批号标题必须用 `Round <N>` 形态**（`TestChangelogHeadingForm`）：
+   不得写另一套编号体系的短形态。R86 的标题曾写成 `R86`（而非 `Round 82`），
+   而**不变式 B 只认 `Round NN`** ⇒ 它**静默失效**：`max` 停在 81、实际最新是
+   Round 82，戳落后 1 轮却全绿。⇒ **护栏的解析形态本身就是它的攻击面**。
 
 ## 每轮要做什么
 
@@ -348,3 +354,71 @@ class TestCrossReferencesResolve:
         rng = _section_range("0")
         assert rng is not None, "解析不到 §0 的区间 —— 标题锚点失效"
         assert rng[1] <= len(_todo_lines()) + 1 and rng[0] < rng[1]
+
+
+# ── CHANGELOG 标题编号形态（不变式 H）──────────────────────────────────
+# 批号标题形态：`### …（Round NN 第M批，YYYY-MM-DD）`
+_HEADING_BATCH_RE = re.compile(r"^### .*?（[^）]*?第[^）]*?批", re.MULTILINE)
+#: 短形态：`### …（R86 第二十六批` —— `R<N>` 是 TODO/记忆的体系，不是 CHANGELOG 的
+_HEADING_SHORT_FORM_RE = re.compile(r"^### .*?（R\s*\d+\s*第", re.MULTILINE)
+
+
+class TestChangelogHeadingForm:
+    """不变式 H：CHANGELOG 的批号标题必须用 `Round <N>` 形态。
+
+    为什么锁这条：R86 的标题写成 `（R86 第二十六批，…）` —— `R86` 属**另一套编号
+    体系**（TODO / 记忆用 `RNN`），CHANGELOG 的体系是 `Round NN`。后果不是"写错
+    一个数字"，而是**不变式 B 静默失效**：`_changelog_max_round()` 只认 `Round NN`，
+    于是 `max` 停在 81、实际最新已是 Round 82 —— **戳落后 1 轮却全绿**。
+    ⇒ 一般化教训：**护栏的解析形态本身就是它的攻击面**，形态漂移 = 护栏失效。
+    """
+
+    def test_no_heading_uses_the_short_r_form(self):
+        text = _CHANGELOG.read_text(encoding="utf-8")
+        hits = [
+            ln.strip()[:120]
+            for ln in text.splitlines()
+            if _HEADING_SHORT_FORM_RE.search(ln)
+        ]
+        assert not hits, (
+            "CHANGELOG 的批号标题用了短形态（应写 `Round <N>`）—— "
+            "这会让 `test_todo_stamp_is_not_behind_changelog` **静默失效**：\n  "
+            + "\n  ".join(hits)
+        )
+
+    def test_every_batch_heading_carries_a_round_token(self):
+        """每个 `### …（…第M批…）` 标题都必须带 `Round` 记号。
+
+        没有 `Round` 的标题**不会进入**新鲜度比较 ⇒ 等于对不变式 B 隐形。
+        """
+        text = _CHANGELOG.read_text(encoding="utf-8")
+        heads = [
+            ln.strip()[:120]
+            for ln in text.splitlines()
+            if _HEADING_BATCH_RE.search(ln)
+        ]
+        assert len(heads) >= 10, (
+            f"只解析到 {len(heads)} 条批号标题（预期 >=10）—— 标题形态变了，"
+            "本用例可能已退化成空断言"
+        )
+        bad = [h for h in heads if "Round" not in h]
+        assert not bad, (
+            "以下批号标题没有 `Round <N>` 记号 —— 它们不会进入新鲜度比较：\n  "
+            + "\n  ".join(bad)
+        )
+
+    def test_detectors_are_not_vacuous(self):
+        """防空转：两条检测器都要有判别力，且必须**只认标题行**。"""
+        assert _HEADING_BATCH_RE.search("### 标题（Round 83 第二十七批，2026-10-10）"), (
+            "批号标题检测器匹配不到标准形态"
+        )
+        assert _HEADING_SHORT_FORM_RE.search("### 标题（R86 第二十六批，2026-10-10）"), (
+            "短形态检测器匹配不到 `R86` —— 它抓不到本不变式要防的那种标题"
+        )
+        assert not _HEADING_SHORT_FORM_RE.search(
+            "### 标题（Round 82 第二十六批，2026-10-10）"
+        ), "短形态检测器把正确的 `Round 82` 也判成短形态 ⇒ 过宽"
+        # 正文里的短形态引用是**合法**的（本仓正文大量使用 `RNN`）—— 不得被误伤
+        assert not _HEADING_SHORT_FORM_RE.search("> ⚠️ 同日更正（R69 第九批）：上文初版…"), (
+            "短形态检测器命中了正文引用行 ⇒ 没有锚在 `### ` 标题上"
+        )

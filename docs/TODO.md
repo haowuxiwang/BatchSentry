@@ -1,6 +1,6 @@
 # TODO —— 活的待办清单
 
-> **复核戳：Round 81（2026-10-10，第二十五批）** ← `tests/unit/test_todo_freshness.py` 机检读这一行；
+> **复核戳：Round 83（2026-10-10，第二十七批）** ← `tests/unit/test_todo_freshness.py` 机检读这一行；
 > 该戳**不得落后于 `CHANGELOG.md` 的最新 Round**。
 >
 > **状态（R66 复核，2026-09-30）——本文件分两层，别混读**：
@@ -84,6 +84,20 @@
 >   ⇒ 单次计数**不得**当判据，须 N 次重复跑给区间。② **入口拒绝矩阵有静默前置条件**
 >   （产物未配 LLM provider ⇒ 每个上传 400 ⇒ 矩阵零判别力，表面 13/34）⇒ 已加
 >   **前置 fail-fast** 并做正/负控双向验证。
+> - **R87 第二十七批（2026-10-10）**：承 R86 的分发/UX 评估，修两条**可被用户/维护者直接读到**的缺陷。
+>   ① **`MAX_CONCURRENT_JOBS` 3 → 5 的清扫只做了 1/5** —— R85 只扫了 `README.md` + 一个测试
+>   docstring，全库残留 **7 处「默认 3」**（含 `CLAUDE.md` 这个 agent 指令文件、`static/upload.js`
+>   这个入包源）；且默认值变化**蕴含**了「选 5 份 ⇒ 第 4、5 份必然吃 409」变成**假命题** ⇒ 改为
+>   与默认值无关的表述。另删 `core/procpool.py` 里已被实测否证的 ~2GB 分母。
+>   ② **settings 页「测试连接」窄屏不可达** —— 唯一入口在 `hidden md:flex` 的桌面侧栏里，
+>   <768px 完全无入口（`ui_e2e.py` 在**桌面视口**下点得到 ⇒ 对既有 e2e **不可见**）。已加
+>   `md:hidden` 移动入口 + 两入口共用同一实现 + 结果滚动到可视区；重构由机检保证**旧逻辑零丢失**。
+>   另修 `test_todo_freshness` 的**静默失效**（R86 标题误用 `R86` 而非 `Round 82` ⇒ 新鲜度检查
+>   只认 `Round NN`，戳落后 1 轮却没被发现），并新增**不变式 H** 钉住标题形态。
+>   护栏 `tests/unit/test_concurrency_default_claims.py`（9 条，变异 **7/7 CAUGHT**）+
+>   `tests/unit/test_settings_mobile_test_conn.py`（5 条，变异 **5/5 CAUGHT**）。
+>   另**复核 0-34**：R86 的延后判断**正确**（改 `electron/main.js` 会让 asar 一致性单测变红，见条目）。
+>   属**当前 backlog** ⇒ **就地记 §0 表（新增 0-35 / 0-36）**，**不进 §0.1 台账**。
 > - **§A 及以下 = Round 59（2026-09-23）的快照**，**已做过一轮核销，但未逐条复核**。
 >   核销过的条目带 **`—— **R66 已核销**（证据见 §0.1）`** 尾注；
 >   **其余仍标 `[ ]` 的，按"未复核"对待，不要当成当前事实。**
@@ -151,7 +165,16 @@
 | **0-32** | **硬崩溃恢复缺产物级验证**：`recover_stuck_jobs` 只有单测（lifespan 那几条还是 **mock 的日志分支**），**从未**在真产物上验证「跑到一半被 `taskkill /F` ⇒ 重启后收敛 + 审计 + 额度释放」 | **P2** | **✅ 已完成（R85 第二十五批）** | 崩溃后：① 卡死 job 必须收敛为**终态**；② 必须留 `stuck_recovery` **审计**；③ **额度必须释放**（否则用户被永久锁死） | **R85 第二十五批（2026-10-10）实测（产物级 `devlogs/_verify/r85m_crash_recovery.py`）**：**5/5 达成** —— 杀前 5/5 **非终态**且**已开工**（`ocr_running`）；`taskkill /T /F` 后进程确死；重启 ⇒ 5/5 收敛为 `error`；`stuck_recovery` 审计 **+5**；重启后新上传 **200** ⇒ **额度未泄漏**。 |
 | **0-33** | **上传页对 OCR 缺口只有信息性横幅、无前置门**：`main.py::index` 的 `needs_setup` 只看 LLM，`api/jobs/upload.py:159` 的 400 前置门也只判 LLM ⇒ OCR 未配置时上传被**接受**，用户白传大文件（实测样本 **138MB / 51 页**）后在 **Stage 1** 失败 | **P2** | **🟡 部分完成（R86 第二十六批：信息性横幅已加；后端前置门待做）** | 与 LLM 对称的前置门是**语义变更** ⇒ 必须重验产物级入口矩阵 `tests/e2e_rejections.py`（**34 例**）的 seed 与期望（seed 需含 OCR，否则「期望 200」用例会变红） | **R86 第二十六批（2026-10-10）**：已加 `core/pipeline/ocr_support.ocr_chain_configured()`（**单一来源**，复用 `remote_backend_configured` / `is_backend_available`）+ `main.py::index` 下发 `ocr_setup_needed` + `templates/upload.html` 第二横幅；护栏 `tests/integration/test_main_routes.py::TestIndexOcrGuidance`（**双向**）+ 变异 **4/4 CAUGHT**（`devlogs/_verify/r86d_mutation.py`）。**未做**：后端前置门（400 仍只对 LLM）⇒ 忽略横幅的用户仍会白传。 **R86 第二十六批（2026-10-10）定位完成（仍未实现）**：变更集 = ① `api/jobs/upload.py` 在**全部输入校验之后**加 OCR 门 —— **顺序是硬不变量**：放前面会让 15 条"期望 400 且断言具体文案"的用例（`dev_*` / `ext_exe` / `magic_bad` / `too_small` / `origin_foreign` / `pfx_dev_*`）改报 OCR 错误而**全红**；② `tests/e2e_rejections.py` 加与 `_llm_provider_configured` **对称**的 `_ocr_configured` 前置 + fail-closed；③ **必须**先 seed OCR 凭据到 `{APPDATA}/PBC/config.json`，否则 8 条 MATRIX「期望 200」+ 8 条 HOSTILE + 3 条 dedup = **19 条**会因 400 而全红（矩阵规模 **34** = MATRIX 23 + HOSTILE 8 + dedup 3，已用 AST 复核，非目测）；④ 为门本身补一条用例：需在运行中临时清空 OCR 配置再恢复（或退化为 TestClient 级）。⚠️ **本轮不实现**：产物级复验（需重建 + seed 凭据）在当前状态下**做不了**，而"改了语义却不复验"违反本项目纪律。 |
 
-| **0-34** | **`electron/main.js` 文件头注释的启动等待上限仍是旧值 30s**：第 13 行写 `poll /health until ready (up to 30s)`，而第 48 行 `READY_TIMEOUT_MS = 180_000`、报错文案也写 `within 180s` | P3 | **开放（R86 第二十六批登记）** | 注释与常量一致（或注释改为**引用常量名**、不再复述数值 —— 复述数值必然漂移） | **R86 第二十六批（2026-10-10）定位**：同一数值散在 3 处，2 处（代码 + 报错文案）已是 180s，注释残留 30s。**本轮刻意不改**：`electron/main.js` 是**入包源**（`D_ASAR`）⇒ 改它会让产物失效面再 +1 个文件，而用户侧收益为零（注释不面向用户）⇒ 与 `PORTABLE_README.txt` 的 180 秒纠偏**一并**在下次重建时处理。 |
+| **0-34** | **`electron/main.js` 文件头注释的启动等待上限仍是旧值 30s**：第 13 行写 `poll /health until ready (up to 30s)`，而第 48 行 `READY_TIMEOUT_MS = 180_000`、报错文案也写 `within 180s` | P3 | **开放（R86 登记；R87 复核并更正理由）** | 注释与常量一致（或注释改为**引用常量名**、不再复述数值 —— 复述数值必然漂移） | **R86 第二十六批（2026-10-10）定位**：同一数值散在 3 处，2 处（代码 + 报错文案）已是 180s，注释残留 30s。**本轮刻意不改**：`electron/main.js` 是**入包源**（`D_ASAR`）⇒ 改它会让产物失效面再 +1 个文件，而用户侧收益为零（注释不面向用户）⇒ 与 `PORTABLE_README.txt` 的 180 秒纠偏**一并**在下次重建时处理。 **R87 第二十七批（2026-10-10）复核：R86 的延后判断是对的，理由比它写的更硬 —— 仍未结**：
+本轮曾按「两份产物本就因同一 3 个文件失败（`devlogs/gate_report_20261010_144520.json`）⇒ 延长清单零边际成本」
+改掉第 13 行，**全量测试当场判红**：`tests/unit/test_bundle_manifest.py::TestAsarReader::test_real_asar_matches_source_for_electron_main`
+把 `app.asar` 里的 `electron/main.js` **逐字节**对比源码 ⇒ **改源码必然让它红**，直到 Electron 产物重建
+（实测 `1 failed, 4101 passed, 4 skipped`）。已**回退**该改动 ⇒ 本条**保持开放**。⚠️ 因此这条**只能**与
+Electron 产物重建**同批**做，不能提前。另记：`180s` 仍**复述在 3 处**（`electron/main.js` 的 L47 / L262 / L278，
+其中 L278 是**面向用户**的报错文案）—— 当前值与常量一致；**重建时**建议一并改为**引用常量名**，
+否则再调 `READY_TIMEOUT_MS` 时这 3 处会一起漂移。 |
+| **0-35** | **一次参数变更的「清扫」只做了 1/5**：R85 把 `MAX_CONCURRENT_JOBS` 默认 3 → 5，只扫了 `README.md` 与 `tests/unit/test_upload_quota_contract.py` 的 docstring；全库仍残留 **7 处「默认 3」**（`CLAUDE.md` ×2、`static/upload.js`、`core/procpool.py`、`api/jobs/listings.py`、3 个测试 docstring），且**蕴含**了「选 5 份 ⇒ 第 4、5 份必然吃 409」变成**假命题** | **P2** | **✅ 已完成（R87 第二十七批）** | 活文件集合内不得再出现与代码不一致的默认值；由默认值**派生**的序数/条数不得写进文档 | **R87 第二十七批（2026-10-10）**：10 处一次扫净（`devlogs/_verify/r87a_concurrency_sweep.py`）+ 2 处歧义形态改写为显式（`r87b_reword_claims.py`）；护栏 `tests/unit/test_concurrency_default_claims.py`（**9 条**，默认值从 `api/jobs/__init__.py` **重算**，含反空转与「`=N` 只留给覆盖示例」约定）；变异 `devlogs/_verify/r87c_mutation.py` ⇒ **7/7 CAUGHT**。⚠️ 改到**入包源** `static/upload.js` ⇒ 产物失效面 +1（重建时一并处理）。 |
+| **0-36** | **settings 页「测试连接」在窄屏完全不可达**：唯一入口 `#test-conn-btn` 在 `<nav class="settings-nav hidden md:flex …">` 内，窄屏侧栏整体 `hidden`，而 `.settings-nav-mobile` 只有 5 个 section 锚点 ⇒ <768px 用户**无法**检测 OCR/LLM 连通性 | **P2** | **✅ 已完成（R87 第二十七批）** | 功能性入口在**窄屏**也必须可达；「元素存在」≠「元素可达」（e2e 只在桌面视口跑 ⇒ 缺陷不可见） | **R87 第二十七批（2026-10-10）**：加 `md:hidden` 的 `#test-conn-btn-mobile`（`templates/settings.html`）+ 抽出具名 `runConnectionTests(btn, scrollToMessage)` 供两入口**共用**（`static/settings.js`）+ 移动入口触发后把结果滚动到可视区；重构由 `devlogs/_verify/r87e_refactor_lossless.py` 机检**旧逻辑零丢失**（64→64 行，集合差空）；护栏 `tests/unit/test_settings_mobile_test_conn.py`（**5 条**）；变异 `devlogs/_verify/r87f_mutation_mobile.py` ⇒ **5/5 CAUGHT**。⚠️ **未在真机窄屏做浏览器级复验**（本环境无 GUI）⇒ 只宣称「入口存在 + 共用同一实现 + 有窄屏可见性机检」，**不宣称「移动端已可用」**。 |
 
 > 用法：完成一条就把 `[ ]`/状态改掉并补证据列。**0-1 / 0-2 是用户动作，agent 不代做。**
 

@@ -109,6 +109,21 @@
           <a href="#kb" data-target="kb" class="settings-nav-link">知识库</a>
         </nav>
 
+        <!-- 移动端专用入口 —— 窄屏下侧栏（含"测试连接"）被 `md:hidden`
+             整体隐藏，此前**没有任何检测入口** ⇒ <768px 用户无法测试
+             OCR/LLM 连通性（R87 定位的 UI 缺陷）。
+             结果仍写入页面底部 #save-msg，触发后由 JS 滚动到可视区。 -->
+        <div class="md:hidden mb-6">
+          <button
+            type="button"
+            id="test-conn-btn-mobile"
+            class="btn-press focus-ring w-full inline-flex items-center justify-center gap-1.5 px-3 py-2 text-[13px] font-medium text-foreground border border-border rounded-md hover:bg-muted/40 transition-colors"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline></svg>
+            测试连接
+          </button>
+        </div>
+
         <!-- ═══════════════════════════════════════════════════
              Content Area — 4 Sections
              ═══════════════════════════════════════════════════ -->

@@ -5,7 +5,7 @@
 `templates/upload.html` 的 `<input type="file">` 没有 `multiple`，且
 `static/upload.js` 的 change / drop 处理器都只取 **`files[0]`**
 ⇒ 用户拖入 3 份 PDF，**只有 1 份被处理，另外 2 份无任何提示地消失**
-（静默数据丢失 —— 用户以为传上去了）。后端 `MAX_CONCURRENT_JOBS=3` 的
+（静默数据丢失 —— 用户以为传上去了）。后端 `MAX_CONCURRENT_JOBS`（默认 5）的
 并发能力因此对用户完全不可见。
 
 **为什么"只加 `multiple`"是伪修复**（本文件的核心断言）

@@ -262,7 +262,7 @@ class TestPoolConcurrencyIsCalibrated:
             "同步 core/procpool.py 顶部的实测表与本断言"
         )
         # 上界有据：每 worker ≈60MB 且独立加载 fitz；worker 数超过并发 job 上限
-        # （MAX_CONCURRENT_JOBS 默认 3）只是白占内存。
+        # （MAX_CONCURRENT_JOBS 默认 5）只是白占内存。
         assert 1 <= procpool._POOL_MAX_WORKERS <= 4
 
     def test_pool_size_comes_from_the_single_constant(self):

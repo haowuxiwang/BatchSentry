@@ -162,7 +162,7 @@ async def stream_all_live_jobs(request: Request = None):
     """SSE 聚合端点：单连接推送所有活跃任务的进度快照。
 
     解决 HTTP/1.1 每域 6 条 EventSource 连接上限：upload 页多任务并行
-    时不再每个任务各开一条连接（MAX_CONCURRENT_JOBS=3 时多标签页
+    时不再每个任务各开一条连接（MAX_CONCURRENT_JOBS 默认 5 时多标签页
     很容易撞上限），而是聚合为一条流，事件体为
     {"jobs": [{job 快照}, ...]}，前端按 job_id 分发。
     """

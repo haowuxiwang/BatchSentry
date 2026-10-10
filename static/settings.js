@@ -253,84 +253,107 @@
   }
 
   // ============================================================
-  // 底部"测试连接"按钮 — 并行测试 OCR + 所有 LLM provider
+  // "测试连接" — 并行测试 OCR + 所有 LLM provider
   // (不再只测 active；逐个显示结果，避免"配了 SiliconFlow 却报
   //  deepseek 未配置 Key"的死亡陷阱)
+  //
+  // ⚠️ 两个入口**共用同一实现**：桌面侧栏 `#test-conn-btn` 与移动端
+  // `#test-conn-btn-mobile`。此前只有侧栏入口，而侧栏所在 nav 是
+  // `hidden md:flex` ⇒ <768px 用户**完全无法**检测连通性（R87 定位的
+  // UI 缺陷）。移动入口额外把结果滚动到可视区 —— 结果落在页面底部，
+  // 不滚等于"点了没反应"。
   // ============================================================
-  document
-    .getElementById("test-conn-btn")
-    ?.addEventListener("click", async (e) => {
-      const btn = e.currentTarget;
-      const originalText = btn.textContent;
-      btn.disabled = true;
-      btn.textContent = "检测中…";
-      const providers = S.state.current.llm.providers || [];
-      showMsg(`正在检测 OCR + ${providers.length} 个 LLM 提供商…`, "info");
-      try {
-        // 并行: downstream (用于 OCR) + 每个 provider 的 test_provider
-        // P2 修复：health 探测失败（网络异常/后端 500）不应拖垮整个结果 —
-        // 单项失败降级为 ✗ 条目，已完成的其他 provider 结果保留。
-        const [healthData, ...providerTests] = await Promise.all([
-          fetch("/api/health/downstream")
-            .then((r) => r.json())
-            .catch((e) => ({
-              ok: false,
-              ocr: { ok: false, reason: `探测请求失败: ${e.message}` },
-            })),
-          ...providers.map(async (p) => {
-            const r = await fetch("/api/settings/test_provider", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ provider: p.name }),
-            });
-            const data = await r.json().catch(() => ({}));
-            return { name: p.name, ok: r.ok && data.ok, data };
-          }),
-        ]);
-        log("health probe result", healthData);
-        log("provider test results", providerTests);
+  async function runConnectionTests(btn, scrollToMessage) {
+    const originalText = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = "检测中…";
+    const providers = S.state.current.llm.providers || [];
+    showMsg(`正在检测 OCR + ${providers.length} 个 LLM 提供商…`, "info");
+    try {
+      // 并行: downstream (用于 OCR) + 每个 provider 的 test_provider
+      // P2 修复：health 探测失败（网络异常/后端 500）不应拖垮整个结果 —
+      // 单项失败降级为 ✗ 条目，已完成的其他 provider 结果保留。
+      const [healthData, ...providerTests] = await Promise.all([
+        fetch("/api/health/downstream")
+          .then((r) => r.json())
+          .catch((e) => ({
+            ok: false,
+            ocr: { ok: false, reason: `探测请求失败: ${e.message}` },
+          })),
+        ...providers.map(async (p) => {
+          const r = await fetch("/api/settings/test_provider", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ provider: p.name }),
+          });
+          const data = await r.json().catch(() => ({}));
+          return { name: p.name, ok: r.ok && data.ok, data };
+        }),
+      ]);
+      log("health probe result", healthData);
+      log("provider test results", providerTests);
 
-        const parts = [];
-        // OCR
-        const ocr = healthData.ocr || {};
-        const ocrLat = ocr.latency_ms ? ` ${ocr.latency_ms}ms` : "";
-        if (ocr.ok) {
-          parts.push(`✓ OCR(${ocrDisplay(healthData.ocr_backend)})${ocrLat}`);
+      const parts = [];
+      // OCR
+      const ocr = healthData.ocr || {};
+      const ocrLat = ocr.latency_ms ? ` ${ocr.latency_ms}ms` : "";
+      if (ocr.ok) {
+        parts.push(`✓ OCR(${ocrDisplay(healthData.ocr_backend)})${ocrLat}`);
+      } else {
+        parts.push(`✗ OCR(${ocrDisplay(healthData.ocr_backend)}): ${ocr.reason || "失败"}`);
+      }
+      // LLM providers: 已配置/连通的排前
+      const sorted = [...providerTests].sort((a, b) => {
+        const ac = a.ok ? 0 : 1;
+        const bc = b.ok ? 0 : 1;
+        return ac - bc;
+      });
+      let llmAnyOk = false;
+      for (const { name, ok, data } of sorted) {
+        const tag = name === S.state.activeProvider ? "·当前" : "";
+        if (ok) {
+          llmAnyOk = true;
+          const lat = data.latency_ms ? ` ${data.latency_ms}ms` : "";
+          parts.push(`✓ ${display(name)}${lat}${tag}`);
         } else {
-          parts.push(`✗ OCR(${ocrDisplay(healthData.ocr_backend)}): ${ocr.reason || "失败"}`);
-        }
-        // LLM providers: 已配置/连通的排前
-        const sorted = [...providerTests].sort((a, b) => {
-          const ac = a.ok ? 0 : 1;
-          const bc = b.ok ? 0 : 1;
-          return ac - bc;
-        });
-        let llmAnyOk = false;
-        for (const { name, ok, data } of sorted) {
-          const tag = name === S.state.activeProvider ? "·当前" : "";
-          if (ok) {
-            llmAnyOk = true;
-            const lat = data.latency_ms ? ` ${data.latency_ms}ms` : "";
-            parts.push(`✓ ${display(name)}${lat}${tag}`);
+          const reason = data.reason || data.detail || "失败";
+          if (reason.includes("未配置") || reason.includes("密钥")) {
+            parts.push(`○ ${display(name)}：未配置${tag}`);
           } else {
-            const reason = data.reason || data.detail || "失败";
-            if (reason.includes("未配置") || reason.includes("密钥")) {
-              parts.push(`○ ${display(name)}：未配置${tag}`);
-            } else {
-              parts.push(`✗ ${display(name)}:${reason}${tag}`);
-            }
+            parts.push(`✗ ${display(name)}:${reason}${tag}`);
           }
         }
-        const allOk = ocr.ok && llmAnyOk;
-        showMsg(parts.join(" | "), allOk ? "info" : "err");
-      } catch (err) {
-        showMsg(`✗ 检测失败: ${err.message}`, "err");
-        log.err("health probe failed", err);
-      } finally {
-        btn.disabled = false;
-        btn.textContent = originalText;
       }
-    });
+      const allOk = ocr.ok && llmAnyOk;
+      showMsg(parts.join(" | "), allOk ? "info" : "err");
+    } catch (err) {
+      showMsg(`✗ 检测失败: ${err.message}`, "err");
+      log.err("health probe failed", err);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = originalText;
+      // 移动端：结果写在页面底部 #save-msg，而触发按钮在页面顶部 ⇒
+      // 不滚动用户看不到任何反馈（"点了没反应"）。仅移动入口滚动。
+      if (scrollToMessage) {
+        document
+          .getElementById("save-msg")
+          ?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+      }
+    }
+  }
+
+  // 桌面侧栏入口（结果留在原处 —— 桌面视口内可见，不打断阅读）
+  document
+    .getElementById("test-conn-btn")
+    ?.addEventListener("click", (e) =>
+      runConnectionTests(e.currentTarget, false),
+    );
+  // 移动端入口（见 templates/settings.html 的 md:hidden 按钮）
+  document
+    .getElementById("test-conn-btn-mobile")
+    ?.addEventListener("click", (e) =>
+      runConnectionTests(e.currentTarget, true),
+    );
 
   Object.assign(S, { showMsg });
 

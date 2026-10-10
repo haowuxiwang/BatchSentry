@@ -6,7 +6,76 @@
 ---
 
 ## [Unreleased]
-### 分发/UX 评估 + 首启体验纠偏（R86 第二十六批，2026-10-10）
+### 一次参数变更的清扫只做了 1/5 + settings「测试连接」窄屏不可达（Round 83 第二十七批，2026-10-10）
+
+> 承 R86（Round 82）的分发/UX 评估。本轮按 **先定位 → 再解决 → 后测试** 推进；
+> 两条缺陷都落在**用户/维护者能直接读到**的位置，且都用**机检 + 变异**锁住。
+
+**修复 1 · `MAX_CONCURRENT_JOBS` 3 → 5 的清扫只做了 1/5**
+R85（Round 81）把默认值从 3 抬到 5，但只扫了 `README.md` 与
+`tests/unit/test_upload_quota_contract.py` 的 docstring。全库仍残留 **7 处「默认 3」**，
+其中两处代价最高：
+
+  · `CLAUDE.md`（**agent 指令文件**，每次会话注入）**2 处** —— 写错的默认值会误导后续
+    agent 对并发上限的判断，与 R86 修的 OCR failover 阈值**同一类**缺陷；
+  · `static/upload.js`（**入包源**，随包分发）—— 注释里的错值会被下游当成「产品事实」。
+
+另有 `core/procpool.py`、`api/jobs/listings.py` 及 3 个测试 docstring。⇒ **10 处**一次扫净
+（`devlogs/_verify/r87a_concurrency_sweep.py`）。
+
+**修复 2 · 同一次改动**蕴含**了两处叙述变成假命题**：默认 5 时空位够，
+「用户选 5 份 ⇒ **第 4、5 份必然吃 409**」不再成立（`static/upload.js` +
+`tests/unit/test_upload_quota_js.py`）。⇒ 改为**与默认值无关**的表述（「活跃数已达额度时，
+排在空位之外的几份必然吃 409」）—— **由默认值派生的序数/条数本身就是副本**，
+写完即随下次调参过期。
+
+**修复 3 · `core/procpool.py` 的 ~2GB 归因（已被实测否证）仍在当分母用**
+注释写 `+60MB 相对「3×200MB PDF 最坏 ~2GB」约 3%`，而该 ~2GB 归因早在
+`docs/ADVERSARIAL_REVIEW_2026-09-29.md` §内存维度被实测否证（单 job ≈ 102MB）。
+⇒ 删去该百分比，改为标注**已否证** + 指向实测出处（**不**另编一个新百分比）。
+
+**修复 4 · settings 页「测试连接」在窄屏**完全不可达**（UI 缺陷）**
+唯一入口 `#test-conn-btn` 位于 `<nav class="settings-nav hidden md:flex …">`（**桌面侧栏专属**）；
+窄屏下侧栏整体 `hidden`，而 `.settings-nav-mobile` 只有 5 个 section 锚点、**没有任何检测入口**
+⇒ <768px 用户无法测试 OCR/LLM 连通性。⚠️ 该缺陷对既有 e2e **不可见** —— `ui_e2e.py` 是在
+**桌面视口**下点 `#test-conn-btn` 的：「元素存在」≠「元素可达」。
+修法：① `templates/settings.html` 加 `md:hidden` 的 `#test-conn-btn-mobile`；
+② `static/settings.js` 把内联 handler 提为具名 `runConnectionTests(btn, scrollToMessage)`，
+两入口**共用同一实现**；③ 移动入口触发后把结果（页面底部 `#save-msg`）**滚动到可视区**。
+⚠️ 重构**不重打逻辑**：新函数体由旧 handler **逐行 dedent 2 格生成**，并由
+`devlogs/_verify/r87e_refactor_lossless.py` 机检**旧逻辑零丢失**（64 行 → 64 行，集合差为空）。
+
+**护栏 + 变异**
+
+  · `tests/unit/test_concurrency_default_claims.py`（**9 条**）：默认值从
+    `api/jobs/__init__.py` **重算**（不写死字面量）；活文件集合内不得出现与代码不一致的
+    默认值；README 表形态 / PORTABLE_README **跨行**形态各自单独钉住；反空转 +
+    「已否证的序数叙述不得回流」；并立下约定 **`=N` 只留给覆盖示例**（该歧义是首跑在
+    `PORTABLE_README.txt` 上**假红**后定位的）。
+    变异 `devlogs/_verify/r87c_mutation.py` ⇒ **基线绿 + 7/7 CAUGHT**。
+  · `tests/unit/test_settings_mobile_test_conn.py`（**5 条**）：声明 == 接线（双向）；
+    入口**不止一个**；至少一个落在 `md:hidden` 内；桌面入口确实在 `hidden md:flex` 内
+    （记录**为什么**需要第二个）；检测逻辑**只有一份**。
+    变异 `devlogs/_verify/r87f_mutation_mobile.py` ⇒ **基线绿 + 5/5 CAUGHT**。
+  · `tests/unit/test_todo_freshness.py` 新增**不变式 H**：CHANGELOG 的 `第N批` 标题必须用
+    `Round <N>` 形态。**R86 的标题误用了 `R86`**（另一套编号体系），而新鲜度检查只认
+    `Round NN` ⇒ **静默失效**（实际最新已是 Round 82，戳却仍是 81）。已改正标题形态，
+    本轮把戳推进到 Round 83。
+
+**0-34 复核：R86 的延后判断**正确**，且本轮找到了它的**真实机制**（仍未结）**
+R86 以「入包源 +1」为由把 `electron/main.js:13` 的 `30s` 注释延后到重建时处理。
+本轮曾按「两份产物本就失败 ⇒ 延长清单零边际成本」改掉它，**全量测试当场判红**：
+`tests/unit/test_bundle_manifest.py::TestAsarReader::test_real_asar_matches_source_for_electron_main`
+把 `app.asar` 里的 `electron/main.js` **逐字节**对比源码 ⇒ **改源码必然让它红**，直到
+Electron 产物重建（实测 `1 failed, 4101 passed, 4 skipped`）。⇒ **R86 的延后是对的，
+理由比它写的更硬**（不是"清单 +1"，而是"有一条单测专门盯这个文件"）。已**回退**该改动；
+0-34 **保持开放**，条目里补上这条实测证据。
+
+**⚠️ 本轮再次改动入包源**（`static/upload.js` / `templates/settings.html` /
+`static/settings.js` / `electron/main.js`）⇒ 现有产物**必然过期**，`artifact_freshness`
+的失效面由 3 个文件扩到 **7 个**；分发前**必须重建**（需宿主退出）。
+
+### 分发/UX 评估 + 首启体验纠偏（Round 82 第二十六批，2026-10-10）
 
 > 记录 → `docs/DISTRIBUTION_UX_ASSESSMENT_2026-10-10.md`（新增）。
 > 本轮回答用户五问：能否分发/作基线、距分发缺口、进度总结、前端设置与首启体验、UX 改善。

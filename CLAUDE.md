@@ -231,7 +231,7 @@ A leftover `.env` is **not** required, and should be deleted once migrated
 | `MINERU_TOKEN` | MinerU OCR backend (optional, set `OCR_BACKEND=mineru`) |
 | `DATABASE_PATH` | SQLite file (default: `data/pharma.db`) |
 | `OUTPUT_DIR` | PDF storage + job artifacts (default: `output/`) |
-| `MAX_CONCURRENT_JOBS` | Max simultaneous active pipelines (default 3) |
+| `MAX_CONCURRENT_JOBS` | Max simultaneous active pipelines (default 5) |
 
 **Adding a new LLM provider** (no code changes needed):
 1. Add the provider name to `LLM_PROVIDERS` (e.g. `LLM_PROVIDERS=glm,kimi`)
@@ -344,7 +344,7 @@ API routes emit business logs (upload/cancel/retry/archive/delete/finding update
 - **PDF preview**: pages are rendered by PyMuPDF to JPEG (quality 82) via `GET /api/jobs/{id}/page/{n}` and shown as `<img>` (zoom capped at 2000px, cached 6 docs / 30min TTL, render in thread pool). `content_disposition_type="inline"` for the raw PDF endpoint.
 - **XSS**: `render_page_links` filter escapes HTML before inserting links; `review.js` `renderFindings` escapes all LLM-sourced text via `esc()` helper; `upload.js` `setStatus` uses `textContent` not `innerHTML`.
 - **Path traversal**: `delete_job` validates `job_dir` is inside `output_root` before `rmtree`.
-- **Concurrency**: `MAX_CONCURRENT_JOBS` env var (default 3) caps active pipelines to prevent memory exhaustion.
+- **Concurrency**: `MAX_CONCURRENT_JOBS` env var (default 5) caps active pipelines to prevent memory exhaustion.
 - **Downstream probes**: `GET /api/health/downstream` checks OCR + LLM reachability; Settings page has "测试连接" button.
 
 ### Secret Rotation Procedure
