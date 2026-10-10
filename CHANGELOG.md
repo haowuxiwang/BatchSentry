@@ -65,8 +65,31 @@ OpenAI / 自定义补进「可添加」列表。
 **基线绿 + 6/6 CAUGHT**（含既有并发数护栏的回归）。
 `PORTABLE_README.txt` 与 `tests/` 均**不入包** ⇒ **不新增**产物失效面。
 
-**测试**：全量 pytest **4080 passed / 0 failed**（4 skipped；较本批首测 4074 **+6** =
-新增护栏用例）。门禁 **10/11**（`devlogs/gate_report_20261010_142528.json`）：唯一红 =
+**修复 4 · DEPLOYMENT.md 事实性断言复审（5 处）**：该文件不入包，但其中两条会被当成
+事实引用 —— **数据保留**与**安全描述**。①「压缩后的样式（~14KB）」而 `static/app.css`
+= **20,016 字节**（顺带实测：重跑 `npm run build:css` 后 sha256 **不变** ⇒ CSS 不过期）；
+②「上传文件…（**OCR 完成后自动清理**）」**与实现相反** —— `core/` 内没有任何删除已上传
+PDF 的逻辑，删除只发生在 `api/jobs/actions.py::delete_job`，且**必须保留**（复核页逐页
+渲染依赖它）⇒ 这是**合规相关**的错误陈述；③「有 4 个日志文件」而实为 3 个 + 控制台；
+④ `/health` 示例硬编码 `"version":"1.0.0"` ⇒ 改为引用 `main.APP_VERSION`；
+⑤ 上传限额只写 200MB、漏页数上限。
+护栏 `tests/unit/test_deployment_doc_claims.py`（5 条）：日志轮转表逐文件 ==
+`logging_config.py`（解析 `RotatingFileHandler` 重算）；app.css 体积声明与实物同量级
+（±30%）；保留策略如实 + 正向对照（`delete_job` 的 `rmtree` 真实存在）+ 禁回流旧说法；
+`core/` 不得出现"删掉上传 PDF"的逻辑（同行含 `pdf_path` + 删除调用）；`# →` 示例输出
+不得硬编码版本号。变异 `devlogs/_verify/r86v_deployment_mutation.py`：**基线绿 +
+5/5 CAUGHT + 负控 1/1 未误伤**。
+
+**新踩坑（已记入 `docs/PROJECT_PITFALLS.md` §六十）**：`git checkout -- <入包源>` 会按
+`core.autocrlf=true` 把 LF **改写成 CRLF** ⇒ 清单（**原始字节** sha256）失配 ⇒
+`artifact_freshness` 多报一个"未重建"的文件，而 `git diff` / `git status` **看不到**这次
+内容变化（被规范化掩盖）。本轮实测：变异 harness 在 `core/mineru_client.py` 留下锚点后
+用 `git checkout` 还原，门禁随即把该文件列为第 **4** 个失配源；按 `git show HEAD:<path>`
+的**原始字节**写回（纯 LF、57,331 B）并复跑门禁（`--skip-tests`）后回到 **3** 项。
+⇒ 还原入包源**不要**用 `git checkout`；且 harness 的还原基准必须在改动**之前**快照。
+
+**测试**：全量 pytest **4085 passed / 0 failed**（4 skipped；较本批首测 4074 **+11** =
+新增护栏用例）。门禁 **10/11**（`devlogs/gate_report_20261010_144342.json`）：唯一红 =
 `artifact_freshness`，**指名**本轮改动的 3 个**入包源**（`core/pipeline/ocr_support.py` /
 `main.py` / `templates/upload.html`）⇒ **重建即转绿**；其余 10 项（worktree_clean /
 1 份完整产物 / coverage **95.09%** / 依赖 **0** 公告 / Electron 43.7.4 在支持线 …）全绿。

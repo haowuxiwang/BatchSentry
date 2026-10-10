@@ -2676,3 +2676,37 @@ completeness（20 个 job）；`scripts/eval_noise_reduction.py` 在其中一个
 
 **教训**：**先想清"这个判据在操作**之后**还成立吗"。** 替换 / 插入 / 删除三类改写的
 幂等判据**形态不同**：替换可用"新在旧不在"，插入**不行**（旧锚点是新文本的前缀）。
+
+## 六十、`git checkout` 会改写入包源的 EOL ⇒ 清单失配（**且 git 看不见**）（Round 82 第二十六批，2026-10-10 实测）
+
+**现象**：变异 harness 在 `core/mineru_client.py`（**入包源**）末尾留下一行锚点，用
+`git checkout -- core/mineru_client.py` 还原后，`git diff` 与 `git status` 都显示**干净**；
+但门禁 `artifact_freshness` 随即把该文件列为第 **4** 个"源码改动后未重建"的源
+（此前一直是 3 个）。
+
+**根因**：本仓库 `core.autocrlf=true`、**无 `.gitattributes`**，而该文件的工作树形态是
+**纯 LF**（57,331 B）—— 与 autocrlf"检出转 CRLF"的预期相反（它是被工具直接写入的，
+git 从未重新检出过）。`git checkout` 按 autocrlf 把它写成 **CRLF**（58,632 B）。清单
+（`scripts/bundle_manifest.py::sha256_file`）校验的是**原始字节**，故失配；而 git 的
+diff/status 会做换行规范化 ⇒ **完全看不到**这次内容变化。
+另：`git status` 还一度因 stat 缓存过期显示 ` M`，`git update-index --refresh` 后才归零
+—— 即"git 说干净"本身也可能只是缓存没刷新，不能当唯一证据。
+
+**修法**：按 git 对象里的**原始字节**写回，不要用 `git checkout`：
+
+```python
+blob = subprocess.run(["git", "show", "HEAD:core/mineru_client.py"],
+                      capture_output=True).stdout   # 纯 LF、57,331 B
+io.open("core/mineru_client.py", "wb").write(blob)
+```
+
+本轮写回后复跑门禁（`--skip-tests`），失配清单回到 **3** 项 ⇒ 归因确认。
+
+**教训**：
+
+1. **入包源的"还原"不等于 `git checkout`** —— 清单钉的是**字节**，git 钉的是**规范化后的
+   内容**。两者只在"工作树 EOL == autocrlf 预期"时才等价。
+2. **变异 / 改写 harness 的还原基准必须在任何改动之前快照**，并在收尾做**逐字节**自校验
+   （`read_bytes() == 快照`）—— 否则会在入包源里留下"git 看不见、门禁看得见"的残留。
+3. **重建前不要对入包源跑 `git checkout` / `git stash` / `git pull`**：会让门禁凭空多报
+   失配文件，极易被误读成"我的改动把它弄坏了"。
