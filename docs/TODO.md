@@ -1,6 +1,6 @@
 # TODO —— 活的待办清单
 
-> **复核戳：Round 84（2026-10-10，第二十八批）** ← `tests/unit/test_todo_freshness.py` 机检读这一行；
+> **复核戳：Round 85（2026-10-10，第二十九批）** ← `tests/unit/test_todo_freshness.py` 机检读这一行；
 > 该戳**不得落后于 `CHANGELOG.md` 的最新 Round**。
 >
 > **状态（R66 复核，2026-09-30）——本文件分两层，别混读**：
@@ -106,6 +106,13 @@
 >   护栏 3+1 条（含端到端 **6 个失配源**的反向用例 —— 旧 `[:5]` 会吞掉第 6 个起）+ 变异
 >   `devlogs/_verify/r88a_mutation_underreport.py` ⇒ **3/3 CAUGHT**。只改 `scripts/**`+`tests/**`
 >   （**均不入包**）⇒ **不扩大**失效面。属当前 backlog ⇒ 就地记 §0 表（新增 **0-37**）。
+> - **R89 第二十九批（2026-10-10）**：**安全维度扫描 + 命令执行面静态护栏**。应用包内
+>   `shell=True` / `os.system` / `os.popen` / 裸 `eval` / `exec` **一处都没有**；3 处 f-string SQL
+>   均非注入面（int 常量 + 模块内字面量元组）；文件服务端点的路径穿越防御**一致**；
+>   `LocalGuardMiddleware` 覆盖每个 http 请求 ⇒ `review.py` 的 POST 无需逐端点守卫。
+>   顺带实测：**3 个应用源带 BOM** ⇒ AST 工具必须 `utf-8-sig`。已加护栏
+>   `tests/unit/test_no_dangerous_exec.py`（含反空转）+ 变异 **3 CAUGHT + 1 负控 OK**。
+>   ⚠️ 只拦语法可见调用 ⇒ **不是安全证明**（见 `docs/PROJECT_PITFALLS.md` §六十五）。
 > - **§A 及以下 = Round 59（2026-09-23）的快照**，**已做过一轮核销，但未逐条复核**。
 >   核销过的条目带 **`—— **R66 已核销**（证据见 §0.1）`** 尾注；
 >   **其余仍标 `[ ]` 的，按"未复核"对待，不要当成当前事实。**

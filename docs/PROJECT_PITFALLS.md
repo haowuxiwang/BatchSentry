@@ -2858,3 +2858,41 @@ bundle），都会产生这类**字节级一致性**约束。改源码前先问�
 
 > **推论**：发现一个「形态类」缺陷后，**先全库 `grep` 同形态**再动手 —— 本仓同一形态
 > 一次就找出 6 处（同 §五十七 的「清扫只做 1/5」教训：**改一处 ≠ 改完**）。
+
+## 六十五、安全维度：**先扫、再钉** —— 命令执行面（Round 85 第二十九批，2026-10-10 实测）
+
+对抗性审查走到"安全性"时，**先扫已知高危形态**，扫完**用静态护栏钉住**，别只停在"扫过了"。
+
+### 扫描结果（应用包：`api/ core/ llm/ db/ models/ main.py server.py config.py logging_config.py`）
+
+| 形态 | 结果 |
+|---|---|
+| `shell=True` / `os.system` / `os.popen` / 裸 `eval` / `exec` | ✅ **一处都没有** |
+| f-string SQL | 3 处（`db/client.py`）**均非注入面**：`SCHEMA_VERSION` 是 int 常量、`col_def` 来自模块内字面量元组；PRAGMA 那处已写明"cannot be parameterized"的理由 |
+| 文件服务端点的路径穿越防御 | ✅ **一致**：`serve_pdf`（`main.py`）与 `page_image`（`api/jobs`）都是「本机守卫 → DB 查行 → `relative_to(output_dir)` 包含性检查」；`actions.py` ×2 同款 |
+| 跨站守卫 | ✅ `LocalGuardMiddleware` 对**每个** http 请求判 `is_local_request` ⇒ `review.py` 的 POST **不写逐端点守卫不是缺陷**（中间件已覆盖）；`actions.py` 那些是**纵深防御** |
+
+> **判据说明**：上表是 **grep/AST 级**证据（`grep -rnE` 精确模式 + 逐处读源码确认输入来源）。
+> **不是**安全证明 —— 见文末边界。
+
+### ⚠️ 顺带实测：应用源里有 **3 个文件带 BOM**
+
+`api/jobs/actions.py`、`api/settings/probe.py`、`api/settings/provider.py`。
+
+* Python **tokenizer 容忍** BOM ⇒ 应用运行**不受影响**；
+* 但 `ast.parse(open(p, encoding="utf-8").read())` 会对**残留的** U+FEFF 报
+  `SyntaxError: invalid non-printable character U+FEFF` ⇒ **任何 AST 工具必须用
+  `encoding="utf-8-sig"`**（本轮写护栏时即踩到）。
+
+### 钉住：`tests/unit/test_no_dangerous_exec.py`
+
+AST 扫描应用包，禁 `os.system` / `os.popen` / 裸 `eval` / `exec`，以及 `subprocess.*(shell=True)`；
+**刻意只扫应用包**（`scripts/**` 合法地调 git/pytest/PyInstaller，不随包分发、不碰用户输入）。
+含**反空转**：扫描面塌缩到 < 30 个文件即**红**（否则"什么都没扫到"会被读成"很干净" —— Trap 87）。
+变异 `devlogs/_verify/r88f_mutation_exec_guard.py` ⇒ **3 CAUGHT + 1 负控 OK**
+（`shell=False` 的合法 subprocess **不得**误伤）。
+
+### 边界（如实声明，**不得**读成"已安全"）
+
+本护栏只拦**语法上可见**的调用。`getattr(os, "system")(...)`、经第三方库的间接执行、
+或"数据流可达性"层面的注入都绕得过去 —— 它是**回归网**，不是安全证明。

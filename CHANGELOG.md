@@ -6,6 +6,36 @@
 ---
 
 ## [Unreleased]
+### 安全维度扫描 + 命令执行面静态护栏（Round 85 第二十九批，2026-10-10）
+
+> 承 R88。对抗性审查走到"安全性"：**先扫已知高危形态，再把它钉住**，不停在"扫过了"。
+
+**扫描（应用包 `api/ core/ llm/ db/ models/` + 4 个根模块）**
+
+  · `shell=True` / `os.system` / `os.popen` / 裸 `eval` / `exec` —— **一处都没有**；
+  · 3 处 f-string SQL（`db/client.py`）**均非注入面**：`SCHEMA_VERSION` 是 int 常量、
+    `col_def` 来自模块内字面量元组；PRAGMA 那处已写明 "cannot be parameterized" 的理由；
+  · 文件服务端点的路径穿越防御**一致**：`serve_pdf`（`main.py`）与 `page_image`（`api/jobs`）
+    都是「本机守卫 → DB 查行 → `relative_to(output_dir)` 包含性检查」；`actions.py` ×2 同款；
+  · `LocalGuardMiddleware` 对**每个** http 请求判 `is_local_request` ⇒ `review.py` 的 POST
+    不写逐端点守卫**不是缺陷**（中间件已覆盖），`actions.py` 那些是**纵深防御**。
+
+**顺带实测**：应用源有 **3 个文件带 BOM**（`api/jobs/actions.py`、`api/settings/probe.py`、
+`api/settings/provider.py`）—— Python tokenizer 容忍（应用不受影响），但
+`ast.parse(open(p, encoding="utf-8").read())` 会对残留 U+FEFF 报 SyntaxError
+⇒ **AST 工具必须 `encoding="utf-8-sig"`**（写本条护栏时即踩到）。
+
+**钉住**：`tests/unit/test_no_dangerous_exec.py` —— AST 扫描应用包，禁上述形态；
+含**反空转**（扫描面塌缩到 <30 个文件即红，否则"什么都没扫到"会被读成"很干净"）；
+**刻意只扫应用包**（`scripts/**` 合法地调 git/pytest/PyInstaller）。
+变异 `devlogs/_verify/r88f_mutation_exec_guard.py` ⇒ **3 CAUGHT + 1 负控 OK**
+（`shell=False` 的合法 subprocess 不得误伤）。
+
+⚠️ **边界（不得读成"已安全"）**：本护栏只拦**语法上可见**的调用 —— `getattr(os, "system")(...)`、
+经第三方库的间接执行、数据流可达性层面的注入都绕得过去。它是**回归网**，不是安全证明。
+
+**门禁**：本轮只加 1 个测试文件 + 文档（**均不入包**）⇒ 失效面不变。
+
 ### 诊断报文不得低报：`artifact_freshness` 的路径清单截断改为**显式声明**（Round 84 第二十八批，2026-10-10）
 
 > 承 R87（Round 83）。本轮修的是**上一轮我自己踩到**的缺陷：门禁报文说"**8 个**源文件与
