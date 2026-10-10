@@ -36,6 +36,8 @@
 
 **全量门禁（head `f1c8879`）**：**10/11 PASS**，`tests_coverage` = **4106 passed, 0 failed, coverage 95.09%**（较 R87 的 4102 **+4** = 本轮新增护栏 3 条 + 门禁护栏 1 条）；唯一红仍是 `artifact_freshness`（同 8 个入包源）。报告 `devlogs/gate_report_20261010_154313.json`。
 
+**清扫（同轮）**：按同一形态把 `scripts/**` 全扫一遍，又找出 **6 处**同类（`release_gate.py` 4+1、`golden_gate.py` 2、`seed_kb.py` 2、`clean_dist.py` 1）⇒ 抽出**唯一实现** `scripts/report_fmt.py::fmt_list`（`sep=None` 渲染列表字面量 / `sep="; "` 保留调用方原连接风格），各脚本按**文件位置**互导（同 `release_gate` 既有做法）。护栏 `tests/unit/test_report_fmt.py`（边界 + 反空转 + **只有一处实现**的静态扫描）+ `tests/unit/test_release_gate.py::TestOrchestration::test_check_worktree_clean_declares_truncated_remainder`；变异 `devlogs/_verify/r88d_mutation_shared_fmt.py` ⇒ **3/3 CAUGHT**。（既有好做法：`check_leaked_keys.py` 早已写 `等 N 个 blob`、`compare_ocr_engines.py` 写 `另 N 页` —— 好做法早就在仓库里，只是没被推广。）
+
 ### 一次参数变更的清扫只做了 1/5 + settings「测试连接」窄屏不可达（Round 83 第二十七批，2026-10-10）
 
 > 承 R86（Round 82）的分发/UX 评估。本轮按 **先定位 → 再解决 → 后测试** 推进；

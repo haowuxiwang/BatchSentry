@@ -2834,3 +2834,27 @@ bundle），都会产生这类**字节级一致性**约束。改源码前先问�
 2. **别让"数量"和"清单"在同一句里打架** —— 打架时读者会挑更具体的那个信。
 3. 反向用例要**构造 > K 项**（本仓 8 项 > 5）才测得出截断；只用 1~2 项的用例
    **永远发现不了**低报（这也是它长期没被发现的原因）。
+
+### 清扫结果：全库还有 **6 处**同类（同轮一次扫净）
+
+按上面第 1 问把 `scripts/**` 全扫一遍，又找到 **6 处** `f"{len(x)} …：x[:K]}"`：
+
+| 文件 | 处 | 形态 |
+|---|---|---|
+| `release_gate.py` | 4 | `worktree_clean` / `no_build_outputs` / `dependency_vulns` / `tests_coverage`（`real_failures[:5]`） |
+| `release_gate.py` | 1 | WARN 第三态的 `" ｜ ".join(blocked[:2])`（表头报了 `len(blocked)`） |
+| `golden_gate.py` | 2 | `gate-1` 的 `missing_diag[:10]`、`gate-2` 的 `incomplete[:5]` |
+| `seed_kb.py` | 2 | `bad_src[:3]`、`empty[:5]` |
+| `clean_dist.py` | 1 | 表头报 `len(lk)`、循环只印 `lk[:10]` |
+
+**反例（既有好做法）**：`check_leaked_keys.py` 早就写了 `等 {len(paths)} 个 blob`；
+`compare_ocr_engines.py` 也写了 `... 另 {n-10} 页`。⇒ **好做法早就在仓库里，只是没被推广**。
+
+**修法：抽出唯一实现 `scripts/report_fmt.py::fmt_list`**（`scripts/` 非包 ⇒ 各脚本按
+**文件位置**互导，同 `release_gate` 既有做法）。`sep=None` 渲染列表字面量、`sep="; "` 保留
+调用方原有连接风格。**判据不变，只让报文诚实**。护栏：`tests/unit/test_report_fmt.py`
+（边界 + 反空转 + **只有一处实现**的静态扫描）+ `test_release_gate.py` 的
+`test_check_worktree_clean_declares_truncated_remainder`；变异 **3/3 CAUGHT**。
+
+> **推论**：发现一个「形态类」缺陷后，**先全库 `grep` 同形态**再动手 —— 本仓同一形态
+> 一次就找出 6 处（同 §五十七 的「清扫只做 1/5」教训：**改一处 ≠ 改完**）。

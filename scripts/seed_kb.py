@@ -28,6 +28,14 @@ import re
 import sys
 from pathlib import Path
 
+# `scripts/` 非包 ⇒ 按**文件位置**互导（同 `release_gate` 的既有做法）。
+_HERE = Path(__file__).resolve().parent
+if str(_HERE) not in sys.path:
+    sys.path.insert(0, str(_HERE))
+
+# 诊断报文的清单格式化**只有一处实现**（>上限时显式声明余量，PITFALLS §六十四）。
+from report_fmt import fmt_list  # noqa: E402
+
 ROOT = Path(__file__).resolve().parents[1]
 DOC_PATH = ROOT / "docs" / "2010版GMP.doc"
 DATA_DIR = ROOT / "core" / "kb" / "data"
@@ -359,11 +367,11 @@ def verify_payload(payload: dict) -> list[str]:
         problems.append("duplicate entry ids")
     bad_src = [e.get("entry_id") for e in en if e.get("source_id") != sid]
     if bad_src:
-        problems.append(f"entries with wrong source_id: {bad_src[:3]}")
+        problems.append(f"{len(bad_src)} entries with wrong source_id: {fmt_list(bad_src, cap=3)}")
 
     empty = [e.get("entry_id") for e in en if len(e.get("text", "")) < 10]
     if empty:
-        problems.append(f"suspiciously short entries: {empty[:5]}")
+        problems.append(f"{len(empty)} suspiciously short entries: {fmt_list(empty, cap=5)}")
 
     nos = [e.get("no") for e in en]
     if nos and all(isinstance(n, int) for n in nos):

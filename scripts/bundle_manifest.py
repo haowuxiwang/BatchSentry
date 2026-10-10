@@ -56,6 +56,14 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+# `scripts/` 非包 ⇒ 按**文件位置**互导（同 `release_gate` 的既有做法）。
+_HERE = Path(__file__).resolve().parent
+if str(_HERE) not in sys.path:
+    sys.path.insert(0, str(_HERE))
+
+# 诊断报文的清单格式化**只有一处实现**（见 `report_fmt` 与 PITFALLS §六十四）。
+from report_fmt import DEFAULT_LIST_CAP, fmt_list  # noqa: E402
+
 MANIFEST_SCHEMA = 1
 MANIFEST_NAME = "build_manifest.json"
 
@@ -340,23 +348,10 @@ def read_manifest(path) -> dict:
 
 # ── 校验（门禁与本模块 CLI 共用的唯一实现）──────────────────────────────────
 
-#: 诊断报文里**路径清单**的显示上限。⚠️ 超过上限**必须显式声明还有多少未显示** ——
-#: 报文低报路径会让读者无法据以行动。实测（2026-10-10）：本仓有 8 个失配源文件，
-#: 而报文写「8 个源文件与清单不符」却只列了 **5** 个（`[:5]`），读者据此以为只有 5 个
-#: ⇒ 这正是本项要防的「静默低报」在**报文自身**上复发。
-_PATH_LIST_CAP = 20
-
-
-def _fmt_paths(items: list[str]) -> str:
-    """把路径清单渲染成一行，**永不静默丢项**。
-
-    ≤ 上限 ⇒ 全列；> 上限 ⇒ 列前 ``_PATH_LIST_CAP`` 个**并明说**余下几个，
-    使读者既拿到可行动的路径、也知道清单是**部分**的（低报 = 缺陷，不是简洁）。
-    """
-    if len(items) <= _PATH_LIST_CAP:
-        return str(items)
-    hidden = len(items) - _PATH_LIST_CAP
-    return (f"{items[:_PATH_LIST_CAP]} …（另有 {hidden} 个未显示，共 {len(items)} 个）")
+# 清单格式化已抽到 `scripts/report_fmt.py`（**一处实现**，见其 docstring 与
+# `docs/PROJECT_PITFALLS.md` §六十四）。此处保留旧名，避免改动本模块既有调用点。
+_PATH_LIST_CAP = DEFAULT_LIST_CAP
+_fmt_paths = fmt_list
 
 
 def verify_artifact(artifact_dir, root) -> list[str]:

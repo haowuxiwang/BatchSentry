@@ -655,6 +655,10 @@ def main(argv=None):
             print(f"\n⚠ {name} 内有 {len(lk)} 个文件被外部句柄占用，整目录无法删除：")
             for one in lk[:10]:
                 print(f"    {one}")
+            # ⚠️ 低报即缺陷：上面的表头报了 `len(lk)`，这里只印 10 个 ⇒ 必须声明余量
+            # （见 `docs/PROJECT_PITFALLS.md` §六十四）。
+            if len(lk) > 10:
+                print(f"    …（另有 {len(lk) - 10} 个未显示，共 {len(lk)} 个）")
             # 具名持有者：把"可能是谁"变成"就是谁"（Restart Manager，实测可用）。
             # 推导**只有一处实现**（named_holders）—— 门禁也要用同一份结论来决定
             # 能否把陈旧产物降级，两边各推一遍必然漂移。

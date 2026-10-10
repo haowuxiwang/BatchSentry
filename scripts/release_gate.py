@@ -87,6 +87,9 @@ from clean_dist import ELECTRON_ENTRY, EMBEDDED_SERVER, named_holders  # noqa: E
 # `locked_requirements` 是"requirements.txt 唯一解析口径"，复用而不另写一份
 # （两份必然漂移：一处改了注释处理、另一处没改 ⇒ 判据悄悄失效）。
 from audit_deps import locked_requirements  # noqa: E402
+# 诊断报文的清单格式化**只有一处实现**（`fmt_list`：>上限时**显式声明**余量，
+# 见 `docs/PROJECT_PITFALLS.md` §六十四 —— 报文低报会让读者无法据以行动）。
+from report_fmt import fmt_list  # noqa: E402
 
 # 与 pytest.ini 的 --cov 口径保持一致
 COVERAGE_SOURCES = "api,core,llm,db,config,main"
@@ -243,7 +246,7 @@ def check_worktree_clean() -> CheckResult:
     lines = [ln for ln in out.splitlines() if ln.strip()]
     if lines:
         return CheckResult("worktree_clean", FAIL,
-                           f"{len(lines)} 处未提交改动：" + "; ".join(lines[:5]),
+                           f"{len(lines)} 处未提交改动：" + fmt_list(lines, cap=5, sep="; "),
                            _ms() - t0)
     return CheckResult("worktree_clean", PASS, "工作区干净", _ms() - t0)
 
@@ -306,7 +309,7 @@ def check_no_build_outputs_tracked() -> CheckResult:
         return CheckResult(
             "no_build_outputs", FAIL,
             f"{len(bad)} 个构建产物已入库（= 已进入提交历史，删文件也抹不掉）："
-            + ", ".join(bad[:5])
+            + fmt_list(bad, cap=5, sep=", ")
             + "｜用 `git rm -r --cached <path>` 取消跟踪并补 .gitignore",
             _ms() - t0)
     return CheckResult("no_build_outputs", PASS,
@@ -483,7 +486,7 @@ def check_dependency_vulns(root: Path = REPO_ROOT) -> CheckResult:
     if drift:
         return CheckResult(
             "dependency_vulns", FAIL,
-            f"快照与 requirements.txt **脱节**（{len(drift)} 个包：{drift[:6]}）"
+            f"快照与 requirements.txt **脱节**（{len(drift)} 个包：{fmt_list(drift, cap=6)}）"
             "⇒ 改过依赖必须重扫：`python scripts/audit_deps.py`", _ms() - t0)
 
     hits = snap.get("packages_with_vulns") or {}
@@ -810,7 +813,7 @@ def check_artifact_freshness(root: Path = REPO_ROOT) -> CheckResult:
         return CheckResult("artifact_freshness", WARN,
                            f"{len(fresh)} 份产物新鲜；{len(blocked)} 份陈旧但不可替换"
                            f"（**仍可被读取并打包分发，勿据此认为可发布**）："
-                           + " ｜ ".join(blocked[:2]),
+                           + fmt_list(blocked, cap=2, sep=" ｜ "),
                            _ms() - t0)
 
     return CheckResult("artifact_freshness", PASS,
@@ -1104,7 +1107,7 @@ def check_tests_and_coverage(fail_under: int = 95, python: str | None = None,
 
     if real_failures:
         return CheckResult("tests_coverage", FAIL,
-                           f"{detail}；真实失败：{real_failures[:5]}", _ms() - t0, raw_log)
+                           f"{detail}；真实失败：{fmt_list(real_failures, cap=5)}", _ms() - t0, raw_log)
     # 整文件被收集阶段跳过 → 那些用例根本没参与门禁，却既不计 failed 也不计覆盖率
     # → 必须显式失败，否则"用例静默消失"永远查不出来。
     container_skips = _container_skips(junit)

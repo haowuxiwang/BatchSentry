@@ -282,6 +282,18 @@ class TestOrchestration:
         monkeypatch.setattr(rg, "run_cmd", lambda *a, **k: (128, "not a repo"))
         assert rg.check_worktree_clean().status == rg.WARN
 
+    def test_check_worktree_clean_declares_truncated_remainder(self, monkeypatch):
+        """**报文不得低报**：>5 处改动时明细必须**明说**还有几处未显示（PITFALLS §六十四）。
+
+        旧写法 `"; ".join(lines[:5])` 会报「8 处未提交改动」却只列 5 条 —— 数量与清单
+        互相矛盾，读者信清单。
+        """
+        out = "".join(f" M f{i}.py\n" for i in range(8))
+        monkeypatch.setattr(rg, "run_cmd", lambda *a, **k: (0, out))
+        r = rg.check_worktree_clean()
+        assert r.status == rg.FAIL and "8 处" in r.detail
+        assert "另有 3 个未显示，共 8 个" in r.detail
+
 
 # ── T0：junitxml 事实源 ──────────────────────────────────────────────────────
 

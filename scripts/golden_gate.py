@@ -23,6 +23,14 @@ import time
 from pathlib import Path
 from urllib import error, request as urlreq
 
+# `scripts/` 非包 ⇒ 按**文件位置**互导（同 `release_gate` 的既有做法）。
+_HERE = Path(__file__).resolve().parent
+if str(_HERE) not in sys.path:
+    sys.path.insert(0, str(_HERE))
+
+# 诊断报文的清单格式化**只有一处实现**（>上限时显式声明余量，PITFALLS §六十四）。
+from report_fmt import fmt_list  # noqa: E402
+
 TERMINAL_STATES = {"review", "partial_review", "error", "cancelled"}
 
 
@@ -111,7 +119,8 @@ def run_gates(runner: GateRunner, job_id: str, output_dir: Path | None,
         if not pg.get("ocr_diagnostics"):
             missing_diag.append(p)
     if missing_diag:
-        failures.append(f"gate-1: {len(missing_diag)} 页缺 ocr_diagnostics: {missing_diag[:10]}")
+        failures.append(f"gate-1: {len(missing_diag)} 页缺 ocr_diagnostics: "
+                        f"{fmt_list(missing_diag, cap=10)}")
     else:
         print("gate-1 diagnostics: OK（全部页面有诊断）")
     if output_dir is not None:
@@ -140,7 +149,7 @@ def run_gates(runner: GateRunner, job_id: str, output_dir: Path | None,
     if incomplete:
         failures.append(
             f"gate-2: {len(incomplete)} 页 integrity!=ok 且无豁免: "
-            f"{[(p, r) for p, r in incomplete[:5]]}"
+            f"{fmt_list(incomplete, cap=5)}"
         )
     else:
         msg = "gate-2 integrity: OK"
