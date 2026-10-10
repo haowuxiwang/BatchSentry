@@ -353,11 +353,16 @@ _CITATION_MARKERS = ("本节出处", "$1.50", "1,000 页")
 
 
 def _iter_text_files():
-    """扫描范围：单一真值 + 全部文档（第三方数字只可能出现在这些地方）。"""
+    """扫描范围：单一真值 + 全部文档（第三方数字只可能出现在这些地方）。
+
+    R86 补充：`PORTABLE_README.txt` **必须在内** —— 它是用户解压后第一份会读的
+    文档，却长期游离在扫描之外（实测它当时正含一条无出处的 "DeepSeek 默认 50 RPM"）。
+    """
     yield Path("config.py")
     for p in sorted((_ROOT / "docs").rglob("*.md")):
         yield p.relative_to(_ROOT)
-    for name in ("CLAUDE.md", "CHANGELOG.md", "README.md", "DEPLOYMENT.md"):
+    for name in ("CLAUDE.md", "CHANGELOG.md", "README.md", "DEPLOYMENT.md",
+                 "PORTABLE_README.txt"):
         p = _ROOT / name
         if p.is_file():
             yield Path(name)

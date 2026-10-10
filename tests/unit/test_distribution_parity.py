@@ -398,3 +398,92 @@ def test_portable_readme_concurrency_matches_code_default():
         f"而代码默认是 {default}（api/jobs/__init__.py）—— "
         f"交付说明与实际不符。改代码默认值时必须同步改文档。"
     )
+
+
+# ── 随包文档的数字必须与代码同源（R86 第二十六批新增）─────────────────
+#
+# 由来（2026-10-10）：`PORTABLE_README.txt` 是**用户解压后第一份会读的文档**，
+# 却长期游离在机检之外 —— 版本戳与并发数有护栏，其余数字没有。实测查出 4 处
+# 与代码相反/无出处的说法：
+#   * 只写「PDF 最大 200MB」，**漏了页数上限**（config 注释：两者正交）；
+#   * 「启动超时（>30秒）」而 `READY_TIMEOUT_MS = 180_000`；
+#   * 「51 页…约 10-15 分钟」而单一真值 32.7 s/页 ⇒ 约 28 分钟（差 2~3 倍）；
+#   * 「DeepSeek 默认 50 RPM」全仓无出处，且"请联系技术支持下调并发"是死指引。
+# 这里把**其余会被用户当真的数字**一并绑定到单一真值上。
+
+
+def _readme_txt() -> str:
+    return (_ROOT / "PORTABLE_README.txt").read_text(encoding="utf-8", errors="replace")
+
+
+def test_portable_readme_page_limit_matches_policy():
+    """页数上限必须与 `UPLOAD_LIMITS` 同源。
+
+    只写体积上限会漏掉"低密度但极长的 PDF"：50KB/页的排版件能塞进 200MB
+    数千页，而体积检查毫无察觉（见 config.UPLOAD_LIMITS 上方推导）。
+    """
+    from config import UPLOAD_LIMITS
+
+    txt = _readme_txt()
+    assert f"不超过 {UPLOAD_LIMITS['max_pages']} 页" in txt, (
+        f"PORTABLE_README.txt 未声明页数硬上限 {UPLOAD_LIMITS['max_pages']} 页"
+    )
+    assert f"超过 {UPLOAD_LIMITS['warn_pages']} 页" in txt, (
+        f"PORTABLE_README.txt 未声明软告警阈值 {UPLOAD_LIMITS['warn_pages']} 页"
+    )
+
+
+def test_portable_readme_startup_timeout_matches_electron():
+    """启动等待上限必须等于 `electron/main.js` 的 `READY_TIMEOUT_MS`。
+
+    实测漂移：文档写「>30秒」，代码早已是 180s（`READY_TIMEOUT_MS = 180_000`，
+    报错文案也写 "within 180s"）。用户会以为 30 秒没起来就是坏了，转而杀进程。
+    """
+    src = (_ROOT / "electron" / "main.js").read_text(encoding="utf-8")
+    m = re.search(r"READY_TIMEOUT_MS\s*=\s*(\d[\d_]*)\s*;", src)
+    assert m, "未从 electron/main.js 解析到 READY_TIMEOUT_MS（解析方式可能已过时）"
+    seconds = int(m.group(1).replace("_", "")) // 1000
+    txt = _readme_txt()
+    assert f"等待上限 {seconds} 秒" in txt, (
+        f"PORTABLE_README.txt 的启动等待上限与 READY_TIMEOUT_MS（{seconds}s）不符"
+    )
+
+
+def test_portable_readme_per_page_estimate_matches_single_source():
+    """文档里的「秒/页」与「N 页约 M 分钟」必须能由 `sec_per_page_total` 复算。
+
+    实测漂移：文档写「51 页约 10-15 分钟」，而单一真值 32.7 s/页 ⇒ 约 28 分钟；
+    docs/UPLOAD_LIMITS.md §2 的实测全链是 1,889,115 ms（≈31.5 分钟）。差 2~3 倍
+    ⇒ 用户会在第 20 分钟以为程序卡死。示例页数从文档自身解析，改示例也受检。
+    """
+    from config import UPLOAD_LIMITS
+
+    v = float(UPLOAD_LIMITS["sec_per_page_total"])
+    txt = _readme_txt()
+
+    m = re.search(r"约\s*([\d.]+)\s*秒/页", txt)
+    assert m, "PORTABLE_README.txt 未给出「秒/页」量级"
+    assert abs(float(m.group(1)) - v) < 0.05, (
+        f"PORTABLE_README.txt 写 {m.group(1)} 秒/页，单一真值 sec_per_page_total={v}"
+    )
+
+    m2 = re.search(r"(\d+)\s*页约\s*(\d+)\s*分钟", txt)
+    assert m2, "PORTABLE_README.txt 未给出「N 页约 M 分钟」的量级示例"
+    pages, claimed = int(m2.group(1)), int(m2.group(2))
+    expected = int(pages * v / 60 + 0.5)
+    assert claimed == expected, (
+        f"PORTABLE_README.txt 写「{pages} 页约 {claimed} 分钟」，"
+        f"按 sec_per_page_total={v} 复算应为 {expected} 分钟"
+    )
+
+
+def test_portable_readme_does_not_reinstate_refuted_claims():
+    """已被否证的说法不得回流（与 test_claude_md_* 同款做法）。
+
+    - `10-15 分钟`：与单一真值及实测差 2~3 倍；
+    - `50 RPM`：全仓无出处（grep 只命中它自己）—— "别把借来的数字当自己的事实"；
+    - `>30秒`：与 `READY_TIMEOUT_MS=180s` 相反。
+    """
+    txt = _readme_txt()
+    for banned in ("10-15 分钟", "50 RPM", ">30秒"):
+        assert banned not in txt, f"PORTABLE_README.txt 出现已被否证的说法：{banned!r}"
