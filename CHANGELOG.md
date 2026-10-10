@@ -44,8 +44,32 @@ Electron **43.7.4** 在支持线 / **1 份完整产物**。⚠️ 本轮改了**
 变异 `devlogs/_verify/r86d_mutation.py`：**基线绿 + 4/4 CAUGHT**
 （M1 文档数 5→3 / M2 谓词恒不配置 / M3 模板恒显示 / M4 路由恒隐藏）。
 
-**测试**：全量 pytest **4074 passed / 0 failed**（4 skipped；较上批 4071 **+3** = 新增用例）。
-门禁 **10/11**（`devlogs/gate_report_20261010_140022.json`）：唯一红 = `artifact_freshness`，**指名**本轮改动的 3 个**入包源**（`core/pipeline/ocr_support.py` / `main.py` / `templates/upload.html`）⇒ **重建即转绿**；其余 10 项（worktree_clean / 1 份完整产物 / coverage **95.09%** / 依赖 **0** 公告 / Electron 43.7.4 在支持线 …）全绿。
+**修复 3 · 随包文档数字复审（用户第一份会读的文档）**：`PORTABLE_README.txt` 长期游离在
+机检之外（版本戳 / 并发数有护栏，其余数字没有）。逐条实测查出 4 处与代码**相反**或**无出处**：
+①只写「PDF 最大 200MB」而**漏了页数上限**（真值 `UPLOAD_LIMITS = {max_bytes: 200MB,`
+`max_pages: 200, warn_pages: 80}`；config 注释明确「两者正交：体积上限挡巨文件，页数上限挡
+低密度但极长的 PDF」）；②「启动超时（>30秒）」而 `electron/main.js` 的
+`READY_TIMEOUT_MS = 180_000`；③「51 页…约 10-15 分钟」而本仓实测全链 **1,889,115 ms ≈ 31.5
+分钟**、单一真值 `sec_per_page_total = 32.7 s/页` ⇒ **约 28 分钟**（差 2~3 倍 ⇒ 用户会在第
+20 分钟以为程序卡死）；④「DeepSeek 默认 50 RPM」**全仓无出处**（grep 只命中它自己），
+且「请联系技术支持下调并发」是**死指引**（无联系方式、并发是 env-only）⇒ 改为给出
+`set MAX_CONCURRENT_JOBS=2 && set LLM_CONCURRENCY=2` 实例。另把 UI 实际提供的
+OpenAI / 自定义补进「可添加」列表。
+
+**护栏（+4 条，全部从源码重算）**：页数上限 == `UPLOAD_LIMITS`；启动等待上限 ==
+`READY_TIMEOUT_MS/1000`（解析 `electron/main.js`）；「秒/页」== `sec_per_page_total`，
+且「N 页约 M 分钟」由同一常量复算（示例页数**从文档自身解析** ⇒ 改示例也受检）；
+被否证说法（`10-15 分钟` / `50 RPM` / `>30秒`）不得回流。另把 `PORTABLE_README.txt`
+纳入 `test_upload_limits._iter_text_files()` 的第三方数字扫描范围 —— 它此前**不在**扫描内，
+正是「50 RPM」得以存活的空档。变异 `devlogs/_verify/r86r_portable_mutation.py`：
+**基线绿 + 6/6 CAUGHT**（含既有并发数护栏的回归）。
+`PORTABLE_README.txt` 与 `tests/` 均**不入包** ⇒ **不新增**产物失效面。
+
+**测试**：全量 pytest **4080 passed / 0 failed**（4 skipped；较本批首测 4074 **+6** =
+新增护栏用例）。门禁 **10/11**（`devlogs/gate_report_20261010_142528.json`）：唯一红 =
+`artifact_freshness`，**指名**本轮改动的 3 个**入包源**（`core/pipeline/ocr_support.py` /
+`main.py` / `templates/upload.html`）⇒ **重建即转绿**；其余 10 项（worktree_clean /
+1 份完整产物 / coverage **95.09%** / 依赖 **0** 公告 / Electron 43.7.4 在支持线 …）全绿。
 ⚠️ 本轮改了入包源（`main.py` / `core/pipeline/ocr_support.py` / `templates/upload.html`）
 ⇒ 门禁 `artifact_freshness` 在**重建前必红**（**设计如此，非回归**）。
 

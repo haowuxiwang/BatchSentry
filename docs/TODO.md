@@ -151,6 +151,8 @@
 | **0-32** | **硬崩溃恢复缺产物级验证**：`recover_stuck_jobs` 只有单测（lifespan 那几条还是 **mock 的日志分支**），**从未**在真产物上验证「跑到一半被 `taskkill /F` ⇒ 重启后收敛 + 审计 + 额度释放」 | **P2** | **✅ 已完成（R85 第二十五批）** | 崩溃后：① 卡死 job 必须收敛为**终态**；② 必须留 `stuck_recovery` **审计**；③ **额度必须释放**（否则用户被永久锁死） | **R85 第二十五批（2026-10-10）实测（产物级 `devlogs/_verify/r85m_crash_recovery.py`）**：**5/5 达成** —— 杀前 5/5 **非终态**且**已开工**（`ocr_running`）；`taskkill /T /F` 后进程确死；重启 ⇒ 5/5 收敛为 `error`；`stuck_recovery` 审计 **+5**；重启后新上传 **200** ⇒ **额度未泄漏**。 |
 | **0-33** | **上传页对 OCR 缺口只有信息性横幅、无前置门**：`main.py::index` 的 `needs_setup` 只看 LLM，`api/jobs/upload.py:159` 的 400 前置门也只判 LLM ⇒ OCR 未配置时上传被**接受**，用户白传大文件（实测样本 **138MB / 51 页**）后在 **Stage 1** 失败 | **P2** | **🟡 部分完成（R86 第二十六批：信息性横幅已加；后端前置门待做）** | 与 LLM 对称的前置门是**语义变更** ⇒ 必须重验产物级入口矩阵 `tests/e2e_rejections.py`（**34 例**）的 seed 与期望（seed 需含 OCR，否则「期望 200」用例会变红） | **R86 第二十六批（2026-10-10）**：已加 `core/pipeline/ocr_support.ocr_chain_configured()`（**单一来源**，复用 `remote_backend_configured` / `is_backend_available`）+ `main.py::index` 下发 `ocr_setup_needed` + `templates/upload.html` 第二横幅；护栏 `tests/integration/test_main_routes.py::TestIndexOcrGuidance`（**双向**）+ 变异 **4/4 CAUGHT**（`devlogs/_verify/r86d_mutation.py`）。**未做**：后端前置门（400 仍只对 LLM）⇒ 忽略横幅的用户仍会白传。 |
 
+| **0-34** | **`electron/main.js` 文件头注释的启动等待上限仍是旧值 30s**：第 13 行写 `poll /health until ready (up to 30s)`，而第 48 行 `READY_TIMEOUT_MS = 180_000`、报错文案也写 `within 180s` | P3 | **开放（R86 第二十六批登记）** | 注释与常量一致（或注释改为**引用常量名**、不再复述数值 —— 复述数值必然漂移） | **R86 第二十六批（2026-10-10）定位**：同一数值散在 3 处，2 处（代码 + 报错文案）已是 180s，注释残留 30s。**本轮刻意不改**：`electron/main.js` 是**入包源**（`D_ASAR`）⇒ 改它会让产物失效面再 +1 个文件，而用户侧收益为零（注释不面向用户）⇒ 与 `PORTABLE_README.txt` 的 180 秒纠偏**一并**在下次重建时处理。 |
+
 > 用法：完成一条就把 `[ ]`/状态改掉并补证据列。**0-1 / 0-2 是用户动作，agent 不代做。**
 
 ## 0.1 R66 核销台账（§A 及以下，2026-09-30）
