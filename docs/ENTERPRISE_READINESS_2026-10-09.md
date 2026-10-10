@@ -60,7 +60,7 @@ Electron `contextIsolation: true` / `nodeIntegration: false`；门禁 **11 项**
 | 17. Validate the `sender` of IPC messages | N/A（无 IPC / 无 preload） |
 | 19/20. Fuses / 不向不可信内容暴露 API | ✅ **已核并关闭**（R80 第二十批）—— `build.electronFuses` 显式关掉 `RunAsNode` / `EnableNodeOptionsEnvironmentVariable` / `EnableNodeCliInspectArguments`；**产物** fuse wire 逐位断言三项 OFF（`tests/unit/test_electron_fuses.py`，含合成伪二进制正负对照）；行为对照：`ELECTRON_RUN_AS_NODE=1 --version` 由 `v24.21.0`（Node）→ 以 Electron 启动。另三个改**启动语义**的 fuse **刻意未改**（见 §4） |
 
-## §3 已修（**12 项**，全部带护栏 + 变异验证）
+## §3 已修（**13 项**，全部带护栏 + 变异验证）
 
 | 修复 | 内容 | 证据 |
 |---|---|---|
@@ -76,6 +76,7 @@ Electron `contextIsolation: true` / `nodeIntegration: false`；门禁 **11 项**
 | **F10** 并发额度默认 **3 → 5**（R85 第二十五批补） | `api/jobs._MAX_CONCURRENT_JOBS` 默认 3 ⇒ 第 4 个并发审核任务起 **409 硬拒绝**，不满足“5 个文件并发”。修法：默认 5（env 可覆盖）+ 兜底分支同步；并更正原注释“~2GB”的错误归因（实测单 job ≈ 102MB） | `tests/unit/test_upload_quota_contract.py::TestDefaultQuotaSupportsFiveConcurrentReviews`（默认 ≥ 5 + 兜底 ≥ 5）；变异 M4/M5 CAUGHT |
 | **F11** 第三方日志降噪名单**不完整**（R85 第二十五批补） | `logging_config._NOISY_THIRD_PARTY_LOGGERS`（#145）漏掉 `aiosqlite`（历史 8,116 行）与 `chardet`（当天 `pharma.log` 100%）⇒ 有效级别仍 `DEBUG`（继承 root），#145「把自家 DEBUG 挤出去」未达成。修法：两者补入名单 | `tests/unit/test_logging_config.py::TestThirdPartyNoiseSuppression`（3 条：名单完整性 + `setup_logging` **行为**断言 + 子 logger 继承）；变异 M6–M9 CAUGHT（累计 **9/9**） |
 | **F12** 产物级入口拒绝矩阵**静默前置条件**（R85 第二十五批补） | 产物未配置真实 LLM provider 时**每个**上传都 400 ⇒ 矩阵"期望 400"用例全部**假绿**、阳性用例全红 ⇒ 表面 **13/34** 却**零判别力**。修法：`tests/e2e_rejections.py` 加前置 fail-fast（读 `GET /api/settings` 的 `llm.providers[].configured`），未满足即 rc=2 + 打印 seed 路径 | **双向验证**：正控（有 config）⇒ rc=0 / **34/34**；负控（隐藏 config）⇒ rc=2 + 明确提示。⚠️ 首版按顶层 `providers` 取值 ⇒ 恒判 False，**只有正控抓到** |
+| **F13** 额度**槽位回收**无断言（R85 第二十五批补） | 既有用例只钉「占满 ⇒ 409」；**回收方向**（终态 job 释放额度后新上传能否被接受）**无任何断言** ⇒ 若计数 SQL 被改成 `NOT IN (TERMINAL)`（或 ACTIVE 集混入终态）会「永久占满」而现有用例**全绿**。修法：新增 `TestQuotaSlotIsReleasedWhenAJobReachesTerminal`（自带**同轮负控**，且**必须**用 `test_db` 隔离库） | `tests/unit/test_upload_quota_contract.py::TestQuotaSlotIsReleasedWhenAJobReachesTerminal`；变异 **3/3**（`devlogs/_verify/r85i_quota_recycle_mutation.py`：M0 负控绿 / M1·M2 CAUGHT）；产物级 `devlogs/_verify/r85h_slot_recycle.py` **6/6** |
 
 > 变异合计 **15/15 CAUGHT + 基线绿**（`devlogs/_verify/r78_hardening_mutation.py`，覆盖 F1–F4）；F5（0-19 机检）另有 **10/10 达成**（`devlogs/_verify/r78_innerhtml_mutation.py`）。
 > R80 第二十批另有 **10/10 CAUGHT**（F1–F5 + U1–U5，`devlogs/_verify/r80_mutation.py`）+ 基线绿。
@@ -108,6 +109,7 @@ Electron `contextIsolation: true` / `nodeIntegration: false`；门禁 **11 项**
 - `Qwen/Qwen3.5-35B-A3B` **从未**产品级验证通过（仅有 >930s 无日志挂起的历史记录）。**R83 第二十三批**用**真实 v4 页分析提示**（system 3553 字符 + user 1770 字符 / `max_tokens=4000`）**复现**：单次调用 **903s 超时未返回**（300s × 3 次 SDK 内部重试），而最小调用 8.2s 正常 ⇒ 该模型**可用但属思考型**（返回 `reasoning_content`），单页墙钟远超产品单次尝试超时（`_PAGE_TIMEOUT=480s`）⇒ 与 **0-9** 的「预算错配」一致（e2e **930s 冒烟预算** < 看门狗 1 页阈值 **2280s**）。证据 `devlogs/_verify/r83_qwen_latency_probe.py`。
 - Electron fuses 的**运行时**语义只在本机受限环境验到「产物能起来 + 不再被 `ELECTRON_RUN_AS_NODE` 降级成 Node」；**GUI 层**（窗口/渲染）仍不可复现（见 0-2）。另三个 fuse 未改。
 - 保留设备名守卫只枚举 **ASCII 形态**（`CON`/`PRN`/`AUX`/`NUL`/`COM1-9`/`LPT1-9`）；Windows 文档提到的**上标数字变体**（如 `COM¹`）**未**覆盖 —— 本机**未实测**其行为，登记为已知缺口（不做未验证的断言）。**另**：该守卫的「先剥离、后判定」**载荷顺序**现已**三重锁定**（单测 `TestEndpointStripsBeforeChecking` + 产物级 e2e **34 例** + 变异 **3/3**，且三条变异下**旧用例保持绿** ⇒ 新用例是唯一判别力来源）。
+- 5 路**同时**上传 138MB×5 的**网络/磁盘峰值**未测（本轮在本机 localhost，非生产网络）。
 
 ## §6 基线判定：现有 e2e 能否作基线（R85 第二十五批新增）
 
@@ -120,8 +122,11 @@ Electron `contextIsolation: true` / `nodeIntegration: false`；门禁 **11 项**
 | 入口拒绝 / 敌意矩阵 | HTTP 状态码 + job 建/拒 | **34/34**（连跑两次；正控 rc=0） | `tests/e2e_rejections.py`（须先 seed `%TEMP%/pbc_e2e_appdata/PBC/config.json`；未配置 LLM 即 rc=2） |
 | 5 文件并发 + UI | UI 200 / 并发 5 全 200 / 第 6 份 409 / job 离开 pending | **7/7** | `devlogs/_verify/r85_five_concurrency.py` |
 | 5 路并发**端到端** | 5/5 准入 + 第 6 份**配额** 409 + 并发峰值 + 全部终态 + 存储层隔离 | **9/9**（峰值=**5** 真并发；5/5 到 `review`、0 error；findings 逐 job `[1,1,1,18,25]` 隔离；总墙钟 **715s < 1260s** 串行和） | `devlogs/_verify/r85_five_e2e.py` |
-| 产物门禁 | 11 项 fail-closed | **11/11**（worktree_clean / 产物与源码**逐字节一致** / **4070 passed 0 failed** / coverage **95.09%** / 依赖 **0** 公告 / Electron 43.7.4 在支持线） | `scripts/release_gate.py --fail-under 95 --json` |
+| 产物门禁 | 11 项 fail-closed | **11/11**（worktree_clean / 产物与源码**逐字节一致** / **4071 passed 0 failed** / coverage **95.09%** / 依赖 **0** 公告 / Electron 43.7.4 在支持线） | `scripts/release_gate.py --fail-under 95 --json` |
 | 冻结产物多轮 e2e | 终态 + SSE 事件链 + OCR 后端归属 + LLM 成功率（**非** findings 计数） | **ALL ROUNDS PASSED**（RC=0；`pdf,img,mineru,rot,robust,cancel,dual`） | `devlogs/_verify/r83b_multiround.py` |
+| 额度**槽位回收** | 取消 1 个后，其余仍在跑时第 6 份应 **200**（同轮负控：取消前 409） | **6/6**（cancel 后其余 **4/4** 在跑时新上传 200 且为**新** job_id） | `devlogs/_verify/r85h_slot_recycle.py` |
+| 大记录 ×5 并发 | 5×200 准入 + 峰值 5 + 5/5 全 51 页 + 0 error + 全终态 + LLM 失败**必须披露** | **6/6**（51 页/138MB ×5；总墙钟 **2593s**；1 次 cross-page 超时**已披露**） | `devlogs/_verify/r85k_bigfive_e2e.py` → 事后核验 `r85k_verify_bigfive.py` |
+| 硬崩溃恢复 | 硬杀后重启 ⇒ 卡死 job 收敛终态 + 审计 + **额度释放** | **5/5**（5/5 `ocr_running` 时 `taskkill /F` ⇒ 重启 5/5→`error`（4s）、`stuck_recovery` 审计 +5、新上传 200） | `devlogs/_verify/r85m_crash_recovery.py` |
 
 > 多轮尾段明细：`rot` paddle / llm 5/5 / 旋转自愈 page2,3@90° / `rot_lost=[]`；
 > `robust` o6(4pt+72dpi) 与 o1 均 `review`、llm 2/2；`cancel` 终态 `cancelled`（1s，入 `ocr_running` 后取消）；
@@ -135,6 +140,9 @@ Electron `contextIsolation: true` / `nodeIntegration: false`；门禁 **11 项**
 `page4 n=6`，`temperature=0.0 → [2,2,3,2,2,2]`、`0.1 → [3,2,3,2,2,2]`，**spread 均 1（50%）** ⇒
 即使客户端已把温度固定为 0，**本上游仍有残余方差**（推测为服务端实现/量化/负载路由）。
 ⇒ **任何 `findings == N` 式断言都不是稳定基线**；只能给 **N 次重复的区间**（登记 **0-29**）。
+
+**规模化佐证**（**同一份** 51 页记录**并发跑 5 次**，`devlogs/_verify/r85k_bigfive_e2e.py`）：
+findings 逐 job **199 / 203 / 204 / 217 / 220**（**同一输入**！spread **21**，rel **≈10.6%**，均值 208.6）⇒ 在**真实规模**上同样不可复现；且**类型集合**亦不同。
 
 **⇒ 结论**：回归基线用**确定路径**（拒绝 / 准入 / 并发 / 终态 / 事件链 / 后端归属）；
 判定质量**不设单值基线**，改设**区间 + 方差披露**。
