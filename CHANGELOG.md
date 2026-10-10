@@ -42,6 +42,7 @@
 （M1 文档数 5→3 / M2 谓词恒不配置 / M3 模板恒显示 / M4 路由恒隐藏）。
 
 **测试**：全量 pytest **4074 passed / 0 failed**（4 skipped；较上批 4071 **+3** = 新增用例）。
+门禁 **10/11**（`devlogs/gate_report_20261010_140022.json`）：唯一红 = `artifact_freshness`，**指名**本轮改动的 3 个**入包源**（`core/pipeline/ocr_support.py` / `main.py` / `templates/upload.html`）⇒ **重建即转绿**；其余 10 项（worktree_clean / 1 份完整产物 / coverage **95.09%** / 依赖 **0** 公告 / Electron 43.7.4 在支持线 …）全绿。
 ⚠️ 本轮改了入包源（`main.py` / `core/pipeline/ocr_support.py` / `templates/upload.html`）
 ⇒ 门禁 `artifact_freshness` 在**重建前必红**（**设计如此，非回归**）。
 

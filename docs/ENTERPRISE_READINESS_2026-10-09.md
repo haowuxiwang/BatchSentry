@@ -122,7 +122,7 @@ Electron `contextIsolation: true` / `nodeIntegration: false`；门禁 **11 项**
 | 入口拒绝 / 敌意矩阵 | HTTP 状态码 + job 建/拒 | **34/34**（连跑两次；正控 rc=0） | `tests/e2e_rejections.py`（须先 seed `%TEMP%/pbc_e2e_appdata/PBC/config.json`；未配置 LLM 即 rc=2） |
 | 5 文件并发 + UI | UI 200 / 并发 5 全 200 / 第 6 份 409 / job 离开 pending | **7/7** | `devlogs/_verify/r85_five_concurrency.py` |
 | 5 路并发**端到端** | 5/5 准入 + 第 6 份**配额** 409 + 并发峰值 + 全部终态 + 存储层隔离 | **9/9**（峰值=**5** 真并发；5/5 到 `review`、0 error；findings 逐 job `[1,1,1,18,25]` 隔离；总墙钟 **715s < 1260s** 串行和） | `devlogs/_verify/r85_five_e2e.py` |
-| 产物门禁 | 11 项 fail-closed | **11/11**（worktree_clean / 产物与源码**逐字节一致** / **4071 passed 0 failed** / coverage **95.09%** / 依赖 **0** 公告 / Electron 43.7.4 在支持线） | `scripts/release_gate.py --fail-under 95 --json` |
+| 产物门禁 | 11 项 fail-closed | **10/11**（唯一红 = `artifact_freshness`，**指名**本轮改动的 3 个**入包源** `core/pipeline/ocr_support.py` / `main.py` / `templates/upload.html` ⇒ **重建前必红，设计如此**；其余 10 项绿：worktree_clean / 1 份完整产物 / **4074 passed 0 failed** / coverage **95.09%** / 依赖 **0** 公告 / Electron 43.7.4 在支持线） | `scripts/release_gate.py --fail-under 95 --json` |
 | 冻结产物多轮 e2e | 终态 + SSE 事件链 + OCR 后端归属 + LLM 成功率（**非** findings 计数） | **ALL ROUNDS PASSED**（RC=0；`pdf,img,mineru,rot,robust,cancel,dual`） | `devlogs/_verify/r83b_multiround.py` |
 | 额度**槽位回收** | 取消 1 个后，其余仍在跑时第 6 份应 **200**（同轮负控：取消前 409） | **6/6**（cancel 后其余 **4/4** 在跑时新上传 200 且为**新** job_id） | `devlogs/_verify/r85h_slot_recycle.py` |
 | 大记录 ×5 并发 | 5×200 准入 + 峰值 5 + 5/5 全 51 页 + 0 error + 全终态 + LLM 失败**必须披露** | **6/6**（51 页/138MB ×5；总墙钟 **2593s**；1 次 cross-page 超时**已披露**） | `devlogs/_verify/r85k_bigfive_e2e.py` → 事后核验 `r85k_verify_bigfive.py` |
