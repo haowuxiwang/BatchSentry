@@ -188,6 +188,32 @@ def _wait_health(c: httpx.Client, timeout: float = 60.0) -> bool:
     return False
 
 
+def _llm_provider_configured(c: httpx.Client) -> bool:
+    """前置条件：产物必须已配置**真实** LLM provider（`configured=true`）。
+
+    为什么必须**前置**判定（2026-10-10 实测）：`api/jobs/upload.py` 在"未配置
+    provider"时对**每一个**上传都返回 400（`Upload rejected: no LLM provider
+    configured`）⇒ 矩阵里"期望 400"的用例**全部假绿**、"期望 200"的用例全部变红
+    ⇒ 表面 **13/34**，实则**整轮零判别力**。这正是"用例存在 ≠ 断言有效"的产物级版本；
+    只有**阴性对照**能暴露它，而"13/34"极易被误读成"守卫大部分有效"。
+
+    本产物读的是冻结路径 `%APPDATA%/PBC/config.json`（e2e 下 = `_APPDATA/PBC/`），
+    **不是**仓库根的 `config.json` ⇒ 换机/清临时目录后必须重新 seed。
+
+    ⚠️ provider 列表在响应里的路径是 **`llm.providers`**（不是顶层 `providers`）
+    —— 首版按顶层取 ⇒ 永远取到 `[]` ⇒ **恒判 False**（把"配置齐全"也误判成未配置）。
+    这正是本函数存在的意义所要求的：**阳性对照必须跑**（见 PITFALLS §五十四 教训 2）。
+    """
+    try:
+        r = c.get(f"{_API}/api/settings", timeout=10)
+        if r.status_code != 200:
+            return False
+        providers = (r.json().get("llm") or {}).get("providers") or []
+        return any(p.get("configured") for p in providers)
+    except Exception:                                            # noqa: BLE001
+        return False
+
+
 def _cancel(c: httpx.Client, r: httpx.Response):
     """立刻取消，别烧 OCR/LLM 额度。返回 cancel 的状态码（失败记字符串）。"""
     try:
@@ -359,6 +385,14 @@ def main(argv: list[str]) -> int:
                         if _LOG.is_file() else "")
                 print(f"!! /health 超时。日志尾：\n{tail}")
                 return 3
+            if not _llm_provider_configured(c):
+                print(
+                    f"!! 前置条件未满足：产物未配置任何**真实** LLM provider"
+                    f"（GET {_API}/api/settings 无 configured=true）⇒ 每个上传都会 400，"
+                    f"矩阵将**无判别力**（阳性用例假绿、阴性对照全红）。\n"
+                    f"   先 seed：{_APPDATA / 'PBC' / 'config.json'}"
+                    f"（冻结版只读该路径，**不**读仓库根 config.json）。fail-closed。")
+                return 2
             print("[probe] health OK —— ① 拒绝矩阵")
             rows += _run_matrix(c)
             print("[probe] ② 敌意文件名（安全不变式）")
