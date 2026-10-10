@@ -34,6 +34,8 @@
 ⚠️ 本轮只改 `scripts/**` 与 `tests/**`（**均不入包**）⇒ **不扩大** `artifact_freshness`
 失效面（仍是那 8 个）；产物过期状态**不变**，分发前仍需重建。
 
+**全量门禁（head `f1c8879`）**：**10/11 PASS**，`tests_coverage` = **4106 passed, 0 failed, coverage 95.09%**（较 R87 的 4102 **+4** = 本轮新增护栏 3 条 + 门禁护栏 1 条）；唯一红仍是 `artifact_freshness`（同 8 个入包源）。报告 `devlogs/gate_report_20261010_154313.json`。
+
 ### 一次参数变更的清扫只做了 1/5 + settings「测试连接」窄屏不可达（Round 83 第二十七批，2026-10-10）
 
 > 承 R86（Round 82）的分发/UX 评估。本轮按 **先定位 → 再解决 → 后测试** 推进；
