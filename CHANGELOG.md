@@ -115,6 +115,9 @@ UI `/` + `/static/app.css` + `/api/jobs` 均 200（css 与磁盘**逐字节一�
 永久护栏 `TestQuotaSlotIsReleasedWhenAJobReachesTerminal`（自带同轮负控）；
 变异 `devlogs/_verify/r85i_quota_recycle_mutation.py` ⇒ **3/3**（M0 绿 / M1·M2 CAUGHT）。复跑**全量门禁** ⇒ **11/11**（4071 passed / 0 failed / coverage **95.09%**；两份产物仍**逐字节新鲜**）。
 
+**大记录 ×5 并发（0-27 最后一个缺口关闭）**：`devlogs/_verify/r85k_bigfive_e2e.py` 把 **51 页 / 138MB** 真记录**同时**跑 5 份 ⇒ **6/6**：5×200 准入（各 8–9s）、**并发峰值 5**、**5/5 全 51 页分析完**、**0 error**、全部到 `review`，**总墙钟 2579s**（预算 3600s 内）。⚠️ **1 次 cross-page LLM 超时**（上游抖动）⇒ 产品**按设计降级并披露**（该 job 带 `completeness`「跨页 LLM 语义检查不可用…需人工复核」finding）⇒ 判据修正为「**失败必须披露**」（首版断言「永不失败」是判据错，已修；事后核验脚本 `r85k_verify_bigfive.py`）。**同输入 5 次 findings = 199/203/204/217/220**（spread **21**，rel **≈10.6%**）⇒ 在真实规模上再次印证 0-29「单次计数不可复现」。
+
+
 
 ### 报告缓存 key 未覆盖**全部渲染输入** ⇒ 重试后 `report.md` 静默返回过期内容（Round 80 第二十四批，2026-10-09）
 
