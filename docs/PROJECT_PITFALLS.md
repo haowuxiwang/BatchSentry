@@ -2591,3 +2591,21 @@ R80 的变异 harness（`devlogs/_verify/r80_mutation.py`）第一次跑**没有
 4. **冻结版只读 `%APPDATA%/PBC/config.json`**（**不**读仓库根 `config.json`）⇒ 换机 /
    清临时目录后必须重新 seed。这是 e2e 的**环境契约**，不是产品缺陷 ——
    归因时先分清「被测对象」与「执行环境」。
+
+
+## 五十六、验证 harness 必须**全量落盘**子进程输出，别用 `[-N:]` 截尾（Round 81 第二十五批，2026-10-10 实测）
+
+**现象**：`r83b_multiround.py` 用 `print(p.stdout[-4000:])` 打印多轮 e2e 汇总。7 轮
+（`pdf,img,mineru,rot,robust,cancel,dual`）的 `[e2e] SUMMARY` JSON 远超 4000 字符 ⇒
+**前 3 轮（pdf/img/mineru）的逐轮明细被截掉**，落盘证据只剩 `rot/robust/cancel/dual`。
+汇总判决 `ALL ROUNDS PASSED`（RC=0）仍在，但**逐轮明细永久丢失**（`capture_output=True`
+的子进程 stdout 在父进程退出后即消失）。
+
+教训：
+
+1. **证据要落盘，不要只打印尾部。** `capture_output=True` 拿到的 stdout 只活在内存里；
+   只 `print` 尾部等于**主动丢弃**头部。改为先 `write_text(p.stdout)` 再打印尾部。
+2. **`[-N:]` 是"看日志"的习惯，不是"存证据"的习惯。** 目的不同：看日志要尾部，
+   存证据要**全量**。二者别混用同一个变量。
+3. **截断会制造"看起来完整"的假象。** `ALL ROUNDS PASSED` 是真的，但"7 轮都有明细"
+   是假的 ⇒ 报告里必须**如实标注**"该 3 轮只有汇总判决、无逐轮明细"，**不得**默认齐全。

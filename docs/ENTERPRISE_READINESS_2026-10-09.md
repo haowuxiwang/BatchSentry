@@ -88,7 +88,7 @@ Electron `contextIsolation: true` / `nodeIntegration: false`；门禁 **11 项**
 |---|---|---|
 | **0-18** | **审计追踪不可删**（G2） | 二选一：① 软删除（job 行保留 + `deleted_at`）；② 删除前把该 job 的 `audit_log`/`llm_call_audit` **归档**到独立表。**属产品语义变更，须你拍板** |
 | — | 无身份/RBAC/电子签名（G1） | 企业部署前必须有；至少先做"多账户下的数据隔离"评估 |
-| — | 无人工标注集（G3） | 需要领域数据；在此之前**不得**对外宣称任何精度/召回 |
+| — | 无人工标注集（G3） | 需要领域数据；在此之前**不得**对外宣称任何精度/召回（**分阶段方案见 §7**） |
 | — | `script-src 'unsafe-inline'` | 用 CSP nonce 重构（代码内已注明） |
 | — | 密钥明文落盘 | 可评估 Windows DPAPI；注意会改变配置格式与迁移路径 |
 | — | 无 DB 备份/导出端点、无 `LICENSE` 文件 | 分发前补 |
@@ -108,3 +108,42 @@ Electron `contextIsolation: true` / `nodeIntegration: false`；门禁 **11 项**
 - `Qwen/Qwen3.5-35B-A3B` **从未**产品级验证通过（仅有 >930s 无日志挂起的历史记录）。**R83 第二十三批**用**真实 v4 页分析提示**（system 3553 字符 + user 1770 字符 / `max_tokens=4000`）**复现**：单次调用 **903s 超时未返回**（300s × 3 次 SDK 内部重试），而最小调用 8.2s 正常 ⇒ 该模型**可用但属思考型**（返回 `reasoning_content`），单页墙钟远超产品单次尝试超时（`_PAGE_TIMEOUT=480s`）⇒ 与 **0-9** 的「预算错配」一致（e2e **930s 冒烟预算** < 看门狗 1 页阈值 **2280s**）。证据 `devlogs/_verify/r83_qwen_latency_probe.py`。
 - Electron fuses 的**运行时**语义只在本机受限环境验到「产物能起来 + 不再被 `ELECTRON_RUN_AS_NODE` 降级成 Node」；**GUI 层**（窗口/渲染）仍不可复现（见 0-2）。另三个 fuse 未改。
 - 保留设备名守卫只枚举 **ASCII 形态**（`CON`/`PRN`/`AUX`/`NUL`/`COM1-9`/`LPT1-9`）；Windows 文档提到的**上标数字变体**（如 `COM¹`）**未**覆盖 —— 本机**未实测**其行为，登记为已知缺口（不做未验证的断言）。**另**：该守卫的「先剥离、后判定」**载荷顺序**现已**三重锁定**（单测 `TestEndpointStripsBeforeChecking` + 产物级 e2e **34 例** + 变异 **3/3**，且三条变异下**旧用例保持绿** ⇒ 新用例是唯一判别力来源）。
+
+## §6 基线判定：现有 e2e 能否作基线（R85 第二十五批新增）
+
+**答：分两类，不可一刀切。** 确定性路径**可作基线**；依赖上游采样的**判定质量**暂**不可**设单值基线。
+
+### §6.1 可作基线（判据确定、与上游采样无关）
+
+| 基线 | 判据 | 本轮实测 | 复现命令 |
+|---|---|---|---|
+| 入口拒绝 / 敌意矩阵 | HTTP 状态码 + job 建/拒 | **34/34**（连跑两次；正控 rc=0） | `tests/e2e_rejections.py`（须先 seed `%TEMP%/pbc_e2e_appdata/PBC/config.json`；未配置 LLM 即 rc=2） |
+| 5 文件并发 + UI | UI 200 / 并发 5 全 200 / 第 6 份 409 / job 离开 pending | **7/7** | `devlogs/_verify/r85_five_concurrency.py` |
+| 产物门禁 | 11 项 fail-closed | **11/11**（worktree_clean / 产物与源码**逐字节一致** / **4070 passed 0 failed** / coverage **95.09%** / 依赖 **0** 公告 / Electron 43.7.4 在支持线） | `scripts/release_gate.py --fail-under 95 --json` |
+| 冻结产物多轮 e2e | 终态 + SSE 事件链 + OCR 后端归属 + LLM 成功率（**非** findings 计数） | **ALL ROUNDS PASSED**（RC=0；`pdf,img,mineru,rot,robust,cancel,dual`） | `devlogs/_verify/r83b_multiround.py` |
+
+> 多轮尾段明细：`rot` paddle / llm 5/5 / 旋转自愈 page2,3@90° / `rot_lost=[]`；
+> `robust` o6(4pt+72dpi) 与 o1 均 `review`、llm 2/2；`cancel` 终态 `cancelled`（1s，入 `ocr_running` 后取消）；
+> `dual` 6 页 `partial_review`、backend=**mineru**、llm 8/8、`dual_compare_done`。
+> ⚠️ 首轮 `pdf/img/mineru` 的**逐轮明细**因 harness `stdout[-4000:]` 截断**未落盘**（仅有汇总判决 `ALL ROUNDS PASSED`）；
+> 已修 `r83b_multiround.py` 改为**全量落盘** `_r83b_multiround_full.out`。**该 3 轮只有汇总判决、无逐轮明细**。
+
+### §6.2 不可作基线（非确定，随上游采样波动）
+
+**findings 计数**。受控重放（`devlogs/_verify/r85_temp_probe.py`，桩捕获 → 真 client 重放）实测：
+`page4 n=6`，`temperature=0.0 → [2,2,3,2,2,2]`、`0.1 → [3,2,3,2,2,2]`，**spread 均 1（50%）** ⇒
+即使客户端已把温度固定为 0，**本上游仍有残余方差**（推测为服务端实现/量化/负载路由）。
+⇒ **任何 `findings == N` 式断言都不是稳定基线**；只能给 **N 次重复的区间**（登记 **0-29**）。
+
+**⇒ 结论**：回归基线用**确定路径**（拒绝 / 准入 / 并发 / 终态 / 事件链 / 后端归属）；
+判定质量**不设单值基线**，改设**区间 + 方差披露**。
+
+## §7 「判定质量无可信数字」（G3）具体方案（**不编造数字**）
+
+| 阶段 | 做法 | 能给出的量 | 依赖 |
+|---|---|---|---|
+| 短期（**本轮已做**） | 消除**客户端**随机源（F9，温度单一真值 0.0）；判定类结论**一律**用 N 次重复的**区间**表达，禁用单次计数 | 区间 + 方差 | 无 |
+| 中期（可执行） | ① 对**植入型**半合成用例（刻意植入漏签 / 参数越界 / 步骤缺项，真值由**植入定义**）测**命中率**；② 扩展 `FINDING_GROUND_TRUTH.json` 的合成语料从**规则层**覆盖到 **LLM 层**；③ 对**同一批**记录重复跑，报 findings 区间 + 噪声类型分布 | **植入用例命中率**（可测）；重复跑**区间** | 无（用例自造） |
+| 长期（需领域数据） | 与 QA / 药企共建**人工标注集**（每页逐条 finding 的 ground truth） | **漏报率 / 误报率 / 精确率 / 召回** | **人工标注** |
+
+⚠️ 在**长期**项完成前，**不得**对外宣称任何精度 / 召回数字（呼应 §4 G3 行）。

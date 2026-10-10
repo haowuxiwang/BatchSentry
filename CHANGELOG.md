@@ -71,6 +71,17 @@ page 2（n=3）`0.1 → [3,3,4]`、`0.0 → [3,4,3]`（均 spread 1）。⇒ **�
 （读 `GET /api/settings` 的 `llm.providers[].configured`），并做**正/负控双向验证**
 （有 config ⇒ rc=0 / 34/34；无 config ⇒ rc=2 + 明确提示）。⚠️ 首版按顶层 `providers`
 取值 ⇒ 恒判 False（**只有正控抓到**）—— 又一次"用例存在 ≠ 断言有效"。
+**产物级实测（R85 收尾，全部在新产物 `sha256[:12]=30bac4437653` 上）**：
+① 门禁 **11/11**（worktree_clean / 产物与源码**逐字节一致** / **4070 passed 0 failed** /
+coverage **95.09%** / 依赖 **0** 公告 / Electron 43.7.4 在支持线）；
+② 冻结产物多轮 e2e（`pdf,img,mineru,rot,robust,cancel,dual`）⇒ **ALL ROUNDS PASSED**（RC=0）；
+③ **5 文件并发 + UI**（`devlogs/_verify/r85_five_concurrency.py`，走**默认**额度路径）⇒ **7/7**：
+UI `/` + `/static/app.css` + `/api/jobs` 均 200（css 与磁盘**逐字节一致**）、并发 5 份全 **200**
+（0.2s）且拿到 5 个 job_id、第 6 份 **409**（拒绝而非排队）、5 个 job 均离开 `pending` 进入
+`ocr_running`。⚠️ 只验**准入 + 起跑**；5 路**端到端**完成时延与上游速率影响**未测**（0-27）。
+⚠️ 多轮 e2e 的 `pdf/img/mineru` **逐轮明细**因 harness `stdout[-4000:]` 截断**未落盘**
+（仅汇总判决）；已改为**全量落盘**（`_r83b_multiround_full.out`）。
+
 ### 报告缓存 key 未覆盖**全部渲染输入** ⇒ 重试后 `report.md` 静默返回过期内容（Round 80 第二十四批，2026-10-09）
 
 > 记录 → `docs/TODO.md` 的 **0-26**（属当前 backlog ⇒ 就地记 §0 表）。
