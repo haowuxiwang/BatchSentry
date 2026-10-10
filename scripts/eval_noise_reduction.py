@@ -117,6 +117,17 @@ def main(argv: list[str] | None = None) -> int:
     final = summarize(after)
 
     print(f"job={job_id}  页数={total_pages}  带完整性告警页={len(flagged)}")
+    # 口径披露（防误读）：写入期（stage3）已对**新** job 施加 R1+M2 ⇒ 新 job 的
+    # 重放增量≈0；只有"写入期降噪之前"的旧 job 才会显出大幅下降。**别把重放增量
+    # 读成"当前线上降噪幅度"** —— 见 docs/PROJECT_PITFALLS.md §五十七。
+    already = sum(1 for f in findings
+                  if (f.get("ocr_text") or "").startswith("aggregated "))
+    if already:
+        print(f"  口径：本 job 含 {already} 条**降噪摘要条** ⇒ 已在**写入期**降噪过，"
+              f"重放增量≈0 属**预期**（不是'降噪失效'）。")
+    else:
+        print("  口径：本 job **不含**降噪摘要条 ⇒ 可能是写入期降噪**之前**的旧数据，"
+              "重放增量偏大；**不得**读成当前线上降噪幅度。")
     print(f"\n──── 原始 ────\n  total={before['total']}  {before['by_severity']}"
           f"  噪声占比={before['noise_share']:.1%}")
     print(f"\n──── R1 自指元噪声聚合后 ────\n  total={mid['total']}"

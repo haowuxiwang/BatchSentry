@@ -82,6 +82,14 @@ UI `/` + `/static/app.css` + `/api/jobs` 均 200（css 与磁盘**逐字节一�
 ⚠️ 多轮 e2e 的 `pdf/img/mineru` **逐轮明细**因 harness `stdout[-4000:]` 截断**未落盘**
 （仅汇总判决）；已改为**全量落盘**（`_r83b_multiround_full.out`）。
 
+**降噪量测口径（0-31，核查后判定「非缺陷」）**：`data/pharma.db` 里有 **2,669** 条
+`超出自动判定上限` 的**逐参数** completeness（20 个 job），而 `scripts/eval_noise_reduction.py`
+在旧 job 上重放报 **-24.8%** ⇒ 易被误读成「当前线上降噪幅度」。**用当前产物取证**：e2e 库
+（`%TEMP%/pbc_e2e_appdata/PBC/data.db`）该形态 **0 条**，且 `llm_checks.py:109-118` 超限分支
+已 `aggregate=True`（单条汇总）⇒ **旧库那批是写入期降噪之前的遗留，当前无此缺陷**。
+已给该脚本加**输出级口径披露**（按 `ocr_text` 前缀判 pre/post-降噪）：旧库显示「不得读成
+当前线上降噪幅度」，当前库显示「写入期已降噪、增量≈0 属预期」。⚠️ 脚本**不入包**、**不计覆盖率**。
+
 ### 报告缓存 key 未覆盖**全部渲染输入** ⇒ 重试后 `report.md` 静默返回过期内容（Round 80 第二十四批，2026-10-09）
 
 > 记录 → `docs/TODO.md` 的 **0-26**（属当前 backlog ⇒ 就地记 §0 表）。
