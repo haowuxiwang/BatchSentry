@@ -247,3 +247,64 @@ CSS（未改 templates/static 的 CSS 源，可跳过）→ PyInstaller → `bun
 4. **🔴 是否要 OCR 后端前置门**（§5 第 1 条，需重验 34/34 矩阵）。
 5. `LICENSE` 文件的**许可条款**（Proprietary / 内部使用）。
 6. 人工标注集（G3，长期）。
+
+---
+
+## §9 R87（同日第二十七批 / Round 83）更新 —— 结论不变，数字与一处 UX 缺口已变
+
+> 本文档主体是 **R86** 的评估（同一天）。R87 未改变任何**判定**（§0/§1/§2 结论照旧），
+> 但更新了三处**数字**、补修了 **1 处前端可达性缺口**、并把 `artifact_freshness` 的失效面
+> 从 **3 → 8** 个文件。以下均为**实测**（非推算），供分发决策使用。
+
+### 9.1 D5 / §1.3 更新：失效面 **3 → 8** 个源文件（**逐字节复算**，非目测）
+
+最新门禁报告 `devlogs/gate_report_20261010_152357.json`（2026-10-10 15:33:05，head `5c82d15`）：
+**10/11 PASS**，唯一红 = `artifact_freshness`；`tests_coverage` = **4102 passed / 0 failed /
+coverage 95.09%**（门禁 95%）。
+
+⚠️ 门禁 detail 只显示 `diverged_src[:5]`（`scripts/bundle_manifest.py:392`）——报"**8 个**"
+却只列 **5** 个。**完整 8 项**由直接复算 `verify_artifact` 的 `diverged_src` 得到：
+
+| 来源 | 文件 |
+|---|---|
+| **R86 既有（3）** | `core/pipeline/ocr_support.py`、`main.py`、`templates/upload.html` |
+| **R87 本轮（5）** | `api/jobs/listings.py`、`core/procpool.py`、`static/settings.js`、`static/upload.js`、`templates/settings.html` |
+
+两侧产物（`dist/pbc-server` 与 `dist-electron/win-unpacked/resources/pbc-server`）**均为这 8 项**，
+且 `missing_in_manifest=0 / extra_in_manifest=0`、`app_version` 两侧都是 `1.2.1`
+⇒ **唯一失配就是这 8 个文件的字节**（不是版本、不是集合）。**结论不变**：分发前**必须重建**。
+
+### 9.2 §3.2 进度追加：R87（Round 83）本轮内容
+
+| 项 | 内容 | 状态 |
+|---|---|---|
+| **清扫补完** | `MAX_CONCURRENT_JOBS` 3→5 的清扫在 R85 只做了 **1/5**；本轮全库扫净 **10 处**（含 `CLAUDE.md` ×2、**入包源** `static/upload.js`），并改写 2 处**由默认值派生的假命题**（"选 5 份 ⇒ 第 4、5 份必然吃 409"），删 1 处**已被否证**的 ~2GB 分母 | ✅ |
+| **窄屏可达性** | settings「测试连接」唯一入口在 `hidden md:flex` 桌面侧栏内 ⇒ <768px **不可达**；加 `md:hidden` 移动入口 + **两入口共用同一实现** + 结果滚动到可视区 | ✅（见 9.3） |
+| **护栏静默失效** | `test_todo_freshness` 只认 `Round NN`，而 R86 标题误用 `R86` ⇒ 新鲜度检查**静默失效**；改正标题 + 新增**不变式 H**（批号标题形态） | ✅ |
+| **0-34 复核** | `electron/main.js` 注释残留 30s：R86 的延后判断**正确**，真实机制 = **asar 一致性单测**逐字节盯该文件 ⇒ 只能与重建同批 | 仍开放 |
+| **护栏 + 变异** | 并发默认值护栏（9 条，**从源码重算**）+ 移动入口护栏（5 条）；变异 **7/7 + 5/5 CAUGHT** | ✅ |
+
+### 9.3 §4/§5 更新：一处 UX 缺口**已修**（0-36），但**未做真机窄屏复验**
+
+- **已修**：设置页窄屏（<768px）此前**没有任何连通性检测入口** —— `#test-conn-btn` 在
+  `hidden md:flex` 的桌面侧栏里，窄屏整栏隐藏。现在移动标签栏下加了 `#test-conn-btn-mobile`，
+  与桌面按钮**调用同一个** `runConnectionTests(btn, scrollToMessage)`（重构**零逻辑丢失**，
+  由机检 `r87e_refactor_lossless.py` 验证 64 行→64 行、集合差为空）。
+- ⚠️ **未验证边界**：本环境**无 GUI** ⇒ 只宣称"**入口存在 + 两入口共用同一实现 + 有窄屏可见性
+  机检**"，**不宣称"移动端已可用"**；真机窄屏浏览器级复验仍待做。
+- §5 建议表**第 1 条（后端 OCR 前置门）仍为最高价值项**，本轮未动（语义变更，须重验 34/34）。
+
+### 9.4 §6 未验证边界追加
+
+9. **窄屏移动入口**只做到"入口存在 + 共用实现 + 可见性机检"（9.3）；**真机窄屏未复验**。
+10. **`electron/main.js` 的 0-34 注释**（30s vs 180s）**仍开放**：它是**入包源**，且被
+    `tests/unit/test_bundle_manifest.py::TestAsarReader::test_real_asar_matches_source_for_electron_main`
+    **逐字节**盯着 ⇒ 只能与 Electron 产物**重建同批**改（`docs/PROJECT_PITFALLS.md` §六十三）。
+
+### 9.5 §7 对照追加：`mattpocock/skills` → `verification-integrity` 新增 Trap 98
+
+本轮暴露一类**新**的护栏失效：**新鲜度护栏只匹配一种命名形态**（`Round \d+`），而标题漂移成
+`R82` ⇒ 该条**被静默排除出语料**，护栏算出的"最新"因此**构造性过期**，于是**在最该报警时最自信**。
+修法不是"放宽正则"，而是**再加一条钉住形态本身的不变式**（使漂移变响红）。已作为
+**Trap 98** 写入 `~/.workbuddy-ai/skills/verification-integrity/SKILL.md`。
+（与 Trap 77「静默跳过无法解析的输入」同族，但后果相反：这里漏掉的是**最新**那条。）
