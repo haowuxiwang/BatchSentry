@@ -10,7 +10,7 @@
  * Lifecycle:
  *   1. app.whenReady() → show splash window (instant feedback)
  *   2. pre-flight port check (58765 must be free or owned by us)
- *   3. spawn pbc-server.exe + poll /health until ready (up to 30s)
+ *   3. spawn pbc-server.exe + poll /health until ready (bounded by READY_TIMEOUT_MS)
  *   4. splash → main window, load the app URL
  *   5. on quit: POST /api/shutdown (后端自行优雅退出) → 等端口释放 → 超时才 taskkill /T /F
  */

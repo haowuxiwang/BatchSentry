@@ -1,6 +1,6 @@
 # TODO —— 活的待办清单
 
-> **复核戳：Round 85（2026-10-10，第二十九批）** ← `tests/unit/test_todo_freshness.py` 机检读这一行；
+> **复核戳：Round 86（2026-10-10，第三十批）** ← `tests/unit/test_todo_freshness.py` 机检读这一行；
 > 该戳**不得落后于 `CHANGELOG.md` 的最新 Round**。
 >
 > **状态（R66 复核，2026-09-30）——本文件分两层，别混读**：
@@ -113,6 +113,13 @@
 >   顺带实测：**3 个应用源带 BOM** ⇒ AST 工具必须 `utf-8-sig`。已加护栏
 >   `tests/unit/test_no_dangerous_exec.py`（含反空转）+ 变异 **3 CAUGHT + 1 负控 OK**。
 >   ⚠️ 只拦语法可见调用 ⇒ **不是安全证明**（见 `docs/PROJECT_PITFALLS.md` §六十五）。
+> - **R90 第三十批（2026-10-10）**：**重建产物 + 核销 0-34**（`electron/main.js` 启动等待注释）。
+>   0-34 的前提在 R89 之后**被实测破除** —— 三份产物（`app.asar` + 两个 `pbc-server.exe`）
+>   的 `os.rename` 往返**全部成功** ⇒ 宿主**未**持有它们 ⇒ 「与 Electron 重建同批」的条件成立。
+>   第 13 行注释由 `(up to 30s)` 改为 `(bounded by READY_TIMEOUT_MS)`（**引用常量名**，不再复述数值）。
+>   ⚠️ 该改动**必然**让 `test_bundle_manifest.py::TestAsarReader::test_real_asar_matches_source_for_electron_main`
+>   变红**直到 asar 重建**（`docs/PROJECT_PITFALLS.md` §六十三）⇒ 本轮按「先提交 → 重建 → 全量跑」顺序执行。
+>   属**当前 backlog** ⇒ **就地记 §0 表（0-34 核销）**，**不进 §0.1 台账**。
 > - **§A 及以下 = Round 59（2026-09-23）的快照**，**已做过一轮核销，但未逐条复核**。
 >   核销过的条目带 **`—— **R66 已核销**（证据见 §0.1）`** 尾注；
 >   **其余仍标 `[ ]` 的，按"未复核"对待，不要当成当前事实。**
@@ -180,14 +187,14 @@
 | **0-32** | **硬崩溃恢复缺产物级验证**：`recover_stuck_jobs` 只有单测（lifespan 那几条还是 **mock 的日志分支**），**从未**在真产物上验证「跑到一半被 `taskkill /F` ⇒ 重启后收敛 + 审计 + 额度释放」 | **P2** | **✅ 已完成（R85 第二十五批）** | 崩溃后：① 卡死 job 必须收敛为**终态**；② 必须留 `stuck_recovery` **审计**；③ **额度必须释放**（否则用户被永久锁死） | **R85 第二十五批（2026-10-10）实测（产物级 `devlogs/_verify/r85m_crash_recovery.py`）**：**5/5 达成** —— 杀前 5/5 **非终态**且**已开工**（`ocr_running`）；`taskkill /T /F` 后进程确死；重启 ⇒ 5/5 收敛为 `error`；`stuck_recovery` 审计 **+5**；重启后新上传 **200** ⇒ **额度未泄漏**。 |
 | **0-33** | **上传页对 OCR 缺口只有信息性横幅、无前置门**：`main.py::index` 的 `needs_setup` 只看 LLM，`api/jobs/upload.py:159` 的 400 前置门也只判 LLM ⇒ OCR 未配置时上传被**接受**，用户白传大文件（实测样本 **138MB / 51 页**）后在 **Stage 1** 失败 | **P2** | **🟡 部分完成（R86 第二十六批：信息性横幅已加；后端前置门待做）** | 与 LLM 对称的前置门是**语义变更** ⇒ 必须重验产物级入口矩阵 `tests/e2e_rejections.py`（**34 例**）的 seed 与期望（seed 需含 OCR，否则「期望 200」用例会变红） | **R86 第二十六批（2026-10-10）**：已加 `core/pipeline/ocr_support.ocr_chain_configured()`（**单一来源**，复用 `remote_backend_configured` / `is_backend_available`）+ `main.py::index` 下发 `ocr_setup_needed` + `templates/upload.html` 第二横幅；护栏 `tests/integration/test_main_routes.py::TestIndexOcrGuidance`（**双向**）+ 变异 **4/4 CAUGHT**（`devlogs/_verify/r86d_mutation.py`）。**未做**：后端前置门（400 仍只对 LLM）⇒ 忽略横幅的用户仍会白传。 **R86 第二十六批（2026-10-10）定位完成（仍未实现）**：变更集 = ① `api/jobs/upload.py` 在**全部输入校验之后**加 OCR 门 —— **顺序是硬不变量**：放前面会让 15 条"期望 400 且断言具体文案"的用例（`dev_*` / `ext_exe` / `magic_bad` / `too_small` / `origin_foreign` / `pfx_dev_*`）改报 OCR 错误而**全红**；② `tests/e2e_rejections.py` 加与 `_llm_provider_configured` **对称**的 `_ocr_configured` 前置 + fail-closed；③ **必须**先 seed OCR 凭据到 `{APPDATA}/PBC/config.json`，否则 8 条 MATRIX「期望 200」+ 8 条 HOSTILE + 3 条 dedup = **19 条**会因 400 而全红（矩阵规模 **34** = MATRIX 23 + HOSTILE 8 + dedup 3，已用 AST 复核，非目测）；④ 为门本身补一条用例：需在运行中临时清空 OCR 配置再恢复（或退化为 TestClient 级）。⚠️ **本轮不实现**：产物级复验（需重建 + seed 凭据）在当前状态下**做不了**，而"改了语义却不复验"违反本项目纪律。 |
 
-| **0-34** | **`electron/main.js` 文件头注释的启动等待上限仍是旧值 30s**：第 13 行写 `poll /health until ready (up to 30s)`，而第 48 行 `READY_TIMEOUT_MS = 180_000`、报错文案也写 `within 180s` | P3 | **开放（R86 登记；R87 复核并更正理由）** | 注释与常量一致（或注释改为**引用常量名**、不再复述数值 —— 复述数值必然漂移） | **R86 第二十六批（2026-10-10）定位**：同一数值散在 3 处，2 处（代码 + 报错文案）已是 180s，注释残留 30s。**本轮刻意不改**：`electron/main.js` 是**入包源**（`D_ASAR`）⇒ 改它会让产物失效面再 +1 个文件，而用户侧收益为零（注释不面向用户）⇒ 与 `PORTABLE_README.txt` 的 180 秒纠偏**一并**在下次重建时处理。 **R87 第二十七批（2026-10-10）复核：R86 的延后判断是对的，理由比它写的更硬 —— 仍未结**：
+| **0-34** | **`electron/main.js` 文件头注释的启动等待上限仍是旧值 30s**：第 13 行写 `poll /health until ready (up to 30s)`，而第 48 行 `READY_TIMEOUT_MS = 180_000`、报错文案也写 `within 180s` | P3 | **✅ 已完成（R90 第三十批）** | 注释与常量一致（或注释改为**引用常量名**、不再复述数值 —— 复述数值必然漂移） | **R86 第二十六批（2026-10-10）定位**：同一数值散在 3 处，2 处（代码 + 报错文案）已是 180s，注释残留 30s。**本轮刻意不改**：`electron/main.js` 是**入包源**（`D_ASAR`）⇒ 改它会让产物失效面再 +1 个文件，而用户侧收益为零（注释不面向用户）⇒ 与 `PORTABLE_README.txt` 的 180 秒纠偏**一并**在下次重建时处理。 **R87 第二十七批（2026-10-10）复核：R86 的延后判断是对的，理由比它写的更硬 —— 仍未结**：
 本轮曾按「两份产物本就因同一 3 个文件失败（`devlogs/gate_report_20261010_144520.json`）⇒ 延长清单零边际成本」
 改掉第 13 行，**全量测试当场判红**：`tests/unit/test_bundle_manifest.py::TestAsarReader::test_real_asar_matches_source_for_electron_main`
 把 `app.asar` 里的 `electron/main.js` **逐字节**对比源码 ⇒ **改源码必然让它红**，直到 Electron 产物重建
 （实测 `1 failed, 4101 passed, 4 skipped`）。已**回退**该改动 ⇒ 本条**保持开放**。⚠️ 因此这条**只能**与
 Electron 产物重建**同批**做，不能提前。另记：`180s` 仍**复述在 3 处**（`electron/main.js` 的 L47 / L262 / L278，
 其中 L278 是**面向用户**的报错文案）—— 当前值与常量一致；**重建时**建议一并改为**引用常量名**，
-否则再调 `READY_TIMEOUT_MS` 时这 3 处会一起漂移。 |
+否则再调 `READY_TIMEOUT_MS` 时这 3 处会一起漂移。 **R90 第三十批（2026-10-10）核销**：前提破除（三份产物 `os.rename` 往返成功 = 无宿主锁）⇒ 改 L13 为 `(bounded by READY_TIMEOUT_MS)` + **重建**（PyInstaller → manifest → electron-builder → PROVENANCE）⇒ `TestAsarReader` 由红转绿（全量数字见 `CHANGELOG.md` Round 86）。⚠️ **只改 L13**：L45 / L239 是**历史叙述**（引用已删除的旧行为 `not ready after 60 checks`），非活规格；L278 是**面向用户**的报错文案且当前值与常量一致，本轮不动。 |
 | **0-35** | **一次参数变更的「清扫」只做了 1/5**：R85 把 `MAX_CONCURRENT_JOBS` 默认 3 → 5，只扫了 `README.md` 与 `tests/unit/test_upload_quota_contract.py` 的 docstring；全库仍残留 **7 处「默认 3」**（`CLAUDE.md` ×2、`static/upload.js`、`core/procpool.py`、`api/jobs/listings.py`、3 个测试 docstring），且**蕴含**了「选 5 份 ⇒ 第 4、5 份必然吃 409」变成**假命题** | **P2** | **✅ 已完成（R87 第二十七批）** | 活文件集合内不得再出现与代码不一致的默认值；由默认值**派生**的序数/条数不得写进文档 | **R87 第二十七批（2026-10-10）**：10 处一次扫净（`devlogs/_verify/r87a_concurrency_sweep.py`）+ 2 处歧义形态改写为显式（`r87b_reword_claims.py`）；护栏 `tests/unit/test_concurrency_default_claims.py`（**9 条**，默认值从 `api/jobs/__init__.py` **重算**，含反空转与「`=N` 只留给覆盖示例」约定）；变异 `devlogs/_verify/r87c_mutation.py` ⇒ **7/7 CAUGHT**。⚠️ 改到**入包源** `static/upload.js` ⇒ 产物失效面 +1（重建时一并处理）。 |
 | **0-36** | **settings 页「测试连接」在窄屏完全不可达**：唯一入口 `#test-conn-btn` 在 `<nav class="settings-nav hidden md:flex …">` 内，窄屏侧栏整体 `hidden`，而 `.settings-nav-mobile` 只有 5 个 section 锚点 ⇒ <768px 用户**无法**检测 OCR/LLM 连通性 | **P2** | **✅ 已完成（R87 第二十七批）** | 功能性入口在**窄屏**也必须可达；「元素存在」≠「元素可达」（e2e 只在桌面视口跑 ⇒ 缺陷不可见） | **R87 第二十七批（2026-10-10）**：加 `md:hidden` 的 `#test-conn-btn-mobile`（`templates/settings.html`）+ 抽出具名 `runConnectionTests(btn, scrollToMessage)` 供两入口**共用**（`static/settings.js`）+ 移动入口触发后把结果滚动到可视区；重构由 `devlogs/_verify/r87e_refactor_lossless.py` 机检**旧逻辑零丢失**（64→64 行，集合差空）；护栏 `tests/unit/test_settings_mobile_test_conn.py`（**5 条**）；变异 `devlogs/_verify/r87f_mutation_mobile.py` ⇒ **5/5 CAUGHT**。⚠️ **未在真机窄屏做浏览器级复验**（本环境无 GUI）⇒ 只宣称「入口存在 + 共用同一实现 + 有窄屏可见性机检」，**不宣称「移动端已可用」**。 |
 | **0-37** | **诊断报文低报**：`artifact_freshness` 报「8 个源文件与清单不符」却只列 **5** 个（`scripts/bundle_manifest.py` 的 `diverged_src[:5]`）；门禁 `release_gate.py` 的 `problems[:4]` 同类 ⇒ 读者**无法据以行动**（得再跑一次工具才能拿到全部路径） | **P2** | **✅ 已完成（R88 第二十八批）** | 报文的「数量」与「清单」**不得互相矛盾**；任何截断必须**显式声明**余量（低报即缺陷） | **R88 第二十八批（2026-10-10）**：`scripts/bundle_manifest.py` 新增 `_fmt_paths()`（≤上限 20 全列；>上限列前 N 并**明说**「另有 M 个未显示，共 K 个」），**5 处**报文改用它；`scripts/release_gate.py` 的 `problems[:4]` / `blocked[:2]` 补「另有 N 项未显示」。护栏 `tests/unit/test_bundle_manifest.py::TestProblemReportDoesNotUnderReport`（**3 条**）+ `tests/unit/test_release_gate.py::TestArtifactFreshness::test_truncated_problem_list_declares_the_remainder`（**1 条**）；变异 `devlogs/_verify/r88a_mutation_underreport.py` ⇒ **3/3 CAUGHT**。实测报文现**列全 8 个**。只改 `scripts/**` + `tests/**`（**均不入包**）⇒ **不扩大**失效面。 **同轮清扫**：按同形态全扫 `scripts/**` 又找出 **6 处**同类（`release_gate.py` 4+1、`golden_gate.py` 2、`seed_kb.py` 2、`clean_dist.py` 1）⇒ 抽出**唯一实现** `scripts/report_fmt.py::fmt_list`（`sep` 可选），各脚本按文件位置互导；护栏 `tests/unit/test_report_fmt.py`（含**只有一处实现**的静态扫描）+ `test_check_worktree_clean_declares_truncated_remainder`；变异 `devlogs/_verify/r88d_mutation_shared_fmt.py` ⇒ **3/3 CAUGHT**。 |

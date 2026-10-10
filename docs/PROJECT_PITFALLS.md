@@ -2808,6 +2808,16 @@ eol = b"\r\n" if b"\r\n" in blob else b"\n"
 bundle），都会产生这类**字节级一致性**约束。改源码前先问：**有没有一条单测/门禁在比对
 "产物里的副本"与源码？** 有 ⇒ 改动与重建不可分离。
 
+**闭环（R90 第三十批，2026-10-10 实测）**：上面第 3 条说的"正确顺序"，本轮**真的走了一遍**。
+R86/R87 卡在"需宿主退出"（无法重建 ⇒ 只能延后），而 R89 之后实测：三份产物
+（`dist-electron/win-unpacked/resources/app.asar`、`.../resources/pbc-server/pbc-server.exe`、
+`dist/pbc-server/pbc-server.exe`）的 `os.rename` **往返全部成功** ⇒ **无宿主锁**，重建可行。
+于是按顺序执行：**先提交**（源码 + 文档）⇒ 改 L13 注释为 `(bounded by READY_TIMEOUT_MS)`
+⇒ **重建 asar**（PyInstaller → manifest → electron-builder → PROVENANCE）⇒ 全量跑。
+结果印证本条：改动落地前 `TestAsarReader` **红**、重建后**绿** —— 它**只能**与重建同批。
+⚠️ 一句推论：**"这个改动要不要重建"不是靠推理定的，是靠"产物里有没有它的副本"查的** ——
+查法就是本条最后那句自问（有没有单测/门禁比对产物副本与源码）。
+
 ## 六十四、诊断报文**不得低报** —— 截断必须**显式声明**（Round 84 第二十八批，2026-10-10 实测）
 
 **现象（本 agent 亲自踩到）**：`artifact_freshness` 判红时打印
