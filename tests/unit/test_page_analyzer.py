@@ -17,6 +17,7 @@ from core.page_analyzer import (
     _grounding_check,
 )
 from config import config as _app_config
+from llm.client import DETERMINISTIC_TEMPERATURE
 
 
 def _ok_payload(page=1):
@@ -183,7 +184,7 @@ class TestPromptConstruction:
 
         call_kwargs = mock_client.chat_json.await_args.kwargs
         assert call_kwargs["max_tokens"] == 8000
-        assert call_kwargs["temperature"] == 0.1
+        assert call_kwargs["temperature"] == DETERMINISTIC_TEMPERATURE
         assert call_kwargs["timeout"] == 480.0
         assert call_kwargs["retries"] == 2
 

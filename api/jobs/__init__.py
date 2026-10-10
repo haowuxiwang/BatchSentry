@@ -109,13 +109,14 @@ _IMAGE_MAGIC_PREFIXES = (
 _WEBP_MAGIC = (b"RIFF", b"WEBP")  # 8 字节偏移后为 WEBP
 
 # Concurrency guard — prevents memory exhaustion from many parallel pipelines.
-# Each pipeline holds the OCR result + LLM JSON in memory; 3 concurrent 200MB
-# PDFs with multi-page OCR results can hit ~2GB. Override via MAX_CONCURRENT_JOBS.
-# 对抗审查(cr-11): 非法 env 值兜底为默认 3，避免 import 崩溃。
+# Each pipeline holds the OCR result + LLM JSON in memory. 实测单 job ≈ 102MB
+#（含瞬时 pixmap）——此前注释的 “~2GB” 归因有误（见 MEMORY-DETAIL §7）。
+# 默认 5 支持五个文件并发；小内存机器可用环境变量 MAX_CONCURRENT_JOBS 调低。
+# 对抗审查(cr-11): 非法 env 值兜底为默认值，避免 import 崩溃。
 try:
-    _MAX_CONCURRENT_JOBS = int(os.getenv("MAX_CONCURRENT_JOBS", "3"))
+    _MAX_CONCURRENT_JOBS = int(os.getenv("MAX_CONCURRENT_JOBS", "5"))
 except (TypeError, ValueError):
-    _MAX_CONCURRENT_JOBS = 3
+    _MAX_CONCURRENT_JOBS = 5
 # _ACTIVE_STATUSES / _TERMINAL_STATUSES 见文件顶部的 re-export（单一真值在
 # core.pipeline.state）—— 此处不再重复声明字面量。
 

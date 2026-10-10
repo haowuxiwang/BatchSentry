@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 
-from llm.client import get_llm_client
+from llm.client import DETERMINISTIC_TEMPERATURE, get_llm_client
 
 logger = logging.getLogger(__name__)
 
@@ -127,7 +127,7 @@ async def _llm_fallback_check(llm_queue: list[dict], *, job_id: str = "") -> lis
     client = get_llm_client()
     try:
         result = await client.chat_json(
-            _FALLBACK_SYSTEM_PROMPT, prompt, max_tokens=4000, temperature=0.1, timeout=120.0,
+            _FALLBACK_SYSTEM_PROMPT, prompt, max_tokens=4000, temperature=DETERMINISTIC_TEMPERATURE, timeout=120.0,
             audit_ctx={"job_id": job_id, "page": None, "stage": "cross_page_llm_fallback",
                        "prompt_version": "fallback_v1"},
         )
@@ -319,7 +319,7 @@ async def _llm_based_check(summary: str, *, job_id: str = "",
     client = get_llm_client()
     try:
         result = await client.chat_json(
-            SYSTEM_PROMPT, prompt, max_tokens=4000, temperature=0.1, timeout=180.0,
+            SYSTEM_PROMPT, prompt, max_tokens=4000, temperature=DETERMINISTIC_TEMPERATURE, timeout=180.0,
             audit_ctx={"job_id": job_id, "page": None, "stage": "cross_page_llm",
                        "prompt_version": prompt_version},
         )

@@ -6,6 +6,40 @@
 ---
 
 ## [Unreleased]
+### 判定产出**采样温度未固定** ⇒ 同输入两次跑 findings 差 +24%；并发额度默认 3 → 5（Round 81 第二十五批，2026-10-10）
+
+> 记录 → `docs/TODO.md` 的 **0-15**（核销）与 **0-27**（新增）（属当前 backlog ⇒ 就地记 §0 表）。
+
+**定位（0-15）**：全仓**唯一**随机源是 LLM 采样 —— 页面分析（`core/page_analyzer.py`
+两处）与跨页语义检查（`core/rules/llm_checks.py` 两处）都传 `temperature=0.1`。
+`temperature > 0` 即引入采样随机性，逐页累积成整份记录的 findings 条数漂移
+（B6-1 实测：同输入 / 同产物 / 同后端 / 同模型，**41 vs 51**，+24%）。其余“疑似随机源”
+经核查**不成立**：OCR 客户端**不发** `temperature`/`seed`（服务端固定）；`datetime.now()`
+只注入“今天日期”（同日恒定）；`rule_time`/`year_vote` 的年份上界是**跨年**敏感
+（设计如此），**不解释**同日 41 vs 51。
+
+**修法**：新增单一真值 `llm.client.DETERMINISTIC_TEMPERATURE = 0.0`，四处调用点改用它。
+greedy 解码（0.0）是结构化抽取 / 合规判定的标准做法：既去掉运行间方差，也让输出落在
+模型最高概率路径上。**不**引入 `seed` —— 网关可能拒绝该参数 ⇒ 给调用链加一条 400 分支，
+收益不确定。
+
+**并发额度（0-27）**：`api/jobs._MAX_CONCURRENT_JOBS` 默认 **3 → 5**（支持 5 个文件并发
+审核；env `MAX_CONCURRENT_JOBS` 仍可覆盖）。原注释称“3 并发 200MB PDF 可达 ~2GB”
+**归因有误**（实测单 job ≈ 102MB，见 `.workbuddy-ai/memory/MEMORY-DETAIL.md` §7），已更正。
+
+**护栏**：`tests/unit/test_llm_determinism.py`（4 条：常量 / `analyze_page` **行为**断言 /
+`_llm_fallback_check` **行为**断言 / 源码扫描“判定产出模块不得再出现裸 temperature 数字”）；
+`tests/unit/test_upload_quota_contract.py::TestDefaultQuotaSupportsFiveConcurrentReviews`
+（默认 ≥ 5 且**兜底分支** ≥ 5）。
+
+**变异**：`devlogs/_verify/r85_mutation.py` ⇒ **5/5 CAUGHT**（M1 页面温度回 0.1 /
+M2 跨页温度回 0.1 / M3 常量改 0.1 / M4 默认回 3 / M5 兜底回 3）+ 基线绿。
+⚠️ **M3 是必需项**：只把常量改成 0.1 时，两条**行为**断言仍绿（调用方与常量一起变）
+⇒ 只有 `test_constant_is_zero` 能抓 —— 又一个“用例存在 ≠ 断言有效”的现场。
+
+**未验证边界**：0.0 消除的是**客户端采样**这一已知随机源；**服务端**残余方差
+（批处理 / MoE 路由 / 浮点非结合）**未测** ⇒ **不宣称“非确定性已消除”**。
+本批同时改了两处**入包源**（`core/`、`llm/`）⇒ **必须重建产物**。
 ### 报告缓存 key 未覆盖**全部渲染输入** ⇒ 重试后 `report.md` 静默返回过期内容（Round 80 第二十四批，2026-10-09）
 
 > 记录 → `docs/TODO.md` 的 **0-26**（属当前 backlog ⇒ 就地记 §0 表）。

@@ -13,7 +13,11 @@ import re
 from datetime import datetime
 from typing import Awaitable, Callable, Optional
 
-from llm.client import get_llm_client, raw_digest
+from llm.client import (
+    DETERMINISTIC_TEMPERATURE,
+    get_llm_client,
+    raw_digest,
+)
 from core.hw_signal import _extract_low_conf_tokens
 from config import config as _app_config
 
@@ -596,7 +600,7 @@ async def analyze_page(
         # ~7 min generating the full payload). 8000 covers a 24-timepoint x 8
         # column worst-case matrix; timeout 480s covers the slow generation.
         max_tokens=_PAGE_MAX_TOKENS,
-        temperature=0.1,
+        temperature=DETERMINISTIC_TEMPERATURE,
         timeout=_PAGE_TIMEOUT,
         retries=_PAGE_RETRIES,
         # Phase 7: GMP audit — record provider/model/prompt_version/tokens
@@ -704,7 +708,7 @@ async def analyze_page(
             prompt_cfg["system"],
             prompt + fix_suffix,
             max_tokens=_PAGE_MAX_TOKENS,
-            temperature=0.1,
+            temperature=DETERMINISTIC_TEMPERATURE,
             timeout=_PAGE_TIMEOUT,
             retries=_PAGE_RETRIES,
             audit_ctx={

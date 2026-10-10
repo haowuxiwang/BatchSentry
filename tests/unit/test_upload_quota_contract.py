@@ -2,7 +2,7 @@
 
 **要防的失效模式**
 
-后端配额是 `api.jobs._MAX_CONCURRENT_JOBS`（默认 3），超限**硬拒绝 409**。
+后端配额是 `api.jobs._MAX_CONCURRENT_JOBS`（默认 5），超限**硬拒绝 409**。
 前端若不知道这个数字，多文件串行上传的第 4 份就会把整个文件传完再吃 409
 （见 `static/upload.js` 的 quotaSnapshot 注释）。故服务端必须把额度**下发**
 到上传页 —— 与既有的 `UPLOAD_LIMITS` 同一套路（单一真值 + 注入，见
@@ -54,7 +54,7 @@ class TestHarnessIsNotVacuous:
 
 class TestConcurrencyLimitIsInjected:
     @pytest.mark.asyncio
-    async def test_default_limit_is_three(self, test_client):
+    async def test_default_limit_is_injected(self, test_client):
         from api.jobs import _MAX_CONCURRENT_JOBS
 
         r = await test_client.get("/")
@@ -116,6 +116,33 @@ class TestInjectedLimitAgreesWithTheRejectionMessage:
         assert "上限为 2" in str(ei.value.detail), (
             f"409 文案里的数字与页面上的一致（2）：{ei.value.detail!r}"
         )
+
+
+class TestDefaultQuotaSupportsFiveConcurrentReviews:
+    """产品要求：支持 5 个文件**并发**审核 —— 代码默认值必须 ≥ 5。
+
+    断言的是**代码里的默认值**（源码扫描，不跑子进程）：跑子进程会受本机
+    `config.json` / 环境变量影响 ⇒ 用户机器上可能假红。env `MAX_CONCURRENT_JOBS`
+    仍是合法逃生口（小内存机器可调低），本条只锁"出厂默认"。
+    """
+
+    def test_default_job_quota_is_at_least_five(self):
+        import re
+        from pathlib import Path
+
+        src = (
+            Path(__file__).resolve().parents[2] / "api" / "jobs" / "__init__.py"
+        ).read_bytes().decode("utf-8")
+        m = re.search(r'os\.getenv\(\s*"MAX_CONCURRENT_JOBS"\s*,\s*"(\d+)"\s*\)', src)
+        assert m, "找不到 MAX_CONCURRENT_JOBS 的默认值读取点"
+        assert int(m.group(1)) >= 5, (
+            f"默认并发额度 {m.group(1)} < 5 —— 第 5 个文件并发审核会吃 409"
+        )
+        # 兜底分支（env 值非法 int() 抛错时走的那条）也必须 ≥ 5，
+        # 否则一次非法 env 会把额度静默降到低值。
+        m2 = re.search(r"^\s*_MAX_CONCURRENT_JOBS\s*=\s*(\d+)\s*$", src, re.M)
+        assert m2, "找不到 _MAX_CONCURRENT_JOBS 的兜底赋值"
+        assert int(m2.group(1)) >= 5, f"兜底并发额度 {m2.group(1)} < 5"
 
 
 async def _db():
