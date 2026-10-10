@@ -113,7 +113,7 @@ UI `/` + `/static/app.css` + `/api/jobs` 均 200（css 与磁盘**逐字节一�
 **其余 4/4 仍在跑**时重传第 6 份即 **200** 且为**新 job_id** ⇒ 额度**动态回收**
 （无需等全部跑完）。此前只钉了「占满 ⇒ 409」这**一半**，回收方向**无任何断言**。
 永久护栏 `TestQuotaSlotIsReleasedWhenAJobReachesTerminal`（自带同轮负控）；
-变异 `devlogs/_verify/r85i_quota_recycle_mutation.py` ⇒ **3/3**（M0 绿 / M1·M2 CAUGHT）。
+变异 `devlogs/_verify/r85i_quota_recycle_mutation.py` ⇒ **3/3**（M0 绿 / M1·M2 CAUGHT）。复跑**全量门禁** ⇒ **11/11**（4071 passed / 0 failed / coverage **95.09%**；两份产物仍**逐字节新鲜**）。
 
 
 ### 报告缓存 key 未覆盖**全部渲染输入** ⇒ 重试后 `report.md` 静默返回过期内容（Round 80 第二十四批，2026-10-09）
