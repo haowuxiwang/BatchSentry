@@ -51,7 +51,7 @@ $env:CODEBUDDY_SAFE_DELETE_ENABLED = "0"
 |------|------|------|
 | Electron 应用文件夹 | `dist-electron/win-unpacked/` | 双击 `BatchSentry.exe` 运行，无需安装 |
 | Python 后端 | `dist/pbc-server/pbc-server.exe` | PyInstaller 打包的后端，嵌入 win-unpacked/resources/ |
-| Tailwind CSS | `static/app.css` | 压缩后的样式（~14KB） |
+| Tailwind CSS | `static/app.css` | 压缩后的样式（~20KB；实测 20,016 字节） |
 
 > ⚠️ **产物目录名不一定是 `dist-electron/`。** 若外部进程持有上一轮
 > `win-unpacked/resources/app.asar` 的文件句柄（**本机实测＝WorkBuddy 宿主进程，
@@ -268,7 +268,7 @@ Electron 主进程把后端的 spawn/stdout/stderr/exit 与每次健康检查的
 |------|------|
 | 数据库 | `{项目根目录}/data/pharma.db` |
 | 日志 | `{项目根目录}/logs/` |
-| 上传文件 | `{项目根目录}/output/{job_id}/`（OCR 完成后自动清理） |
+| 上传文件 | `{项目根目录}/output/{job_id}/`（**保留至任务删除** —— 复核页的逐页渲染依赖它；删除任务时一并清理） |
 
 ### 安装版（Frozen 模式）
 
@@ -283,7 +283,7 @@ Electron 主进程把后端的 spawn/stdout/stderr/exit 与每次健康检查的
 
 ### 日志系统
 
-BatchSentry 有 4 个日志文件（位于 `logs/` 目录）：
+BatchSentry 有 3 个日志文件（位于 `logs/` 目录），外加实时控制台输出：
 
 | 日志文件 | 内容 | 轮转策略 |
 |----------|------|----------|
@@ -304,7 +304,7 @@ BatchSentry 有 4 个日志文件（位于 `logs/` 目录）：
 ```bash
 # 基础健康检查（开发模式端口 8000，frozen 模式端口 58765）
 curl http://127.0.0.1:58765/health
-# → {"status":"ok","version":"1.0.0"}
+# → {"status":"ok","version":"<main.APP_VERSION>"}
 
 # 下游服务连通性检查（LLM + OCR）
 curl http://127.0.0.1:58765/api/health/downstream
@@ -515,6 +515,6 @@ sqlite3 data/pharma.db "PRAGMA wal_checkpoint(TRUNCATE)"
 1. **`config.json` 文件包含 API key**，切勿提交到 git（已在 `.gitignore` 中）
 2. **CSP 头**：`default-src 'self'`，禁止加载外部资源
 3. **CORS**：仅允许 `127.0.0.1:8000/58765`，禁止远程访问
-4. **PDF 上传**：magic bytes 校验 + 200MB 大小限制 + 路径遍历防护
+4. **PDF 上传**：magic bytes 校验（`%PDF-` 头）+ 200MB 体积 / 200 页上限 + 路径遍历防护
 5. **本地访问限制**：`/api/shutdown` 等敏感端点仅允许本地访问
 6. **审计日志**：所有状态转换和人工操作均记录，不可篡改
