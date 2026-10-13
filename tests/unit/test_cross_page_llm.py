@@ -1490,3 +1490,85 @@ class TestSummaryTruncation:
         assert len(text) <= cap32 + 200
         assert "内容过长已截断" in text
         assert "内容过长已截断" not in _build_summary(pages)
+
+
+class TestQueueFindingsAreNotCollapsedByDedupKey:
+    """0-42（**未修**，xfail 显式登记）：同一参数在不同时间点必须产出**可区分**的 finding。
+
+    为什么锁这条（R90 第三十四批）：写库去重键是 UNIQUE
+    ``idx_findings_dedup(job_id, source, page, type, description)``，而
+    ``core/rules/llm_checks.py`` 的三个产出分支（cap/逐参数、``in_spec=False``、
+    ``in_spec=None``）用的是**裸 dict + 不含 ``time``/``step_no`` 的 f-string**
+    ⇒ ``kind='cell'`` 的多时间点条目描述**逐字相同** ⇒ ``INSERT OR IGNORE`` **静默丢弃**。
+
+    实测（``devlogs/_verify/r91f_reproduce_422.py``，只读 DB + 离线重放）：
+    全库 7 个 job 的「参数数量过多（N）」行数**均** < N，丢 **64–77 条（13–17%）**；
+    该 51 页 job 重放得 400 条队列 → 去重后 337（丢 63 = 15.75%）。
+    对照：规则层自身的 cell 判定走 ``make_oos_finding``（``_where_phrase`` 把时间点
+    清单写进描述）⇒ **不丢**（同输入实测 2 条描述互异）。
+
+    ``strict=True``：一旦有人修好（描述带上时间点），本用例会 **XPASS → FAIL**，
+    强制其**显式**移除本登记 —— 这是"显式登记 + 陈旧检测"，不是"永远绿"的放松。
+    """
+
+    _REASON = "参数数量过多（2），超出自动判定上限，需人工确认"
+
+    @staticmethod
+    def _two_timepoints():
+        """同一页、同一参数、同一取值，**只有时间点不同**（真实批记录常态）。"""
+        return [
+            {"page": 8, "step_no": 3, "name": "总进_进口压力", "time": "10:38",
+             "spec": "", "actual": "3.6", "unit": "bar", "kind": "cell"},
+            {"page": 8, "step_no": 3, "name": "总进_进口压力", "time": "11:34",
+             "spec": "", "actual": "3.6", "unit": "bar", "kind": "cell"},
+        ]
+
+    @pytest.mark.xfail(strict=True,
+                       reason="0-42：描述模板未编码 time/step_no ⇒ UNIQUE 静默丢")
+    def test_per_param_flag_keeps_time_points_distinct(self):
+        from core.rules.llm_checks import _flag_llm_queue_for_review
+
+        findings = _flag_llm_queue_for_review(
+            self._two_timepoints(), reason=self._REASON)
+        assert len(findings) == 2
+        assert len({f["description"] for f in findings}) == 2, (
+            "两个时间点产出了**逐字相同**的 description ⇒ 写库时会被 UNIQUE "
+            "idx_findings_dedup 静默合并（0-42）"
+        )
+
+    @pytest.mark.xfail(strict=True,
+                       reason="0-42：同上有损模板（param_out_of_spec 分支）")
+    @pytest.mark.asyncio
+    async def test_llm_judged_oos_keeps_time_points_distinct(self):
+        """``in_spec=False``（**真实越界**）分支用同一个有损模板 ⇒ 真 OOS 也可能被合并。"""
+        from core.rules.llm_checks import _llm_fallback_check
+
+        client = MagicMock()
+        client.chat_json = AsyncMock(return_value=[
+            {"index": 1, "in_spec": False, "reason": "超上限"},
+            {"index": 2, "in_spec": False, "reason": "超上限"},
+        ])
+        with patch("core.rules.llm_checks.get_llm_client", return_value=client):
+            findings = await _llm_fallback_check(self._two_timepoints(), job_id="t")
+        assert len(findings) == 2
+        assert len({f["description"] for f in findings}) == 2
+
+    def test_rule_layer_counterexample_keeps_time_points_distinct(self):
+        """**正对照**（现在就绿）：规则层 cell 判定把时间点写进描述 ⇒ 不撞车。
+
+        没有这条，"让 LLM 路径复用规则层构造点"是否真能修好就没有现场证据；
+        同时它也证明缺陷**不是** UNIQUE 索引本身的锅，而是**产出侧**的有损描述。
+        """
+        from core.rules.finding_aggregate import (
+            make_oos_finding, KIND_CELL, CAUSE_HARD)
+
+        a = make_oos_finding(
+            page=8, type_="param_out_of_spec", severity="warning", kind=KIND_CELL,
+            subject="总进_进口压力", cause=CAUSE_HARD, desc_value="3.6",
+            raw_value="3.6", unit="bar", spec="", where="10:38")
+        b = make_oos_finding(
+            page=8, type_="param_out_of_spec", severity="warning", kind=KIND_CELL,
+            subject="总进_进口压力", cause=CAUSE_HARD, desc_value="3.6",
+            raw_value="3.6", unit="bar", spec="", where="11:34")
+        assert a["description"] != b["description"]
+        assert "10:38" in a["description"] and "11:34" in b["description"]
