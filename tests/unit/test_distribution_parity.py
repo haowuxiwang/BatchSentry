@@ -24,6 +24,7 @@ import json
 import os
 import re
 import struct
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -521,3 +522,229 @@ def test_other_docs_do_not_claim_a_single_file_portable_artifact():
         assert "单文件便携版" not in doc, (
             f"{name} 仍称「单文件便携版」，但 win.target={sorted(targets)} 只有目录形态。"
         )
+
+# ── 打包图标：声明了就必须是「真实、可用、不被忽略」的资产（2026-10-13 补）──
+#
+# 由来（2026-10-13 实测）：图标管线**两处都没接线**，且失败是静默的 ——
+#   * `electron/main.js` 找 `electron/icon.ico`（不存在）；
+#   * electron-builder 默认找根 `build/icon.ico`（不存在；且根 `build/` 是
+#     PyInstaller workpath、会被 `--clean` 清掉 ⇒ **默认位置不可用**）；
+#   * 唯一在盘的是 `electron/build/icon.ico` = 190 B / 16x16 / 1-bpp 占位
+#     （< electron-builder 的 256x256 下限），还被**未锚定**的 `.gitignore` 吃掉。
+# ⇒ 产物用 Electron 默认图标，而**没有任何东西**会发现（构建成功、产物齐备）。
+#
+# 本类钉住的是**声明后**的不变式：一旦 `build.win.icon` 被声明，它就必须是
+# 真实、够大、且在版本控制里（不被忽略）的资产，并与 `main.js` 的运行时图标**同源**。
+# 现状是**未声明** ⇒ 走 `pytest.skip` 并指向 `docs/TODO.md` 0-39（诚实标注，非假绿）；
+# 同时用**无条件**的正负对照证明检测器不空转（本仓库铁律：「用例存在」≠「断言有效」）。
+
+_ICO_DIR_ENTRY = struct.Struct("<BBBBHHII")
+_ICO_MIN_DIM = 256
+
+
+def _ico_problems(raw: bytes) -> list[str]:
+    """按 ICO **目录头**检查「够不够用」：≥1 个 ≥256x256 条目，且载荷在文件内。
+
+    ⚠️ **只查目录头与载荷边界，不解码像素** —— 目的是挡住「16x16 占位当图标用」
+    这一类（electron-builder 会因此**直接构建失败**）。可解码性由构建期兜底，
+    此处刻意不做（无 PIL 依赖、确定性、秒级）。
+    """
+    if len(raw) < 6:
+        return [f"文件过短（{len(raw)} B），不是 ICO"]
+    reserved, kind, count = struct.unpack("<HHH", raw[:6])
+    if reserved != 0 or kind != 1 or count == 0:
+        return [f"不是 ICO（reserved={reserved} type={kind} count={count}）"]
+
+    problems: list[str] = []
+    biggest = 0
+    for i in range(count):
+        off = 6 + i * 16
+        if off + 16 > len(raw):
+            problems.append(f"第 {i} 个目录项越界（头声明 {count} 项）")
+            break
+        w, h, _c, _r, _p, _b, size, offset = _ICO_DIR_ENTRY.unpack(raw[off:off + 16])
+        w, h = w or 256, h or 256          # ICO 用 0 表示 256
+        biggest = max(biggest, min(w, h))
+        if offset + size > len(raw):
+            problems.append(
+                f"第 {i} 项载荷越界（offset={offset} size={size} 文件={len(raw)}）"
+            )
+    if biggest < _ICO_MIN_DIM:
+        problems.append(
+            f"最大边长 {biggest} < {_ICO_MIN_DIM}（electron-builder 会拒绝构建）"
+        )
+    return problems
+
+
+def _packaging_icon(pkg: dict, repo: Path):
+    """返回 `(图标绝对路径 | None, 说明)` —— 未声明 `win.icon` 时路径为 `None`。
+
+    electron-builder 把 `win.icon` 解释为**相对 `directories.buildResources`**
+    （默认 `build`）的路径。此处如实复刻该语义，不另立一套。
+    """
+    build = pkg.get("build", {})
+    win_icon = build.get("win", {}).get("icon")
+    if not win_icon:
+        return None, "package.json 的 build.win.icon 未声明"
+    res = build.get("directories", {}).get("buildResources", "build")
+    return (repo / res / win_icon).resolve(), f"buildResources={res!r}"
+
+
+def _icon_wiring_problems(pkg: dict, repo: Path, *, is_ignored=None) -> list[str]:
+    """纯函数：给定 `package.json` 与仓库根，返回图标接线的全部问题（空 = 合格）。
+
+    `is_ignored` 为可注入的「该相对路径是否被忽略清单吃掉」判定（默认不做该检查，
+    以便在非 git 目录里做合成对照）。**注入点存在的原因**是「资产被忽略」这一分支
+    当前**无法**在真实仓库上触发（没有合格资产可放），只能靠合成对照覆盖。
+    """
+    path, why = _packaging_icon(pkg, repo)
+    if path is None:
+        return [f"未声明打包图标（{why}）"]
+
+    problems: list[str] = []
+    if not path.is_file():
+        problems.append(f"声明的图标不存在：{path}")
+        return problems
+
+    problems.extend(_ico_problems(path.read_bytes()))
+
+    if is_ignored is not None:
+        try:
+            rel = path.relative_to(repo.resolve()).as_posix()
+        except ValueError:
+            rel = None
+        if rel and is_ignored(rel):
+            problems.append(
+                f"图标被忽略清单吃掉（{rel}）⇒ 资产进不了版本控制，下一次重建就丢"
+            )
+    return problems
+
+
+def _main_js_icon_path(src: str, repo: Path):
+    """从 `electron/main.js` 解析运行时图标路径（`iconPath = path.join(__dirname, ...)`）。"""
+    m = re.search(r"iconPath\s*=\s*path\.join\(\s*__dirname\s*,([^;]*)\)", src)
+    if not m:
+        return None
+    parts = re.findall(r'"([^"]+)"', m.group(1))
+    if not parts:
+        return None
+    return (repo / "electron" / Path(*parts)).resolve()
+
+
+class TestPackagingIconIsWired:
+    """图标一旦被声明，就必须「真实 + 够大 + 不被忽略 + 与运行时同源」。"""
+
+    def test_declared_icon_is_real_and_not_ignored(self):
+        pkg = _pkg()
+        path, why = _packaging_icon(pkg, _ROOT)
+        if path is None:
+            pytest.skip(
+                f"{why} —— 图标管线未接线（见 docs/TODO.md 0-39，待真实资产）。"
+                f"本类的正负对照仍无条件运行，证明检测器不空转。"
+            )
+
+        def _git_ignored(rel: str) -> bool:
+            try:
+                p = subprocess.run(
+                    ["git", "check-ignore", "--", rel],
+                    cwd=str(_ROOT), capture_output=True,
+                )
+            except OSError:
+                pytest.skip("git 不可用，跳过「是否被忽略」检查")
+            return p.returncode == 0
+
+        problems = _icon_wiring_problems(pkg, _ROOT, is_ignored=_git_ignored)
+        assert not problems, (
+            f"打包图标不合格：{problems}\n"
+            f"→ electron-builder 需要 ≥{_ICO_MIN_DIM}x{_ICO_MIN_DIM} 的多尺寸 .ico，"
+            f"且资产必须进版本控制。修法与退出条件见 docs/TODO.md 0-39。"
+        )
+
+    def test_runtime_and_packaging_icon_agree(self):
+        """`main.js` 的窗口图标与 electron-builder 的打包图标必须**同一个文件**。
+
+        实测（2026-10-13）：`main.js` 找 `electron/icon.ico`、builder 找
+        `build/icon.ico` —— 两处**都不是**磁盘上那个 `electron/build/icon.ico`。
+        两个消费者各指一处，是这条缺陷最容易被漏看的地方。
+        """
+        pkg = _pkg()
+        path, _why = _packaging_icon(pkg, _ROOT)
+        if path is None:
+            pytest.skip("build.win.icon 未声明（见 docs/TODO.md 0-39）")
+
+        src = (_ROOT / "electron" / "main.js").read_text(encoding="utf-8")
+        runtime = _main_js_icon_path(src, _ROOT)
+        assert runtime is not None, (
+            "electron/main.js 里找不到 `iconPath = path.join(__dirname, ...)` —— "
+            "运行时图标接线被摘掉了？"
+        )
+        assert runtime == path, (
+            f"运行时图标 {runtime} != 打包图标 {path} ⇒ 用户窗口看到的与安装包嵌入的"
+            f"不是同一个图标。两处必须指向同一文件。"
+        )
+
+    # ── 无条件正负对照：证明上面两条的检测器真的会红/会绿 ──────────────
+
+    @staticmethod
+    def _ico(w: int, h: int, *, bpp: int = 1) -> bytes:
+        """构造一个**头与载荷自洽**的最小 ICO（1-bpp BMP-in-ICO，与真实占位同构）。"""
+        row = ((w * bpp + 31) // 32) * 4
+        and_row = ((w + 31) // 32) * 4
+        payload = 40 + row * h + and_row * h
+        head = struct.pack("<HHH", 0, 1, 1) + struct.pack(
+            "<BBBBHHII", w if w < 256 else 0, h if h < 256 else 0, 0, 0, 1, bpp, payload, 22
+        )
+        return head + b"\x00" * payload
+
+    def test_checker_accepts_a_256px_icon(self, tmp_path: Path):
+        f = tmp_path / "icon.ico"
+        f.write_bytes(self._ico(256, 256))
+        assert _ico_problems(f.read_bytes()) == [], "256x256 的合格 ICO 被判不合格"
+
+    def test_checker_rejects_the_16px_placeholder(self, tmp_path: Path):
+        """阳性对照：**当前盘上那个 190 B 占位**必须被判不合格。"""
+        f = tmp_path / "icon.ico"
+        f.write_bytes(self._ico(16, 16))
+        problems = _ico_problems(f.read_bytes())
+        assert problems and any("16" in p for p in problems), problems
+
+    def test_checker_rejects_a_truncated_payload(self, tmp_path: Path):
+        raw = self._ico(256, 256)
+        problems = _ico_problems(raw[: len(raw) - 4096])   # 砍掉尾部 ⇒ 载荷越界
+        assert problems and any("越界" in p for p in problems), problems
+
+    def test_checker_rejects_non_ico_bytes(self):
+        assert _ico_problems(b"MZ\x90\x00\x03\x00") != []
+        assert _ico_problems(b"\x00\x01") != []
+
+    def test_checker_flags_an_ignored_icon(self, tmp_path: Path):
+        """「资产被忽略」分支：注入一个恒真的忽略判定 ⇒ 必须报出来。
+
+        该分支在真实仓库上**当前无法**触发（没有合格资产），故只能合成覆盖 ——
+        这正是 `is_ignored` 注入点存在的理由。
+        """
+        repo = tmp_path
+        (repo / "build").mkdir()
+        (repo / "build" / "icon.ico").write_bytes(self._ico(256, 256))
+        pkg = {"build": {"win": {"icon": "icon.ico"}}}
+        assert _icon_wiring_problems(pkg, repo) == []
+        problems = _icon_wiring_problems(pkg, repo, is_ignored=lambda rel: True)
+        assert problems and any("忽略清单" in p for p in problems), problems
+
+    def test_checker_flags_a_missing_icon(self, tmp_path: Path):
+        pkg = {"build": {"win": {"icon": "nope.ico"}}}
+        problems = _icon_wiring_problems(pkg, tmp_path)
+        assert problems and any("不存在" in p for p in problems), problems
+
+    def test_icon_path_honours_build_resources(self, tmp_path: Path):
+        pkg = {"build": {"directories": {"buildResources": "electron/build"},
+                         "win": {"icon": "icon.ico"}}}
+        path, why = _packaging_icon(pkg, tmp_path)
+        assert path == (tmp_path / "electron" / "build" / "icon.ico").resolve(), (path, why)
+
+    def test_main_js_icon_path_is_parsed_from_the_real_source(self):
+        """解析器对**真实** `main.js` 必须能取到路径（防解析式失效后静默变空）。"""
+        src = (_ROOT / "electron" / "main.js").read_text(encoding="utf-8")
+        got = _main_js_icon_path(src, _ROOT)
+        assert got is not None, "解析器在真实 main.js 上取不到 iconPath —— 解析式已过时"
+        assert got.name == "icon.ico", got

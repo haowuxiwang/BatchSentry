@@ -404,3 +404,50 @@ class TestNoLineNumberRefsIntoFrontend:
         (tmp_path / "test_plain.py").write_text(
             f"# 见 static/{_SAMPLE_REF}\n", encoding="utf-8")
         assert self._find_refs(tmp_path) == {"test_plain.py": [_SAMPLE_REF]}
+
+
+# ── 忽略规则必须锚定到根（2026-10-13 补）───────────────────────────────────
+
+
+class TestIgnoreRulesAreRootAnchored:
+    """未锚定的目录规则会**连带**吃掉同名子目录 —— 且是**静默**的。
+
+    由来（2026-10-13 实测）：`.gitignore` 里的 `build/`（**未锚定**）把
+    `electron/build/` 一并吃掉，而后者是**打包图标**的落点 ⇒ 图标资产
+    **从未进过版本控制**（`git log -- electron/build/` 为空），且无人察觉
+    （见 `docs/TODO.md` 0-39）。同一形态在本项目已有先例：`/data/` 之所以带
+    前导斜杠，正是为了不吞掉**被跟踪**的 `core/kb/data/`（见该行上方注释）。
+
+    判据刻意**行为化**（问 `git check-ignore` 的返回值），不读 `.gitignore` 文本 ——
+    本项目反复踩过「断言序列化后的字符」的坑。
+    """
+
+    #: 见证路径。**刻意取一个没有显式规则的层级**：`core/build/` 不在任何显式
+    #: 规则里，故**只有未锚定**的 `build/` 才会命中它。
+    #: ⚠️ 若将来真给 `core/build/` 加了显式忽略规则，请**换一个见证路径**
+    #: （`test_detector_sees_a_genuinely_ignored_path` 会因此变红来提醒你）。
+    _WITNESS = "core/build/__hygiene_probe__.tmp"
+
+    def test_a_nested_build_dir_is_not_swallowed(self):
+        ignored = _ignored_paths([self._WITNESS])
+        if ignored is None:
+            pytest.skip("git check-ignore 不可用")
+        assert self._WITNESS not in ignored, (
+            f"`{self._WITNESS}` 被忽略了 ⇒ `.gitignore` 里的 `build` 规则**未锚定**"
+            f"（应为 `/build/`）。未锚定的规则会吃掉**任意层级**的同名目录 —— "
+            f"`electron/build/`（打包图标落点）就是这样丢掉版本控制的。"
+        )
+
+    def test_detector_sees_a_genuinely_ignored_path(self):
+        """防空转：同一个检测器对**确实被忽略**的路径必须返回命中。
+
+        没有这条，"未被忽略"与"检测器根本没工作"在返回空集时长得一样。
+        """
+        probe = "build/__hygiene_probe__.tmp"
+        ignored = _ignored_paths([probe])
+        if ignored is None:
+            pytest.skip("git check-ignore 不可用")
+        assert probe in ignored, (
+            "根 `build/`（PyInstaller workpath）居然没被忽略 —— 检测器没工作，"
+            "上一条断言是空的。"
+        )

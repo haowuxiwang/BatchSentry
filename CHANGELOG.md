@@ -6,6 +6,61 @@
 ---
 
 ## [Unreleased]
+### 便携版图标管线定位 + 忽略规则锚定（Round 86 第三十一批，2026-10-13）
+
+> 承第三十批。本轮**不重建**（改动**全部不入包**：`.gitignore` / `docs/**` / `tests/**` / `devlogs/**`）
+> ⇒ 按项目纪律**不升版号**（边界 = 是否进入 PyInstaller 产物），产物与第三十批逐字节相同。
+
+**Fixed（真缺陷）**
+
+- 🟠 **`.gitignore` 的 `build/` 未锚定 ⇒ 连带吃掉 `electron/build/`**：该目录是**打包图标**
+  的落点（`directories.buildResources` 的目标），却因这条规则**从未进过版本控制**
+  （`git ls-files electron/` 只有 `main.js`；`git log -- electron/build/` 为空），且是**静默**的。
+  全树 `build` 目录只有 `./build`（PyInstaller workpath）与 `./electron/build` ⇒ 已改为
+  **`/build/`**（锚定），并把 `electron/build/` 改为**显式**忽略（附退出条件）。
+
+**New（护栏）**
+
+- `tests/unit/test_repo_hygiene.py::TestIgnoreRulesAreRootAnchored`（2 条）：忽略规则必须
+  **锚定到根** —— 用见证路径 `core/build/…`（无显式规则，故只有未锚定的 `build/` 才会命中）
+  做**行为化**判定（问 `git check-ignore` 的返回值，不读 `.gitignore` 文本）。
+- `tests/unit/test_distribution_parity.py::TestPackagingIconIsWired`（9 条）：一旦
+  `build.win.icon` 被声明，它就必须**存在 + ICO 头含 ≥256×256 条目 + 不被忽略清单吃掉 +
+  与 `electron/main.js` 的运行时图标同源**。现状**未声明** ⇒ 两条条件式用例 `SKIP` 并指向
+  `docs/TODO.md` 0-39（**诚实标注，非假绿**）；另 7 条**无条件**正负对照证明检测器不空转。
+
+**变异验证**（`devlogs/_verify/r90l_mutation_icon.py`）：**7/7 AS EXPECTED**，逐文件还原
+sha256 一致（drift=none）—— S0 基线 **SKIP**；S1 `win.icon`=16×16 ⇒ 红；S2 `main.js` 与
+builder 不同源 ⇒ 红；S3 图标不存在 ⇒ 红；S4 `.gitignore` 退回未锚定 ⇒ 红；**S5 负控**
+（图标同源、但仍 16×16）⇒ **绿**（证明 S2 红的是"不同源"而非"图标不合格"）。
+
+**便携版 zip 的实物端到端（本轮补做）**
+
+`devlogs/_verify/r90j_zip_e2e.py` 把 `release-archive/BatchSentry-Portable-1.2.1-20261013.zip`
+解压（**908** 成员）后，用**解压出来的内嵌** `pbc-server.exe` 跑 `tests/e2e_frozen.py`
+（`PBC_E2E_REQUIRE_LLM=1`，真凭据）⇒ **`E2E_RC=0`、29 passed / 0 failed**、覆盖账本
+`covered=4 skipped=0 failed=0`；`llm_audit success=3/3`、`ocr_backend_used=paddle`、
+`pipeline_terminal=review`、`settings_llm_model_matches=deepseek-ai/DeepSeek-V3.2`；
+解压出的内嵌 exe sha256 `3b174f3f…41e` **== `dist/pbc-server/pbc-server.exe`**；
+`PORTABLE_README.txt` 位于 zip 根。⇒ **"用户解压后双击的那份"已被端到端验过**。
+
+**定位（未修，登记 `docs/TODO.md` 0-39）**
+
+- 图标管线**两处都没接线**：`main.js` 找 `electron/icon.ico`（不存在）、electron-builder 找根
+  `build/icon.ico`（不存在，且根 `build/` 是 PyInstaller workpath、会被 `--clean` 清掉
+  ⇒ 默认位置**不可用**）；唯一在盘的 `electron/build/icon.ico` 是
+  **190 B / 16×16 / 1-bpp DIB 占位**（< builder 的 256×256 下限）⇒ 产物 `BatchSentry.exe`
+  用 **Electron 默认图标**。**未接线是有意的**：先接 16×16 会把「静默降级」变成「构建硬失败」。
+  修它需**真实资产**（本项目无任何 logo/favicon 可派生 ⇒ 属产品决策）。
+
+**更正（本轮自查）**
+
+- 撤回一条**误记**：此前记录称「`CHANGELOG.md` 含 `421.7 MB` 与 `418.9 MB` 自相矛盾」——
+  全库 grep **零命中**该两数。实测 `win-unpacked` = **498,333,600 B（475.2480 MiB）/ 907 文件**；
+  正文 `475.1 MB` 属 **W2 收尾（2026-09-24）** 那次构建，与当前产物是**两次不同构建**的
+  0.1 MiB 差异，**不是矛盾**。⇒ 该"缺陷"不存在，未做任何"修复"（不编造、也不"修"不存在的问题）。
+
+
 ### 重建产物（干净树）+ 核销 0-34：启动等待注释改为引用常量名（Round 86 第三十批，2026-10-10）
 
 > 承 R89。本轮把 R86/R87 一直延后的 **0-34** 结掉，并按项目纪律「**先提交 → 重建 → 全量跑**」

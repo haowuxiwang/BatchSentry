@@ -4,7 +4,20 @@ dist/
 # dist-electron\win-unpacked 被安全软件占用时会自动改写为
 # -c.directories.output=dist-electron-locked 并尽力归位）。
 dist-electron*/
-build/
+# PyInstaller 的 workpath（build.ps1 用 `--workpath build`）。**必须锚定**：
+# 未锚定的 `build/` 会连 `electron/build/` 一起吃掉 —— 而后者是**打包图标**
+# 的落点（`package.json` 的 `directories.buildResources` 应指向它）。
+# 实测（2026-10-13）：未锚定时 `git check-ignore -v electron/build/icon.ico`
+# 命中本行 ⇒ 图标资产**从未进过版本控制**（`git log -- electron/build/` 为空），
+# 且这是**静默**的。全树 `build` 目录只有 `./build`（workpath）与 `./electron/build`。
+/build/
+# 打包图标暂存目录（`directories.buildResources` 的目标）。整目录忽略，**因为当前**
+# 里面的 `icon.ico` 是 190 B / 16x16 / 1-bpp 占位（electron-builder 要求 >=256x256）
+# ⇒ 入库等于把「坏的」登记成「能用的」。换成真实资产后**必须同时**做三件事：
+#   取消本行 + `package.json` 声明 `build.win.icon` + `electron/main.js` 指向同一文件。
+# 三者缺一，`tests/unit/test_distribution_parity.py::TestPackagingIconIsWired` 会红。
+# 现状与退出条件见 docs/TODO.md 0-39。
+electron/build/
 # 历史版本的归档 zip（CLAUDE.md「Repo hygiene」规则 2 指示打包到此，故必须忽略）。
 # ⚠️ 这条曾经缺失：规则让 agent 往 release-archive/ 写 zip，忽略清单却不拦 ——
 # 规则与忽略清单不一致时，agent 会照规则做，然后 zip 出现在 git status 里。
