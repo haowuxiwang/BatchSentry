@@ -30,7 +30,7 @@ BatchSentry 用 OCR + LLM 半自动化：OCR 还原页面文本 → LLM 提取�
   - PyInstaller 打包后端为 `pbc-server.exe`（端口 58765，config 重定向
     到 `%APPDATA%/PBC/`）。
   - Electron 壳只是"启动后端 + 打开内置浏览器窗口"，无任何 Node 业务。
-  - 单文件便携版（electron-builder portable），免安装。
+  - 文件夹便携版（electron-builder `dir` target），免安装。
 - PowerShell 5.1 写 UTF-8 会带 BOM → config.json 解析崩溃 → 设置页必须
   用 Python 侧 `encoding='utf-8'` 原子写（PID+UUID 临时文件 + os.replace）。
 

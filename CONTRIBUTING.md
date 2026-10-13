@@ -140,7 +140,7 @@ python -m pytest tests/ --cov=. --cov-report=term --timeout=30
 `build.ps1` 是唯一的构建入口，支持以下参数：
 
 ```powershell
-.\build.ps1              # 完整构建：CSS + PyInstaller + Electron portable
+.\build.ps1              # 完整构建：CSS + PyInstaller + Electron 文件夹便携版
 .\build.ps1 -SkipCSS     # 跳过 Tailwind 重建（app.css 已最新时）
 .\build.ps1 -Clean       # 清理 dist/ + dist-electron/ + build/ 后重建
 ```
@@ -158,9 +158,11 @@ python -m pytest tests/ --cov=. --cov-report=term --timeout=30
 ### 分发流程
 
 1. 在真实 PowerShell 中运行 `.\build.ps1`
-2. 验证 `dist-electron/BatchSentry-Portable-1.0.0.exe` 存在且可启动
-3. 将该 exe 重命名为 `.zip` 或直接分发（portable 格式本质是自解压）
-4. 用户解压后双击 `BatchSentry.exe` 即可运行
+2. 跑 `python scripts/pack_portable.py --apply` 生成分发 zip
+   （zip 根目录两件套：`win-unpacked/` + `PORTABLE_README.txt`；落 `release-archive/`，
+   并打印 sha256 供对账）
+3. 把该 zip 交付给用户
+4. 用户解压后双击 `win-unpacked\BatchSentry.exe` 即可运行
 
 ### PyInstaller spec
 

@@ -487,3 +487,37 @@ def test_portable_readme_does_not_reinstate_refuted_claims():
     txt = _readme_txt()
     for banned in ("10-15 分钟", "50 RPM", ">30秒"):
         assert banned not in txt, f"PORTABLE_README.txt 出现已被否证的说法：{banned!r}"
+
+
+# ── 分发形态：**其他**文档也不得宣称配置产不出的产物（2026-10-13 补）─────
+
+
+def test_other_docs_do_not_claim_a_single_file_portable_artifact():
+    """`CONTRIBUTING.md` / `ARCHITECTURE.md` 不得宣称**配置产不出**的产物名。
+
+    背景（2026-10-13 实测）：`test_deployment_doc_matches_declared_distribution_form`
+    只守 `DEPLOYMENT.md`；而 `CONTRIBUTING.md` 的「分发流程」与 `ARCHITECTURE.md`
+    §2.2 长期写着单文件便携版产物名（`BatchSentry-Portable-<ver>.exe`）—— 而
+    `win.target` 只有 `dir`，**根本不会产出那个 exe**。照文档走的人会去找一个不存在
+    的文件；且它是**静默**的（构建成功、产物齐备，只是名字对不上）。
+
+    判据 = **配置里没有 portable target ⇒ 文档不得出现单文件便携版产物名**。
+    只禁 `.exe` 形态、**不禁** `BatchSentry-Portable-` 前缀 —— 分发 zip 名
+    （`BatchSentry-Portable-<ver>-<date>.zip`）正当使用该前缀。
+    将来真启用 `portable` target 时本用例自动放行（前置 return），不阻碍改形态。
+    """
+    target = _pkg()["build"]["win"]["target"]
+    targets = {t["target"] for t in target} if isinstance(target, list) else {target}
+    if "portable" in targets:
+        return
+    for name in ("CONTRIBUTING.md", "ARCHITECTURE.md"):
+        doc = (_ROOT / name).read_text(encoding="utf-8")
+        m = re.search(r"BatchSentry-Portable-[\w.\-]*\.exe", doc)
+        assert m is None, (
+            f"{name} 提到单文件便携版产物名 {m.group(0)!r}，但 "
+            f"win.target={sorted(targets)} 不产出它 ⇒ 文档与配置矛盾。"
+            f"分发形态是**文件夹便携版**：跑 `python scripts/pack_portable.py --apply`。"
+        )
+        assert "单文件便携版" not in doc, (
+            f"{name} 仍称「单文件便携版」，但 win.target={sorted(targets)} 只有目录形态。"
+        )
