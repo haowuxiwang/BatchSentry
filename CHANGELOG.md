@@ -6,6 +6,43 @@
 ---
 
 ## [Unreleased]
+### LLM 截断解析载荷定位修复（Round 86 第三十二批，2026-10-13）
+
+> 承第三十一批。本轮**修一处入包源**（`llm/client.py`）⇒ **必须重建产物**
+> （`dist-electron` 随本批刷新）；**不升版号**（缺陷修复、无接口/行为契约变更，且 1.2.1 尚未分发）。
+
+**Fixed（真缺陷）**
+
+- 🔴 **`_parse_json` 在「前导文本 + 截断」时返回内层片段 ⇒ 静默数据丢失**：旧实现先用
+  `if not text.startswith(("{","[")):` 跳过截断恢复，再用双定界符 `find`/`rfind` 块扫描；
+  当外层对象被截断、而内部已有**闭合**的数组/对象时，`rfind` 会抓到那个**内层**片段并当作
+  整页结果返回 —— **无异常、无重试、`_truncated_recovered` 不置位**，该页 findings 静默丢失。
+  实测（`devlogs/_verify/r90m_038_parse_probe.py`）：4/4 前导文本截断样例返回内层片段。
+  修法：载荷起点 = 第一个 `{`/`[`，用 `json.JSONDecoder().raw_decode` 取**一个**完整值
+  （完整 JSON + 尾随文字的行为与旧实现等价），失败才走**唯一**恢复实现
+  `_recover_truncated_payload`（只试与载荷首字符匹配的那一对定界符、**不再 `rfind`**），
+  仍失败 ⇒ `_parse_error`（**fail-closed**）。`_repair_truncated_json` 本体**未动**。
+- 🟠 **`_repair_truncated_json` 返回契约违例 3 例**（R3/R4 裸词、R5 冒号后 ⇒ 返回值非合法
+  JSON；根因 L681 `out = out[:j+1]` 会切掉已消费的 `"`）。新路径**不依赖**它：先
+  `json.loads(repaired)` 校验，违例时**丢弃**（不再被当作结果返回）。
+
+**Docs**
+
+- `docs/TODO.md`：**0-38** 的「推断」改为**实测事实**（原表述「前导文本 ⇒ parse_error」被
+  取证**推翻**）；新增 **0-40** 登记本次定位 + 修复 + 变异。
+
+**Tests（护栏）**
+
+- `tests/unit/test_llm_client.py::TestParseJson` 新增 6 条：前导文本截断须恢复**外层**对象
+  （不是内层片段）、数组载荷同理、**修不回来必须 fail-closed**、完整 JSON + **含方括号**的
+  尾随文字仍须解出、载荷定位器**永不返回片段**。
+- 变异（`devlogs/_verify/r90p_mutation_parse_payload.py`）**5 场景全部 AS EXPECTED**，
+  `drift=none`：还原旧实现 ⇒ **4 条红**；`raw_decode` → 双定界符 `rfind` 扫描 ⇒ 3 条红；
+  `raw_decode` → `json.loads`（去尾随文字容错）⇒ 1 条红；两个**负控**（只改注释 / 交换
+  定界符对顺序）⇒ 全绿。
+- ⚠️ 既有 `test_parse_truncated_json_recovers` 只断言 `isinstance(result, (dict, list))`
+  ⇒ 片段与整体**都能过**（弱到不可能红）—— 这是本缺陷长期存活的原因。
+
 ### 便携版图标管线定位 + 忽略规则锚定（Round 86 第三十一批，2026-10-13）
 
 > 承第三十批。本轮**不重建**（改动**全部不入包**：`.gitignore` / `docs/**` / `tests/**` / `devlogs/**`）

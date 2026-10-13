@@ -504,60 +504,30 @@ class LLMClient:
         except json.JSONDecodeError:
             pass
 
-        # Try to find first { ... } or [ ... ] block (only when the text does
-        # not START with a brace — otherwise the block scan can grab an inner
-        # fragment like "steps": [] and return an empty array instead of the
-        # truncated outer object; brace-starting text goes straight to the
-        # truncation recovery below).
-        if not text.startswith(("{", "[")):
-            for start_char, end_char in [("{", "}"), ("[", "]")]:
-                start = text.find(start_char)
-                end = text.rfind(end_char)
-                if start != -1 and end > start:
-                    try:
-                        return json.loads(text[start : end + 1])
-                    except json.JSONDecodeError:
-                        pass
-
-        # Attempt truncated JSON recovery: if text starts with { or [ and has
-        # more opening braces than closing, try appending closing braces.
-        # Round 3: truncated output may also cut mid-string (e.g. page9 matrix
-        # hitting max_tokens). Repair: drop the dangling tail text (any chars
-        # after the last complete JSON value), re-close unclosed strings/arrays,
-        # then re-balance braces.
-        for start_char, end_char in [("{", "}"), ("[", "]")]:
-            if text.startswith(start_char):
-                open_count = text.count(start_char)
-                close_count = text.count(end_char)
-                if open_count > close_count:
-                    repaired = _repair_truncated_json(text)
-                    if repaired is not None:
-                        try:
-                            result = json.loads(repaired)
-                            logger.info(
-                                f"Recovered truncated JSON "
-                                f"(added {repaired.count(end_char) - close_count} closing braces)"
-                            )
-                            if isinstance(result, dict):
-                                result["_truncated_recovered"] = True
-                            return result
-                        except json.JSONDecodeError:
-                            pass
-                    # Legacy path: pure brace padding (covers cut-between-values,
-                    # which _repair_truncated_json also handles, but keep as
-                    # last resort for exotic shapes)
-                    recovered = text + end_char * (open_count - close_count)
-                    try:
-                        result = json.loads(recovered)
-                        logger.info(
-                            f"Recovered truncated JSON "
-                            f"(added {open_count - close_count} closing braces)"
-                        )
-                        if isinstance(result, dict):
-                            result["_truncated_recovered"] = True
-                        return result
-                    except json.JSONDecodeError:
-                        pass
+        # Locate the payload: the **first** `{` or `[` (whichever comes first)
+        # starts the JSON value; then extract **one complete value** from that
+        # offset with `raw_decode`, which ignores trailing prose — so the
+        # complete case behaves exactly as the old `find`/`rfind` block scan did.
+        #
+        # WARNING: never carve a block with `rfind(end_char)`. When the payload
+        # is truncated, `rfind` happily returns an *inner* balanced fragment
+        # (e.g. just the findings array) and that fragment is then treated as
+        # the whole page result — **silent data loss**: no exception, no retry.
+        # Measured 2026-10-13 (docs/TODO.md 0-40): a leading-prose response whose
+        # outer object was cut mid-string returned the inner findings array.
+        # The old scan also skipped truncation recovery entirely for
+        # leading-prose responses (0-38's mechanism had been recorded as
+        # "=> parse_error"; in fact it usually returned a fragment).
+        starts = [i for i in (text.find("{"), text.find("[")) if i != -1]
+        if starts:
+            payload = text[min(starts):]
+            try:
+                return json.JSONDecoder().raw_decode(payload)[0]
+            except json.JSONDecodeError:
+                pass
+            recovered = _recover_truncated_payload(payload)
+            if recovered is not None:
+                return recovered
 
         logger.warning(
             f"Failed to parse JSON from LLM response: {raw_digest(raw)}"
@@ -576,6 +546,51 @@ _NUM_TOKEN_RE = __import__("re").compile(
 def re_fullmatch_number(token: str) -> bool:
     """True when token reads as a (possibly BPE-cut) JSON number literal."""
     return _NUM_TOKEN_RE.fullmatch(token) is not None
+
+
+def _recover_truncated_payload(payload: str) -> dict | list | None:
+    """对**载荷**（必以 `{` 或 `[` 开头）做截断恢复；修不回来返回 None。
+
+    这是截断恢复的**唯一实现** —— `_parse_json` 不再自己复制一份（单一真值）。
+    只尝试与载荷首字符**匹配**的那一对定界符：载荷以 `{` 开头时去数 `[`/`]`
+    毫无意义，而"再试另一种定界符"正是旧实现返回内层片段的入口（见 0-40）。
+    """
+    for start_char, end_char in [("{", "}"), ("[", "]")]:
+        if not payload.startswith(start_char):
+            continue
+        open_count = payload.count(start_char)
+        close_count = payload.count(end_char)
+        if open_count <= close_count:
+            continue
+        repaired = _repair_truncated_json(payload)
+        if repaired is not None:
+            try:
+                result = json.loads(repaired)
+                logger.info(
+                    f"Recovered truncated JSON "
+                    f"(added {repaired.count(end_char) - close_count} closing braces)"
+                )
+                if isinstance(result, dict):
+                    result["_truncated_recovered"] = True
+                return result
+            except json.JSONDecodeError:
+                pass
+        # Legacy path: pure brace padding (covers cut-between-values, which
+        # _repair_truncated_json also handles, but keep as last resort for
+        # exotic shapes)
+        recovered = payload + end_char * (open_count - close_count)
+        try:
+            result = json.loads(recovered)
+            logger.info(
+                f"Recovered truncated JSON "
+                f"(added {open_count - close_count} closing braces)"
+            )
+            if isinstance(result, dict):
+                result["_truncated_recovered"] = True
+            return result
+        except json.JSONDecodeError:
+            pass
+    return None
 
 
 def _repair_truncated_json(text: str) -> str | None:

@@ -123,6 +123,56 @@ class TestParseJson:
         # 恢复成功时返回 dict，失败时返回 _parse_error
         assert isinstance(result, (dict, list))
 
+    # ── 0-40：前导文本 + 截断 ⇒ **不得**返回内层片段（2026-10-13）─────────────
+    #
+    # 实测缺陷：旧实现用 `find("{")`/`rfind("}")` 取块，截断时 `rfind` 抓到**内层**
+    # 已闭合的 `{...}`/`[...]`，于是把片段当成整页结果返回 —— **静默数据丢失**
+    # （无异常、无重试）。取证脚本 `devlogs/_verify/r90n_038_repair_contract.py`。
+
+    def test_leading_prose_truncated_recovers_outer_object_not_fragment(self):
+        raw = '分析如下：\n{"findings": [{"id": 1, "level": "P1"}], "note": "abc'
+        result = LLMClient._parse_json(raw)
+        assert isinstance(result, dict), (
+            f"返回了 {type(result).__name__}（疑似内层片段）：{result!r}"
+        )
+        assert "findings" in result and "note" in result, result
+        assert result["note"] is None, "被截断的字符串值应补 null"
+        assert result.get("_truncated_recovered") is True
+
+    def test_leading_prose_truncated_never_returns_inner_array(self):
+        raw = '好的。\n\n{"findings": [{"id": 1}], "spec": 25.4'
+        result = LLMClient._parse_json(raw)
+        assert not isinstance(result, list), f"返回了内层数组片段：{result!r}"
+        assert isinstance(result, dict) and "spec" in result, result
+
+    def test_leading_prose_truncated_array_payload_recovers(self):
+        raw = '清单：\n[{"id": 1}, {"id": 2'
+        result = LLMClient._parse_json(raw)
+        assert isinstance(result, list) and len(result) == 2, result
+        assert result[1] == {"id": None}, "被截断的元素应补 null"
+
+    def test_leading_prose_unrepairable_is_fail_closed(self):
+        """修不回来必须**失败**，不得退回片段 —— 这是本条修复的核心口径。"""
+        raw = '分析：\n{"a": 1, xyz'
+        result = LLMClient._parse_json(raw)
+        assert isinstance(result, dict) and result.get("_parse_error") is True, (
+            f"未修回来却没 fail-closed，返回了：{result!r}"
+        )
+
+    def test_complete_json_with_trailing_prose_containing_brackets(self):
+        """回归：完整 JSON + 尾随文字（**含方括号**）仍须解出那个对象。"""
+        raw = 'Here is the result: {"steps": [], "findings": []} 说明见 [1,2]'
+        assert LLMClient._parse_json(raw) == {"steps": [], "findings": []}
+
+    def test_payload_locator_never_returns_a_fragment(self):
+        """直接钉住载荷定位器：内层已闭合但外层未闭合时，结果不得是内层值。"""
+        raw = '前言 {"outer": {"inner": 1}, "cut": "xy'
+        result = LLMClient._parse_json(raw)
+        assert not (isinstance(result, dict) and set(result) == {"inner"}), (
+            f"返回了内层对象片段：{result!r}"
+        )
+        assert isinstance(result, dict) and "outer" in result, result
+
 
 class TestLLMClientInit:
     """LLM 客户端初始化 — 从 config.providers 读取并构建 adapter。"""
