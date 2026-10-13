@@ -6,6 +6,74 @@
 ---
 
 ## [Unreleased]
+### 重建产物（干净树）+ 核销 0-34：启动等待注释改为引用常量名（Round 86 第三十批，2026-10-10）
+
+> 承 R89。本轮把 R86/R87 一直延后的 **0-34** 结掉，并按项目纪律「**先提交 → 重建 → 全量跑**」
+> **在已提交的树上完整重跑 4 步构建**。
+
+**前提破除（本轮实测）**：R86/R87 把 0-34 挂在「需宿主退出」（无法重建）上。本轮用
+`os.rename` 往返探测三份产物 —— `dist-electron/win-unpacked/resources/app.asar`、
+`.../resources/pbc-server/pbc-server.exe`、`dist/pbc-server/pbc-server.exe` —— **全部成功**
+⇒ 宿主**未**持有它们（无 `FILE_SHARE_DELETE` 锁）⇒ **重建可行**。
+
+**改动**：`electron/main.js:13` 的文件头注释 `(up to 30s)` → `(bounded by READY_TIMEOUT_MS)`
+—— **引用常量名、不再复述数值**（`READY_TIMEOUT_MS = 180_000`）。⚠️ **只改 L13**：
+L45 / L239 是**历史叙述**（引用已删除的旧行为 `not ready after 60 checks`），非活规格；
+L278 是**面向用户**的报错文案且当前值与常量一致，均不动。
+
+⚠️ **该改动必然让一条单测变红，直到 asar 重建**（`docs/PROJECT_PITFALLS.md` §六十三）：
+`test_bundle_manifest.py::TestAsarReader::test_real_asar_matches_source_for_electron_main`
+把 `app.asar` 里的 `electron/main.js` 与源码**逐字节**比对 ⇒ 与重建**不可分离**。
+本轮据此前置确认后按顺序执行，§六十三 的「一般化约束」由此**闭环**。
+
+**重建（4 步，干净树 `06c18a1`）**：
+
+  1. `npm run build:css` —— `static/app.css` **无 diff**（已最新）；
+  2. `PyInstaller pbc-server.spec --noconfirm --clean`；
+  3. `bundle_manifest.py --write`（`git_dirty=false`、`files=116`）→ `--check` 通过；
+  4. `electron-builder --win --x64` → `gen_provenance.py`（`git_head=06c18a1`、BOM+CRLF）。
+
+**产物一致性（实测）**：asar 内 `electron/main.js` == 源码（34719 B）；两份 `pbc-server.exe`
+**同 sha256** `3b174f3f1a875d9123a10fe21fc414a26f7526550dddb6702dbe5c99f42e641e`。
+
+**门禁**（干净树，报告 `devlogs/gate_report_20261010_164104.json`）：**11/11 PASS** ——
+`artifact_freshness` **由红转绿**（2 份产物逐字节一致）；`tests_coverage` **4114 passed,
+0 failed, coverage=95.09%**（junit `devlogs/gate_junit_20261010_164107.xml`）。
+
+**产物级 e2e（全部打 Electron 内嵌的那份 `pbc-server.exe`，真凭据，`PBC_E2E_REQUIRE_LLM=1`）**：
+
+  · `tests/e2e_frozen.py` **连跑 3 次** ⇒ 每次 **29 passed / 0 failed**、`E2E_RC=0`、
+    覆盖账本 `covered=4 skipped=0 failed=0`（`devlogs/e2e_coverage_20261010-164855.json` /
+    `-165038.json` / `-165208.json`）；每次 `llm_audit success=3/3`、`ocr_backend_used=paddle`、
+    `pipeline_terminal=review`。
+    ⚠️ `findings_api` 计数 **4 / 4 / 3** —— 已知**上游非确定性**（0-15 / 0-29），**非**失败。
+  · **7 轮**多轮冒烟（`pdf,img,mineru,rot,robust,cancel,dual`；`e2e_run.py`，
+    `devlogs/_verify/r90_e2e_multiround.log`）⇒ **7/7 达成、`ALL ROUNDS PASSED`**：
+
+    | 轮 | 终态 | 页 | 耗时 | findings | OCR 后端 | LLM 成功 |
+    |---|---|---|---|---|---|---|
+    | pdf | review | 6 | 296s | 26 | paddle | 7/7 |
+    | img | review | 1 | 252s | 11 | paddle | 3/3 |
+    | mineru | review | 6 | 465s | 24 | **mineru** | 8/8 |
+    | rot | review | 4 | 889s | 16 | paddle | 5/5 |
+    | robust（复合 o6+o1） | review | 1+1 | 84s+180s | 1+1 | paddle | 2/2 + 2/2 |
+    | cancel | cancelled | — | 1s | — | — | 豁免 |
+    | dual（对比） | partial_review | 6 | 1001s | 27 | mineru | 8/8 |
+
+    · `rot`：横向页 `via=[{page2,rotation@90°},{page3,rotation@90°}]`、`lost=[]`、
+      `audit_rotation_events=1` ⇒ 旋转页经 OCR 正确复原。
+    · `dual`：`dual_compare` 审计事件齐（`start` + `done`），`diff-completeness findings=2`。
+    · 全部轮次 `llm_failed=0`；`cancel` 按设计豁免（不经 `run_upload`）。
+
+⚠️ **未做 / 未验证（不得读成已通过）**：
+
+  · **Electron 层 e2e**（`tests/e2e_unpacked.py`）在受限沙箱内**不可复现**（R65 实测：
+    请求关沙箱隔离后**仍崩**）⇒ 须在**真实终端**复跑；
+  · 本轮 e2e 是**单次**重复（frozen ×3、多轮 ×1），**不是** N 次重复的**区间**估计 ——
+    findings 计数的上游方差（0-29）依然存在，**单次计数不得当回归判据**；
+  · `dual` 轮出现**上游 LLM 长延迟**（page2 单次 **424s** 且 JSON 解析失败触发 fix-hint
+    重试）—— 属已知上游行为（0-10），非本轮引入。
+
 ### 安全维度扫描 + 命令执行面静态护栏（Round 85 第二十九批，2026-10-10）
 
 > 承 R88。对抗性审查走到"安全性"：**先扫已知高危形态，再把它钉住**，不停在"扫过了"。
