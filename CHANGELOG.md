@@ -31,6 +31,26 @@
 - `docs/TODO.md`：**0-38** 的「推断」改为**实测事实**（原表述「前导文本 ⇒ parse_error」被
   取证**推翻**）；新增 **0-40** 登记本次定位 + 修复 + 变异。
 
+**Build / Gate（重建证据）**
+
+- 入包源变更 ⇒ 本批**重建**（复刻 `build.ps1` 四步）：CSS（`app.css` md5 未变）→
+  PyInstaller（冒烟 `/health` 200，~2s）→ `bundle_manifest --write/--check`
+  （`version=1.2.1 files=116 head=a225fb8 dirty=False`）→ electron-builder
+  （`electron=43.7.4`；日志含 `default Electron icon is used` = 0-39 的**预期**现象）→
+  `PROVENANCE.txt`（`git_head=a225fb8` / `standard output: dist-electron was NOT locked`）。
+- 产物：`win-unpacked` = 498,334,075 B / 907 文件；内嵌 `pbc-server.exe` sha256
+  `6b100b39b70355c3d3f8d7f2ab93ee458e1707a1f9382d4a0b134fe92678bf66`
+  （== `dist/pbc-server` 产物）；`_internal` 内**无** `scripts`/`tests`/`docs`/`devlogs`。
+- 门禁 `devlogs/gate_r90_r32.json`：**11/11 PASS**（`tests_coverage` 4135 passed /
+  0 failed / coverage 95.1%；`artifact_freshness` 两份产物与源码逐字节一致）。
+- 便携版 zip 重打（`--force` 覆盖同名）：205.0 MB / 908 成员，sha256
+  `92fbd8e5392f2c0ebcdb7a977de26f1174ad28be8d257192d17cf41eabee75fb`。
+- **zip 实物端到端**（解压 → 内嵌 exe sha256 对账 → `PBC_E2E_REQUIRE_LLM=1` 跑
+  `tests/e2e_frozen.py`）：`E2E_RC=0`、**29 passed / 0 failed**、`covered=4 / skipped=0 /
+  failed=0`、`llm_audit success=3/3`、`ocr_backend_used=paddle`、`pipeline_terminal=review`、
+  `settings_llm_model_matches=deepseek-ai/DeepSeek-V3.2`。⚠️ `findings_api count=3`（上一轮
+  同一条 e2e 为 4）—— 这正是 **0-15 已登记的非确定性**，**不得**把单次计数当回归判据。
+
 **Tests（护栏）**
 
 - `tests/unit/test_llm_client.py::TestParseJson` 新增 6 条：前导文本截断须恢复**外层**对象
