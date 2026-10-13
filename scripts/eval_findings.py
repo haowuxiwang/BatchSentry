@@ -180,6 +180,41 @@ def _print_report(report: dict) -> None:
           f"条为噪声类型（占比 {s['noise_ratio']}）")
 
 
+def _print_real_samples_note() -> None:
+    """**独立小节**：真实样本口径（**非判据**，不产生 P/R）。
+
+    与 `cases`（合成语料、规则层、逐位可复现）**分开呈现** —— 真实样本
+    **无标签**（`annotation.label is None`）、系统输出**非确定**且来自
+    **旧版本**，混进 F1 会产出"看似权威、实则无据"的精度数字。
+    """
+    print("\n════════ 真实样本口径（**非判据**，不产生 P/R）════════")
+    try:
+        gt = load_ground_truth()
+    except Exception as exc:  # 缺块 / 坏 JSON 不得影响判据路径
+        print(f"  （读不到：{exc}）")
+        return
+    rs = gt.get("real_samples") or {}
+    samples = rs.get("samples") or []
+    if not samples:
+        print("  （未登记真实样本）")
+        return
+    for s in samples:
+        ann = s.get("annotation") or {}
+        loc = s.get("locator") or {}
+        obs = s.get("observed_system_output") or {}
+        print(f"  · {s.get('sample_id')}  标签="
+              f"{'已确认' if ann.get('intent_confirmed') else '未确认'}"
+              f"（intent_confirmed={bool(ann.get('intent_confirmed'))}）")
+        print(f"      标注：规格 `{ann.get('spec_text')}` / 实测 `{ann.get('measured_text')}`")
+        print(f"      定位：{loc.get('filename')} p{loc.get('page')}"
+              f"（job {loc.get('job_id')}）")
+        print(f"      系统输出：该页 {obs.get('page_findings')} 条 findings"
+              f"（{obs.get('page_types')}），"
+              f"param_out_of_spec={obs.get('page_param_out_of_spec')}；"
+              f"实测值命中 {obs.get('measured_value_hits_in_job')} 次")
+    print("  ⚠️ 本口径**不进**上面的 F1；合成集口径与真实样本口径**不可混用**。")
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Finding 离线评测（M2）")
     ap.add_argument("--json", action="store_true", help="额外打印 JSON")
@@ -195,6 +230,7 @@ def main(argv: list[str] | None = None) -> int:
     out.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
 
     _print_report(report)
+    _print_real_samples_note()
     print(f"报告: {out}")
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2))

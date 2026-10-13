@@ -188,7 +188,7 @@ Remove-Item Env:\PBC_E2E_UNPACKED
   ⚠️ 这是**抽样**，**不可外推为整体假阳性率** —— 但足以说明交付说明里的
   「须人工复核」不是免责套话。详见 `docs/ADVERSARIAL_AUDIT.md` §15.3。
 - **上游凭据与真机连通性未验**：本机 LLM key 可用性、Anthropic **厂商真机**（仅有本地协议桩）。
-- **无真实标注集** ⇒ 精度/召回**没有可信数字**（`docs/FINDING_GROUND_TRUTH.json` 是合成件，不可外推）。
+- **仍无真实标注集** ⇒ 精度/召回**没有可信数字**（`docs/FINDING_GROUND_TRUTH.json` 的 `cases` 是合成件，不可外推）。已登记**首个真实样本**（`real_samples`：`用户标注.png` ⇒ 丝裂霉素 `p6`），但**无标签**（`intent_confirmed:false`）⇒ **仍不产生** P/R；用途是把「合成集口径」与「真实样本口径」**分开**呈现。
 - **200 页上传上限是线性外推**，未实跑。
 
 ### v1.2.1 增补证据边界（2026-09-30）

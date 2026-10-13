@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -272,3 +273,104 @@ def test_evaluate_end_to_end_baseline():
     assert s["fp"] == 0 and s["fn"] == 0
     assert s["precision"] == 1.0 and s["recall"] == 1.0 and s["f1"] == 1.0
     assert s["noise_findings"] > 0
+
+
+class TestRealSampleContract:
+    """`real_samples` 是**真实标注**样本：有来源、**无标签**，且**不进判据**。
+
+    为什么锁这条（R90 第三十三批 / TODO #161）：`用户标注.png` 圈出规格
+    `▲pH 为 6.8~7.0。` 与实测 `中和后 pH 6.88`，但「该行应为 OOS 还是合规」
+    **未与业务方确认**（6.88 落在区间内）⇒ 若有人把它当"真值"接进 P/R，
+    就会得到一个**看似权威、实则无据**的精度数字。
+    """
+
+    def _rs(self) -> dict:
+        return ef.load_ground_truth()["real_samples"]
+
+    def test_block_is_present_and_declares_no_truth(self):
+        rs = self._rs()
+        assert rs.get("criterion") is False, "real_samples 必须**显式**声明 `criterion: false`"
+        assert rs.get("truth_declared") is False, (
+            "real_samples 必须**显式**声明 `truth_declared: false` —— 缺了它，"
+            "这一块读起来就像真值"
+        )
+        assert rs.get("criterion_note"), "必须写明'为什么不是判据'"
+        assert rs.get("samples"), "至少要有一条真实样本，否则本块是空壳"
+
+    def test_every_sample_has_no_label_and_unconfirmed_intent(self):
+        """**无标签 + 意图未确认**：`label` 必须为 `None`，`intent_confirmed` 必须为 `False`。"""
+        for s in self._rs()["samples"]:
+            sid = s.get("sample_id")
+            ann = s.get("annotation") or {}
+            assert ann.get("label") is None, f"{sid}: 未确认意图前 label 必须是 null"
+            assert ann.get("intent_confirmed") is False, (
+                f"{sid}: intent_confirmed 必须是 False（6.88 落在规格内 ⇒ 结论待业务方确认）"
+            )
+            assert ann.get("intent_question"), f"{sid}: 必须写明**待确认的问题**"
+            assert s.get("usable_as_criterion") is False, (
+                f"{sid}: usable_as_criterion 必须是 False"
+            )
+
+    def test_every_sample_has_a_locator(self):
+        """每条样本必须可**回指**到具体 job / 页 / 方法，且显式声明是否做了像素级绑定。"""
+        for s in self._rs()["samples"]:
+            sid = s.get("sample_id")
+            loc = s.get("locator") or {}
+            for k in ("job_id", "filename", "page", "method"):
+                assert loc.get(k), f"{sid} 的 locator 缺 {k!r}"
+            assert isinstance(loc["page"], int) and loc["page"] >= 1, f"{sid}: page 非法"
+            assert "pixel_binding" in loc, (
+                f"{sid}: 必须显式声明是否做了像素级绑定（缺了会有人默认'已绑定'）"
+            )
+
+    def test_observed_output_is_labelled_as_old_version(self):
+        """系统输出必须自报**测量环境**，且不得暗示"当前版本如此"。"""
+        for s in self._rs()["samples"]:
+            sid = s.get("sample_id")
+            o = s.get("observed_system_output") or {}
+            for k in ("measured_at", "app_version", "ocr_backend"):
+                assert k in o, f"{sid} 的 observed_system_output 缺 {k!r}"
+
+    def test_criterion_path_never_reads_real_data_blocks(self):
+        """**判据路径**不得引用 `real_baselines` / `real_samples`。
+
+        用 **AST 查名字**（不是文本搜）：注释 / docstring 里提到它不算消费。
+        为什么必须挡：真实样本**无标签**、系统输出**非确定**（同输入两次跑差 >20%）
+        ⇒ 一旦接进 pass/fail，门禁会**随机红 / 绿**，并产出无据的"精度数字"。
+        """
+        tree = ast.parse(_EVAL.read_text(encoding="utf-8"))
+        judge_fns = {"evaluate", "aggregate", "score_case", "validate_cases",
+                     "load_ground_truth", "main"}
+        offenders = []
+        for fn in (n for n in ast.walk(tree)
+                   if isinstance(n, ast.FunctionDef) and n.name in judge_fns):
+            refs = {n.id for n in ast.walk(fn) if isinstance(n, ast.Name)}
+            refs |= {n.value for n in ast.walk(fn)
+                     if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+            for key in ("real_baselines", "real_samples"):
+                if key in refs:
+                    offenders.append(f"{fn.name}:{key}")
+        assert not offenders, (
+            f"判据路径引用了真实数据块：{offenders} —— 真实样本**无标签**、"
+            "系统输出**非确定**，接进 pass/fail 会产出'看似权威、实则无据'的精度数字"
+        )
+
+    def test_detector_is_not_vacuous_for_real_samples(self):
+        """防空转：给一段**确实**消费它的源码，检测器必须报出来。"""
+        bad = "def evaluate():\n    return load()['real_samples']\n"
+        parsed = ast.parse(bad)
+        refs = {n.id for n in ast.walk(parsed) if isinstance(n, ast.Name)}
+        refs |= {n.value for n in ast.walk(parsed)
+                 if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+        assert "real_samples" in refs, "检测器连构造样例都认不出 ⇒ 上一条是空断言"
+
+    def test_evaluate_report_carries_no_real_sample_content(self):
+        """**口径分离**机检：判据报告（`evaluate()`）不得夹带真实样本内容。
+
+        真实样本口径只在 `main()` 的**文本**输出里以独立小节呈现；若有人把
+        `real_samples` 塞进 `evaluate()` 的返回值，下游任何拿 report 算指标
+        的地方都会被**静默**污染。
+        """
+        blob = json.dumps(ef.evaluate(), ensure_ascii=False)
+        assert "real_samples" not in blob
+        assert "真实样本" not in blob

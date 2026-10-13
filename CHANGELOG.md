@@ -6,6 +6,56 @@
 ---
 
 ## [Unreleased]
+### 真实标注样本登记 + 参数自动判定降级定位（Round 86 第三十三批，2026-10-13）
+
+> 承第三十二批。本轮**只改 `docs/` + `tests/` + `scripts/`（均不入包）** ⇒ **不重建产物**
+> （`dist-electron` 仍为第三十二批产物，`artifact_freshness` 不受影响）。
+> 目的：把用户长期提的「判定质量无可信数字」落成**可复现的第一步**（TODO #161）。
+
+**Added（真实样本口径 —— 与合成集口径分开）**
+
+- `docs/FINDING_GROUND_TRUTH.json` 新增 **`real_samples`** 块（**非判据**：`criterion:false` /
+  `truth_declared:false`）：登记**首个真实标注样本** —— `用户标注.png`（仓库根）红框圈出
+  规格行 `▲pH 为 6.8~7.0。` 与实测行 `中和后 pH 6.88`，定位到 job `670672f3-d0f`
+  （`丝裂霉素提取批记录.pdf` / `partial_review` / 51 页 / `ocr=mineru` / 2026-08-19）的 **page 6**。
+  ⚠️ **无标签**（`annotation.label: null` / `intent_confirmed: false`）：该行「应为 OOS 还是合规」
+  **未与业务方确认**（6.88 落在 [6.8, 7.0] 内）⇒ 不得当已知真值用（TODO #161 原文要求）。
+- `scripts/eval_findings.py`：文本报告**新增独立小节**「真实样本口径」⇒ 合成集口径（`cases` 的 F1）
+  与真实样本口径**分开呈现**；并由机检保证 `evaluate()` 的返回**不含**任何真实样本内容（口径分离）。
+
+**Findings（参数自动判定被整体吞没 —— 一手取证）**
+
+- 🔴 **page 6 的参数判定被 fail-closed 分支整体降级**：`core/rules/llm_checks.py:109-118`
+  在 `len(llm_queue) > _LLM_FALLBACK_BATCH_MAX(=50)` 时**不调 LLM**，改为 flag 人工复核。
+  实测该 job 有 **356** 条带「超出自动判定上限」的 findings（分布在**页 5–47**），page 6 占 **5** 条
+  （发酵批号 / 接收体积 / 残液体积 / 磷酸批号 / 磷酸用量）⇒ 该页 **0 条 `param_out_of_spec`**。
+- ⚠️ **实测值 `6.88` 在全 job findings 中命中 0 次**（规格串 `6.8~7.0` 命中 1 次，
+  出现在一条 `completeness` 的 description 里）⇒ 实测值**根本没进入系统**。
+- ⚠️ **未解释的计数差**：reason 内嵌计数 = **422**，而带该 reason 的 findings = **356**（差 **66**）。
+  成因**未查**（该 job 由**旧版本**产生，且 `partial_review`）⇒ 登记为待查，**不猜**。
+- 登记为 **0-41**（未修；属行为决策）。
+
+**Tests（护栏）**
+
+- `tests/unit/test_eval_findings.py` 新增 `TestRealSampleContract`（**7 条**）：块必须显式
+  `criterion:false` + `truth_declared:false`；每条样本 `label is None` / `intent_confirmed is False` /
+  `usable_as_criterion is False` + 必须写明待确认问题；locator 必备字段 + 显式 `pixel_binding`；
+  `observed_system_output` 必须自报测量环境；**AST 机检「判据路径不得引用 `real_baselines` /
+  `real_samples`」** + 防空转；**口径分离**（`evaluate()` 返回不含真实样本内容）。
+
+**Docs**
+
+- `DEPLOYMENT.md`：由「**无真实标注集**」改为「**仍无真实标注集**（首个真实样本已登记但
+  **无标签**）」⇒ 结论（精度/召回无可信数字）**不变**，但口径不再含混。
+- `docs/TODO.md`：**#161** 更新为「真实样本已登记、意图待业务方确认」；新增 **0-41**。
+
+**边界（未验，不得读成通过）**
+
+- 真实样本**只有 1 条**且**无标签** ⇒ **仍无**真实口径的 P/R 数字（C1 未解）。
+- `用户标注.png` 与 `p6` 的**像素级绑定未完成**（两份 PDF 均纯扫描件；全页模板匹配 51 页
+  >11 min 未收敛，已放弃）⇒ 页码来自 R76 记录 + DB 内容复核，**不是**图像定位结论。
+- `356 vs 422` 的差**未解释**。
+
 ### LLM 截断解析载荷定位修复（Round 86 第三十二批，2026-10-13）
 
 > 承第三十一批。本轮**修一处入包源**（`llm/client.py`）⇒ **必须重建产物**

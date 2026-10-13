@@ -238,5 +238,64 @@
         "comparable_to_current": true
       }
     ]
+  },
+  "real_samples": {
+    "note": "真实批记录上的**人工标注**样本（与 `cases` 的合成语料**不同口径**）。⚠️ 本块**不是判据**，且**尚无标签**：标注人圈出了规格行与实测行，但「该行应为 OOS 还是合规」**未与业务方确认** ⇒ `annotation.label: null` / `intent_confirmed: false`。用途：把「真实样本口径」与「合成集口径」**分开**呈现，**禁止**把本块并进 P/R。",
+    "truth_declared": false,
+    "criterion": false,
+    "criterion_note": "**本块不参与任何 pass/fail，也不产生 P/R。** 唯一判据仍是 `cases`（合成语料、规则层、零 LLM / 零 OCR、逐位可复现）的 F1（`scripts/eval_findings.py --min-f1`）。本块只登记「真实样本上的观察」，且其系统输出来自**旧版本产物**（见 `observed_system_output.app_version`）。",
+    "samples": [
+      {
+        "sample_id": "annotation-ph-p6",
+        "source": "用户标注.png（仓库根；509,676 B）",
+        "annotation": {
+          "spec_text": "▲pH 为 6.8~7.0。",
+          "measured_text": "中和后 pH 6.88",
+          "what_is_annotated": "红框同时圈出规格行与实测行（两行相邻）",
+          "label": null,
+          "intent_confirmed": false,
+          "intent_question": "该行**应为 OOS 还是合规**尚未与业务方确认（6.88 落在 [6.8, 7.0] 内）⇒ 不得当作已知真值使用（TODO #161 原文要求）"
+        },
+        "locator": {
+          "job_id": "670672f3-d0f",
+          "filename": "丝裂霉素提取批记录.pdf",
+          "page": 6,
+          "method": "R76 记录（.workbuddy-ai/memory/2026-10-09.md）+ 本仓 `devlogs/_verify/r91b_161_real_sample_evidence.py` 只读复核",
+          "pixel_binding": false,
+          "pixel_binding_note": "**未做像素级绑定**：两份 PDF 均为纯扫描件（零文本层，`devlogs/_verify/r90z_locate_annotation.py` 实测每页 text_len=0）⇒ 定位只能靠图像；全页多尺度模板匹配在 51 页上 >11 分钟未收敛（已放弃）⇒ 页码来自 R76 记录 + DB 内容复核，**不是**图像定位结论。"
+        },
+        "observed_system_output": {
+          "measured_at": "2026-08-19 06:57:36（job created_at）",
+          "app_version": "unknown（旧产物；DB 无版本列，且本 job 早于本轮多次行为变更）",
+          "ocr_backend": "mineru",
+          "status": "partial_review",
+          "total_pages": 51,
+          "job_total_findings": 720,
+          "job_by_type": {
+            "completeness": 589,
+            "handwritten": 50,
+            "param_out_of_spec": 24,
+            "signature_time_anomaly": 15,
+            "suspicious_date": 13,
+            "year_contradiction": 12,
+            "time_reversal": 10,
+            "signature_mismatch": 6,
+            "batch_inconsistency": 1
+          },
+          "page_findings": 14,
+          "page_types": ["completeness"],
+          "page_param_out_of_spec": 0,
+          "measured_value_hits_in_job": 0,
+          "spec_string_hits_in_job": 1,
+          "spec_string_hit_note": "唯一命中是一条 `completeness` finding 的 description：`第6页 工序4 中和:用磷酸调节 R2101 预处理罐发酵液▲pH为6.8~7.0。 有操作描述但缺少执行时间记录`（**规格**进了系统，**实测值 6.88 没有**）",
+          "page_param_cap_findings": 5,
+          "job_param_cap_findings": 356,
+          "param_cap_reason_value": 422,
+          "param_cap_note": "该页参数判定被 fail-closed 分支整体吞没：`core/rules/llm_checks.py:109-118` 在 `len(llm_queue) > _LLM_FALLBACK_BATCH_MAX(=50)` 时**不调 LLM**，改为 flag 人工复核；本 job 的 reason 内嵌计数 = 422，而带该 reason 的 findings = **356**（差 **66，成因未查**）。"
+        },
+        "usable_as_criterion": false,
+        "usable_as_criterion_note": "① 无标签；② 系统输出**非确定**（同输入两次跑 41 vs 51，见 `real_baselines.criterion_note`）；③ 来自**旧版本**产物 ⇒ **不得**用于 P/R 或阈值。"
+      }
+    ]
   }
 }
