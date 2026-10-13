@@ -13,7 +13,9 @@
 
 **Fixed（真缺陷）**
 
-- 🔴 **`_parse_json` 在「前导文本 + 截断」时返回内层片段 ⇒ 静默数据丢失**：旧实现先用
+- 🔴 **`_parse_json` 在「前导文本 + 截断」时返回内层片段 ⇒ 该页 findings 丢失**
+  （消费侧实测 `r90u`：**非静默** —— 片段缺 `page_info`/`steps` ⇒ schema 校验失败 ⇒
+  **多一次 LLM 调用** ⇒ 以重试结果为准，重试仍失败才 `_schema_warn`）：旧实现先用
   `if not text.startswith(("{","[")):` 跳过截断恢复，再用双定界符 `find`/`rfind` 块扫描；
   当外层对象被截断、而内部已有**闭合**的数组/对象时，`rfind` 会抓到那个**内层**片段并当作
   整页结果返回 —— **无异常、无重试、`_truncated_recovered` 不置位**，该页 findings 静默丢失。
@@ -62,6 +64,21 @@
   定界符对顺序）⇒ 全绿。
 - ⚠️ 既有 `test_parse_truncated_json_recovers` 只断言 `isinstance(result, (dict, list))`
   ⇒ 片段与整体**都能过**（弱到不可能红）—— 这是本缺陷长期存活的原因。
+
+**Findings（消费侧复核 —— 更正本批初稿的一处推演）**
+
+- 初稿把旧实现后果写成「静默数据丢失」，并推测「若按 list 遍历，片段会变成无 finding 的
+  成功页，比 parse_error 更糟」。**实测推翻该推演**（`devlogs/_verify/r90u_stage2_consumption.py`，
+  给真实 `analyze_page` 喂片段）：消费侧 `core/page_analyzer.py` 对 list 取 `result[0]` 后走
+  `_validate_page_result`，缺 `page_info`/`steps` ⇒ **必然**校验失败 ⇒ **多一次 LLM 调用**
+  （实测 `calls=2`）⇒ 重试仍失败才 `_schema_warn`（review 页可见）；`[]` ⇒ `_parse_error`。
+- **唯一静默**情形 = 片段**恰好**含 `page_info` + `steps`（构造性；实测该情形返回值键与
+  **正常页完全无法区分**）⇒ 已加护栏
+  `tests/unit/test_page_analyzer.py::TestFragmentNeverSilentlyPersisted`（片段必须被标记
+  + 防空转正对照；变异：`REQUIRED_PAGE_FIELDS` 改空集 ⇒ **恰好 2 条红**）。
+- 修复后**端到端**复核（`r90v`）：6 个「前导文本 + 截断」输入经新 `_parse_json` 再喂
+  `analyze_page` ⇒ **零静默**（有告警或显式失败）。结构上：载荷起点 = **第一个**定界符 ⇒
+  `raw_decode` 解出的必然是最外层值 ⇒ 内层片段**不可达**。
 
 ### 便携版图标管线定位 + 忽略规则锚定（Round 86 第三十一批，2026-10-13）
 

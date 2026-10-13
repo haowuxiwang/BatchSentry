@@ -1008,3 +1008,49 @@ class TestGroundingCheck:
         user_msg = kwargs.args[1] if len(kwargs.args) > 1 else ""
         assert "[知识库参考]" not in user_msg
         assert (kwargs.kwargs.get("audit_ctx") or {}).get("kb_used") is None
+
+
+class TestFragmentNeverSilentlyPersisted:
+    """0-40 消费侧契约：LLM 返回的**内层片段**不得被静默当作正常页入库。
+
+    背景（R90 第三十二批实测，`devlogs/_verify/r90u_stage2_consumption.py`）：
+    `_parse_json` 旧实现在「前导文本 + 截断」时会返回**内层**已闭合片段。消费侧
+    （`analyze_page`）对片段的处置是 —— 缺 `page_info`/`steps` ⇒ schema 校验失败 ⇒
+    一次额外 LLM 调用 ⇒ `_schema_warn`（review 页可见）。
+
+    **这条链路必须保持。** 若 `_validate_page_result` 的必需字段被放松，片段就会
+    **静默**变成一页"正常"数据 —— 实测中该情形的返回值键与正常页**完全无法区分**
+    （只有 `_ocr_sparse` / `_prompt_version`），复核者没有任何线索。
+
+    判据：喂片段 ⇒ 结果**必须**带 `_schema_warn` 或 `_parse_error`。
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            [{"id": 1, "level": "P1"}],  # 旧实现：前导文本 + 内层数组闭合
+            {"id": 1},  # 旧实现：前导文本 + 内层对象闭合
+            [],  # 空数组 ⇒ 消费侧走 else 分支
+        ],
+        ids=["inner-array", "inner-object", "empty-list"],
+    )
+    async def test_fragment_is_flagged_never_silent(self, payload):
+        """片段必须被标记（`_schema_warn` 或 `_parse_error`），不得静默通过。"""
+        client = _make_mock_client(payload)
+        with patch("core.page_analyzer.get_llm_client", return_value=client):
+            result = await analyze_page("<table></table>", page_num=1)
+
+        assert result.get("_parse_error") is True or result.get("_schema_warn"), (
+            f"片段被静默接受（既无 _schema_warn 也无 _parse_error）：{result!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_complete_payload_is_not_flagged(self):
+        """防空转正对照：完整合规 payload **不得**被标记 —— 否则上一条恒真。"""
+        client = _make_mock_client(_ok_payload())
+        with patch("core.page_analyzer.get_llm_client", return_value=client):
+            result = await analyze_page("<table></table>", page_num=1)
+
+        assert not result.get("_parse_error"), result
+        assert not result.get("_schema_warn"), result
