@@ -88,6 +88,7 @@
 - 产物级入口拒绝矩阵 `tests/e2e_rejections.py`：**34/34**（matrix 23 / hostile 8 / dedup 3；`exe_sha256[:12]=d2d85c7a8a93`，两份产物同源）
 - 冻结冒烟 `tests/e2e_frozen.py`：**E2E_RC=0**（covered=4 / skipped=0 / failed=0；`llm_audit_success=3/3`、`ocr_backend_used=paddle`、终态 `review`、`health v1.2.1`）
 - 门禁 `scripts/release_gate.py`：**11/11 PASS**（`4192 passed / 0 failed`，coverage **95.11%**；报告 `devlogs/gate_report_20261014_091529.json`）
+- ⚠️ **未跑通 —— 双击层 `tests/e2e_unpacked.py`**（本批**必列**，不得读成已通过）：`D1_startup` 失败，stderr `GPU process isn't usable`。**已排除沙箱假设** —— 关闭沙箱隔离重跑**同样**失败（`r92_e2e_unpacked_ns.log`）⇒ **宿主环境问题，非产品缺陷**（与 R65 结论一致；加 `--disable-gpu` 亦不能绕过）⇒ **须在真实终端复跑**。
 
 
 > 承第三十三批。本轮**只改 `docs/` + `tests/`（均不入包）** ⇒ **不重建产物**。
