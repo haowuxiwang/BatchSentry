@@ -861,11 +861,11 @@ def _normalize_preserving_tokens(s: str) -> list[str]:
 
 def _value_grounded(text: str, value: str,
                     tokens: list[str] | None = None) -> bool:
-    """value 的数字分量是否能�?text 中找到（任一分量命中即通过）�?
+    """value 的数字分量是否能在 text 中找到（任一分量命中即通过）。
 
     双方都经 _normalize_grounding_text 归一化：全角数字、千分位逗号
-    不再造成假阴性；尾部归一化（0.974 命中 "0.9740"）靠子串包含�?
-    短数字要求边界防误命中�?
+    不再造成假阴性；尾部归一化（0.974 命中 "0.9740"）靠子串包含；
+    短数字要求边界防误命中。
 
     tokens（可选）：token 保留版归一化的词元列表 —— 不论数字长短都优先
     走 token 精确/尾零匹配。这既根除"相邻单元格拼接幻观数字"与"前向嵌入

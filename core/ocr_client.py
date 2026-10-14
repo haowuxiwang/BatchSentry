@@ -186,10 +186,10 @@ def poll_job(
 ) -> dict:
     """Poll until job done. Returns the final poll response dict.
 
-    容错：网络异常重试，最�?POLL_MAX_RETRIES 次后放弃�?
-    progress_callback(done, total): 每次轮询�?extractProgress 时回调，
-    �?pipeline 实时更新 job 进度（Stage 1 流式反馈）�?
-    timeout_s: 轮询上限（缺�?POLL_TIMEOUT；大文档�?run_ocr 按页数扩展）�?
+    容错：网络异常重试，最多 POLL_MAX_RETRIES 次后放弃。
+    progress_callback(done, total): 每次轮询到 extractProgress 时回调，
+    供 pipeline 实时更新 job 进度（Stage 1 流式反馈）。
+    timeout_s: 轮询上限（缺省 POLL_TIMEOUT；大文档由 run_ocr 按页数扩展）。
     cancel_check: 同步取消探针（阻塞线程内无法 await，由调用方提供
     线程安全的只读检查）；返回 True 时抛 OCRCancelled 中止轮询。
     """
@@ -478,18 +478,18 @@ def run_ocr(
     job_id: str = "",
     cancel_check=None,
 ) -> list[dict]:
-    """End-to-end OCR: submit �?poll �?download. Returns list of page results.
+    """End-to-end OCR: submit → poll → download. Returns list of page results.
 
-    progress_callback 透传�?poll_job（Stage 1 实时进度）�?
-    job_id: 应用�?job id �?仅用于日志前缀（本模块所有日志自动带
-    [job_id]），便于�?pipeline.log 反查某个 job �?OCR 全流程�?
+    progress_callback 透传给 poll_job（Stage 1 实时进度）。
+    job_id: 应用层 job id — 仅用于日志前缀（本模块所有日志自动带
+    [job_id]），便于从 pipeline.log 反查某个 job 的 OCR 全流程。
     cancel_check: 同步取消探针，透传 poll_job（见 OCRCancelled）。
     """
     if job_id:
         _token = ocr_job_id_var.set(job_id)
     try:
         paddle_job_id = submit_pdf(pdf_path)
-        # 大文档按页数扩展轮询预算（e2e 实证 51 �?600s 超时�?
+        # 大文档按页数扩展轮询预算（e2e 实证 51 页 600s 超时）
         timeout_s = poll_timeout_for(pdf_path)
         poll_response = poll_job(
             paddle_job_id,

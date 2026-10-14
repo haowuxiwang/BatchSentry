@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING
 
 from config import config, dev_config_credential_hint
 from llm.adapters import get_adapter
-from llm.adapters.base import ContentInput, append_text_part
+from llm.adapters.base import ContentInput, FINISH_LENGTH, append_text_part
 
 if TYPE_CHECKING:
     from llm.adapters.base import ChatResult
@@ -230,6 +230,30 @@ class LLMClient:
         audit_ctx: dict | None = None,
         response_format: dict | None = None,
     ) -> str:
+        """Send a chat completion request and return the assistant **content**.
+
+        向后兼容的薄包装：重试 / 退避 / 审计 / 结构化降级全在 `_chat_result()`
+        （**单一真值** —— 一个循环、两个消费者）。需要 `finish_reason` 的调用方
+        （`chat_json`）直接调 `_chat_result()`，不另起一份循环（0-38）。
+        """
+        res = await self._chat_result(
+            system_prompt, user_content, max_tokens=max_tokens,
+            temperature=temperature, retries=retries, timeout=timeout,
+            audit_ctx=audit_ctx, response_format=response_format,
+        )
+        return res.content
+
+    async def _chat_result(
+        self,
+        system_prompt: str,
+        user_content: ContentInput,
+        max_tokens: int = 4000,
+        temperature: float = 0.1,
+        retries: int = 3,
+        timeout: float = 180.0,
+        audit_ctx: dict | None = None,
+        response_format: dict | None = None,
+    ) -> "ChatResult":
         """Send a chat completion request with retry and exponential backoff.
 
         Args:
@@ -318,7 +342,7 @@ class LLMClient:
                         audit_ctx, self, result, last_latency_ms, success=True
                     )
 
-                return result.content
+                return result
             except Exception as e:
                 last_error = e
                 # Timeout 类异常（asyncio.TimeoutError / httpx.ReadTimeout /
@@ -408,7 +432,7 @@ class LLMClient:
             and getattr(self.adapter, "protocol", "") == "openai"
         ):
             response_format = {"type": "json_object"}
-        raw = await self.chat(
+        res = await self._chat_result(
             system_prompt, user_content,
             max_tokens=max_tokens,
             temperature=temperature,
@@ -417,6 +441,7 @@ class LLMClient:
             audit_ctx=audit_ctx,
             response_format=response_format,
         )
+        raw = res.content
         result = self._parse_json(raw)
 
         # Context tag for log correlation (reused by retry + final failure logs)
@@ -435,11 +460,32 @@ class LLMClient:
         # 文本或非法转义字符，API 调用本身成功（audit 已记 success=1）但内容
         # 不可用。附加"修正提示"后最多重试 2 次单发调用（retries=1，不叠加
         # API 级重试与退避，控制成本）。51 页真实回归中第 19 页正是此类失败。
+        # 0-38：**截断型**失败不重试 —— `finish_reason == "length"` 表示输出被
+        # max_tokens 硬截断。同 prompt + 同 max_tokens ⇒ 重试**必然**再次打满
+        # （实测两次 completion 均 = 8000；fix-hint 那次白烧 903.2s）。市面惯例
+        # 亦明确：「length 不得当作成功，且不得盲目重试」；GMP 属高风险域 ⇒
+        # fail-closed（该页转 failed_pages / 人工复核），**不**自动续写。
+        if res.finish_reason == FINISH_LENGTH:
+            if isinstance(result, dict) and result.get("_parse_error"):
+                logger.warning(
+                    f"LLM output truncated (finish_reason={res.raw_finish_reason!r}"
+                    f"{ctx_tag}) — skipping fix-hint retry: same prompt + same "
+                    f"max_tokens({max_tokens}) would truncate again"
+                )
+            else:
+                # 截断但解析成功（多为 `_recover_truncated_payload` 补全）⇒ 内容
+                # **可能不完整**。静默接受截断内容正是本项目禁止的形态 ⇒ 必须
+                # 留痕；下游 `_validate_page_result` 是第二道防线（0-40 已复核）。
+                logger.warning(
+                    f"LLM output truncated (finish_reason={res.raw_finish_reason!r}"
+                    f"{ctx_tag}) but JSON parsed — content may be incomplete"
+                )
         parse_attempt = 1
         while (
             isinstance(result, dict)
             and result.get("_parse_error")
             and parse_attempt < 3
+            and res.finish_reason != FINISH_LENGTH
         ):
             parse_attempt += 1
             logger.warning(
@@ -455,7 +501,7 @@ class LLMClient:
                 fix_audit_ctx["stage"] = (
                     f"{base_stage}:fix_hint" if base_stage else "fix_hint"
                 )
-            raw = await self.chat(
+            res = await self._chat_result(
                 system_prompt,
                 # 追加修复提示：纯文本路径字节级不变，多模态路径追加一个
                 # text 片段（`list + str` 会 TypeError —— 这正是扩展
@@ -473,6 +519,7 @@ class LLMClient:
                 timeout=timeout,
                 audit_ctx=fix_audit_ctx,
             )
+            raw = res.content
             result = self._parse_json(raw)
 
         # Log final parse failures with context for production debugging
@@ -756,8 +803,8 @@ async def _record_llm_call(
                    (job_id, page, stage, provider, protocol, model,
                     prompt_version, prompt_tokens, completion_tokens,
                     total_tokens, latency_ms, success, error, kb_used,
-                    created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    finish_reason, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                            datetime('now','localtime'))""",
                 (
                     ctx.get("job_id", ""),
@@ -778,6 +825,9 @@ async def _record_llm_call(
                         json.dumps(ctx["kb_used"], ensure_ascii=False)
                         if ctx.get("kb_used") else None
                     ),
+                    # v13/0-38：归一化结束原因（stop|length|other）；
+                    # None = 未采集（异常路径）或上游未报 ⇒ 与「正常收尾」区分。
+                    (result.finish_reason or None) if result else None,
                 ),
             )
             await db.commit()

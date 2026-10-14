@@ -431,11 +431,22 @@ try:
     try:
         with open(test_pdf, "rb") as f:
             r = requests.post(f"{BASE}/api/jobs?force=1", files={"file": ("test.pdf", f, "application/pdf")}, timeout=10)
-        assert r.status_code == 200, f"status={r.status_code} body={r.text[:200]}"
-        data = r.json()
-        job_id = data.get("job_id") or data.get("id")
-        assert job_id, f"no job_id in response: {data}"
-        ok("upload", f"job_id={job_id}")
+        if OCR_CONFIGURED:
+            assert r.status_code == 200, f"status={r.status_code} body={r.text[:200]}"
+            data = r.json()
+            job_id = data.get("job_id") or data.get("id")
+            assert job_id, f"no job_id in response: {data}"
+            ok("upload", f"job_id={job_id}")
+        else:
+            # 0-33：上传门与 LLM 门对称 —— 未配 OCR 时上传**应**被 400 拒绝。
+            # 这不是缺陷，而是产品的新（正确）行为；成功路径本轮**未验**，
+            # 如实记录，不得读成通过。
+            assert r.status_code == 400, (
+                f"未配 OCR 却未被拒：status={r.status_code} body={r.text[:200]}"
+            )
+            assert "OCR" in r.text, f"拒绝文案未点名 OCR：{r.text[:200]}"
+            ok("upload_rejected_without_ocr", f"status={r.status_code}")
+            job_id = None
     except Exception as e:
         fail("upload", str(e))
         job_id = None

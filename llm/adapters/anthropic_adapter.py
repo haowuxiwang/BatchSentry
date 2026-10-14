@@ -21,6 +21,7 @@ import logging
 from config import ProviderConfig
 from .base import (
     LLMAdapter, ChatResult, ContentInput, ImagePart, content_parts,
+    normalize_finish_reason,
 )
 
 logger = logging.getLogger(__name__)
@@ -109,12 +110,17 @@ class AnthropicAdapter(LLMAdapter):
         completion_tokens = getattr(usage, "output_tokens", None) if usage else None
         total = (prompt_tokens + completion_tokens) if (prompt_tokens is not None and completion_tokens is not None) else None
 
+        # 0-38：Anthropic 用 `stop_reason`（`max_tokens` = 截断）—— 归一化
+        # 收敛在 base.normalize_finish_reason，调用方只看统一枚举。
+        raw_finish = getattr(resp, "stop_reason", None)
         return ChatResult(
             content=content,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             total_tokens=total,
             model=self.model,
+            finish_reason=normalize_finish_reason(raw_finish, self.protocol),
+            raw_finish_reason=str(raw_finish or ""),
         )
 
     def client_info(self) -> dict:

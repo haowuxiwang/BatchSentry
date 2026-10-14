@@ -269,8 +269,17 @@ def ocr_ready_from_settings(settings) -> bool:
         return False
     for name in ("paddle", "mineru"):
         prov = ocr.get(name)
-        if isinstance(prov, dict) and prov.get("configured") is True:
-            return True
+        if not (isinstance(prov, dict) and prov.get("configured") is True):
+            continue
+        # ⚠️ 0-33：paddle 的「就绪」还须 api_url —— 上传门的判据是
+        # `bool(api_url and token)`（ocr_support.remote_backend_configured）。
+        # 只看 token 会把「token 真但 api_url 空」误判成就绪 ⇒ 驱动放行、
+        # 随后 19 条「期望 200」变 400（**危险方向**）。加上 api_url 后本
+        # 判定成为门的**充分条件**（严格 ⟹ 宽松），危险方向被消除。
+        # mineru 只需 token（base_url 有默认值），与门一致。
+        if name == "paddle" and not str(prov.get("api_url") or "").strip():
+            continue
+        return True
     return False
 
 

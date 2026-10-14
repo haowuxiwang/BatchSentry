@@ -23,12 +23,56 @@ class ChatResult:
         model: The model identifier actually used (useful for audit logs and
             the health probe, which needs to report which model served the
             request).
+        finish_reason: 归一化结束原因（`FINISH_*` 之一；"" = 上游未报）。
+        raw_finish_reason: 上游原始枚举（排障 / 协议迁移用；不做判定）。
     """
     content: str
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
     total_tokens: int | None = None
     model: str = ""
+    #: 归一化结束原因（`FINISH_*` 之一；"" = 上游未报）。**唯一**能区分
+    #: 「自然收尾」与「被 max_tokens 截断」的信号（TODO 0-38）。
+    finish_reason: str = ""
+    #: 上游**原始**枚举（openai `length` / anthropic `max_tokens` …）——
+    #: 排障与协议迁移用；**判定一律看 `finish_reason`**。
+    raw_finish_reason: str = ""
+
+
+# ── 结束原因归一化（TODO 0-38）──────────────────────────────────────────
+# 为什么需要：`finish_reason` 是**唯一**能区分「模型自然收尾」与「被
+# max_tokens 硬截断」的信号。此前 ChatResult 未采集它 ⇒ 产品**无法**区分
+# 「截断」与「格式错」，fix-hint 重试对截断型失败**结构性无产**（同 prompt +
+# 同 max_tokens ⇒ 必然再次打满；实测两次 completion 均 = 8000，白烧 903.2s）。
+#
+# 两套协议的枚举**不同**（openai `length` / anthropic `max_tokens`）⇒ 若让
+# 每个调用方各自判字符串，必然漂移。此处收敛为**统一枚举**（便于决策），
+# 同时保留原始值（便于排障）—— 即市面惯例的「统一枚举 + 原始值」。
+FINISH_STOP = "stop"      #: 模型自然收尾
+FINISH_LENGTH = "length"  #: 被 max_tokens 截断（**唯一**需要特别处理的值）
+FINISH_OTHER = "other"    #: tool_calls / content_filter / 未知 —— 一律按非截断
+
+_FINISH_TABLE: dict[str, dict[str, str]] = {
+    "openai": {"stop": FINISH_STOP, "length": FINISH_LENGTH},
+    "anthropic": {
+        "end_turn": FINISH_STOP,
+        "stop_sequence": FINISH_STOP,
+        "max_tokens": FINISH_LENGTH,
+    },
+}
+
+
+def normalize_finish_reason(raw: object, protocol: str) -> str:
+    """把某协议的原始结束原因归一为 `FINISH_*` 之一。
+
+    未报（None / 空串）⇒ `""`（**不**当作 stop —— 「没报」与「正常收尾」是
+    两件事）；协议未登记或枚举未知 ⇒ `FINISH_OTHER`（按非截断处理，且**不**
+    静默当成 stop）。
+    """
+    s = str(raw or "").strip().lower()
+    if not s:
+        return ""
+    return _FINISH_TABLE.get((protocol or "").lower(), {}).get(s, FINISH_OTHER)
 
 
 @dataclass(frozen=True)

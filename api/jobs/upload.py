@@ -162,6 +162,24 @@ async def create_job(
             "尚未配置 LLM 服务商，无法进行结构化分析。请先前往「设置」完成配置后再上传。",
         )
 
+    # 友好拦截：未配置 OCR 后端时拒绝上传（**与上面的 LLM 门对称**）。
+    # 为什么需要（TODO 0-33）：批记录识别依赖 OCR；未配置时上传必然在
+    # Stage 1 失败。实测样本 138MB / 51 页 —— 用户白传、白等，且错误发生在
+    # 中途。门**必须早于写盘**（下方 job_dir 落盘）才有效，否则大文件已落盘。
+    # 判定复用**单一来源** core.pipeline.ocr_support.ocr_chain_configured()，
+    # 与上传页横幅（main.py::index 的 ocr_setup_needed）同源 ⇒ 横幅说 OK 就
+    # 一定放行，不产生「横幅 / 门」口径漂移。
+    # ⚠️ 顺序不变量：本门位于扩展名 / 保留设备名**之后**、写盘与 magic/size
+    # **之前**；与 LLM 门同构（配置前置门先于输入格式校验）。
+    from core.pipeline.ocr_support import ocr_chain_configured
+    if not ocr_chain_configured():
+        logger.warning("Upload rejected: no OCR backend configured")
+        raise HTTPException(
+            400,
+            "尚未配置 OCR 服务（PaddleOCR-VL / MinerU），无法进行文档识别。"
+            "请先前往「设置」完成配置后再上传。",
+        )
+
     # ── 并发额度：**两道检查**（B2-7 修 TOCTOU）──────────────────────────
     # ① 这里是**尽力而为的前置快检**：目的只是别让用户白传一个 200MB 的文件，
     #    **不是**授权依据 —— COUNT 与最终 INSERT 之间隔着写盘 + 解析（大文件

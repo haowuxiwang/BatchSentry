@@ -85,6 +85,9 @@ CREATE TABLE IF NOT EXISTS llm_call_audit (
     latency_ms INTEGER,
     success INTEGER NOT NULL DEFAULT 1, -- 0 = exception occurred
     error TEXT,
+    -- v13/0-38：归一化的 LLM 结束原因（stop|length|other）—— 区分「自然
+    -- 收尾」与「被 max_tokens 截断」。GMP 追溯：能回答"这页为何失败"。
+    finish_reason TEXT,
     created_at TIMESTAMP DEFAULT (datetime('now','localtime')),
     FOREIGN KEY (job_id) REFERENCES jobs(id)
 );

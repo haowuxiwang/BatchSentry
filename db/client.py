@@ -21,7 +21,7 @@ def _get_init_lock() -> asyncio.Lock:
     return _db_init_lock
 
 # Current schema migration level, persisted via PRAGMA user_version.
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 
 async def get_db() -> aiosqlite.Connection:
@@ -121,6 +121,9 @@ async def migrate(db: aiosqlite.Connection):
 
     if current_version < 12:
         await _migrate_v12(db)
+
+    if current_version < 13:
+        await _migrate_v13(db)
 
     # PRAGMA user_version cannot be parameterized; SCHEMA_VERSION is an int
     # constant defined in this module, so f-string is safe.
@@ -398,6 +401,28 @@ async def _migrate_v12(db: aiosqlite.Connection):
             logger.info("Migration: added jobs.last_activity_at")
     except Exception as e:
         logger.warning(f"Migration skip jobs.last_activity_at: {e}")
+    await db.commit()
+
+
+async def _migrate_v13(db: aiosqlite.Connection):
+    """v13: ``llm_call_audit.finish_reason`` —— LLM 结束原因（TODO 0-38）。
+
+    为什么需要：这是**唯一**能区分「模型自然收尾」与「被 max_tokens 硬截断」
+    的信号。此前全库未采集它 ⇒ 事后无法回答"这一页为什么失败"，而 fix-hint
+    重试对截断型失败是**纯浪费**（实测单次白烧 903.2s + 8000 token）。
+
+    归一化值（stop|length|other），原始枚举另见调用日志；旧行保持 NULL ⇒
+    读取期视为「未采集」，不参与任何判定（历史 job 无需回填、功能不降级）。
+    """
+    try:
+        cur = await db.execute("PRAGMA table_info(llm_call_audit)")
+        cols = {row["name"] for row in await cur.fetchall()}
+        if "finish_reason" not in cols:
+            await db.execute(
+                "ALTER TABLE llm_call_audit ADD COLUMN finish_reason TEXT")
+            logger.info("Migration: added llm_call_audit.finish_reason")
+    except Exception as e:
+        logger.warning(f"Migration skip llm_call_audit.finish_reason: {e}")
     await db.commit()
 
 

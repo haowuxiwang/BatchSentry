@@ -20,6 +20,7 @@ from openai import AsyncOpenAI
 from config import ProviderConfig
 from .base import (
     LLMAdapter, ChatResult, ContentInput, ImagePart, content_parts,
+    normalize_finish_reason,
 )
 
 logger = logging.getLogger(__name__)
@@ -87,12 +88,17 @@ class OpenAIAdapter(LLMAdapter):
         )
         content = resp.choices[0].message.content or ""
         usage = resp.usage
+        # 0-38：采集结束原因（`length` = 被 max_tokens 截断）。SDK 缺该字段时
+        # 取 None ⇒ normalize 返回 ""（「未报」≠「正常收尾」）。
+        raw_finish = getattr(resp.choices[0], "finish_reason", None)
         return ChatResult(
             content=content,
             prompt_tokens=getattr(usage, "prompt_tokens", None) if usage else None,
             completion_tokens=getattr(usage, "completion_tokens", None) if usage else None,
             total_tokens=getattr(usage, "total_tokens", None) if usage else None,
             model=self.model,
+            finish_reason=normalize_finish_reason(raw_finish, self.protocol),
+            raw_finish_reason=str(raw_finish or ""),
         )
 
     def client_info(self) -> dict:

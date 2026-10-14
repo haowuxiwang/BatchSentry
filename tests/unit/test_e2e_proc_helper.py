@@ -368,13 +368,22 @@ def test_tail_log_truncates_to_max_chars(tmp_path):
 # （fail-open）。真值必须取**应用自报**。见 `tests/e2e_proc.ocr_ready_from_settings`。
 
 
-def _settings(paddle=None, mineru=None, with_ocr=True):
-    """造一份 `GET /api/settings` 形态的响应（None = 该键缺失）。"""
+def _settings(paddle=None, mineru=None, with_ocr=True,
+              paddle_api_url="http://paddle.test/api"):
+    """造一份 `GET /api/settings` 形态的响应（None = 该键缺失）。
+
+    0-33：paddle 的就绪判定除了 ``configured`` 还要 ``api_url`` —— 上传门的
+    判据是 ``bool(api_url and token)``。``paddle_api_url=None`` 用来构造
+    「token 真、api_url 空」这个**必须被判成未就绪**的反例。
+    """
     d = {"llm": {"provider": "siliconflow"}}
     if with_ocr:
         ocr = {}
         if paddle is not None:
-            ocr["paddle"] = {"configured": paddle}
+            entry = {"configured": paddle}
+            if paddle_api_url is not None:
+                entry["api_url"] = paddle_api_url
+            ocr["paddle"] = entry
         if mineru is not None:
             ocr["mineru"] = {"configured": mineru}
         d["ocr"] = ocr
@@ -385,7 +394,20 @@ class TestOcrReadyFromSettings:
     def test_paddle_configured_is_ready(self):
         assert ocr_ready_from_settings(_settings(paddle=True, mineru=False)) is True
 
-    def test_mineru_configured_is_ready(self):
+    def test_paddle_without_api_url_is_not_ready(self):
+        """0-33 收紧：``configured=True`` 但 ``api_url`` 空/纯空白 ⇒ **未就绪**。
+
+        门判的是 ``bool(api_url and token)``；这里若放行，驱动会按「已就绪」
+        去断言上传 200，而真实门返回 400 ⇒ 把**产品语义**读成环境问题
+        （危险方向）。收紧后本判定是门的**充分条件**（严格 ⟹ 宽松）。
+        """
+        assert ocr_ready_from_settings(
+            _settings(paddle=True, mineru=False, paddle_api_url=None)) is False
+        assert ocr_ready_from_settings(
+            _settings(paddle=True, mineru=False, paddle_api_url="   ")) is False
+
+    def test_mineru_needs_no_api_url(self):
+        """mineru 的 base_url 有默认值 ⇒ 与门一致，只判 token。"""
         assert ocr_ready_from_settings(_settings(paddle=False, mineru=True)) is True
 
     def test_both_false_is_not_ready(self):
@@ -414,6 +436,10 @@ class TestOcrReadyFromSettings:
         ready = _settings(paddle=True, mineru=False)
         not_ready = _settings(paddle=False, mineru=False)
         assert ocr_ready_from_settings(ready) != ocr_ready_from_settings(not_ready)
+        # 0-33 新增的收紧项也必须可分（否则它可能是永不生效的空转断言）
+        assert (ocr_ready_from_settings(_settings(paddle=True, mineru=False))
+                != ocr_ready_from_settings(
+                    _settings(paddle=True, mineru=False, paddle_api_url=None)))
 
 
 

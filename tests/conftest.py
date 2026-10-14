@@ -120,6 +120,9 @@ async def test_db(tmp_path):
     # （_load_all_providers 总是注册这两个内置 provider），保存其 api_key
     # 原值即可恢复。
     orig_deepseek_key = _cfg["providers"]["deepseek"].api_key
+    # 0-33：OCR 门与 LLM 门对称 —— 一并保存 / 注入 / 恢复 OCR 凭据。
+    orig_paddle_url = _cfg["paddle_ocr"].api_url
+    orig_paddle_token = _cfg["paddle_ocr"].token
 
     # 指向临时数据库 + 临时输出目录
     _cfg["app"].database_path = str(db_path)
@@ -132,6 +135,11 @@ async def test_db(tmp_path):
     # 到不存在的 "llm_providers" 键，与 production 路径脱节，掩盖了上传守卫
     # 的真实 bug（见对抗性审查 B-C1）。
     _cfg["providers"]["deepseek"].api_key = "sk-test-key-for-unit-test-only"
+    # 0-33：注入 mock OCR 凭据（绕过 create_job 的「未配置 OCR」拦截）。
+    # 与 LLM key 同源理由：production 读的是 config["paddle_ocr"]
+    # （core.pipeline.ocr_support.remote_backend_configured 用 api_url + token）。
+    _cfg["paddle_ocr"].api_url = "http://test-ocr.local/api"
+    _cfg["paddle_ocr"].token = "test-ocr-token-for-unit-test-only"
 
     try:
         db = await db_mod.get_db()  # 连接 + 自动 init_schema + migrate
@@ -146,6 +154,8 @@ async def test_db(tmp_path):
         _cfg["app"].database_path = orig_db_path
         _cfg["app"].output_dir = orig_output_dir
         _cfg["providers"]["deepseek"].api_key = orig_deepseek_key
+        _cfg["paddle_ocr"].api_url = orig_paddle_url
+        _cfg["paddle_ocr"].token = orig_paddle_token
         if db_path.exists():
             db_path.unlink()
 

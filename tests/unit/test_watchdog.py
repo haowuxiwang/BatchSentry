@@ -1059,10 +1059,10 @@ class TestSchemaSingleSourceOfTruth:
             f"每个版本必须写 `if current_version < N:` + `await _migrate_vN(db)` "
             f"（不得把新迁移贴在上一版 if 块里）")
 
-    def test_schema_version_is_12(self):
+    def test_schema_version_is_13(self):
         from db.client import SCHEMA_VERSION
 
-        assert SCHEMA_VERSION == 12
+        assert SCHEMA_VERSION == 13
 
     @pytest.mark.asyncio
     async def test_migrate_v11_db_adds_column(self, tmp_path):

@@ -105,7 +105,7 @@
 | MinerU 坐标系 / 块抽取 | `mineru_client._layout_page_sizes` / `_page_regions` | `test_regions_anchor.py`（**合成 zip**；勿只靠真实产物用例）|
 | 朝向分类必须开着 | `prunedResult.doc_preprocessor_res.model_settings.use_doc_orientation_classify` 且逐页 `angle ∈ {0,90,180,270}` | `test_real_artifact_reports_orientation_for_every_page` |
 | 抑制台账 / 建表 DDL | `spec_guard.suppression_rows` + **仅** `db/schema.sql`（迁移体只加列）| `test_suppression_ledger.py` |
-| DB schema 版本 | `db/client.SCHEMA_VERSION`（当前 **v12**）| 同上 |
+| DB schema 版本 | `db/client.SCHEMA_VERSION`（当前 **v13**）| 同上 |
 | 看门狗阈值 / 扫描间隔 | `core/watchdog.py`（`_BASE_STALL_S`/`_PER_PAGE_S`/`_CAP_S`）| `test_watchdog.py` |
 | 心跳写入点（必须绑"前进"） | `pipeline/state.py`（`touch_activity` + 各进度 UPDATE）；`stage2.py` 逐页落盘；`jobs/upload.py` INSERT | `test_watchdog.py::TestHeartbeatWiring` |
 | 上传限额 | `config.UPLOAD_LIMITS` + `check_upload_page_limits()`（纯函数）| `test_upload_limits.py`（防重新写死 + 策略≤厂商上限 + **引用纪律**）|

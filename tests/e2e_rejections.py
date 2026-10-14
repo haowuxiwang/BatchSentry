@@ -214,6 +214,35 @@ def _llm_provider_configured(c: httpx.Client) -> bool:
         return False
 
 
+def _ocr_configured(c: httpx.Client) -> bool:
+    """前置条件：产物必须已配置**可运行**的 OCR 后端（0-33 的上传门）。
+
+    为什么必须**前置**判定（与 `_llm_provider_configured` 同源理由）：
+    `api/jobs/upload.py` 在「未配置 OCR」时对**每一个**上传都返回 400 ⇒
+    矩阵里「期望 200」的 **19** 条会全部变红、而「期望 400 且断言具体文案」
+    的用例可能改报 OCR 错误 ⇒ 整轮**无判别力**。
+
+    判据与**上传门同构**（而非只看 `configured`）：门用的是
+    `ocr_support.remote_backend_configured` —— paddle = `bool(api_url and
+    token)`、mineru = `bool(token)`。此处用 `/api/settings` 暴露的
+    `ocr.paddle.api_url`（明文）+ `configured`（严格，滤占位值）复现同一
+    条件；严格 ⟹ 宽松 ⇒ 本判定是门的**充分条件**（宁可 fail-closed 误报，
+    不可放行后假绿）。
+    """
+    try:
+        r = c.get(f"{_API}/api/settings", timeout=10)
+        if r.status_code != 200:
+            return False
+        ocr = (r.json().get("ocr") or {})
+        paddle = ocr.get("paddle") or {}
+        mineru = ocr.get("mineru") or {}
+        if paddle.get("configured") and str(paddle.get("api_url") or "").strip():
+            return True
+        return bool(mineru.get("configured"))
+    except Exception:                                            # noqa: BLE001
+        return False
+
+
 def _cancel(c: httpx.Client, r: httpx.Response):
     """立刻取消，别烧 OCR/LLM 额度。返回 cancel 的状态码（失败记字符串）。"""
     try:
@@ -392,6 +421,17 @@ def main(argv: list[str]) -> int:
                     f"矩阵将**无判别力**（阳性用例假绿、阴性对照全红）。\n"
                     f"   先 seed：{_APPDATA / 'PBC' / 'config.json'}"
                     f"（冻结版只读该路径，**不**读仓库根 config.json）。fail-closed。")
+                return 2
+            if not _ocr_configured(c):
+                print(
+                    f"!! 前置条件未满足：产物未配置**可运行**的 OCR 后端"
+                    f"（GET {_API}/api/settings 的 ocr.paddle.api_url+configured /"
+                    f" ocr.mineru.configured 均不满足）⇒ 每个上传都会 400，"
+                    f"矩阵将**无判别力**（19 条「期望 200」全红）。\n"
+                    f"   先 seed：{_APPDATA / 'PBC' / 'config.json'}"
+                    f"（PADDLE_OCR_API_URL + PADDLE_OCR_TOKEN，或 MINERU_TOKEN）。"
+                    f"fail-closed。"
+                )
                 return 2
             print("[probe] health OK —— ① 拒绝矩阵")
             rows += _run_matrix(c)
