@@ -7,6 +7,88 @@
 
 ## [Unreleased]
 ### 422 vs 356 归因 + 描述模板有损（Round 86 第三十四批，2026-10-13）
+### OCR 后端前置门 + LLM 截断治理 + 源码 U+FFFD 清理（Round 87 第三十五批，2026-10-14）
+
+> 承第三十四批。本轮**改入包源**（`api/`、`llm/`、`db/`、`core/`、`tests/`）⇒ **必须重建产物**。
+> 三条独立事项一次做完 ⇒ 只有**一次**重建。
+
+**0-33 —— 上传页的 OCR 缺口：从「信息性横幅」升级为「后端前置门」**
+
+- 缺陷：`api/jobs/upload.py` 的 400 前置门只判 LLM ⇒ OCR 未配置时上传被**接受**，
+  用户白传大文件（实测样本 **138MB / 51 页**）后在 **Stage 1** 失败。
+- 修法：在 **LLM 门之后、并发额度之前**插入对称的 OCR 门，真值源复用既有**单一来源**
+  `core/pipeline/ocr_support.ocr_chain_configured()`（= paddle/mineru 远端已配 **或**
+  docling 可用）。**位置是硬不变量**：放前面会让 15 条「期望 400 且断言具体文案」的
+  入口矩阵用例改报 OCR 错误而全红。
+- 配套（否则测试与真实语义脱节）：
+  - `tests/conftest.py::test_db` 与 LLM key **同源**注入 mock OCR 凭据（~20 个 `client`
+    fixture 全派生自它 ⇒ 一处修好整个爆炸半径）；
+  - `tests/e2e_proc.ocr_ready_from_settings` 补 `paddle.api_url` 判据 —— 原实现只读
+    `configured`，**比门更宽松**（危险方向）；收紧后本判定成为门的**充分条件**
+    （严格 ⟹ 宽松），危险方向被消除。`tests/unit/test_e2e_proc_helper.py` 的旧钉子
+    随之更正，并新增「`configured=True` 但 `api_url` 空 ⇒ 未就绪」的反例；
+  - `tests/e2e_rejections.py` 加与 `_llm_provider_configured` **对称**的 `_ocr_configured`
+    前置 + fail-closed（判不了 ⇒ rc=2，不伪装成通过）；
+  - `tests/e2e_frozen.py` 上传步按 `OCR_CONFIGURED` **分支断言**（未就绪 ⇒ 期望 400 +
+    断言文案含 OCR，且**不得**伪造 job_id）。
+- 护栏 `tests/integration/test_upload_ocr_guard.py`（4 条：拒绝 / 允许 / **LLM 门先于
+  OCR 门** / LLM 已配时 OCR 门生效）。
+
+**0-38 —— 截断型 JSON 解析失败的 fix-hint 重试链（行为决策：跳过重试 + fail-closed）**
+
+- 实测现场：`e2e_test.pdf` page 2 **稳定**打满 `_PAGE_MAX_TOKENS=8000` ⇒ `_parse_json`
+  失败 ⇒ fix-hint **再发一次**（仍打满 8000）⇒ 单页 **373.7s + 903.2s ≈ 21 分钟**
+  （最坏 `3 × 1440s = 4320s`）。根因：`finish_reason` 由 SDK 提供但 `ChatResult` **未采集**
+  ⇒ 产品无法区分「截断」与「格式错」，而 fix-hint 对截断型失败**结构性无产**。
+- 修法（四层，单一真值）：
+  1. `ChatResult` += `finish_reason`（归一化）+ `raw_finish_reason`（原始枚举）。两套协议
+     枚举**不同**（openai `length` / anthropic `max_tokens`）⇒ 收敛到
+     `llm/adapters/base.normalize_finish_reason`（**唯一**判定入口；`""` = 未报 ≠ stop；
+     未知协议/枚举 ⇒ `other`，**不**猜成 length）。
+  2. `llm/client.py`：`chat()` 退化为**薄包装**，重试/退避/审计/结构化降级收进新的
+     `_chat_result()`（**一个循环、两个消费者**）⇒ 让 `chat_json` 拿到 `finish_reason`
+     而**不**另起一份循环。
+  3. `chat_json`：`finish_reason == "length"` ⇒ **不发** fix-hint（同 prompt + 同
+     max_tokens 必然再次打满）；「截断**且已解析**」单独告警 `content may be incomplete`
+     —— 不得与「有重试待跳过」混进同一条文案（那一支根本没有待跳过的重试）。
+  4. 留痕：`llm_call_audit.finish_reason`（`db/schema.sql` 单一声明处 +
+     `SCHEMA_VERSION 12→13` + `_migrate_v13`）；旧行保持 NULL =「未采集」，不参与判定。
+  5. 参数变更清扫：`tests/unit/test_watchdog.py` 的 `SCHEMA_VERSION == 12` 钉子同步为 13
+     （`devlogs/_verify/r92e_schema_v13_sweep.py`，含「历史陈述不改」的豁免清单）。
+- 护栏 `tests/unit/test_llm_finish_reason.py`（44 条：归一化表**钉字面量** / 适配器取字段 /
+  单一真值静态扫描 / 跳重试 + **反向对照**（`stop`/`other`/**未报** 仍重试 3 次）/ `chat()`
+  仍返回 `str` / 审计落库 / v13 迁移）。
+- ⚠️ **未验**：未在真实上游复现「截断 ⇒ 只发 1 次」（需可用凭据）；`chat()` 非 JSON 路径
+  **不**检查截断（现有调用方只有健康 / 设置探测，不消费正文）。
+
+**0-43 —— 源码里残留 23 个 U+FFFD 替换字符（仅注释 / docstring）**
+
+- `core/ocr_client.py`（**19**）+ `core/page_analyzer.py`（**4**）。文件本身是**合法
+  UTF-8** —— 损坏是**真码点**，形态恒为「U+FFFD + ASCII `?`」替掉一个汉字（早期编码
+  往返的化石）。全在注释 / docstring ⇒ 不影响行为，但污染 grep 与阅读。
+- 按 git 历史原文逐处还原（`devlogs/_verify/r92a_fix_fffd.py`，幂等）；
+  `ocr_client.py` 23423→23417 B、`page_analyzer.py` 55602→55599 B，字节级确认
+  U+FFFD 计数 **23 → 0**，`py_compile` 通过。
+- ⚠️ **未做**：全库 U+FFFD 全树扫描（本轮只修这两处**已定位**的文件）。
+
+**变异验证（本仓库硬门槛）**
+
+- `devlogs/_verify/mutation_r92_038_finish_reason.py` ⇒ **11/11 CAUGHT**。纪律：整仓库
+  复制到临时目录、变异只打**副本**、`cwd=副本`、**先跑基线金丝雀**（未变异必须全绿）、
+  锚点必须恰好命中 1 次。11 条覆盖：还原重试链缺陷 / 常量值改坏 / 未报当成 stop /
+  适配器硬编码判定 / 审计不落列 / 版本号回退 / 迁移空转 / `chat()` 泄漏 ChatResult /
+  `chat()` 另起循环 / 告警分支合并 / Anthropic 取错字段。
+- 顺带加固 `devlogs/_verify/mutation_harness.py`：变异前把原始字节**另存**
+  `devlogs/_verify/_mutbak/` + manifest，被打断（SIGTERM 不展开 `finally`）也能据 manifest
+  还原 —— 原实现只有 `finally`。
+
+**测试 / 产物级复验**
+
+- 受影响单测：全量 `pytest tests`：**4192 passed / 6 skipped / 2 xfailed**（666.08s，零 FAILED/ERROR）。6 条 skip 均有登记理由 —— 0-39 图标管线未接线 ×2、真实 Paddle 产物不在场 ×4；2 条 xfail = 0-42 显式登记
+- 产物级入口拒绝矩阵 `tests/e2e_rejections.py`：**34/34**（matrix 23 / hostile 8 / dedup 3；`exe_sha256[:12]=d2d85c7a8a93`，两份产物同源）
+- 冻结冒烟 `tests/e2e_frozen.py`：**E2E_RC=0**（covered=4 / skipped=0 / failed=0；`llm_audit_success=3/3`、`ocr_backend_used=paddle`、终态 `review`、`health v1.2.1`）
+- 门禁 `scripts/release_gate.py`：**11/11 PASS**（`4192 passed / 0 failed`，coverage **95.11%**；报告 `devlogs/gate_report_20261014_091529.json`）
+
 
 > 承第三十三批。本轮**只改 `docs/` + `tests/`（均不入包）** ⇒ **不重建产物**。
 > 目的：把上一批**自己登记为「未解释」**的计数差（0-41 的 `422 vs 356`）**查清**。
