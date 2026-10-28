@@ -43,7 +43,7 @@ Pillow==12.3.0
 # 可选：仅当 provider 配置了 protocol=anthropic（如 Claude）时才需要。
 # 所有 OpenAI 协议 provider（DeepSeek / GLM / Kimi / Qwen / MiMo）走上面的
 # `openai` 包，**不需要**这个。
-anthropic==0.109.2
+anthropic==2.3.0
 
 # 构建期依赖：Windows 安装包打包（Electron + PyInstaller）。运行时不需要。
 pyinstaller==6.18.0
