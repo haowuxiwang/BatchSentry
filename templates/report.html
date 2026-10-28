@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="h-full">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>报告 — 批记录辅助审查</title>
+    <link rel="stylesheet" href="/static/design-tokens.css?v={{ asset_ver('design-tokens.css') }}">
+    <link rel="stylesheet" href="/static/app.css?v={{ asset_ver('app.css') }}">
+    {# job 状态映射（与 review.html / static/upload.js STATUS_ZH 同源，不另立口径） #}
+    {% set job_status_zh = {'pending': '待处理', 'queued': '排队中', 'processing': '处理中', 'ocr_running': '识别中', 'ocr_done': '识别完成', 'analyzing': '分析中', 'review': '可复核', 'partial_review': '部分可复核', 'error': '出错', 'cancelled': '已取消', 'cancelling': '取消中', 'done': '已完成', 'archived': '已归档'} %}
+    <style>
+        /* 报告正文排版：core.md_render 输出裸 h1~h6 / ul / li / hr / p / strong / code，
+           用元素级样式渲染（颜色全部走 design-tokens 变量，暗色模式自动跟随）。 */
+        #report-body h1 { font-size: 1.3rem; font-weight: 600; margin: 0 0 .5rem; color: hsl(var(--foreground)); }
+        #report-body h2 { font-size: 1.05rem; font-weight: 600; margin: 1.75rem 0 .6rem; color: hsl(var(--foreground)); }
+        #report-body h3 { font-size: .95rem; font-weight: 600; margin: 1.25rem 0 .5rem; color: hsl(var(--foreground)); }
+        #report-body h4, #report-body h5, #report-body h6 { font-size: .9rem; font-weight: 600; margin: 1rem 0 .4rem; color: hsl(var(--foreground)); }
+        #report-body p { font-size: .875rem; line-height: 1.75; margin: .5rem 0; color: hsl(var(--foreground)); }
+        #report-body ul { margin: .5rem 0 .75rem; padding-left: 1.25rem; list-style: disc; }
+        #report-body ul ul { margin: .25rem 0; padding-left: 1.1rem; list-style: circle; }
+        #report-body li { font-size: .875rem; line-height: 1.75; color: hsl(var(--foreground)); }
+        #report-body strong { font-weight: 600; }
+        #report-body code { font-size: .8125rem; padding: .1rem .35rem; border-radius: var(--radius-sm);
+                            background: hsl(var(--muted)); color: hsl(var(--foreground)); }
+        #report-body hr { border: 0; border-top: 1px solid hsl(var(--border)); margin: 1.5rem 0; }
+        /* GMP 阅读场景：内容多页滚动，打印时去掉外壳约束 */
+        @media print {
+            #report-body { max-width: none; padding: 0; }
+        }
+    </style>
+</head>
+<body class="h-full flex flex-col">
+    <a href="#main-content" class="skip-link">跳到主要内容</a>
+    <!-- ============= Top App Bar — 与 review.html 同构，保证外壳一致 ============= -->
+    <header class="border-b border-border bg-background/80 backdrop-blur-sm sticky top-0 z-40">
+        <div class="max-w-[1700px] mx-auto px-6 h-12 flex items-center gap-3">
+            <span class="text-[11px] font-medium text-muted-foreground tracking-wide uppercase">BatchSentry</span>
+            <span class="text-muted-foreground/40">/</span>
+            <a href="/" class="btn-press text-[13px] font-medium hover:text-muted-foreground transition-colors">
+                批记录辅助审查
+            </a>
+            <span class="text-muted-foreground/40">/</span>
+            <span class="text-[13px] font-medium truncate max-w-[280px]">{{ filename }}</span>
+            <span class="inline-flex items-center gap-1 text-[11px] text-muted-foreground">
+                <span class="w-1.5 h-1.5 rounded-full {{ status_dot_class }}"></span>
+                <span>{{ job_status_zh.get(status, status) }}</span>
+            </span>
+            <span class="text-[11px] text-muted-foreground font-mono">{{ job_id }}</span>
+            <div class="flex-1"></div>
+            <nav class="flex items-center gap-2" aria-label="页面导航">
+                <!-- 优雅返回主流程：回到该任务的复核页（浏览器后退的站内等价物） -->
+                <a href="/jobs/{{ job_id }}/review"
+                   class="btn-press focus-ring text-[12px] font-medium text-foreground hover:text-muted-foreground px-2 py-1 rounded transition-colors">
+                    ← 返回复核
+                </a>
+                <a href="/settings"
+                   class="btn-press focus-ring text-[12px] text-muted-foreground hover:text-foreground px-2 py-1 rounded transition-colors">
+                    设置
+                </a>
+                <a href="/"
+                   class="btn-press focus-ring text-[12px] text-muted-foreground hover:text-foreground px-2 py-1 rounded transition-colors">
+                    首页
+                </a>
+            </nav>
+        </div>
+    </header>
+
+    <!-- ============= 报告正文：单栏阅读版式 ============= -->
+    <main id="main-content" class="flex-1 overflow-y-auto">
+        <article id="report-body" class="max-w-3xl mx-auto w-full px-6 py-8">
+            {# 安全模型：api/report.py esc() 前置转义 + md_render 只加结构标签；
+               后端已 Markup() 免转义注入 —— 此处不得再套 |escape（会显示裸标签） #}
+            {{ report_html }}
+        </article>
+    </main>
+</body>
+</html>

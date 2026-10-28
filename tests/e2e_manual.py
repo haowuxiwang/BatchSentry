@@ -1,0 +1,118 @@
+import time, os, sys, requests
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from tests.e2e_proc import (  # noqa: E402
+    llm_key, llm_key_env_display, llm_provider, resolve_exe,
+    spawn_server, stop_server, tail_log,
+)
+
+EXE = resolve_exe()
+BASE = "http://127.0.0.1:58765"
+APPDATA = os.path.join(os.environ["TEMP"], "pbc-e2e-v2")
+os.makedirs(os.path.join(APPDATA, "PBC"), exist_ok=True)
+
+env = os.environ.copy()
+env["APPDATA"] = APPDATA
+
+# 服务端输出落日志文件，勿用未排空的 PIPE（见 tests/e2e_proc.py）
+_SRV_LOG = os.path.join(APPDATA, "PBC", "manual-e2e-server.log")
+print("Starting server...")
+proc, _logf = spawn_server([EXE], env=env, log_path=_SRV_LOG)
+time.sleep(8)
+
+try:
+    # Health
+    r = requests.get(f"{BASE}/health", timeout=5)
+    print(f"Health: {r.status_code} {r.json()}")
+    
+    # Configure LLM（密钥只从环境取，绝不入库）
+    # ⚠️ 提供方不得写死：字段名由提供方名派生（原先是写死的 deepseek ——
+    # 那是把"密钥发给错误提供方"这类 401 事故固化进脚本，见 e2e_frozen.py）。
+    _key = llm_key()
+    _prov = llm_provider()
+    if not _key:
+        print(f"[WARN] 未设置 {llm_key_env_display()} —— LLM 不配置，流水线走降级路径")
+    r = requests.post(f"{BASE}/api/settings", json={
+        "llm_provider": _prov,
+        f"{_prov}_api_key": _key,
+    }, timeout=10)
+    print(f"Settings POST: {r.status_code}")
+    
+    # Verify
+    r2 = requests.get(f"{BASE}/api/settings", timeout=5)
+    s = r2.json()
+    _p = next((p for p in s.get("llm",{}).get("providers",[]) if p.get("name")==_prov), {})
+    print(f"LLM configured: provider={s['llm']['provider']} {_prov}={_p.get('configured')}")
+    
+    # Create unique test PDF (different from previous run)
+    import random
+    test_pdf = os.path.join(os.environ["TEMP"], f"e2e-{random.randint(10000,99999)}.pdf")
+    with open(test_pdf, "wb") as f:
+        f.write(b"%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n3 0 obj<</Type/Page/MediaBox[0 0 612 792]/Parent 2 0 R/Contents 4 0 R/Resources<</Font<</F1 5 0 R>>>>>>endobj\n4 0 obj<</Length 44>>stream\nBT /F1 24 Tf 100 700 Td (E2E Test) Tj ET\nendstream\nendobj\n5 0 obj<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>endobj\nxref\n0 6\n0000000000 65535 f \n0000000009 00000 n \n0000000058 00000 n \n0000000115 00000 n \n0000000266 00000 n \n0000000360 00000 n \ntrailer<</Size 6/Root 1 0 R>>\nstartxref\n429\n%%EOF")
+    
+    # Upload
+    with open(test_pdf, "rb") as f:
+        r = requests.post(f"{BASE}/api/jobs", files={"file": ("e2e_test.pdf", f, "application/pdf")}, timeout=10)
+    print(f"Upload: {r.status_code} {r.text[:200]}")
+    if r.status_code != 200:
+        print("Upload failed, aborting")
+        sys.exit(1)
+    
+    job_id = r.json().get("job_id") or r.json().get("id")
+    print(f"Job ID: {job_id}")
+    
+    # Wait for pipeline (up to 120s)
+    print("Waiting for pipeline...")
+    for i in range(60):
+        time.sleep(2)
+        try:
+            r = requests.get(f"{BASE}/api/jobs/{job_id}", timeout=10)
+            data = r.json()
+            status = data.get("status", "")
+            print(f"  [{i*2}s] status={status}")
+            if status in ("review", "partial_review", "error", "cancelled"):
+                break
+        except Exception as e:
+            print(f"  [{i*2}s] poll error: {e}")
+    
+    # Final status
+    r = requests.get(f"{BASE}/api/jobs/{job_id}", timeout=10)
+    data = r.json()
+    print(f"\nFinal status: {data.get('status')}")
+    print(f"Total pages: {data.get('total_pages')}")
+    print(f"Failed pages: {data.get('failed_pages')}")
+    print(f"OCR backend: {data.get('ocr_backend_used')}")
+    
+    # Review page
+    r = requests.get(f"{BASE}/jobs/{job_id}/review", timeout=10)
+    print(f"Review page: {r.status_code}")
+    
+    # Findings
+    r = requests.get(f"{BASE}/api/jobs/{job_id}/findings", timeout=10)
+    findings = r.json()
+    count = len(findings) if isinstance(findings, list) else len(findings.get("findings", []))
+    print(f"Findings: {count}")
+    
+    # Page image
+    r = requests.get(f"{BASE}/api/jobs/{job_id}/page/1", timeout=15)
+    print(f"Page image: {r.status_code} type={r.headers.get('content-type','?')} size={len(r.content)}")
+    
+    # Report
+    r = requests.get(f"{BASE}/api/jobs/{job_id}/report.md", timeout=10)
+    print(f"Report: {r.status_code} len={len(r.text)}")
+    
+    # Static assets
+    for path in ["/static/app.css", "/static/review.js", "/docs"]:
+        r = requests.get(f"{BASE}{path}", timeout=10)
+        print(f"{path}: {r.status_code} len={len(r.content)}")
+    
+    print("\n=== E2E COMPLETE ===")
+
+finally:
+    stop_server(proc, _logf, timeout=5)
+    # Print server output tail
+    output = tail_log(_SRV_LOG, max_chars=20000)
+    if output.strip():
+        print("\n--- Server output (last 20 lines) ---")
+        for line in output.strip().split("\n")[-20:]:
+            print(f"  {line}")

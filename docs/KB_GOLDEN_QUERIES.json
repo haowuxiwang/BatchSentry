@@ -1,0 +1,87 @@
+{
+  "version": 2,
+  "description": "知识库检索金标集（T5.7）。每条查询 = 一个 finding 的 (type, description)，expect_any 为语料中确实承载该要求的条款 entry_id。",
+  "hit_rule": "retrieved_topk ∩ expect_any ≠ ∅",
+  "threshold": 0.85,
+  "annotation_policy": [
+    "expect_any 只按【条文内容】核定，不得按检索结果反推 —— 否则金标集退化为同义反复，丧失回归价值。",
+    "v2 修订：v1 的标注过窄（每个查询只锚定 1-2 条，遗漏了语料中同样/更直接承载该要求的条款）。修订依据逐条记录在 query 的 note 字段。",
+    "纳入标准：条文内容直接规范该查询所述要求（不是'沾边'/'同领域'）。仅词汇相关（如'批号'一词共同出现）不纳入。"
+  ],
+  "changelog": {
+    "v2": [
+      "语料修复：seed_kb 的中文数字字符类补『零』，找回第一百零一~一百零九/二百零一~二百零九/三百零一~三百零九共 27 条此前被并入前一条的条文（gmp2010 286→313 条）。",
+      "检索修复：BM25 idf 改为标准对数形式、长度归一化 B 由 0.75 调至 0.4（金标标定）；索引纳入条款标题。",
+      "标注修订（均按条文内容核定，非按检索结果反推）：",
+      "q07 +gmp2010-158（旧版文件不得在工作现场出现，直接对应'已作废的旧版本'）",
+      "q17 +gmp2010-172（每一页应标注批号）/+gmp2010-186（编制批号与生产日期的规程）",
+      "q15 +gmp2010-252（纠正预防措施系统应调查偏差）/+gmp2010-175（批生产记录应含偏差情况说明）",
+      "q21 +gmp2010-224（检验结果超标必须完整调查）/q22 +gmp2010-224",
+      "q23 +gmp2010-174、+gmp2010-179（操作结束后签注姓名和日期 —— 签名时间与操作结束的关系）",
+      "q25 +nmpa_di_2020-15（记录不得由他人随意代替）、+gmp2010-175（批生产记录应含操作人员签名）",
+      "q26 +gmp2010-181（操作规程应含批准人签名并注明日期）",
+      "q27 +nmpa_di_2020-21（保证记录时间与系统时间的真实性、一致性）",
+      "q29 +alcoa_plus-008（数据前后逻辑自洽）/q30 +alcoa_plus-008、+nmpa_di_2020-21",
+      "q32 +alcoa_plus-008（数据前后逻辑自洽）/q33 +gmp2010-86（设备使用日志应记录批号）",
+      "q12 +gmp2010-201（清场记录）—— 该条此前因『零』缺陷不存在，修复后补回。"
+    ]
+  },
+  "queries": [
+    {"id": "q01", "type": "alteration", "description": "第12页 配液工序记录有涂改痕迹，未按规程划改签名并注明日期", "expect_any": ["gmp2010-161", "nmpa_di_2020-16", "alcoa_plus-002"]},
+    {"id": "q02", "type": "alteration", "description": "第7页 电子批记录数据被直接覆盖修改，无修改人、无修改理由、无审计追踪", "expect_any": ["gmp2010_annex_cs-16", "nmpa_di_2020-16", "fda_21cfr_part11-004"]},
+    {"id": "q03", "type": "alteration", "description": "手写记录使用修正液覆盖后重写，原值已不可辨认", "expect_any": ["gmp2010-161", "alcoa_plus-003", "nmpa_di_2020-16"]},
+
+    {"id": "q04", "type": "self_review", "description": "第20页 操作人与复核人签名为同一人，存在自检自核", "expect_any": ["gmp2010-116", "gmp2010_annex_cs-15", "gmp2010-175"]},
+    {"id": "q05", "type": "self_review", "description": "复核人签名字迹与操作人完全一致，复核未由他人独立完成", "expect_any": ["gmp2010-116", "alcoa_plus-002", "gmp2010-175"]},
+
+    {"id": "q06", "type": "doc_version", "description": "同一文件编号 H3-MPD-10133-R23 在同一批记录中出现 R23 与 R09 两个版本号", "expect_any": ["gmp2010-155", "nmpa_di_2020-13"]},
+    {"id": "q07", "type": "doc_version", "description": "现场使用的记录表为已作废的旧版本，未加盖作废标识", "expect_any": ["gmp2010-155", "gmp2010-158", "nmpa_di_2020-13"], "note": "第一百五十八条：已撤销的或旧版文件除留档备查外不得在工作现场出现 —— 直接对应'现场使用已作废版本'。"},
+
+    {"id": "q08", "type": "mass_balance", "description": "第31页 物料平衡实测 98.2%，超出设定限度 99%~101%，未见差异调查记录", "expect_any": ["gmp2010-187", "gmp2010-215", "gmp2010-250"]},
+    {"id": "q09", "type": "mass_balance", "description": "工序收率已声明合格范围但未记录实测值，无法核定物料平衡是否合格", "expect_any": ["gmp2010-187", "gmp2010-175"]},
+
+    {"id": "q10", "type": "equipment_state", "description": "第23页 生产设备无状态标识，未标明内容物，也未标明清洁状态", "expect_any": ["gmp2010-87", "gmp2010-84"]},
+    {"id": "q11", "type": "equipment_state", "description": "使用已超过校准有效期的衡器进行称量", "expect_any": ["gmp2010-94", "gmp2010-93"]},
+    {"id": "q12", "type": "equipment_state", "description": "每次生产结束后未进行清场，无清场记录", "expect_any": ["gmp2010-194", "gmp2010-201"]},
+
+    {"id": "q13", "type": "env_monitor", "description": "第24页 洁净区压差监测数据缺失，未记录空调净化系统运行参数", "expect_any": ["gmp2010-48", "gmp2010-200"]},
+    {"id": "q14", "type": "env_monitor", "description": "生产过程中未记录中间控制和必要的环境监测（温度、湿度）", "expect_any": ["gmp2010-200", "gmp2010-48"]},
+
+    {"id": "q15", "type": "deviation_link", "description": "第18页 工艺参数超出规格范围，但未记录偏差编号，未关联偏差处理流程", "expect_any": ["gmp2010-250", "gmp2010-215", "gmp2010-224", "gmp2010-252", "gmp2010-175"], "note": "第二百五十二条：应建立纠正和预防措施系统，对偏差等开展调查；第一百七十五条(九)：批生产记录应含偏离工艺规程的偏差情况的说明或调查报告。"},
+    {"id": "q16", "type": "deviation_link", "description": "生产过程中出现异常但未启动偏差调查，无根本原因分析与纠正预防措施", "expect_any": ["gmp2010-250"]},
+
+    {"id": "q17", "type": "completeness", "description": "第5页 批生产记录缺少生产日期与批号", "expect_any": ["gmp2010-175", "gmp2010-162", "gmp2010-172", "gmp2010-186"], "note": "第一百七十二条：批生产记录每一页应标注批号；第一百八十六条：编制批号与确定生产日期的规程。"},
+    {"id": "q18", "type": "completeness", "description": "第9页 批生产记录缺少操作人签名与复核人签名", "expect_any": ["gmp2010-175", "gmp2010-154"]},
+    {"id": "q19", "type": "completeness", "description": "批记录存在缺页，无法完整追溯该批产品的生产历史", "expect_any": ["gmp2010-162", "gmp2010-171"]},
+
+    {"id": "q20", "type": "handwritten", "description": "手写填写的批号字迹模糊不可辨认", "expect_any": ["alcoa_plus-003", "gmp2010-161"]},
+
+    {"id": "q21", "type": "param_out_of_spec", "description": "灭菌温度实测 118℃，低于工艺规格 121~124℃ 下限", "expect_any": ["gmp2010-250", "gmp2010-215", "gmp2010-224"], "note": "第二百二十四条：任何检验结果超标都必须按操作规程完整调查并记录。"},
+    {"id": "q22", "type": "param_out_of_spec", "description": "含量实测 98.1%，低于质量标准 99.0%", "expect_any": ["gmp2010-224", "gmp2010-250", "gmp2010-12"], "note": "OOS：第二百二十四条为最直接依据。"},
+
+    {"id": "q23", "type": "signature_time_anomaly", "description": "复核签名时间早于操作结束时间，签名时间异常", "expect_any": ["gmp2010-154", "gmp2010-174", "gmp2010-179", "alcoa_plus-004", "nmpa_di_2020-15"], "note": "第一百七十四条/一百七十九条：操作结束后签注姓名和日期 —— 签名时间与操作结束的关系。"},
+    {"id": "q24", "type": "signature_time_anomaly", "description": "签名日期与实际生产日期矛盾，疑似事后补签", "expect_any": ["gmp2010-154", "alcoa_plus-004"]},
+
+    {"id": "q25", "type": "signature_mismatch", "description": "记录上的签名与操作人姓名不符", "expect_any": ["gmp2010-154", "gmp2010-175", "alcoa_plus-002", "nmpa_di_2020-15"], "note": "第一百七十五条：批生产记录应含各工序负责人/操作人员签名；NMPA 第十五条：记录不得由他人随意代替。"},
+    {"id": "q26", "type": "signature_mismatch", "description": "批记录批准人签名缺失，文件未经批准即使用", "expect_any": ["gmp2010-154", "gmp2010-175", "gmp2010-181"], "note": "第一百八十一条：操作规程应含批准人签名并注明日期。"},
+
+    {"id": "q27", "type": "suspicious_date", "description": "记录填写日期为未来日期，数据非同步记录", "expect_any": ["alcoa_plus-004", "nmpa_di_2020-21", "nmpa_di_2020-15"], "note": "NMPA 第二十一条：保证记录时间与系统时间的真实性、准确性和一致性。"},
+    {"id": "q28", "type": "suspicious_date", "description": "使用已超过有效期或复验期的原辅料投料", "expect_any": ["gmp2010-113", "gmp2010-114"]},
+
+    {"id": "q29", "type": "time_reversal", "description": "工序结束时间早于开始时间，时间逻辑倒序", "expect_any": ["alcoa_plus-004", "alcoa_plus-008", "nmpa_di_2020-15"], "note": "ALCOA+ 一致性：数据前后逻辑自洽。"},
+    {"id": "q30", "type": "time_reversal", "description": "记录时间倒序，后一工序的记录时间早于前一工序", "expect_any": ["alcoa_plus-004", "alcoa_plus-008", "nmpa_di_2020-21", "gmp2010-175"], "note": "第一百七十五条：批生产记录应含各工序开始/结束的日期和时间。"},
+
+    {"id": "q31", "type": "year_contradiction", "description": "发运记录保存期限不足有效期后一年，年份要求矛盾", "expect_any": ["gmp2010-297", "gmp2010-162"]},
+
+    {"id": "q32", "type": "batch_inconsistency", "description": "同一批产品前后页记录的批号不一致", "expect_any": ["gmp2010-175", "gmp2010-171", "alcoa_plus-008"], "note": "ALCOA+ 一致性：数据前后逻辑自洽、可重现。"},
+    {"id": "q33", "type": "batch_inconsistency", "description": "设备使用日志记录的批号与批生产记录批号不一致", "expect_any": ["gmp2010-87", "gmp2010-175", "gmp2010-86"], "note": "第八十六条：设备使用日志应记录所生产药品的批号。"},
+
+    {"id": "q34", "type": "step_gap", "description": "批生产记录工序编号缺号，且记录页未标明页码与总页数", "expect_any": ["gmp2010-172", "gmp2010-175"]},
+
+    {"id": "q35", "type": "spec_unverifiable", "description": "规格单位与实测值单位不一致，无换算规则，无法核定是否合格", "expect_any": ["gmp2010-12", "gmp2010-223", "gmp2010-250"], "note": "第十二条/第二百二十三条：检验方法应经验证或确认，检验应有记录。"},
+
+    {"id": "q36", "type": "ocr_noise", "description": "OCR 识别噪声导致字符残缺，记录内容不可读", "expect_any": ["alcoa_plus-003", "gmp2010-161"]},
+
+    {"id": "q37", "type": "user_rule", "description": "用户自定义规则：中间控制数据未按公司规程记录", "expect_any": ["gmp2010-175", "gmp2010-200"], "known_gap": true, "gap_reason": "user_rule 是开放类型（规则由用户自由填写），无法预置策展词表，只能依赖描述挖掘；且描述里的『用户/定义』等元前缀词会稀释信号。实测 top-4 落到 221/163/56/术语条，属该类别的固有检索上限，非回归。", "note": "第一百七十五条(七)：中间控制结果的记录；第二百条：应进行中间控制和必要的环境监测并予以记录。"}
+  ]
+}

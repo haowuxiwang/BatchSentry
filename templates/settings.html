@@ -1,0 +1,621 @@
+<!doctype html>
+<html lang="zh-CN" class="h-full">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>设置 — 批记录辅助审查</title>
+    <link rel="stylesheet" href="/static/design-tokens.css?v={{ asset_ver('design-tokens.css') }}" />
+    <link rel="stylesheet" href="/static/app.css?v={{ asset_ver('app.css') }}" />
+    <link rel="stylesheet" href="/static/settings.css?v={{ asset_ver('settings.css') }}" />
+  </head>
+<body class="h-full min-h-screen">
+    <a href="#main-content" class="skip-link">跳到主要内容</a>
+    <div class="relative max-w-5xl mx-auto px-6 py-10" id="main-content">
+      <!-- ═══════════════════════════════════════════════════
+           顶部导航 — Notion 风格:面包屑 + 简洁标题 + 返回首页
+           ═══════════════════════════════════════════════════ -->
+      <header
+        class="stagger-in flex items-center justify-between mb-8"
+        style="--i: 0"
+      >
+        <div>
+          <div class="flex items-center gap-2 mb-1">
+            <span
+              class="text-[11px] font-medium text-muted-foreground tracking-wide uppercase"
+              >BatchSentry</span
+            >
+            <span class="text-muted-foreground/40">/</span>
+            <a
+              href="/"
+              class="btn-press text-[12px] text-muted-foreground hover:text-foreground transition-colors"
+            >
+              批记录辅助审查
+            </a>
+            <span class="text-muted-foreground/40">/</span>
+            <span class="text-[12px] text-muted-foreground">设置</span>
+          </div>
+          <h1 class="text-xl font-semibold tracking-tight">设置</h1>
+          <p class="text-[12px] text-muted-foreground mt-0.5">
+            管理 LLM 大模型与 OCR 文档解析凭证
+          </p>
+        </div>
+        <a
+          href="/"
+          class="btn-press focus-ring inline-flex items-center gap-1.5 px-3 py-1.5 text-[12px] text-muted-foreground hover:text-foreground rounded-md transition-colors"
+          title="返回首页"
+        >
+          <svg
+            width="14"
+            height="14"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <path d="M19 12H5"></path>
+            <polyline points="12 19 5 12 12 5"></polyline>
+          </svg>
+          返回首页
+        </a>
+      </header>
+
+      <form id="settings-form" class="settings-layout flex gap-8">
+        <!-- ═══════════════════════════════════════════════════
+             Desktop Sidebar — 参考 GitHub/Notion
+             ═══════════════════════════════════════════════════ -->
+        <nav class="settings-nav hidden md:flex flex-col w-60 shrink-0">
+          <a href="#llm" data-target="llm" class="settings-nav-link active">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>
+            LLM 模型
+          </a>
+          <a href="#ocr" data-target="ocr" class="settings-nav-link">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>
+            OCR 配置
+          </a>
+          <a href="#rules" data-target="rules" class="settings-nav-link">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"></path><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path></svg>
+            合规规则
+          </a>
+          <a href="#feishu" data-target="feishu" class="settings-nav-link">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path><path d="M13.73 21a2 2 0 0 1-3.46 0"></path></svg>
+            飞书通知
+          </a>
+          <a href="#kb" data-target="kb" class="settings-nav-link">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path></svg>
+            知识库
+          </a>
+          <div class="mt-auto pt-4 border-t border-border">
+            <button type="button" id="test-conn-btn" class="settings-nav-link w-full text-left">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline></svg>
+              测试连接
+            </button>
+            <a href="/" class="settings-nav-link">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5"></path><polyline points="12 19 5 12 12 5"></polyline></svg>
+              返回主页
+            </a>
+          </div>
+        </nav>
+
+        <!-- ═══════════════════════════════════════════════════
+             Mobile Horizontal Tabs — 参考 GitHub Primer
+             ═══════════════════════════════════════════════════ -->
+        <nav class="settings-nav-mobile flex md:hidden overflow-x-auto border-b border-border -mx-6 px-6 mb-6">
+          <a href="#llm" data-target="llm" class="settings-nav-link active">LLM 模型</a>
+          <a href="#ocr" data-target="ocr" class="settings-nav-link">OCR 配置</a>
+          <a href="#rules" data-target="rules" class="settings-nav-link">合规规则</a>
+          <a href="#feishu" data-target="feishu" class="settings-nav-link">飞书通知</a>
+          <a href="#kb" data-target="kb" class="settings-nav-link">知识库</a>
+        </nav>
+
+        <!-- 移动端专用入口 —— 窄屏下侧栏（含"测试连接"）被 `md:hidden`
+             整体隐藏，此前**没有任何检测入口** ⇒ <768px 用户无法测试
+             OCR/LLM 连通性（R87 定位的 UI 缺陷）。
+             结果仍写入页面底部 #save-msg，触发后由 JS 滚动到可视区。 -->
+        <div class="md:hidden mb-6">
+          <button
+            type="button"
+            id="test-conn-btn-mobile"
+            class="btn-press focus-ring w-full inline-flex items-center justify-center gap-1.5 px-3 py-2 text-[13px] font-medium text-foreground border border-border rounded-md hover:bg-muted/40 transition-colors"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline></svg>
+            测试连接
+          </button>
+        </div>
+
+        <!-- ═══════════════════════════════════════════════════
+             Content Area — 4 Sections
+             ═══════════════════════════════════════════════════ -->
+        <div class="settings-panels flex-1 min-w-0 flex flex-col gap-6">
+
+          <!-- ─── LLM 大模型 ─── -->
+          <section data-section="llm" class="stagger-in" style="--i: 3">
+            <div class="hover-lift bg-card border border-border rounded-lg overflow-hidden">
+              <div class="px-5 py-4 border-b border-border flex items-center justify-between">
+                <div>
+                  <h2 class="text-[14px] font-medium">LLM 大模型</h2>
+                  <p class="text-[12px] text-muted-foreground mt-0.5">
+                    用于批记录结构化分析与问题发现
+                  </p>
+                </div>
+                <span id="llm-provider-badge" class="text-[11px] text-muted-foreground"></span>
+              </div>
+              <div class="p-5 flex flex-col gap-3">
+                <div id="llm-providers-list" class="flex flex-col gap-2"></div>
+                <div id="llm-add-section" class="pt-3 border-t border-border">
+                  <button
+                    type="button"
+                    id="llm-add-toggle"
+                    class="btn-press text-[12px] text-muted-foreground hover:text-foreground transition-colors inline-flex items-center gap-1"
+                  >
+                    <span class="text-[14px] leading-none">+</span>
+                    添加提供商
+                  </button>
+                  <div id="llm-add-form" class="hidden mt-3 flex items-center gap-2">
+                    <select
+                      id="llm-add-select"
+                      class="input"
+                      style="width: auto; padding: 6px 10px; font-size: 12px"
+                    >
+                      <option value="">— 选择 —</option>
+                      <option value="glm">GLM · 智谱</option>
+                      <option value="kimi">Kimi · 月之暗面</option>
+                      <option value="qwen">Qwen · 通义千问</option>
+                      <option value="mimo">MiMo · 小米</option>
+                      <option value="anthropic">Anthropic · Claude</option>
+                      <option value="openai">OpenAI</option>
+                      <option value="__custom">自定义…</option>
+                    </select>
+                    <input
+                      id="llm-add-custom"
+                      class="input hidden"
+                      style="width: 140px; padding: 6px 10px; font-size: 12px"
+                      placeholder="名称"
+                    />
+                    <button
+                      type="button"
+                      id="llm-add-btn"
+                      class="btn-press text-[12px] px-3 py-1.5 bg-foreground text-background rounded-md hover:opacity-90 transition-opacity"
+                    >
+                      确认
+                    </button>
+                    <button
+                      type="button"
+                      id="llm-add-cancel"
+                      class="btn-press text-[12px] text-muted-foreground hover:text-foreground transition-colors"
+                    >
+                      取消
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <!-- ─── OCR 文档解析 ─── -->
+          <section data-section="ocr" class="stagger-in hidden" style="--i: 4">
+            <div class="hover-lift bg-card border border-border rounded-lg overflow-hidden">
+              <div class="px-5 py-4 border-b border-border flex items-center justify-between">
+                <div>
+                  <h2 class="text-[14px] font-medium">OCR 文档解析</h2>
+                  <p class="text-[12px] text-muted-foreground mt-0.5">
+                    将 PDF 批记录转换为结构化文本
+                  </p>
+                </div>
+                <span id="ocr-backend-badge" class="text-[11px] text-muted-foreground"></span>
+              </div>
+              <div class="p-5 flex flex-col gap-4">
+                <div>
+                  <label class="field-label">解析引擎</label>
+                  <div class="seg" id="ocr-backend-seg" role="radiogroup" aria-label="解析引擎">
+                    <button type="button" role="radio" data-value="paddle">PaddleOCR</button>
+                    <button type="button" role="radio" data-value="mineru">MinerU</button>
+                  </div>
+                </div>
+
+                <!-- PaddleOCR 表单 -->
+                <div data-backend-form="paddle" class="flex flex-col gap-3">
+                  <div>
+                    <label class="field-label">访问令牌</label>
+                    <div class="flex gap-2">
+                      <input
+                        class="input"
+                        type="password"
+                        name="paddle_ocr_token"
+                        id="paddle_ocr_token"
+                        placeholder="请输入访问令牌（必填）"
+                        autocomplete="new-password"
+                      />
+                      <button
+                        type="button"
+                        class="ocr-clear-btn btn-danger-small"
+                        data-target="paddle_ocr_token"
+                        title="清除已保存的访问令牌"
+                      >移除</button>
+                    </div>
+                    <p class="field-hint" id="paddle-status"></p>
+                  </div>
+                  <div class="grid grid-cols-2 gap-3">
+                    <div>
+                      <label class="field-label">API 地址</label>
+                      <input class="input" name="paddle_ocr_api_url" id="paddle_ocr_api_url" />
+                    </div>
+                    <div>
+                      <label class="field-label">模型</label>
+                      <input class="input" name="paddle_ocr_model" id="paddle_ocr_model" />
+                    </div>
+                  </div>
+                </div>
+
+                <!-- MinerU 表单 -->
+                <div data-backend-form="mineru" class="flex flex-col gap-3 hidden">
+                  <div>
+                    <label class="field-label">访问令牌</label>
+                    <div class="flex gap-2">
+                      <input
+                        class="input"
+                        type="password"
+                        name="mineru_token"
+                        id="mineru_token"
+                        placeholder="请输入访问令牌（必填）"
+                        autocomplete="new-password"
+                      />
+                      <button
+                        type="button"
+                        class="ocr-clear-btn btn-danger-small"
+                        data-target="mineru_token"
+                        title="清除已保存的访问令牌"
+                      >移除</button>
+                    </div>
+                    <p class="field-hint" id="mineru-status"></p>
+                  </div>
+                  <div class="grid grid-cols-2 gap-3">
+                    <div>
+                      <label class="field-label">模型版本</label>
+                      <select class="input" name="mineru_model_version" id="mineru_model_version">
+                        <option value="vlm">VLM（推荐，精度更高）</option>
+                        <option value="pipeline">Pipeline（默认，通用解析）</option>
+                        <option value="MinerU-HTML">MinerU-HTML（HTML 结构输出）</option>
+                      </select>
+                      <p class="field-hint">pipeline=通用解析（默认）；vlm=精度更高（推荐）；MinerU-HTML=HTML 结构输出，左侧 OCR 原文以 HTML 表格展示，适合批记录。</p>
+                    </div>
+                    <div>
+                      <label class="field-label">语言</label>
+                      <select class="input" name="mineru_language" id="mineru_language">
+                        <option value="ch">中文</option>
+                        <option value="en">英文</option>
+                      </select>
+                    </div>
+                  </div>
+                  <div class="mt-3">
+                    <label class="field-label">接口地址（Base URL）</label>
+                    <input
+                      class="input"
+                      type="text"
+                      name="mineru_base_url"
+                      id="mineru_base_url"
+                      placeholder="https://mineru.net/api/v4"
+                      autocomplete="off"
+                      spellcheck="false"
+                    />
+                    <p class="field-hint">默认官方地址；私有化部署 / 代理场景可覆盖，留空即恢复默认。</p>
+                  </div>
+                  <div class="flex items-center gap-4 mt-1">
+                    <label class="flex items-center gap-2 text-[12px] cursor-pointer">
+                      <input type="checkbox" name="mineru_enable_formula" id="mineru_enable_formula" class="cursor-pointer" />
+                      公式识别
+                    </label>
+                    <label class="flex items-center gap-2 text-[12px] cursor-pointer">
+                      <input type="checkbox" name="mineru_enable_table" id="mineru_enable_table" class="cursor-pointer" />
+                      表格识别
+                    </label>
+                  </div>
+                  <div>
+                    <label class="field-label">分片页数（流式输出）</label>
+                    <input
+                      class="input"
+                      type="number"
+                      min="1"
+                      max="20"
+                      step="1"
+                      name="ocr_slices"
+                      id="ocr_slices"
+                      pattern="[0-9]*"
+                      inputmode="numeric"
+                    />
+                    <p class="field-hint">
+                      每片 N 页：>1 时启用流式——一片 OCR 完成立即开始该片页面 LLM 分析，
+                      边处理边出结果，无需等全部页 OCR 完成。默认 1（整份一次提交）。
+                    </p>
+                  </div>
+                </div>
+
+                <!-- OCR 独立保存按钮 -->
+                <div class="flex items-center gap-2 pt-3 border-t border-border">
+                  <button
+                    type="button"
+                    id="ocr-save-btn"
+                    class="btn-press focus-ring inline-flex items-center px-3 py-1.5 text-[12px] font-medium bg-foreground text-background rounded-md hover:opacity-90 transition-opacity"
+                  >
+                    保存 OCR 设置
+                  </button>
+                  <span id="ocr-msg" class="text-[12px]" role="status" aria-live="polite"></span>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <!-- ─── 合规规则 ─── -->
+          <section data-section="rules" class="stagger-in hidden" style="--i: 5">
+            <div class="hover-lift bg-card border border-border rounded-lg overflow-hidden">
+              <div class="px-5 py-4 border-b border-border">
+                <h2 class="text-[14px] font-medium">合规规则</h2>
+                <p class="text-[12px] text-muted-foreground mt-0.5">
+                  用户自定义规则注入跨页 LLM 分析
+                  <span class="ml-1.5 px-1.5 py-0.5 rounded bg-muted text-[11px] font-normal" id="rules-count">0 条</span>
+                  <span class="ml-1.5 px-1.5 py-0.5 rounded bg-muted text-[11px] font-normal" id="rules-total-chars">0 / 8000 字</span>
+                  <span id="rule-last-saved" class="ml-1.5 px-1.5 py-0.5 rounded bg-muted text-[11px] font-normal"></span>
+                </p>
+              </div>
+              <div class="p-5 flex flex-col gap-3">
+                <p class="text-[12px] text-muted-foreground leading-relaxed">
+                  填写工厂/产品专属合规约束（如「XX 产品中间体储存温度必须 15-25°C」「关键工序必须双人复核签名」），
+                  跨页分析时注入 LLM 逐条核对，命中后生成 user_rule 类型的问题。留空可跳过此项。
+                </p>
+                <div id="rules-list" class="flex flex-col gap-2"></div>
+                <div class="flex items-center gap-2 pt-2">
+                  <button
+                    type="button"
+                    id="rule-template-btn"
+                    class="btn-press focus-ring inline-flex items-center px-3 py-1.5 text-[12px] text-foreground border border-border rounded-md hover:bg-muted/40 transition-colors"
+                  >
+                    模板库
+                  </button>
+                  <button
+                    type="button"
+                    id="rule-add-btn"
+                    class="btn-press focus-ring inline-flex items-center px-3 py-1.5 text-[12px] text-foreground border border-border rounded-md hover:bg-muted/40 transition-colors"
+                  >
+                    + 添加规则
+                  </button>
+                  <button
+                    type="button"
+                    id="rule-save-btn"
+                    class="btn-press focus-ring inline-flex items-center px-3 py-1.5 text-[12px] font-medium bg-foreground text-background rounded-md hover:opacity-90 transition-opacity"
+                  >
+                    保存规则
+                  </button>
+                  <span id="rule-msg" class="text-[12px]" role="status" aria-live="polite"></span>
+                </div>
+                <!-- 模板库就地展开（非 absolute dropdown）— 父卡片
+                     overflow-hidden 会裁剪 absolute 面板，改为文档流展开
+                     后完整可见、无需滚动 -->
+                <div
+                  id="rule-template-panel"
+                  class="hidden mt-2 border border-border rounded-lg p-1"
+                ></div>
+              </div>
+            </div>
+          </section>
+
+          <!-- ─── 飞书通知 ─── -->
+          <section data-section="feishu" class="stagger-in hidden" style="--i: 6">
+            <div class="hover-lift bg-card border border-border rounded-lg overflow-hidden">
+              <div class="px-5 py-4 border-b border-border">
+                <h2 class="text-[14px] font-medium">飞书通知</h2>
+                <p class="text-[12px] text-muted-foreground mt-0.5">
+                  任务完成/出错时推送摘要，通知失败不影响任务处理
+                </p>
+              </div>
+              <div class="p-5 flex flex-col gap-3">
+                <label class="flex items-center gap-2 text-[13px]">
+                  <input type="checkbox" id="feishu-enabled" class="w-4 h-4 accent-foreground cursor-pointer" />
+                  启用飞书通知
+                </label>
+                <div class="flex items-center gap-2 text-[13px]">
+                  <label class="text-muted-foreground">通道</label>
+                  <select
+                    id="feishu-mode"
+                    class="rounded-md border border-border bg-background px-2 py-1.5 text-[13px] focus:outline-none focus:ring-2 focus:ring-foreground/40"
+                  >
+                    <option value="webhook" selected>群机器人 Webhook</option>
+                    <option value="app_bot">自建应用私聊（推荐）</option>
+                  </select>
+                </div>
+                <div class="feishu-app-bot flex flex-col gap-2">
+                  <div class="flex flex-col gap-1">
+                    <label class="text-[12px] text-muted-foreground" for="feishu-app-id">应用 ID（App ID）</label>
+                    <input
+                      type="text"
+                      id="feishu-app-id"
+                      placeholder="cli_xxxxxxxx（开发者后台「凭证与基础信息」）"
+                      class="rounded-md border border-border bg-background px-3 py-2 text-[13px] focus:outline-none focus:ring-2 focus:ring-foreground/40"
+                    />
+                  </div>
+                  <div class="flex flex-col gap-1">
+                    <label class="text-[12px] text-muted-foreground" for="feishu-app-secret">应用密钥（App Secret）</label>
+                    <input
+                      type="password"
+                      id="feishu-app-secret"
+                      placeholder="开发者后台「凭证与基础信息」"
+                      class="rounded-md border border-border bg-background px-3 py-2 text-[13px] focus:outline-none focus:ring-2 focus:ring-foreground/40"
+                    />
+                  </div>
+                  <div class="flex flex-col gap-1">
+                    <label class="text-[12px] text-muted-foreground" for="feishu-open-id">接收者 open_id（ou_ 开头，推荐）</label>
+                    <input
+                      type="text"
+                      id="feishu-open-id"
+                      placeholder="ou_xxxxxxxx（API 调试台或事件订阅获取，详见下方说明）"
+                      class="rounded-md border border-border bg-background px-3 py-2 text-[13px] focus:outline-none focus:ring-2 focus:ring-foreground/40"
+                    />
+                  </div>
+                  <div class="flex flex-col gap-1">
+                    <label class="text-[12px] text-muted-foreground" for="feishu-mobile">或接收者手机号（自动解析 open_id，需 contact:user.id:readonly 权限）</label>
+                    <input
+                      type="text"
+                      id="feishu-mobile"
+                      placeholder="13800000000"
+                      class="rounded-md border border-border bg-background px-3 py-2 text-[13px] focus:outline-none focus:ring-2 focus:ring-foreground/40"
+                    />
+                  </div>
+                  <details class="text-[12px] text-muted-foreground leading-relaxed">
+                    <summary class="cursor-pointer hover:text-foreground transition-colors">接入步骤（自建应用私聊）</summary>
+                    <ol class="mt-1 ml-4 list-decimal flex flex-col gap-0.5">
+                      <li>open.feishu.cn 创建企业自建应用</li>
+                      <li>启用「机器人」能力</li>
+                      <li>开通权限 im:message（发消息）+ contact:user.id:readonly（按手机号查 open_id）</li>
+                      <li>创建版本并发布（自己管理时默认免审）</li>
+                      <li>在「API 调试台」调 contact/v3/users/batch_get_id 填自己手机号复制 open_id</li>
+                    </ol>
+                    <p class="mt-1">open_id 与应用绑定，换应用需重新获取。</p>
+                  </details>
+                </div>
+                <div class="feishu-webhook flex flex-col gap-2">
+                  <div class="flex flex-col gap-1">
+                    <label class="text-[12px] text-muted-foreground" for="feishu-url">Webhook 地址</label>
+                    <input
+                      type="text"
+                      id="feishu-url"
+                      placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/…"
+                      class="rounded-md border border-border bg-background px-3 py-2 text-[13px] focus:outline-none focus:ring-2 focus:ring-foreground/40"
+                    />
+                  </div>
+                  <div class="flex flex-col gap-1">
+                    <label class="text-[12px] text-muted-foreground" for="feishu-secret">签名密钥（可选，留空不签名）</label>
+                    <input
+                      type="password"
+                      id="feishu-secret"
+                      placeholder="群机器人安全设置中的加签密钥"
+                      class="rounded-md border border-border bg-background px-3 py-2 text-[13px] focus:outline-none focus:ring-2 focus:ring-foreground/40"
+                    />
+                  </div>
+                  <p class="text-[12px] text-muted-foreground leading-relaxed">
+                    在飞书群「设置 → 群机器人 → 添加机器人 → 自定义机器人」创建 Webhook，
+                    可选勾选签名校验。仅发送到机器人所在群。
+                  </p>
+                </div>
+                <div class="flex flex-col gap-1">
+                  <label class="text-[12px] text-muted-foreground" for="feishu-events">触发事件（勾选需要通知的事项，至少勾选一项，否则通知不会发送）</label>
+                  <div id="feishu-events" class="flex flex-wrap gap-2"></div>
+                </div>
+                <div class="flex items-center gap-2 pt-2">
+                  <button
+                    type="button"
+                    id="feishu-save-btn"
+                    class="btn-press focus-ring inline-flex items-center px-3 py-1.5 text-[12px] font-medium bg-foreground text-background rounded-md hover:opacity-90 transition-opacity"
+                  >
+                    保存飞书设置
+                  </button>
+                  <button
+                    type="button"
+                    id="feishu-test-btn"
+                    class="btn-press focus-ring inline-flex items-center px-3 py-1.5 text-[12px] text-foreground border border-border rounded-md hover:bg-muted/40 transition-colors"
+                  >
+                    发送测试消息
+                  </button>
+                  <button
+                    type="button"
+                    id="feishu-clear-btn"
+                    class="btn-press focus-ring inline-flex items-center px-3 py-1.5 text-[12px] text-destructive border border-destructive/40 rounded-md hover:bg-destructive/10 transition-colors"
+                  >
+                    清除凭据
+                  </button>
+                  <span id="feishu-msg" class="text-[12px]" role="status" aria-live="polite"></span>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <!-- ════════════════ 知识库（多源浏览 + 来源开关） ════════════════ -->
+          <section data-section="kb" class="stagger-in hidden" style="--i: 7">
+            <div class="flex items-center justify-between mb-2">
+              <div>
+                <h2 class="text-[15px] font-semibold text-foreground">知识库</h2>
+                <p class="text-[12px] text-muted-foreground mt-0.5">
+                  内置多源法规条文，跨页分析自动为问题引用依据。可停用不需要的来源（如现场只认中国法规，可关闭 FDA/ALCOA）。
+                </p>
+              </div>
+              <span id="kb-meta" class="text-[11px] text-muted-foreground tabular-nums shrink-0 ml-4"></span>
+            </div>
+
+            <!-- 条文注入开关（C4/#169：此前只有 config.py 支持，API 白名单缺失 ⇒ 装饰） -->
+            <div class="border border-border rounded-md mb-2 px-3 py-2 flex items-center justify-between gap-3">
+              <label class="flex items-center gap-2 text-[12px] cursor-pointer">
+                <input type="checkbox" id="kb_prompt_inject" class="w-4 h-4 accent-foreground cursor-pointer" />
+                跨页分析注入条文参考
+              </label>
+              <span id="kb-inject-msg" class="text-[11px] text-muted-foreground" role="status" aria-live="polite"></span>
+            </div>
+            <p class="text-[12px] text-muted-foreground mb-3">
+              关闭后仅在问题清单里保留引用（findings.kb_refs 不受影响），不再把条文正文拼进分析提示词。
+            </p>
+
+            <!-- 来源开关（写 config.json kb.disabled_sources，即时生效） -->
+            <div class="border border-border rounded-md mb-3">
+              <div class="px-3 py-2 border-b border-border flex items-center justify-between gap-3">
+                <span class="text-[12px] font-medium text-foreground">来源</span>
+                <span id="kb-source-msg" class="text-[11px] text-muted-foreground" role="status" aria-live="polite"></span>
+              </div>
+              <div id="kb-sources" class="p-2 flex flex-col gap-1">
+                <p class="text-[12px] text-muted-foreground px-1 py-1">加载中…</p>
+              </div>
+            </div>
+
+            <!-- 条款浏览（可按来源过滤） -->
+            <div class="flex items-center gap-2 mb-3">
+              <input
+                type="text"
+                id="kb-search"
+                placeholder="搜索条款内容 / 条款号 / 章名…"
+                class="w-full max-w-md px-3 py-1.5 text-[13px] bg-card border border-border rounded-md focus:outline-none focus:ring-1 focus:ring-ring"
+              />
+              <select
+                id="kb-source-filter"
+                title="按来源过滤"
+                class="px-2 py-1.5 text-[12px] bg-card border border-border rounded-md focus:outline-none focus:ring-1 focus:ring-ring"
+              >
+                <option value="">全部来源</option>
+              </select>
+              <span id="kb-count" class="text-[11px] text-muted-foreground tabular-nums shrink-0"></span>
+            </div>
+            <div
+              id="kb-list"
+              class="border border-border rounded-md divide-y divide-border max-h-[60vh] overflow-y-auto"
+            >
+              <p class="text-[12px] text-muted-foreground px-3 py-3">加载中…</p>
+            </div>
+          </section>
+
+          <div class="flex items-center gap-3">
+            <button
+              type="submit"
+              class="inline-flex items-center gap-1.5 rounded-full border border-border px-4 py-1.5 text-[13px] font-medium text-foreground transition-colors hover:bg-accent focus-ring"
+            >
+              保存全部设置
+            </button>
+            <span id="save-msg" class="text-[12px]" role="status" aria-live="polite"></span>
+          </div>
+          <p class="text-[12px] text-muted-foreground leading-relaxed">
+            每个 LLM 提供商的 API Key、协议、Base URL、模型请在对应卡片内点击「保存」一次性提交（即时生效，首次保存会自动设为当前）。底部"保存全部设置"用于 OCR 与飞书通知等通用字段。
+            "测试连接"会并行检测 OCR + 所有已配置的 LLM 提供商。
+          </p>
+        </div>
+  </form>
+    </div>
+
+    <script src="/static/pbc-fallback.js?v={{ asset_ver('pbc-fallback.js') }}" defer></script>
+    <script src="/static/confirm-dialog.js?v={{ asset_ver('confirm-dialog.js') }}" defer></script>
+    {# settings 页按职责拆为多模块（docs/ADVERSARIAL_REVIEW_2026-09-28.md §维度 4）。
+       defer 保证按**文档顺序**执行 ⇒ 顺序即依赖序：
+       state 必须最先（状态宿主），settings.js 必须最后（入口，末尾调用 load()）。
+       顺序护栏：tests/unit/test_settings_js_modules.py::TestScriptOrder #}
+    <script src="/static/settings-state.js?v={{ asset_ver('settings-state.js') }}" defer></script>
+    <script src="/static/settings-llm.js?v={{ asset_ver('settings-llm.js') }}" defer></script>
+    <script src="/static/settings-ocr.js?v={{ asset_ver('settings-ocr.js') }}" defer></script>
+    <script src="/static/settings-feishu.js?v={{ asset_ver('settings-feishu.js') }}" defer></script>
+    <script src="/static/settings-rules.js?v={{ asset_ver('settings-rules.js') }}" defer></script>
+    <script src="/static/settings.js?v={{ asset_ver('settings.js') }}" defer></script>
+  </body>
+</html>

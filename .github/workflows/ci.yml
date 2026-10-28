@@ -1,0 +1,97 @@
+name: CI
+
+# 为什么跑在 Windows 上：
+#   本产品只发布 Windows 桌面版（Electron + PyInstaller），且 95% 覆盖率门禁是在
+#   Windows 上标定的 —— 代码里的平台分支（Windows 路径、Excel/COM 等）在 Linux 上
+#   根本不会执行，覆盖率会掉到门禁线以下（永久红灯）。跑在与产品同一平台，CI 的
+#   "绿"才与本地门禁同义。
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# 同一分支连推时取消上一个未完成的运行，避免排队浪费
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# 最小权限：CI 只读仓库。**不要**在这里加 contents: write —— 门禁不需要写权限，
+# 需要写权限的只有 CD（见 release.yml，且只在 job 级授予）。
+permissions:
+  contents: read
+
+env:
+  # 日志可读性：本仓库的报告/断言文案是中文，而 Windows runner 的控制台默认代码页
+  # 不是 UTF-8 ⇒ 一旦 Python 往 stdout 打中文就可能 UnicodeEncodeError 把 CI 弄红
+  # （**报错与"门禁真的失败"无法区分**，是最费时间的一类红）。
+  # 只钉 IO 编码，**不**设 PYTHONUTF8/PYTHONIOENCODING 之外的编码开关：UTF-8 模式会
+  # 改 locale 语义，可能让依赖平台默认编码的用例改变行为。
+  PYTHONIOENCODING: utf-8
+
+jobs:
+  gate:
+    name: 发布门禁
+    # 钉具体镜像，**不用** windows-latest：GitHub 官方说明 `-latest` 会在 1–2 个月内
+    # 静默迁移到新 OS 版本，而本门禁的 95% 覆盖率是**在特定平台上标定**的 ⇒ 平台漂移
+    # 就等于门禁口径漂移，而且它是**静默**的（绿变红或红变绿都无人知道为什么）。
+    # 取值依据：`actions/runner-images` 的可用镜像表 —— 当前 `windows-latest` 即
+    # `windows-2025`（Windows Server 2025）⇒ 钉 windows-2025 **不改变现有行为**，
+    # 只是把"浮动别名"变成"显式值"。要换镜像 = 一次可评审的提交。
+    runs-on: windows-2025
+    timeout-minutes: 40
+
+    steps:
+      # 所有 action 一律钉**完整 commit SHA**（tag 可变，可变 = 可被替换成任意代码；
+      # 钉 SHA 是当前唯一能当"不可变发布"用的方式，见 GitHub 官方安全加固文档）。
+      # 行尾注释保留人类可读的版本号；Dependabot 会同时更新 SHA 与注释（见 dependabot.yml）。
+      # SHA 由 devlogs/_verify/resolve_action_shas.py 从 GitHub API 解析（不手抄），
+      # 落盘于 devlogs/_verify/action_shas.json，可 `--verify` 复核 tag 是否被移动。
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: 安装 Python 3.11
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      # 两个清单都是**精确锁定**（`==`），所以 CI 装到的就是本地门禁验证通过的那一组；
+      # 护栏 tests/unit/test_declared_dependencies.py 保证"源码 import 的包一定在清单里"。
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt -r requirements-dev.txt
+
+      # 单一入口：scripts/release_gate.py。CI 不重复实现任何一条检查 —— 门禁的每一项
+      # （工作区干净 / 打包前置文件 / 规则接线 / KB 语料与入包 / 单测 + 覆盖率）都在
+      # 那个脚本里，本地与 CI 跑的是同一份代码。
+      # 不传 --python：默认取 sys.executable，避免 PATH 上同名解释器的歧义。
+      - name: 运行发布门禁
+        run: python scripts/release_gate.py --fail-under 95
+
+      # 上传门禁报告、junit XML 与 pytest 日志（`always()` 而非 `failure()`）。
+      #
+      # 为什么必须 always：CI 与本地跑到的用例数不同（本机有未入库的构建产物，
+      # `test_frozen_smoke` / `test_distribution_parity` / 真实 OCR 产物用例在干净检出上
+      # 只能 skip）。要回答"到底哪些没跑、为什么"，**唯一**的依据就是逐条用例清单。
+      # 只在失败时上传，就导致"CI 绿了 → 差异无法审计" —— 这个盲区是实际踩过的：
+      # 一次调查中拿到的 artifact 日志是**残缺**的（只解析出 1416/2237 条结果），
+      # 于是"44 个用例没跑"只能定位到 17 条 skip，剩下的无法归因。
+      #
+      # gate_junit_*.xml 是**权威**依据：门禁跑 pytest 时带 `-o addopts=-q`，stdout 上
+      # 只有点和汇总、没有逐条 nodeid；junit XML 才是逐条可解析的事实源。
+      - name: 上传门禁报告
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: gate-report
+          path: |
+            devlogs/gate_report_*.json
+            devlogs/gate_junit_*.xml
+            devlogs/gate_pytest_*.log
+          if-no-files-found: ignore
+          retention-days: 14

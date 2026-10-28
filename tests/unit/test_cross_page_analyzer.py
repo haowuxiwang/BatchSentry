@@ -1,0 +1,2671 @@
+"""Cross-page analyzer 单元测试。
+
+覆盖：
+- analyze_cross_page 主入口
+- SpecBounds / _parse_spec 规格解析
+- _expand_power_notation 幂记法（误报修复）
+- _try_unit_normalize 单位换算（误报修复）
+- _check_completeness 完整性检查
+"""
+import pytest
+import asyncio
+from unittest.mock import patch, AsyncMock, MagicMock
+
+from core.cross_page_analyzer import (
+    analyze_cross_page,
+    SpecBounds,
+    _parse_spec,
+    _expand_power_notation,
+    _parse_number,
+    _extract_unit,
+    _try_unit_normalize,
+    _judge,
+    _sign_convention_uncertain,
+    _parse_time,
+    _extract_year,
+    _normalize_pages,
+    _collect_per_page_findings,
+    _check_time_reversal_in_page,
+    _check_time_reversal_cross_page,
+    _step_sort_key,
+    _check_param_out_of_spec,
+    _judge_param,
+    _judge_cell,
+    _decimal_loss_factor,
+    _severity_for_out_of_spec,
+    _violated_bound,
+    _check_suspicious_dates,
+    _check_completeness,
+    _check_batch_consistency,
+    _check_low_confidence_params,
+    _build_summary,
+    _user_rules_section,
+    _llm_based_check,
+)
+
+
+def _make_page(page_no, steps, findings=None, page_info=None, event_year_groups=None):
+    """构造 analyze_cross_page 所需的页面结构（与 pipeline 一致）。"""
+    return {
+        "page": page_no,
+        "data": {
+            "steps": steps or [],
+            "findings": findings or [],
+            "page_info": page_info or {},
+            "event_year_groups": event_year_groups or {},
+        },
+    }
+
+
+def _make_step(step_no, start_time=None, end_time=None, operator="", reviewer="",
+               measurements=None, parameters=None, signatures=None, handwritten=None):
+    """构造 step 字典。"""
+    s = {"step_no": step_no}
+    if start_time:
+        s["start_time"] = start_time
+    if end_time:
+        s["end_time"] = end_time
+    if operator:
+        s["operator"] = operator
+    if reviewer:
+        s["reviewer"] = reviewer
+    if measurements:
+        s["measurements"] = measurements
+    if parameters:
+        s["parameters"] = parameters
+    if signatures:
+        s["signatures"] = signatures
+    if handwritten:
+        s["handwritten"] = handwritten
+    return s
+
+
+def _make_cell(actual, spec, unit=""):
+    """构造矩阵单元格 values dict。"""
+    return {"actual": str(actual), "spec": spec, "unit": unit}
+
+
+def _norm(pages):
+    """将 raw page 结构归一化为 rule 函数所需的格式。"""
+    return _normalize_pages(pages)
+
+
+@pytest.fixture
+def sample_pages():
+    """返回模拟的页面数据。"""
+    return [
+        _make_page(1, [
+            _make_step(1, "2024-01-01 10:00", "2024-01-01 11:00", "张三", "李四",
+                       measurements=[{"time": "10:00", "values": {"温度": _make_cell("25.5", "20-30", "℃")}}],
+                       signatures=[{"role": "qa", "name": "王五"}]),
+        ]),
+        _make_page(2, [
+            _make_step(2, "2024-01-01 11:00", "2024-01-01 12:00", "张三", "李四",
+                       measurements=[{"time": "11:00", "values": {"温度": _make_cell("35.0", "20-30", "℃")}}],
+                       signatures=[{"role": "qa", "name": "王五"}]),
+        ]),
+    ]
+
+
+class TestSpecBoundsAndParsing:
+    """规格解析 — 核心误报修复验证。"""
+
+    def test_parse_range_spec(self):
+        bounds = _parse_spec("20-30")
+        assert bounds is not None
+        assert bounds.low == 20.0
+        assert bounds.high == 30.0
+
+    def test_parse_less_than_spec(self):
+        bounds = _parse_spec("<0.3")
+        assert bounds is not None
+        assert bounds.high == 0.3
+
+    def test_parse_less_equal_spec(self):
+        bounds = _parse_spec("≤0.3")
+        assert bounds is not None
+
+    def test_parse_power_notation_spec(self):
+        expanded = _expand_power_notation("≤10^3")
+        assert "1000" in expanded
+        bounds = _parse_spec(expanded)
+        assert bounds is not None
+        assert bounds.high == 1000.0
+
+    def test_parse_chinese_spec(self):
+        bounds = _parse_spec("不超过100次")
+        assert bounds is not None
+        assert bounds.high == 100.0
+
+    def test_parse_percent_range_spec(self):
+        """M4：带百分号的区间 "99%~101%"（物料平衡率/收率常见写法）须可解析。
+
+        此前 "%" 夹在 99 与 ~ 之间导致解析失败，整条规格降级为 LLM 兜底。
+        """
+        bounds = _parse_spec("99%~101%")
+        assert bounds is not None
+        assert bounds.op == "between"
+        assert bounds.low == 99.0 and bounds.high == 101.0
+
+    def test_parse_fullwidth_percent_range_spec(self):
+        bounds = _parse_spec("99％~101％")
+        assert bounds is not None
+        assert bounds.low == 99.0 and bounds.high == 101.0
+
+    def test_parse_plain_tilde_range_still_works(self):
+        bounds = _parse_spec("1300~3200")
+        assert bounds is not None
+        assert bounds.low == 1300.0 and bounds.high == 3200.0
+
+    # ---- ± 形式（标称值±公差）与「± 被 OCR 读成 -」的反向区间重建 ----
+    # M8 真实 51 页：印版 "15±5℃" 被 OCR 读成 "15-5" → between(15,5) 恒为假
+    # → p08 温度列约 30 条误报「超差」。两条路径都必须回到 [10,20]。
+
+    def test_parse_plusminus_spec(self):
+        """印版 ± 形式："15±5℃" -> [10, 20]。"""
+        bounds = _parse_spec("15±5℃")
+        assert bounds is not None
+        assert bounds.op == "between"
+        assert bounds.low == 10.0 and bounds.high == 20.0
+        assert _judge(bounds, 14.0) is True
+
+    def test_parse_plusminus_with_percent(self):
+        bounds = _parse_spec("7.5±0.2%")
+        assert bounds is not None
+        assert bounds.low == 7.3 and bounds.high == 7.7
+
+    def test_parse_reversed_range_rebuilt_as_plusminus(self):
+        """OCR 把 ± 读成 -："15-5" -> 反向区间重建为 [10, 20]（非恒假）。"""
+        bounds = _parse_spec("15-5")
+        assert bounds is not None
+        assert bounds.op == "between"
+        assert bounds.low == 10.0 and bounds.high == 20.0
+        assert _judge(bounds, 14.0) is True
+        assert _judge(bounds, 25.0) is False
+
+    def test_parse_reversed_range_with_unit(self):
+        bounds = _parse_spec("40-3℃")
+        assert bounds is not None
+        assert bounds.low == 37.0 and bounds.high == 43.0
+
+    def test_parse_forward_range_untouched(self):
+        """正常正向区间不受重建逻辑影响。"""
+        bounds = _parse_spec("15-25")
+        assert bounds is not None
+        assert bounds.low == 15.0 and bounds.high == 25.0
+
+    def test_parse_none_spec(self):
+        assert _parse_spec(None) is None
+
+    def test_parse_empty_spec(self):
+        assert _parse_spec("") is None
+
+    def test_parse_invalid_spec(self):
+        assert _parse_spec("abc") is None
+
+    # ---- 书写变体归一化（M8-spike：真实落库 spec_range 实测定位）----
+    # 以下三类写法与既有语义完全等价，此前全部解析失败 → 整条规格降级
+    # spec_unverifiable（送人工 = 噪音）。归一化只改形状、不改判定语义。
+
+    def test_parse_latex_pm_spec(self):
+        """PaddleOCR-VL 把印版 ± 读成 LaTeX `\\pm`（51 页真实输出 16 处 / 12 页）。
+
+        规则层是判定权威，必须自己读得懂 —— 否则 LLM 一旦原样回填就静默
+        丢掉判定能力。外层裹 `$` 的形态同样要能读。
+        """
+        for raw in ("15 \\pm 5", "15 $ \\pm $5°C", "15\\pm5", "7.5 \\pm 0.2"):
+            bounds = _parse_spec(raw)
+            assert bounds is not None, raw
+            assert bounds.op == "between", raw
+        assert _parse_spec("15 \\pm 5").low == 10.0
+        assert _parse_spec("15 \\pm 5").high == 20.0
+        assert _parse_spec("7.5 \\pm 0.2").low == 7.3
+        assert _parse_spec("7.5 \\pm 0.2").high == 7.7
+
+    def test_parse_latex_pm_variants(self):
+        """`\\mp` / `+/-` / `+-` 同为 ± 的书写变体。"""
+        for raw in ("15 \\mp 5", "15 +/- 5", "15+-5"):
+            bounds = _parse_spec(raw)
+            assert bounds is not None, raw
+            assert (bounds.low, bounds.high) == (10.0, 20.0), raw
+
+    def test_parse_fullwidth_tilde_range(self):
+        """全角波浪线 `～`(U+FF5E)：真实库同语义的 `99%~101%` 有 15 处成功，
+        而 `99%～101%` 1 处失败 —— 仅是字形差异。"""
+        bounds = _parse_spec("99%～101%")
+        assert bounds is not None
+        assert (bounds.low, bounds.high) == (99.0, 101.0)
+
+    def test_parse_unicode_minus_and_fullwidth_hyphen(self):
+        """U+2212 数学减号 / 全角连字符 / em dash 均为区间分隔符变体。"""
+        for raw in ("15−25", "15－25", "15—25"):
+            bounds = _parse_spec(raw)
+            assert bounds is not None, raw
+            assert (bounds.low, bounds.high) == (15.0, 25.0), raw
+
+    def test_parse_unit_straddling_separator(self):
+        """单位夹在数字与分隔符之间：`972 μg/mg ~1020 μg/mg`（含量/效价规格，
+        真实库 20 处全失败）。折叠中间单位，**必须保留串尾单位** ——
+        `_try_unit_normalize` 靠 spec 串里的单位做实测值单位换算。"""
+        for raw in ("972 μg/mg ~1020 μg/mg", "972μg/mg ~1020μg/mg"):
+            bounds = _parse_spec(raw)
+            assert bounds is not None, raw
+            assert (bounds.low, bounds.high) == (972.0, 1020.0), raw
+            assert _extract_unit(raw) == "μg/mg", raw
+
+    def test_parse_parenthesised_range(self):
+        """外层括号："(1300~3200)" -> [1300, 3200]（真实库 1 处）。"""
+        bounds = _parse_spec("(1300~3200)")
+        assert bounds is not None
+        assert (bounds.low, bounds.high) == (1300.0, 3200.0)
+
+    def test_normalization_keeps_fail_closed(self):
+        """归一化不得放大可判范围：非数值/裸数字仍返回 None 交人工。"""
+        for raw in ("1.4", "14 L/min", "√是/□否", "1) IR\\n2) HPLC", "abc", ""):
+            assert _parse_spec(raw) is None, raw
+
+    def test_normalization_does_not_touch_inequalities(self):
+        """≤/≥ 分支不受归一化影响（± 归一必须发生在 ≤/≥ 之前）。"""
+        assert _parse_spec("≤0.3").op == "le"
+        assert _parse_spec("≥98%").op == "ge"
+        assert _parse_spec(">=30").low == 30.0
+
+
+class TestJudge:
+    """_judge 参数判定。"""
+
+    def test_in_range_returns_true(self):
+        bounds = SpecBounds(op="between", low=20.0, high=30.0)
+        assert _judge(bounds, 25.0) is True
+
+    def test_out_of_range_returns_false(self):
+        bounds = SpecBounds(op="between", low=20.0, high=30.0)
+        assert _judge(bounds, 35.0) is False
+
+    def test_at_boundary_returns_true(self):
+        bounds = SpecBounds(op="between", low=20.0, high=30.0)
+        assert _judge(bounds, 20.0) is True
+        assert _judge(bounds, 30.0) is True
+
+
+class TestSignConventionUncertain:
+    """真空度/负压符号约定存疑（M8）——"负表压 vs 印版正限值" fail-closed。"""
+
+    def test_negative_actual_with_upper_bound_flagged(self):
+        """真实 p14：≤0.08MPa vs -0.090 MPa —— 数值比较恒真，须降级人工。"""
+        bounds = SpecBounds(op="le", low=None, high=0.08)
+        assert _sign_convention_uncertain(bounds, -0.09) is True
+
+    def test_positive_actual_with_upper_bound_ok(self):
+        bounds = SpecBounds(op="le", low=None, high=0.08)
+        assert _sign_convention_uncertain(bounds, 0.05) is False
+
+    def test_negative_actual_with_lower_bound_flagged(self):
+        """≥ 方向：负实测值会被数值比较判成超差（潜在误报），同样须人工。"""
+        bounds = SpecBounds(op="ge", low=0.08, high=None)
+        assert _sign_convention_uncertain(bounds, -0.09) is True
+
+    def test_between_spec_not_flagged(self):
+        bounds = SpecBounds(op="between", low=-1.0, high=1.0)
+        assert _sign_convention_uncertain(bounds, -0.5) is False
+
+    def test_negative_limit_with_positive_actual_not_flagged(self):
+        """负限值 + 正实测值（如 ≥-18℃ vs 3℃）通常无歧义，不制造噪声。"""
+        bounds = SpecBounds(op="ge", low=-18.0, high=None)
+        assert _sign_convention_uncertain(bounds, 3.0) is False
+
+    def test_rule_layer_emits_spec_unverifiable_for_vacuum(self):
+        """真实 p14：_judge_param 须把 -0.090 MPa / ≤0.08MPa 降级人工复核，
+        而不是静默判为合规则（原行为：-0.09 <= 0.08 → in_spec=True）。"""
+        findings, queue = [], []
+        p = {"name": "浓缩结束真空度", "spec_range": "≤0.08MPa",
+             "value": "-0.090 MPa", "unit": "MPa"}
+        _judge_param(p, 14, "1", "浓缩结束真空度", findings, queue)
+        assert len(findings) == 1
+        assert findings[0]["type"] == "spec_unverifiable"
+        assert findings[0]["severity"] == "warning"
+        assert queue == []
+        assert "in_spec" not in p  # 未静默下结论
+
+    def test_rule_layer_positive_vacuum_still_judged_normally(self):
+        findings, queue = [], []
+        p = {"name": "浓缩开始真空度", "spec_range": "≤0.08MPa",
+             "value": "0.05 MPa", "unit": "MPa"}
+        _judge_param(p, 14, "1", "浓缩开始真空度", findings, queue)
+        assert findings == []
+        assert p["in_spec"] is True
+
+
+class TestDecimalLossSoftening:
+    """OCR 丢小数点（4.6→46）软化（M8）——真实 p08 进料压力。"""
+
+    def test_factor_detected_for_tenfold_overshoot(self):
+        bounds = SpecBounds(op="between", low=3.0, high=5.0)
+        assert _decimal_loss_factor(bounds, 46.0) == 0.1
+
+    def test_no_factor_for_genuine_deviation(self):
+        bounds = SpecBounds(op="between", low=3.0, high=5.0)
+        assert _decimal_loss_factor(bounds, 7.0) is None
+
+    def test_no_factor_when_actual_has_decimal_point(self):
+        """45.6 vs 0~5°C：自带小数点 → 不是"丢点"形态，真实偏差必须保留。"""
+        bounds = SpecBounds(op="between", low=0.0, high=5.0)
+        assert _decimal_loss_factor(bounds, 45.6, "45.6") is None
+        assert _decimal_loss_factor(bounds, 45.6) is None
+
+    def test_no_factor_when_overshoot_ratio_is_not_tenfold(self):
+        """25 vs ≤5.0（比值仅 5）→ 更可能是真实超差，不软化（维持 warning）。"""
+        bounds = SpecBounds(op="le", low=None, high=5.0)
+        assert _decimal_loss_factor(bounds, 25.0, "25") is None
+
+    def test_no_factor_when_bound_is_zero(self):
+        """上限为 0（≤0）时不可按倍数缩放推断，直接不软化。"""
+        bounds = SpecBounds(op="le", low=None, high=0.0)
+        assert _decimal_loss_factor(bounds, 5.0, "5") is None
+
+
+class TestViolatedBound:
+    """被越过的界（供超差倍数评估）。"""
+
+    def test_between_low_side(self):
+        assert _violated_bound(SpecBounds(op="between", low=1.0, high=2.0), 0.5) == 1.0
+
+    def test_between_high_side(self):
+        assert _violated_bound(SpecBounds(op="between", low=1.0, high=2.0), 3.0) == 2.0
+
+    def test_between_in_range_returns_none(self):
+        assert _violated_bound(SpecBounds(op="between", low=1.0, high=2.0), 1.5) is None
+
+    def test_ge_returns_low(self):
+        assert _violated_bound(SpecBounds(op="ge", low=30.0, high=None), 10.0) == 30.0
+
+    def test_lt_returns_high(self):
+        assert _violated_bound(SpecBounds(op="lt", low=None, high=5.0), 9.0) == 5.0
+
+    def test_unknown_op_returns_none(self):
+        assert _violated_bound(SpecBounds(op="weird", low=1.0, high=2.0), 9.0) is None
+
+
+class TestJudgeCellSignConvention:
+    """矩阵单元格的符号约定降级（与 _judge_param 同源）。"""
+
+    def test_cell_vacuum_downgraded_to_spec_unverifiable(self):
+        findings, queue = [], []
+        val = {"spec": "≤0.08MPa", "actual": "-0.094", "unit": "MPa"}
+        _judge_cell(val, 24, "1", "浓缩结束真空度", "08:18", findings, queue)
+        assert len(findings) == 1
+        assert findings[0]["type"] == "spec_unverifiable"
+        assert queue == []
+        assert "in_spec" not in val
+
+
+class TestSeverityBoundUnavailable:
+    """_severity_for_out_of_spec：界不可用（None/0）时维持 warning。"""
+
+    def test_zero_bound_stays_warning(self):
+        sev, hint = _severity_for_out_of_spec(
+            SpecBounds(op="le", low=None, high=0.0), 5.0, "≤0", "handwritten")
+        assert sev == "warning" and hint == ""
+
+    def test_unknown_op_stays_warning(self):
+        sev, hint = _severity_for_out_of_spec(
+            SpecBounds(op="weird", low=1.0, high=2.0), 9.0, "?", "handwritten")
+        assert sev == "warning" and hint == ""
+
+    def test_zero_actual_safe(self):
+        bounds = SpecBounds(op="between", low=3.0, high=5.0)
+        assert _decimal_loss_factor(bounds, 0.0) is None
+
+    def test_severity_downgraded_to_info_with_hint(self):
+        """46 vs 3.0~5.0bar → info + 小数点提示（非硬性 warning）。"""
+        bounds = SpecBounds(op="between", low=3.0, high=5.0)
+        sev, hint = _severity_for_out_of_spec(bounds, 46.0, "3.0-5.0bar", "handwritten")
+        assert sev == "info"
+        assert "小数点" in hint
+
+    def test_printed_source_never_softened(self):
+        """印刷体实测值（文档级打印输出）不做 OCR 软化，维持 warning。"""
+        bounds = SpecBounds(op="between", low=3.0, high=5.0)
+        sev, hint = _severity_for_out_of_spec(bounds, 46.0, "3.0-5.0bar", "printed")
+        assert sev == "warning" and hint == ""
+
+
+
+class TestPowerNotationExpansion:
+    """幂记法展开（误报修复核心）。"""
+
+    def test_expand_10_cubed(self):
+        assert _expand_power_notation("10^3") == "1000"
+
+    def test_expand_10_to_4(self):
+        assert _expand_power_notation("10^4") == "10000"
+
+    def test_expand_with_prefix(self):
+        result = _expand_power_notation("≤10^3")
+        assert "1000" in result
+
+    def test_no_power_notation_unchanged(self):
+        assert _expand_power_notation("20-30") == "20-30"
+
+
+class TestUnitNormalization:
+    """单位换算（误报修复核心 — ppm ↔ %）。
+
+    _try_unit_normalize 返回 (converted_value, note) 元组：
+    - 无需换算（同单位/无单位）时返回 (actual_num, "")
+    - 成功换算时返回 (converted_actual, "unit normalized: ...")
+    - 单位不一致但无换算规则时返回 (None, "unit_mismatch")（fail-closed）
+    """
+
+    def test_extract_unit_ppm(self):
+        assert _extract_unit("99ppm") == "ppm"
+
+    def test_extract_unit_percent(self):
+        assert _extract_unit("50%") == "%"
+
+    def test_extract_unit_none(self):
+        assert _extract_unit("") == ""
+        assert _extract_unit(None) == ""
+
+    def test_ppm_to_percent_conversion(self):
+        """99ppm 应换算为 0.0099%。"""
+        converted, note = _try_unit_normalize(99.0, "ppm", "≤50%")
+        assert converted is not None
+        assert abs(converted - 0.0099) < 0.0001
+        assert "normalized" in note
+
+    def test_same_unit_no_conversion(self):
+        """相同单位无需换算，返回 (actual_num, "")。"""
+        converted, note = _try_unit_normalize(25.0, "%", "20-30%")
+        assert converted == 25.0
+        assert note == ""
+
+
+class TestAnalyzeCrossPage:
+    """analyze_cross_page 主入口。
+
+    所有测试 mock get_llm_client，避免调用真实 DeepSeek API（120s 超时）。
+    mock 返回空 findings，让规则层逻辑独立验证。
+    """
+
+    @pytest.fixture(autouse=True)
+    def mock_llm_client(self):
+        """自动 mock get_llm_client，返回空结果，避免真实 API 调用。"""
+        mock_client = MagicMock()
+        mock_client.chat_json = AsyncMock(return_value=[])
+        with patch('core.rules.llm_checks.get_llm_client',
+                   return_value=mock_client):
+            yield mock_client
+
+    def test_returns_list(self, sample_pages):
+        findings = asyncio.run(analyze_cross_page(sample_pages))
+        assert isinstance(findings, list)
+
+    def test_empty_pages_returns_empty(self):
+        findings = asyncio.run(analyze_cross_page([]))
+        assert findings == []
+
+    def test_findings_have_required_fields(self, sample_pages):
+        findings = asyncio.run(analyze_cross_page(sample_pages))
+        for f in findings:
+            assert "type" in f
+            assert "severity" in f
+            assert "description" in f
+            assert "page" in f
+            assert "source" in f
+
+    def test_out_of_spec_produces_finding(self):
+        """参数越界应产生 finding。"""
+        pages = [_make_page(1, [
+            _make_step(1, measurements=[
+                {"time": "10:00", "values": {"温度": _make_cell("40.0", "20-30", "℃")}},
+            ]),
+        ])]
+        findings = asyncio.run(analyze_cross_page(pages))
+        assert any("温度" in f.get("description", "") or "越界" in f.get("type", "")
+                   or "参数" in f.get("type", "") for f in findings)
+
+    def test_in_spec_no_finding(self):
+        """在规格内不应产生参数越界 finding。"""
+        pages = [_make_page(1, [
+            _make_step(1, measurements=[
+                {"time": "10:00", "values": {"温度": _make_cell("25.0", "20-30", "℃")}},
+            ]),
+        ])]
+        findings = asyncio.run(analyze_cross_page(pages))
+        param_findings = [f for f in findings if "越界" in f.get("type", "") or "参数" in f.get("type", "")]
+        assert len(param_findings) == 0
+
+    def test_power_notation_no_false_positive(self):
+        """幂记法 50 vs ≤10^3 不应越界（误报修复验证）。"""
+        pages = [_make_page(1, [
+            _make_step(1, measurements=[
+                {"time": "10:00", "values": {"需氧菌": _make_cell("50", "≤10^3")}},
+            ]),
+        ])]
+        findings = asyncio.run(analyze_cross_page(pages))
+        assert all("需氧菌" not in f.get("description", "") for f in findings)
+
+    def test_missing_operator_produces_finding(self):
+        """缺少操作人应产生完整性 finding。"""
+        pages = [_make_page(1, [
+            _make_step(1, start_time="2024-01-01 10:00", end_time="2024-01-01 11:00"),
+        ])]
+        findings = asyncio.run(analyze_cross_page(pages))
+        assert any("签名" in f.get("description", "") or "操作人" in f.get("description", "")
+                   or "复核" in f.get("description", "") for f in findings)
+
+    def test_complete_step_no_completeness_finding(self, sample_pages):
+        """完整 step 不应产生完整性 finding。"""
+        findings = asyncio.run(analyze_cross_page(sample_pages))
+        completeness = [f for f in findings if "签名" in f.get("description", "")
+                         or "操作人" in f.get("description", "")]
+        assert len(completeness) == 0
+
+    def test_time_reversal_cross_page_produces_finding(self):
+        """跨页时间倒序应产生 critical finding。"""
+        pages = [
+            _make_page(9, [_make_step(2, start_time="2024-01-01 15:00", end_time="2024-01-01 16:00")]),
+            _make_page(10, [_make_step(3, start_time="2024-01-01 14:30", end_time="2024-01-01 15:30")]),
+        ]
+        findings = asyncio.run(analyze_cross_page(pages))
+        assert any("时间" in f.get("type", "") or "工序" in f.get("description", "") for f in findings)
+
+
+# ===========================================================================
+# _parse_time 测试 — 各种格式解析与异常分支
+# ===========================================================================
+
+
+class TestParseTime:
+    """_parse_time 各种格式解析与异常分支。"""
+
+    def test_empty_string_returns_none(self):
+        """空字符串与纯空白应返回 None（line 84）。"""
+        assert _parse_time("") is None
+        assert _parse_time("   ") is None
+
+    def test_none_returns_none(self):
+        """None 输入应返回 None。"""
+        assert _parse_time(None) is None
+
+    def test_non_string_returns_none(self):
+        """非字符串输入应返回 None。"""
+        assert _parse_time(123) is None
+        assert _parse_time([]) is None
+
+    def test_time_only_no_fallback_returns_none(self):
+        """仅有 HH:MM 且无 fallback_date 时应返回 None（line 94）。"""
+        assert _parse_time("14:30") is None
+
+    def test_time_only_unparseable_fallback_returns_none(self):
+        """仅有 HH:MM 且 fallback_date 无法解析时应返回 None（line 92）。"""
+        assert _parse_time("14:30", fallback_date="invalid") is None
+
+    def test_time_only_with_valid_fallback(self):
+        """仅有 HH:MM 且有有效 fallback_date 时应返回完整 datetime（line 91）。"""
+        dt = _parse_time("14:30", fallback_date="2024.01.01")
+        assert dt is not None
+        assert dt.year == 2024
+        assert dt.hour == 14
+        assert dt.minute == 30
+
+    def test_time_only_out_of_range_hhmm_returns_none(self):
+        """对抗审查 P1-5：OCR 手写时间噪声 '99:99' 越界 — datetime.replace
+        抛 ValueError，此前该分支无 try/except 会传播出规则层直接炸掉
+        Stage 3（job error）。必须返回 None 不崩溃。"""
+        assert _parse_time("25:10", fallback_date="2024.01.01") is None
+        assert _parse_time("9:85", fallback_date="2024.01.01") is None
+        assert _parse_time("99:99:99", fallback_date="2024.01.01") is None
+
+    def test_ocr_noise_pattern_valid(self):
+        """OCR 串扰格式 '2022/4/202205.07' 应解析为 2022.05.07（lines 99-103）。"""
+        dt = _parse_time("2022/4/202205.07")
+        assert dt is not None
+        assert dt.year == 2022
+        assert dt.month == 5
+        assert dt.day == 7
+
+    def test_ocr_noise_pattern_invalid_date_falls_through(self):
+        """OCR 串扰格式日期非法时应 fallthrough 不崩溃（lines 104-105）。"""
+        # 月份=13、日=40 会触发 ValueError，然后 fallthrough 到 _DATE_RE
+        result = _parse_time("2022/4/20221340")
+        # 不应崩溃；_DATE_RE 会匹配 "2022/4/20"
+        assert result is not None
+        assert result.year == 2022
+        assert result.month == 4
+        assert result.day == 20
+
+    def test_chinese_date_valid(self):
+        """中文日期格式 '2024年5月7日' 应正确解析（lines 110-114）。"""
+        dt = _parse_time("2024年5月7日")
+        assert dt is not None
+        assert dt.year == 2024
+        assert dt.month == 5
+        assert dt.day == 7
+
+    def test_chinese_date_with_time(self):
+        """中文日期含时间应解析出时分。"""
+        dt = _parse_time("2024年05月07日 14时30分")
+        assert dt is not None
+        assert dt.hour == 14
+        assert dt.minute == 30
+
+    def test_chinese_date_invalid_returns_none(self):
+        """中文日期非法时应返回 None（lines 115-116）。"""
+        assert _parse_time("2024年13月32日") is None
+
+    def test_normal_date_invalid_returns_none(self):
+        """普通日期格式非法时应返回 None（lines 126-127）。"""
+        assert _parse_time("2024.13.32") is None
+
+    def test_bare_year(self):
+        """纯年份字符串应解析为 1月1日（lines 132-133）。"""
+        dt = _parse_time("2022")
+        assert dt is not None
+        assert dt.year == 2022
+        assert dt.month == 1
+        assert dt.day == 1
+
+    def test_no_match_returns_none(self):
+        """无法匹配任何格式时应返回 None。"""
+        assert _parse_time("no date here") is None
+
+
+# ===========================================================================
+# B1-16「仅时刻 + 中文单位」形态
+# ===========================================================================
+
+
+class TestParseTimeChineseUnitForms:
+    """B1-16：`09 时 00 分` / `21日07时49分` 这类形态此前**完全解析不出来**。
+
+    实测（真实 51 页隔离库，job `6f80145a-47f`，`devlogs/_verify/probe_b113f.py`）：
+    162 个"看起来是时刻"的字面量中 **51 条的形态本体不被支持**（给了哨兵日期仍失败）
+    ⇒ R1/R1b 与 `llm_finding_guard` 的时序复算**同时饿死**，"判不了 ⇒ 降级"成为这些
+    页的唯一结局。
+
+    ⚠️ 本类同时钉住 **B1-16 明文要求的两条反向约束**（只测"救活了"不算数）：
+      ① 放宽形态**不得**连带接受噪声（`13:6 m^3` / `22108时26分`）或区间形态
+         —— 否则会**激活** p6 那条"体积当时间"的假倒序；
+      ② 带"日"的形态**不得猜月** —— 与生产日期差太远一律判不了，不按本月硬推。
+    """
+
+    FB = "2025年01月20日"
+
+    def _iv(self, *args, **kwargs):
+        # 局部导入（同 `TestParseTimeInterval` 约定）：本模块从
+        # `core.cross_page_analyzer` 取常用再导出，而 `_parse_time_interval`
+        # 只在这里用 ⇒ 不为此改动模块级导入面。
+        from core.rules.parsing import _parse_time_interval
+
+        return _parse_time_interval(*args, **kwargs)
+
+    @pytest.mark.parametrize("lit,hh,mm", [
+        ("09 时 00 分", 9, 0),         # p6  param.接收开始时间
+        ("19 时 15 分", 19, 15),       # p38 meas.清洗罐搅拌开始时间
+        ("08时 09分", 8, 9),           # p17 start
+        ("21日07时49分", 7, 49),       # p15 meas.过滤开始时间（日=21，与生产日差 1）
+        ("20 日 18 时 06 分", 18, 6),   # p38 meas.透出循环起始时间
+    ])
+    def test_real_corpus_forms_are_parseable(self, lit, hh, mm):
+        dt = _parse_time(lit, fallback_date=self.FB)
+        assert dt is not None, f"{lit!r} 应可解析（B1-16 验收）"
+        assert (dt.hour, dt.minute) == (hh, mm)
+
+    def test_time_only_branch_positive_control(self):
+        """1d 分支（仅时刻 + 中文单位）的正向对照，**也是变异验证的稳定锚点**。
+
+        为什么必须单独存在：本类其余用例对"只有时刻"的形态断言的都是 `None`
+        （fail-open 方向），对 1d 分支**存在与否不敏感** —— 若只靠它们，
+        "把 1d 分支整条打掉"这个变异不会有**任何**用例变红（假绿）。
+        """
+        dt = _parse_time("09 时 00 分", fallback_date=self.FB)
+        assert dt is not None, "1d 分支被打掉 ⇒ 本用例必须红"
+        assert (dt.hour, dt.minute) == (9, 0)
+
+    # ⚠️ 下面四条**刻意写成具名用例而不是 parametrize**：变异验证要按 nodeid 指名
+    #    "哪条必须变红"，而 parametrize 的 id 是 pytest 自动生成且会把中文转义成
+    #    `\uXXXX`，脚本里只能硬编码转义串（不可读、脆弱）。具名 = 稳定锚点。
+    def test_volume_as_time_stays_unparseable(self):
+        """护栏①的核心样本：p6 的体积被误绑到时间列。
+
+        它必须**继续**判不可解析 —— 否则会**激活** p6 那条"体积当时间"的假倒序
+        （B1-16 明文要求）。
+        """
+        assert _parse_time("13:6 m^3", fallback_date=self.FB) is None
+
+    def test_intervals_stay_unparseable(self):
+        """区间不是时刻：p11 `01:01 ~ 01:27` / p47 `11:05 - 11:12`。"""
+        assert _parse_time("01:01 ~ 01:27", fallback_date=self.FB) is None
+        assert _parse_time("11:05 - 11:12", fallback_date=self.FB) is None
+
+    def test_glued_noise_stays_unparseable(self):
+        """批号/日期与时刻**粘连**的噪声必须仍判不可解析（判不了 ≠ 判据确凿）。
+
+        依赖"整串锚定"这个约束：一旦去掉锚定，`15时36分008232-2412017`
+        会被截出 `15时36分` 而误收 —— 本用例就是钉住锚定的。
+        """
+        assert _parse_time("22108时26分", fallback_date=self.FB) is None
+        assert _parse_time("2109时31分", fallback_date=self.FB) is None
+        assert _parse_time("15时36分008232-2412017", fallback_date=self.FB) is None
+
+    def test_truncated_minute_stays_unparseable(self):
+        """一位分钟 ⇒ 与"被截断的数字"不可区分，必须拒（分钟一律两位）。"""
+        assert _parse_time("13时6", fallback_date=self.FB) is None
+        assert _parse_time("08时9分", fallback_date=self.FB) is None
+
+    def test_requires_fallback_date(self):
+        """无 fallback 生产日期 ⇒ 新形态同样**不臆造**日期（与 `11:04` 同契约）。"""
+        assert _parse_time("09 时 00 分") is None
+        assert _parse_time("21日07时49分") is None
+
+    def test_day_must_be_near_fallback_day(self):
+        """护栏②：日与生产日期相差 > 窗口 ⇒ 判不了（**不猜月**）。
+
+        实测同类形态：p15 `21日07时49分` 配 `production_date=1月27日`（差 6 天）、
+        p46 `23日08时42分` 配一个伪造的当天日期（差 5 天）—— 都属于
+        "输入里没有可用锚点"，只能如实降级。
+        """
+        assert _parse_time("21日07时49分", fallback_date="2025年01月27日") is None
+        assert _parse_time("23日08时42分", fallback_date="2026-09-18") is None
+
+    def test_never_guesses_adjacent_month(self):
+        """更硬的"不猜月"：`28日` 配 1 月 1 日**不得**被推成 12 月 28 日。"""
+        assert _parse_time("28日09时00分", fallback_date="2025.01.01") is None
+
+    def test_day_window_boundary_both_sides(self):
+        """窗口边界成对断言：相差 **1** 天接受、相差 **2** 天拒绝。"""
+        dt = _parse_time("29日10时00分", fallback_date="2025年01月28日")
+        assert dt is not None and (dt.month, dt.day, dt.hour) == (1, 29, 10)
+        assert _parse_time("30日10时00分", fallback_date="2025年01月28日") is None
+
+    def test_invalid_day_for_fallback_month_returns_none(self):
+        """`31日` 配 2 月 ⇒ 该月无此日 ⇒ 判不了且不崩（docstring 承诺不抛）。"""
+        assert _parse_time("31日10时00分", fallback_date="2025年02月01日") is None
+
+    def test_out_of_range_clock_returns_none(self):
+        """越界时刻沿用既有契约：返回 None 而非抛异常（同 `25:10`）。"""
+        assert _parse_time("25时10分", fallback_date=self.FB) is None
+        assert _parse_time("09 时 99 分", fallback_date=self.FB) is None
+
+    def test_existing_forms_unaffected(self):
+        """回归对照：既有形态结果不因新增分支而改变。"""
+        dt = _parse_time("11:04", fallback_date=self.FB)
+        assert (dt.year, dt.month, dt.day, dt.hour, dt.minute) == (2025, 1, 20, 11, 4)
+        dt = _parse_time("2025年01月20日 09时00分")
+        assert (dt.year, dt.month, dt.day, dt.hour, dt.minute) == (2025, 1, 20, 9, 0)
+
+    @pytest.mark.parametrize("lit", [
+        "21日07时49分",        # 无空格（旧式就能认出）
+        "09 时 00 分",         # 时两侧带空格 —— 旧式认不出
+        "08时 09分",
+        "20 日 18 时 06 分",
+    ])
+    def test_spaced_forms_are_precise_points_not_whole_day(self, lit):
+        """精度判定必须与解析器**同源**：同一种形态不得只因空格被判成两种精度。
+
+        背景（B1-16 实测）：`_parse_time_interval` 靠 `_TIME_OF_DAY_RE` 区分
+        "精确点" 与 "整天区间"。旧式 `\\d{1,2}[:时]\\d{2}` 不容忍空格 ⇒
+        `21日07时49分` 是精确点，而 `09 时 00 分` 会退化成"整天" ⇒ 区间被放宽
+        ⇒ `_interval_after` 更难成立 ⇒ **倒序被系统性漏报**。
+        """
+        iv = self._iv(lit, self.FB)
+        assert iv is not None
+        assert iv[2] is True, f"{lit!r} 是精确时刻，不得被判成整天区间"
+        assert iv[0] == iv[1], "精确点 ⇒ start == end"
+
+    def test_spaced_time_of_day_is_precise_point(self):
+        """`_TIME_OF_DAY_RE` 必须**容忍时分两侧的空白**（本类的具名变异锚点）。
+
+        为什么单独具名：上面那条是 `parametrize`，而变异脚本按 nodeid **精确匹配**
+        （`mutation_harness` 用集合判定），pytest 会把中文 id 转义成 `\\uXXXX`
+        —— 用转义串当锚点既不可读又一改就断。具名 = 稳定锚点。
+        语义：形态本体被解析成精确点还不够，**精度判定**也必须认它是精确点，
+        否则区间被放宽 ⇒ `_interval_after` 更难成立 ⇒ 倒序系统性漏报。
+        """
+        iv = self._iv("09 时 00 分", self.FB)
+        assert iv is not None
+        assert iv[2] is True, "带空格的时刻仍是精确点"
+        assert iv[0] == iv[1]
+
+    def test_date_only_is_still_whole_day(self):
+        """反向对照：真正的 date-only 值必须**仍**是整天区间（不得被一起放宽）。
+
+        没有这条，"把 `_TIME_OF_DAY_RE` 放成永远匹配"也能让上面那条变绿。
+        """
+        iv = self._iv("2025年01月20日", self.FB)
+        assert iv is not None
+        assert iv[2] is False, "date-only 不是精确点"
+        assert (iv[1] - iv[0]).days == 1, "date-only 应覆盖整天"
+
+
+# ===========================================================================
+# _extract_year 测试
+# ===========================================================================
+
+
+class TestParseTimeInterval:
+    """_parse_time_interval 区间解析（date-only 整天 / 带时间精确点）。"""
+
+    def _iv(self, *args, **kwargs):
+        from core.rules.parsing import _parse_time_interval
+
+        return _parse_time_interval(*args, **kwargs)
+
+    def test_date_only_spans_whole_day(self):
+        from datetime import datetime
+
+        iv = self._iv("2024-01-01")
+        assert iv is not None
+        start, end, precise = iv
+        assert (start, precise) == (datetime(2024, 1, 1, 0, 0, 0), False)
+        assert end == datetime(2024, 1, 2, 0, 0, 0)  # 次日零点（开区间）
+
+    def test_datetime_is_precise_point(self):
+        from datetime import datetime
+
+        iv = self._iv("2024-01-01 14:30")
+        assert iv is not None
+        start, end, precise = iv
+        assert (start, end, precise) == (
+            datetime(2024, 1, 1, 14, 30, 0), datetime(2024, 1, 1, 14, 30, 0), True)
+
+    def test_time_only_with_fallback_is_precise(self):
+        from datetime import datetime
+
+        iv = self._iv("09:00", fallback_date="2024-01-01")
+        assert iv is not None
+        start, end, precise = iv
+        assert (start, end, precise) == (
+            datetime(2024, 1, 1, 9, 0, 0), datetime(2024, 1, 1, 9, 0, 0), True)
+
+    def test_chinese_datetime_is_precise(self):
+        iv = self._iv("2024年05月07日 14时30分")
+        assert iv is not None
+        assert iv[2] is True
+
+    def test_parse_failure_returns_none(self):
+        assert self._iv("无效时间") is None
+        assert self._iv("") is None
+
+
+class TestExtractYear:
+    """_extract_year 年份提取。"""
+
+    def test_int_input_uses_year_re_fallback(self):
+        """非字符串输入时 _parse_time 返回 None，但 _YEAR_RE 仍可匹配（lines 145-148）。"""
+        assert _extract_year(2024) == 2024
+
+    def test_none_returns_none(self):
+        assert _extract_year(None) is None
+
+    def test_no_year_returns_none(self):
+        assert _extract_year("no year") is None
+
+    def test_valid_date_returns_year(self):
+        assert _extract_year("2024.05.01") == 2024
+
+
+# ===========================================================================
+# _parse_number 边界条件
+# ===========================================================================
+
+
+class TestParseNumberEdge:
+    """_parse_number 边界条件。"""
+
+    def test_none_returns_none(self):
+        """None 输入应返回 None（line 158）。"""
+        assert _parse_number(None) is None
+
+    def test_empty_string_returns_none(self):
+        """空字符串应返回 None（line 158）。"""
+        assert _parse_number("") is None
+
+    def test_int_input(self):
+        """int 输入应转为 float（line 160）。"""
+        assert _parse_number(42) == 42.0
+
+    def test_float_input(self):
+        """float 输入应原样返回（line 160）。"""
+        assert _parse_number(3.14) == 3.14
+
+    def test_no_number_found_returns_none(self):
+        """无数字的字符串应返回 None（line 170）。"""
+        assert _parse_number("abc") is None
+
+    def test_percentage(self):
+        assert _parse_number("53.6%") == 53.6
+
+    def test_with_units(self):
+        assert _parse_number("17次") == 17.0
+
+
+# ===========================================================================
+# _expand_power_notation 非10基数
+# ===========================================================================
+
+
+class TestExpandPowerNotationEdge:
+    """_expand_power_notation 非10基数不展开。"""
+
+    def test_non_ten_base_unchanged(self):
+        """非10基数的幂记法应保持原样（line 193）。"""
+        result = _expand_power_notation("2^5")
+        assert result == "2^5"
+
+
+# ===========================================================================
+# _parse_spec 边界条件
+# ===========================================================================
+
+
+class TestParseSpecEdge:
+    """_parse_spec 边界条件。"""
+
+    def test_whitespace_only_returns_none(self):
+        """纯空白 strip 后为空应返回 None（line 217）。"""
+        assert _parse_spec("   ") is None
+
+    def test_greater_than_spec(self):
+        """'>5' 应解析为 gt 操作（lines 249-251）。"""
+        bounds = _parse_spec(">5")
+        assert bounds is not None
+        assert bounds.op == "gt"
+        assert bounds.low == 5.0
+
+    def test_greater_equal_spec(self):
+        """'>=30' 应解析为 ge 操作（lines 249-251）。"""
+        bounds = _parse_spec(">=30")
+        assert bounds is not None
+        assert bounds.op == "ge"
+        assert bounds.low == 30.0
+
+    def test_chinese_no_less_than(self):
+        """'不少于30' 应解析为 ge 操作（line 259）。"""
+        bounds = _parse_spec("不少于30")
+        assert bounds is not None
+        assert bounds.op == "ge"
+        assert bounds.low == 30.0
+
+
+# ===========================================================================
+# _judge 所有操作符分支
+# ===========================================================================
+
+
+class TestJudgeEdge:
+    """_judge 所有操作符分支。"""
+
+    def test_lt_operator(self):
+        """lt 操作符：actual < high（line 268）。"""
+        bounds = SpecBounds(op="lt", high=0.3)
+        assert _judge(bounds, 0.2) is True
+        assert _judge(bounds, 0.3) is False
+
+    def test_gt_operator(self):
+        """gt 操作符：actual > low（lines 271-272）。"""
+        bounds = SpecBounds(op="gt", low=5.0)
+        assert _judge(bounds, 10.0) is True
+        assert _judge(bounds, 5.0) is False
+
+    def test_ge_operator(self):
+        """ge 操作符：actual >= low（lines 273-274）。"""
+        bounds = SpecBounds(op="ge", low=30.0)
+        assert _judge(bounds, 30.0) is True
+        assert _judge(bounds, 29.0) is False
+
+    def test_le_operator(self):
+        """le 操作符：actual <= high。"""
+        bounds = SpecBounds(op="le", high=100.0)
+        assert _judge(bounds, 100.0) is True
+        assert _judge(bounds, 101.0) is False
+
+    def test_unknown_op_returns_false_fail_closed(self):
+        """未知操作符应 fail-closed 返回 False（line 275-277，GMP 安全原则）。"""
+        bounds = SpecBounds(op="unknown")
+        assert _judge(bounds, 0.0) is False
+
+
+# ===========================================================================
+# _try_unit_normalize 无换算
+# ===========================================================================
+
+
+class TestTryUnitNormalizeEdge:
+    """_try_unit_normalize 无换算场景。"""
+
+    def test_no_conversion_possible_returns_mismatch(self):
+        """无法换算的单位应返回 (None, 'unit_mismatch') 触发 fail-closed。"""
+        converted, note = _try_unit_normalize(50.0, "bar", "50psi")
+        assert converted is None
+        assert note == "unit_mismatch"
+
+    def test_empty_actual_unit_returns_as_is(self):
+        """actual 无单位时应返回 (actual_num, '') 按原值比较。"""
+        converted, note = _try_unit_normalize(50.0, "", "20-30")
+        assert converted == 50.0
+        assert note == ""
+
+
+# ===========================================================================
+# _normalize_pages 异常输入
+# ===========================================================================
+
+
+class TestNormalizePages:
+    """_normalize_pages 异常输入。"""
+
+    def test_parse_error_page_skipped(self):
+        """带 _parse_error 的页面应被跳过（line 397）。"""
+        pages = [
+            {"page": 1, "data": {"_parse_error": True}},
+            {"page": 2, "data": {"steps": [], "page_info": {}}},
+        ]
+        result = _normalize_pages(pages)
+        assert len(result) == 1
+        assert result[0]["page"] == 2
+
+    def test_no_data_skipped(self):
+        """data 为 None 或空 dict 的页面应被跳过（line 397）。"""
+        pages = [
+            {"page": 1, "data": None},
+            {"page": 2, "data": {}},
+        ]
+        result = _normalize_pages(pages)
+        assert len(result) == 0
+
+    def test_empty_list_returns_empty(self):
+        assert _normalize_pages([]) == []
+
+    def test_type_polluted_rows_filtered(self):
+        """P1-2 兜底: 老 page_cache 脏数据（steps/findings 含非 dict、
+        event_year_groups 含非数字）→ 归一化时过滤，规则层不接触非法元素。"""
+        pages = [{
+            "page": 1,
+            "data": {
+                "page_info": {"title": "x"},
+                "steps": ["garbage", {"step_no": 1, "parameters": ["温度"]}],
+                "findings": ["bad"],
+                "event_year_groups": {"draft": ["2022年", 2021], "production": "oops"},
+            },
+        }]
+        result = _normalize_pages(pages)
+        assert len(result) == 1
+        assert result[0]["steps"] == [{"step_no": 1, "parameters": []}]
+        assert result[0]["findings"] == []
+        # 非数字年份剔除；非 list 的 event 分组置空（键保留）
+        assert result[0]["event_year_groups"] == {"draft": [2021], "production": []}
+
+    def test_analyze_cross_page_survives_type_pollution(self):
+        """P1-2 端到端: analyze_cross_page 面对类型污染输入不抛异常、
+        不整单失败 — 规则层产生零 findings 而非崩溃。"""
+        from unittest.mock import MagicMock
+
+        polluted = [
+            {"page": 1, "data": {
+                "page_info": {"title": "污染页"},
+                "steps": [
+                    "garbage-step",
+                    {"step_no": 1, "start_time": "2024-01-01 09:00",
+                     "end_time": "2024-01-01 08:00",  # 时间反转本应触发 R1-a
+                     "parameters": ["温度"], "signatures": ["签名"]},
+                ],
+                "event_year_groups": {"draft": ["2022年"], "review": 2021},
+                "findings": ["bad"],
+            }},
+        ]
+        mock_client = MagicMock()
+        mock_client.chat_json = AsyncMock(return_value=[])
+        with patch('core.rules.llm_checks.get_llm_client', return_value=mock_client):
+            findings = asyncio.run(analyze_cross_page(polluted, job_id="test"))
+        assert isinstance(findings, list)
+        # 消毒后 steps 只剩合法 dict → R1-a 正常判定/或跳过；不崩溃是核心断言
+        assert all(isinstance(f, dict) for f in findings)
+
+    def test_analyze_cross_page_survives_scalar_pollution(self):
+        """P1-2 端到端(标量): page_info 非 dict / overall_confidence 非 str /
+        operation 非 str / signature role 非 str — 规则层直接触碰这些字段
+        （时间反转、批量一致性、完整性、低置信度检查），消毒后不抛异常。"""
+        from unittest.mock import MagicMock
+
+        polluted = [
+            {"page": 1, "data": {
+                "page_info": "摘要页",
+                "overall_confidence": 5,
+                "steps": [
+                    {
+                        "step_no": 1,
+                        "operation": 123,
+                        "start_time": "2024-01-01 09:00",
+                        "end_time": "2024-01-01 10:00",
+                        "signatures": [{"role": 7, "name": None}],
+                        "parameters": [],
+                        "measurements": [],
+                    },
+                ],
+            }},
+            {"page": 2, "data": {
+                "page_info": "续页",
+                "steps": [
+                    {"step_no": 1, "operation": "复核", "parameters": [],
+                     "measurements": [], "signatures": []},
+                ],
+            }},
+        ]
+        mock_client = MagicMock()
+        mock_client.chat_json = AsyncMock(return_value=[])
+        with patch('core.rules.llm_checks.get_llm_client', return_value=mock_client):
+            findings = asyncio.run(analyze_cross_page(polluted, job_id="test"))
+        assert isinstance(findings, list)
+        assert all(isinstance(f, dict) for f in findings)
+        # 消毒路径: page_info 被置空 → 批量一致性检查跳过而非崩溃
+        assert not any(f.get("source") == "rule" and f.get("description", "").startswith("批量") for f in findings)
+
+
+# ===========================================================================
+# _collect_per_page_findings 过滤
+# ===========================================================================
+
+
+class TestCollectPerPageFindings:
+    """_collect_per_page_findings 过滤。"""
+
+    def test_non_dict_finding_skipped(self):
+        """非 dict 类型的 finding 应被跳过（line 426）。"""
+        pages = _norm([
+            _make_page(1, [], findings=["not a dict", 42, None]),
+        ])
+        result = _collect_per_page_findings(pages)
+        assert result == []
+
+    def test_missing_required_fields_skipped(self):
+        """缺少必需字段的 finding 应被跳过（line 429）。"""
+        pages = _norm([
+            _make_page(1, [], findings=[
+                {"type": "x"},
+                {"severity": "warning"},
+                {"type": "x", "severity": "warning", "description": "ok"},
+            ]),
+        ])
+        result = _collect_per_page_findings(pages)
+        assert len(result) == 1
+        assert result[0]["description"] == "ok"
+        assert result[0]["source"] == "llm_page"
+        assert result[0]["page"] == 1
+
+    def test_page_number_corrected(self):
+        """LLM 设置的错误页号应被纠正为实际页号。"""
+        pages = _norm([
+            _make_page(5, [], findings=[
+                {"type": "x", "severity": "warning", "description": "ok", "page": 999},
+            ]),
+        ])
+        result = _collect_per_page_findings(pages)
+        assert result[0]["page"] == 5
+
+    def test_default_fields_added(self):
+        """缺少 ocr_text/operator 时应填充默认值。"""
+        pages = _norm([
+            _make_page(1, [], findings=[
+                {"type": "x", "severity": "warning", "description": "ok"},
+            ]),
+        ])
+        result = _collect_per_page_findings(pages)
+        assert result[0]["ocr_text"] == ""
+        assert result[0]["operator"] == ""
+
+
+# ===========================================================================
+# R1-a: 页内时间倒序
+# ===========================================================================
+
+
+class TestTimeReversalInPage:
+    """R1-a: 页内工序时间倒序。"""
+
+    def test_start_after_end_produces_finding(self):
+        """开始时间晚于结束时间应产生 critical finding（line 453）。"""
+        pages = _norm([
+            _make_page(1, [
+                _make_step(1, start_time="2024-01-01 11:00", end_time="2024-01-01 10:00"),
+            ]),
+        ])
+        findings = _check_time_reversal_in_page(pages)
+        assert len(findings) == 1
+        f = findings[0]
+        assert f["type"] == "time_reversal"
+        assert f["severity"] == "critical"
+        assert f["page"] == 1
+        assert f["source"] == "rule"
+
+    def test_normal_order_no_finding(self):
+        """正常顺序不应产生 finding。"""
+        pages = _norm([
+            _make_page(1, [
+                _make_step(1, start_time="2024-01-01 10:00", end_time="2024-01-01 11:00"),
+            ]),
+        ])
+        findings = _check_time_reversal_in_page(pages)
+        assert findings == []
+
+    def test_missing_times_no_finding(self):
+        """缺少时间字段的 step 不应产生 finding。"""
+        pages = _norm([
+            _make_page(1, [_make_step(1)]),
+        ])
+        findings = _check_time_reversal_in_page(pages)
+        assert findings == []
+
+    def test_date_only_start_vs_same_day_datetime_end_no_finding(self):
+        """date-only start（当天全天）与同日带时间 end 不应误报反转（用户报告的
+        年月日 vs 年月日小时分钟比较场景）。"""
+        pages = _norm([
+            _make_page(1, [
+                _make_step(1, start_time="2024-01-01", end_time="2024-01-01 14:30"),
+            ]),
+        ])
+        findings = _check_time_reversal_in_page(pages)
+        assert findings == []
+
+    def test_date_only_start_next_day_vs_datetime_end_finding(self):
+        """date-only start（次日全天）晚于前一日带时间 end 应报反转。"""
+        pages = _norm([
+            _make_page(1, [
+                _make_step(1, start_time="2024-01-02", end_time="2024-01-01 14:30"),
+            ]),
+        ])
+        findings = _check_time_reversal_in_page(pages)
+        assert len(findings) == 1
+        assert findings[0]["type"] == "time_reversal"
+
+    def test_date_only_both_same_day_no_finding(self):
+        """双方都是 date-only 且同一天：信息不足，不报反转。"""
+        pages = _norm([
+            _make_page(1, [
+                _make_step(1, start_time="2024-01-01", end_time="2024-01-01"),
+            ]),
+        ])
+        findings = _check_time_reversal_in_page(pages)
+        assert findings == []
+
+    def test_date_only_both_adjacent_days_finding(self):
+        """双方 date-only 且 start 整天在 end 整天之后（相邻天）应报反转。"""
+        pages = _norm([
+            _make_page(1, [
+                _make_step(1, start_time="2024-01-02", end_time="2024-01-01"),
+            ]),
+        ])
+        findings = _check_time_reversal_in_page(pages)
+        assert len(findings) == 1
+        assert findings[0]["type"] == "time_reversal"
+
+
+# ===========================================================================
+# R1-b: 跨页时间倒序
+# ===========================================================================
+
+
+class TestTimeReversalCrossPage:
+    """R1-b: 跨页工序时间倒序。"""
+
+    def test_skip_appendix_relisting(self):
+        """不同页且 step_no 减小时应跳过（附表重列，line 516）。"""
+        pages = _norm([
+            _make_page(1, [_make_step(2, start_time="2024-01-01 10:00", end_time="2024-01-01 11:00")]),
+            _make_page(2, [_make_step(1, start_time="2024-01-01 10:30", end_time="2024-01-01 11:30")]),
+        ])
+        findings = _check_time_reversal_cross_page(pages)
+        assert findings == []
+
+    def test_year_delta_gt_2_produces_warning(self):
+        """年份相差 >2 年应产生 warning 级 finding（line 528）。"""
+        pages = _norm([
+            _make_page(1, [_make_step(1, start_time="2024-01-01 10:00", end_time="2024-01-01 11:00")]),
+            _make_page(2, [_make_step(2, start_time="2020-01-01 10:30", end_time="2020-01-01 11:30")]),
+        ])
+        findings = _check_time_reversal_cross_page(pages)
+        assert len(findings) == 1
+        f = findings[0]
+        assert f["type"] == "time_reversal"
+        assert f["severity"] == "warning"
+        assert "年份相差" in f["description"]
+
+    def test_normal_cross_page_no_finding(self):
+        """正常跨页顺序不应产生 finding。"""
+        pages = _norm([
+            _make_page(1, [_make_step(1, start_time="2024-01-01 10:00", end_time="2024-01-01 11:00")]),
+            _make_page(2, [_make_step(2, start_time="2024-01-01 11:30", end_time="2024-01-01 12:00")]),
+        ])
+        findings = _check_time_reversal_cross_page(pages)
+        assert findings == []
+
+    def test_duplicate_step_same_page_skipped(self):
+        """同页同 step_no 的重复工序不应产生时间倒序 finding（line 521）。"""
+        pages = _norm([
+            _make_page(1, [
+                _make_step(6, start_time="2024-01-01 10:00", end_time="2024-01-01 11:00"),
+                _make_step(6, start_time="2024-01-01 10:30", end_time="2024-01-01 10:45"),
+            ]),
+        ])
+        findings = _check_time_reversal_cross_page(pages)
+        # 同页同 step_no 的两条记录应跳过比较
+        assert findings == []
+
+    def test_sort_exception_handled(self):
+        """排序异常时应保持原顺序不崩溃（lines 495-496）。"""
+        raised = [False]
+
+        def side_effect(step_no):
+            if not raised[0]:
+                raised[0] = True
+                raise RuntimeError("sort error")
+            return _step_sort_key(step_no)
+
+        with patch('core.cross_page_analyzer._step_sort_key', side_effect=side_effect):
+            pages = _norm([
+                _make_page(1, [
+                    _make_step(1, start_time="2024-01-01 10:00", end_time="2024-01-01 11:00"),
+                    _make_step(2, start_time="2024-01-01 11:00", end_time="2024-01-01 12:00"),
+                ]),
+            ])
+            findings = _check_time_reversal_cross_page(pages)
+            assert isinstance(findings, list)
+
+    def test_unparseable_time_flagged_for_review(self):
+        """OCR 导致的时间格式无法解析时应产生 completeness finding 提示人工复核。"""
+        pages = _norm([
+            _make_page(1, [
+                _make_step(1, start_time="2024-01-01 10:00", end_time="2024-01-01 11:00"),
+                _make_step(2, start_time="无效时间", end_time="2024-01-01 12:00"),
+            ]),
+        ])
+        findings = _check_time_reversal_cross_page(pages)
+        # 工序2 的 start_time 无法解析 → 应产生 1 条 completeness info finding
+        review = [f for f in findings if f["type"] == "completeness"]
+        assert len(review) == 1
+        f = review[0]
+        assert f["page"] == 1
+        assert f["severity"] == "info"
+        assert f["source"] == "rule"
+        assert "工序2" in f["description"]
+        assert "无法解析" in f["description"]
+        assert "人工核对" in f["description"]
+        assert "无效时间" in f["ocr_text"]
+        # 不应同时产生 time_reversal 误报
+        assert not any(f["type"] == "time_reversal" for f in findings)
+
+    def test_unparseable_end_time_flagged(self):
+        """end_time 无法解析时也应被标记。"""
+        pages = _norm([
+            _make_page(1, [
+                _make_step(1, start_time="2024-01-01 10:00", end_time="垃圾日期"),
+            ]),
+        ])
+        findings = _check_time_reversal_cross_page(pages)
+        review = [f for f in findings if f["type"] == "completeness"]
+        assert len(review) == 1
+        assert "垃圾日期" in review[0]["ocr_text"]
+
+    def test_no_time_fields_no_unparseable_finding(self):
+        """没有 start_time/end_time 的步骤不应产生解析失败 finding。"""
+        pages = _norm([
+            _make_page(1, [
+                _make_step(1),  # 无时间字段
+            ]),
+        ])
+        findings = _check_time_reversal_cross_page(pages)
+        assert findings == []
+
+    def test_date_only_curr_vs_same_day_datetime_prev_no_finding(self):
+        """curr date-only（1991-01-01 整天）与 prev 同日带时间不应误报（年月日 vs
+        年月日小时分钟混比场景）。"""
+        pages = _norm([
+            _make_page(1, [_make_step(1, start_time="2024-01-01 09:00", end_time="2024-01-01 14:30")]),
+            _make_page(2, [_make_step(2, start_time="2024-01-01", end_time="2024-01-01 18:00")]),
+        ])
+        findings = _check_time_reversal_cross_page(pages)
+        assert not any(f["type"] == "time_reversal" for f in findings)
+
+    def test_date_only_curr_after_prev_day_datetime_finding(self):
+        """curr date-only（前一天整天）vs prev 带时间（次日 14:30 结束）应报反转。"""
+        pages = _norm([
+            _make_page(1, [_make_step(1, start_time="2024-01-01 09:00", end_time="2024-01-02 14:30")]),
+            _make_page(2, [_make_step(2, start_time="2024-01-01", end_time="2024-01-02 09:00")]),
+        ])
+        findings = _check_time_reversal_cross_page(pages)
+        assert len([f for f in findings if f["type"] == "time_reversal"]) == 1
+
+    def test_precise_curr_dates_before_datetime_prev_finding(self):
+        """curr 精确时间早于 prev date-only 整天（下一天）应报反转。"""
+        pages = _norm([
+            _make_page(1, [_make_step(1, start_time="2024-01-01 09:00", end_time="2024-01-01 14:30")]),
+            _make_page(2, [_make_step(2, start_time="2021-12-31 10:00", end_time="2021-12-31 11:00")]),
+        ])
+        findings = _check_time_reversal_cross_page(pages)
+        rev = [f for f in findings if f["type"] == "time_reversal"]
+        assert len(rev) == 1
+        # 年份相差 >2 年 → warning 而非 critical（提取错误提示路径）
+        assert rev[0]["severity"] == "warning"
+
+
+# ===========================================================================
+# _step_sort_key 排序键
+# ===========================================================================
+
+
+class TestStepSortKey:
+    """_step_sort_key 排序键转换。"""
+
+    def test_none_step_no(self):
+        """None step_no 应返回 9999.0（line 564）。"""
+        assert _step_sort_key(None) == 9999.0
+
+    def test_numeric_step_no(self):
+        """数字字符串应转为 float。"""
+        assert _step_sort_key("1") == 1.0
+        assert _step_sort_key(2) == 2.0
+
+    def test_decimal_step_no(self):
+        """小数 step_no 应正确解析。"""
+        assert _step_sort_key("3.1") == 3.1
+
+    def test_non_numeric_step_no(self):
+        """非数字字符串应返回 9999.0（line 568）。"""
+        assert _step_sort_key("abc") == 9999.0
+
+    def test_appendix_step_no(self):
+        """'附表1' 应提取数字部分。"""
+        assert _step_sort_key("附表1") == 1.0
+
+
+# ===========================================================================
+# R10: 工序编号连续性（缺页/漏页检测）
+# ===========================================================================
+
+
+class TestStepNumberGaps:
+    """R10: _check_step_number_gaps — 工序号缺口检测。"""
+
+    def _run(self, pages):
+        from core.rules.rule_time import _check_step_number_gaps
+        return _check_step_number_gaps(_norm(pages))
+
+    def test_gap_reports_warning(self):
+        """1,2,4,5 缺 3 → warning step_gap。"""
+        pages = [
+            _make_page(1, [_make_step("1"), _make_step("2")]),
+            _make_page(2, [_make_step("4"), _make_step("5")]),
+        ]
+        findings = self._run(pages)
+        assert len(findings) == 1
+        f = findings[0]
+        assert f["type"] == "step_gap"
+        assert f["severity"] == "warning"
+        assert "3" in f["description"]
+        assert "缺页" in f["description"] or "漏识别" in f["description"]
+
+    def test_continuous_no_finding(self):
+        """1..5 连续 → 无 finding。"""
+        pages = [
+            _make_page(1, [_make_step("1"), _make_step("2"), _make_step("3")]),
+            _make_page(2, [_make_step("4"), _make_step("5")]),
+        ]
+        assert self._run(pages) == []
+
+    def test_sub_step_merges_to_int(self):
+        """子工序 3.1 与 3 归并为同一编号，不算缺口。"""
+        pages = [
+            _make_page(1, [_make_step("1"), _make_step("2")]),
+            _make_page(2, [_make_step("3.1"), _make_step("3.2"), _make_step("4")]),
+        ]
+        assert self._run(pages) == []
+
+    def test_duplicate_step_across_pages_not_gap(self):
+        """同工序号跨页续表（去重后 1,2,3）→ 无 finding。"""
+        pages = [
+            _make_page(1, [_make_step("1"), _make_step("2")]),
+            _make_page(2, [_make_step("2"), _make_step("3")]),
+        ]
+        assert self._run(pages) == []
+
+    def test_too_few_steps_skipped(self):
+        """数值工序号 < 3 个（封面/附录）→ 不检查。"""
+        pages = [_make_page(1, [_make_step("1"), _make_step("3")])]
+        assert self._run(pages) == []
+
+    def test_non_numeric_ignored(self):
+        """'附表A' 等非数字编号不参与（不触发误报）。"""
+        pages = [
+            _make_page(1, [_make_step("1"), _make_step("2"), _make_step("附表A")]),
+        ]
+        assert self._run(pages) == []
+
+    def test_many_gaps_downgrade_info(self):
+        """缺口数超过已知数一半（编号体系混杂嫌疑）→ 降级 info。"""
+        # 已知 1,2,10 → 缺 3-9 共 7 个 > 已知 3 个的一半
+        pages = [
+            _make_page(1, [_make_step("1"), _make_step("2")]),
+            _make_page(2, [_make_step("10")]),
+        ]
+        findings = self._run(pages)
+        assert len(findings) == 1
+        assert findings[0]["severity"] == "info"
+        assert "编号体系" in findings[0]["description"]
+
+    def test_consecutive_gap_segment_merged(self):
+        """连续缺口段合并显示（缺 3,4 → '3-4'）。"""
+        pages = [
+            _make_page(1, [_make_step("1"), _make_step("2")]),
+            _make_page(2, [_make_step("5"), _make_step("6")]),
+        ]
+        findings = self._run(pages)
+        assert len(findings) == 1
+        assert "3-4" in findings[0]["description"]
+
+
+# ===========================================================================
+# R3: 参数越界检查（含 _judge_param / _judge_cell）
+# ===========================================================================
+
+
+class TestCheckParamOutOfSpec:
+    """R3: 参数越界检查 — 覆盖 _judge_param / _judge_cell 各分支。"""
+
+    def test_param_actual_none_no_finding(self):
+        """参数 value 为 None 时应跳过（line 629）。"""
+        pages = _norm([
+            _make_page(1, [
+                _make_step(1, parameters=[
+                    {"name": "温度", "spec_range": "20-30", "value": None, "unit": "℃"},
+                ]),
+            ]),
+        ])
+        llm_queue = []
+        findings = _check_param_out_of_spec(pages, llm_queue)
+        assert findings == []
+        assert llm_queue == []
+
+    def test_param_empty_actual_no_finding(self):
+        """参数 value 为空字符串时应跳过（line 629）。"""
+        pages = _norm([
+            _make_page(1, [
+                _make_step(1, parameters=[
+                    {"name": "温度", "spec_range": "20-30", "value": "", "unit": "℃"},
+                ]),
+            ]),
+        ])
+        llm_queue = []
+        findings = _check_param_out_of_spec(pages, llm_queue)
+        assert findings == []
+        assert llm_queue == []
+
+    def test_param_non_numeric_actual_goes_to_llm_queue(self):
+        """参数有数字 spec 但 value 非数字时应进入 llm_queue（lines 640-646）。"""
+        pages = _norm([
+            _make_page(1, [
+                _make_step(1, parameters=[
+                    {"name": "温度", "spec_range": "20-30", "value": "异常", "unit": "℃"},
+                ]),
+            ]),
+        ])
+        llm_queue = []
+        findings = _check_param_out_of_spec(pages, llm_queue)
+        assert findings == []
+        assert len(llm_queue) == 1
+        assert llm_queue[0]["kind"] == "param"
+        assert llm_queue[0]["name"] == "温度"
+
+    def test_param_out_of_spec_produces_finding(self):
+        """参数越界应产生 finding（lines 647-654）。"""
+        pages = _norm([
+            _make_page(1, [
+                _make_step(1, parameters=[
+                    {"name": "温度", "spec_range": "20-30", "value": "40.0", "unit": "℃"},
+                ]),
+            ]),
+        ])
+        llm_queue = []
+        findings = _check_param_out_of_spec(pages, llm_queue)
+        assert len(findings) == 1
+        assert findings[0]["type"] == "param_out_of_spec"
+        assert findings[0]["page"] == 1
+
+    def test_param_in_spec_no_finding(self):
+        """参数在规格内不应产生 finding。"""
+        pages = _norm([
+            _make_page(1, [
+                _make_step(1, parameters=[
+                    {"name": "温度", "spec_range": "20-30", "value": "25.0", "unit": "℃"},
+                ]),
+            ]),
+        ])
+        llm_queue = []
+        findings = _check_param_out_of_spec(pages, llm_queue)
+        assert findings == []
+        assert llm_queue == []
+
+    def test_cell_actual_none_no_finding(self):
+        """cell actual 为 None 时应跳过（line 672）。"""
+        pages = _norm([
+            _make_page(1, [
+                _make_step(1, measurements=[
+                    {"time": "10:00", "values": {"温度": {"actual": None, "spec": "20-30", "unit": "℃"}}},
+                ]),
+            ]),
+        ])
+        llm_queue = []
+        findings = _check_param_out_of_spec(pages, llm_queue)
+        assert findings == []
+        assert llm_queue == []
+
+    def test_cell_empty_actual_no_finding(self):
+        """cell actual 为空字符串时应跳过（line 672）。"""
+        pages = _norm([
+            _make_page(1, [
+                _make_step(1, measurements=[
+                    {"time": "10:00", "values": {"温度": {"actual": "", "spec": "20-30", "unit": "℃"}}},
+                ]),
+            ]),
+        ])
+        llm_queue = []
+        findings = _check_param_out_of_spec(pages, llm_queue)
+        assert findings == []
+        assert llm_queue == []
+
+    def test_cell_unparseable_spec_goes_to_llm_queue(self):
+        """cell spec 无法解析时应进入 llm_queue（lines 676-681）。"""
+        pages = _norm([
+            _make_page(1, [
+                _make_step(1, measurements=[
+                    {"time": "10:00", "values": {"外观": {"actual": "浑浊", "spec": "应澄清", "unit": ""}}},
+                ]),
+            ]),
+        ])
+        llm_queue = []
+        findings = _check_param_out_of_spec(pages, llm_queue)
+        assert findings == []
+        assert len(llm_queue) == 1
+        assert llm_queue[0]["kind"] == "cell"
+        assert llm_queue[0]["name"] == "外观"
+
+    def test_cell_non_numeric_actual_goes_to_llm_queue(self):
+        """cell 有数字 spec 但 actual 非数字时应进入 llm_queue（lines 684-689）。"""
+        pages = _norm([
+            _make_page(1, [
+                _make_step(1, measurements=[
+                    {"time": "10:00", "values": {"温度": {"actual": "异常", "spec": "20-30", "unit": "℃"}}},
+                ]),
+            ]),
+        ])
+        llm_queue = []
+        findings = _check_param_out_of_spec(pages, llm_queue)
+        assert findings == []
+        assert len(llm_queue) == 1
+        assert llm_queue[0]["kind"] == "cell"
+
+    def test_cell_out_of_spec_produces_finding(self):
+        """cell 越界应产生 finding（lines 690-708）。"""
+        pages = _norm([
+            _make_page(1, [
+                _make_step(1, measurements=[
+                    {"time": "10:00", "values": {"温度": {"actual": "40.0", "spec": "20-30", "unit": "℃"}}},
+                ]),
+            ]),
+        ])
+        llm_queue = []
+        findings = _check_param_out_of_spec(pages, llm_queue)
+        assert len(findings) == 1
+        assert findings[0]["type"] == "param_out_of_spec"
+
+
+# ===========================================================================
+# R6: 完整性检查 — 重复 step 去重
+# ===========================================================================
+
+
+class TestCompletenessDedup:
+    """R6: completeness 重复 step 去重。"""
+
+    def test_duplicate_step_deduped(self):
+        """同页同 step_no 重复出现时，completeness finding 应去重。"""
+        pages = _norm([
+            _make_page(1, [
+                _make_step(1, start_time="2024-01-01 10:00", end_time="2024-01-01 11:00"),
+                _make_step(1, start_time="2024-01-01 10:30", end_time="2024-01-01 10:45"),
+            ]),
+        ])
+        findings = _check_completeness(pages)
+        # 两条同 step_no=1 的记录应去重，operator 和 reviewer 各只报一次
+        operator_findings = [f for f in findings if "操作人" in f.get("description", "")]
+        reviewer_findings = [f for f in findings if "复核" in f.get("description", "")]
+        assert len(operator_findings) == 1
+        assert len(reviewer_findings) == 1
+
+
+# ===========================================================================
+# R4: suspicious_date 边界条件
+# ===========================================================================
+
+
+class TestSuspiciousDatesEdge:
+    """R4: suspicious_date 边界条件。"""
+
+    def test_unparseable_date_skipped(self):
+        """无法提取年份的日期应被跳过（line 729）。"""
+        pages = _norm([
+            _make_page(1, [
+                _make_step(1, start_time="无效日期", end_time="也是无效的"),
+            ]),
+        ])
+        findings = _check_suspicious_dates(pages)
+        assert findings == []
+
+    def test_empty_page_info_no_finding(self):
+        """空 page_info 不应产生 finding。"""
+        pages = _norm([_make_page(1, [])])
+        findings = _check_suspicious_dates(pages)
+        assert findings == []
+
+    def test_signature_empty_sign_time_skipped(self):
+        """签名为空 sign_time 时应被跳过不崩溃。"""
+        pages = _norm([
+            _make_page(1, [
+                _make_step(1, start_time="2024-01-01 10:00", end_time="2024-01-01 11:00",
+                           signatures=[
+                               {"role": "operator", "name": "张三", "sign_time": ""},
+                           ]),
+            ]),
+        ])
+        findings = _check_suspicious_dates(pages)
+        # 空 sign_time 不应产生 suspicious_date finding
+        assert all("张三" not in f.get("description", "") for f in findings)
+
+
+# ===========================================================================
+# _build_summary 摘要构建
+# ===========================================================================
+
+
+class TestBuildSummary:
+    """_build_summary 摘要构建 — 覆盖所有字段分支。"""
+
+    def test_full_page_summary(self):
+        """完整页面应包含所有摘要字段（lines 990, 992, 994, 997, 1021）。"""
+        pages = _norm([
+            _make_page(1, [
+                _make_step(1, start_time="2024-01-01 10:00", end_time="2024-01-01 11:00",
+                           operator="张三", reviewer="李四",
+                           parameters=[{"name": "温度", "value": "25", "unit": "℃"}],
+                           measurements=[{"time": "10:00", "values": {"温度": {"actual": "25"}}}],
+                           signatures=[{"role": "operator", "name": "张三", "sign_time": "2024-01-01 11:30"}]),
+            ], findings=[
+                {"type": "test", "description": "test finding"},
+            ], page_info={
+                "title": "Test Page",
+                "production_date": "2024-01-01",
+                "batch_no": "BATCH001",
+            }, event_year_groups={"draft": [2024]}),
+        ])
+        summary = _build_summary(pages)
+        assert "标题: Test Page" in summary
+        assert "生产日期: 2024-01-01" in summary
+        assert "批号: BATCH001" in summary
+        assert "事件年份分组" in summary
+        assert "签名:" in summary
+        assert "张三" in summary
+
+    def test_empty_pages_returns_empty(self):
+        """空页面列表应返回空字符串。"""
+        assert _build_summary([]) == ""
+
+    def test_minimal_page(self):
+        """最小页面应至少包含页码标题。"""
+        pages = _norm([_make_page(1, [])])
+        summary = _build_summary(pages)
+        assert "第1页" in summary
+
+    def test_parameter_without_value_skipped(self):
+        """参数无 value 时应在摘要中跳过（不崩溃）。"""
+        pages = _norm([
+            _make_page(1, [
+                _make_step(1, start_time="2024-01-01 10:00", end_time="2024-01-01 11:00",
+                           parameters=[
+                               {"name": "有值参数", "value": "25", "unit": "℃"},
+                               {"name": "无值参数", "value": "", "unit": ""},
+                           ]),
+            ]),
+        ])
+        summary = _build_summary(pages)
+        assert "有值参数" in summary
+        # 无值参数不应出现在摘要中
+
+
+# ===========================================================================
+# 扩展单位归一化 — 制药常用单位（mg/g/kg/mL/L 等）+ fail-closed
+# ===========================================================================
+
+
+class TestUnitNormalizationExpanded:
+    """扩展单位换算表验证 — 制药常用质量/体积/浓度/压力单位。
+
+    GMP 安全核心：spec 和 actual 使用不同但可换算的单位时必须正确换算，
+    否则会导致漏报（不合格品被放行）。单位不一致且无换算规则时必须
+    fail-closed（返回 unit_mismatch 触发人工复核），绝不静默按原值比较。
+    """
+
+    def test_mg_to_g_conversion(self):
+        """spec="≤50mg", actual="0.1g"（=100mg，应不合格）。
+
+        0.1g 必须换算为 100mg 才能正确判定越界。
+        """
+        converted, note = _try_unit_normalize(0.1, "g", "≤50mg")
+        assert converted == 100  # 0.1g = 100mg
+        assert "normalized" in note
+
+    def test_unit_mismatch_fail_closed(self):
+        """spec="≤50mg", actual="0.1mol"（无换算规则）应 fail-closed。"""
+        converted, note = _try_unit_normalize(0.1, "mol", "≤50mg")
+        assert converted is None
+        assert note == "unit_mismatch"
+
+    def test_extract_compound_unit_mg_per_l(self):
+        """复合单位 mg/L 应被完整提取（不被 / 截断）。"""
+        assert _extract_unit("1.5mg/L") == "mg/l"
+        assert _extract_unit("100mg/mL") == "mg/ml"
+
+    def test_g_to_kg_conversion(self):
+        """1 g = 0.001 kg。"""
+        converted, note = _try_unit_normalize(100.0, "g", "≤0.5kg")
+        assert abs(converted - 0.1) < 0.0001  # 100g = 0.1kg
+        assert "normalized" in note
+
+    def test_ml_to_l_conversion(self):
+        """1 mL = 0.001 L。"""
+        converted, note = _try_unit_normalize(500.0, "ml", "0.5-1.0l")
+        assert abs(converted - 0.5) < 0.0001  # 500mL = 0.5L
+        assert "normalized" in note
+
+    def test_mg_per_ml_to_mg_per_l(self):
+        """1 mg/mL = 1000 mg/L。"""
+        converted, note = _try_unit_normalize(2.0, "mg/ml", "≤1000mg/l")
+        assert converted == 2000  # 2 mg/mL = 2000 mg/L（越界）
+        assert "normalized" in note
+
+    def test_bar_to_kpa_conversion(self):
+        """1 bar = 100 kPa。"""
+        converted, note = _try_unit_normalize(5.0, "bar", "≥200kpa")
+        assert converted == 500  # 5 bar = 500 kPa
+        assert "normalized" in note
+
+    def test_no_actual_unit_compares_as_is(self):
+        """actual 无单位时应按原值比较（不触发 mismatch）。"""
+        converted, note = _try_unit_normalize(25.0, "", "20-30mg")
+        assert converted == 25.0
+        assert note == ""
+
+
+# ===========================================================================
+# 科学计数法解析 — 1.5×10^3 / 1.5e3 / 10**3
+# ===========================================================================
+
+
+class TestScientificNotation:
+    """科学计数法展开验证。
+
+    GMP 安全核心：spec 如 "≤1.5×10^3 cfu/g" 必须展开为 1500 才能正确判定，
+    否则 0.1×10^3 这类实测值会被误解析为 0.1（漏报）。
+    """
+
+    def test_coefficient_times_power(self):
+        """1.5×10^3 / 1.5*10^3 应展开为 1500。"""
+        assert _expand_power_notation("1.5×10^3") == "1500"
+        assert _expand_power_notation("1.5*10^3") == "1500"
+
+    def test_e_notation(self):
+        """1.5e3 / 1.5E3 应展开为 1500。"""
+        assert _expand_power_notation("1.5e3") == "1500"
+        assert _expand_power_notation("1.5E3") == "1500"
+
+    def test_double_star(self):
+        """10**3 应展开为 1000。"""
+        assert _expand_power_notation("10**3") == "1000"
+
+    def test_e_notation_with_prefix(self):
+        """带前缀的科学计数法（≤1.5e3）应正确展开。"""
+        result = _expand_power_notation("≤1.5e3")
+        assert "1500" in result
+
+    def test_coefficient_times_power_in_spec(self):
+        """spec="≤1.5×10^3" 应解析为 high=1500。"""
+        expanded = _expand_power_notation("≤1.5×10^3")
+        bounds = _parse_spec(expanded)
+        assert bounds is not None
+        assert bounds.op == "le"
+        assert bounds.high == 1500.0
+
+    def test_e_notation_decimal_result(self):
+        """非整数结果应保留小数（1.5e2 = 150.0 → '150'）。"""
+        # 1.5 * 100 = 150.0 → 整数结果返回 '150'
+        assert _expand_power_notation("1.5e2") == "150"
+
+    def test_non_power_of_ten_base_not_expanded(self):
+        """基数非 10 的幂（如 1.5*30）不应被展开。"""
+        result = _expand_power_notation("1.5*30")
+        assert result == "1.5*30"
+
+    def test_superscript_still_works(self):
+        """Unicode 上标 10³ 应展开为 1000（回归保护）。"""
+        assert _expand_power_notation("10³") == "1000"
+        assert _expand_power_notation("10⁵") == "100000"
+
+
+# ===========================================================================
+# 端到端 fail-closed 集成 — 单位不一致时 _judge_param / _judge_cell 行为
+# ===========================================================================
+
+
+class TestUnitMismatchFailClosedIntegration:
+    """端到端验证：单位不一致且无换算规则时，_judge_param / _judge_cell
+    应产出 completeness finding（人工复核），而非静默比较或漏报。
+
+    GMP 安全核心：绝不能在不一致单位间静默比较（如 0.1mol vs ≤50mg），
+    否则 0.1 ≤ 50 会误判合格，导致不合格品放行。
+    """
+
+    def test_param_unit_mismatch_produces_spec_unverifiable_finding(self):
+        """spec="≤50mg", actual="0.1mol" 应产出 spec_unverifiable finding。
+
+        M2 类型修正：原误标 completeness（"内容不完整"），实为"规格无法核定"。
+        """
+        pages = _norm([
+            _make_page(1, [
+                _make_step(1, parameters=[
+                    {"name": "含量", "spec_range": "≤50mg", "value": "0.1mol", "unit": "mol"},
+                ]),
+            ]),
+        ])
+        llm_queue = []
+        findings = _check_param_out_of_spec(pages, llm_queue)
+        # 应产出 spec_unverifiable（人工复核），不进 llm_queue，不产出 param_out_of_spec
+        assert len(findings) == 1
+        assert findings[0]["type"] == "spec_unverifiable"
+        assert findings[0]["severity"] == "warning"
+        assert "单位不一致" in findings[0]["description"]
+        assert "需人工确认" in findings[0]["description"]
+        assert llm_queue == []
+
+    def test_cell_unit_mismatch_produces_spec_unverifiable_finding(self):
+        """cell 单位不一致且无换算规则时应产出 spec_unverifiable finding。"""
+        pages = _norm([
+            _make_page(1, [
+                _make_step(1, measurements=[
+                    {"time": "10:00", "values": {"压力": {"actual": "5bar", "spec": "≤50psi", "unit": "bar"}}},
+                ]),
+            ]),
+        ])
+        llm_queue = []
+        findings = _check_param_out_of_spec(pages, llm_queue)
+        assert len(findings) == 1
+        assert findings[0]["type"] == "spec_unverifiable"
+        assert "单位不一致" in findings[0]["description"]
+        assert llm_queue == []
+
+    def test_cell_unit_conversion_produces_out_of_spec(self):
+        """cell 有换算规则且越界时应产出 param_out_of_spec（不漏报）。
+
+        spec="≤0.3mpa", actual="5bar"（=0.5mpa > 0.3mpa 越界）。
+        """
+        pages = _norm([
+            _make_page(1, [
+                _make_step(1, measurements=[
+                    {"time": "10:00", "values": {"压力": {"actual": "5bar", "spec": "≤0.3mpa", "unit": "bar"}}},
+                ]),
+            ]),
+        ])
+        llm_queue = []
+        findings = _check_param_out_of_spec(pages, llm_queue)
+        assert len(findings) == 1
+        assert findings[0]["type"] == "param_out_of_spec"
+        assert "normalized" in findings[0]["description"]
+
+    def test_param_unit_conversion_prevents_false_negative(self):
+        """spec="≤50mg", actual="0.1g"（=100mg）应判越界，不漏报。"""
+        pages = _norm([
+            _make_page(1, [
+                _make_step(1, parameters=[
+                    {"name": "杂质", "spec_range": "≤50mg", "value": "0.1g", "unit": "g"},
+                ]),
+            ]),
+        ])
+        llm_queue = []
+        findings = _check_param_out_of_spec(pages, llm_queue)
+        # 0.1g = 100mg > 50mg → 越界，应产出 param_out_of_spec
+        assert len(findings) == 1
+        assert findings[0]["type"] == "param_out_of_spec"
+        assert "归一化" in findings[0]["description"] or "normalized" in findings[0]["description"]
+
+
+# ===========================================================================
+# R7: 批号跨页一致性检查
+# ===========================================================================
+
+
+class TestBatchConsistency:
+    """R7: 批号跨页一致性 — 不同批号指示装订错误或混批（严重 GMP 缺陷）。
+
+    测试数据匹配生产 schema：batch_no 嵌套在 page_info 中（与
+    _normalize_pages 输出格式一致），不再使用顶层 batch_no。
+    """
+
+    def test_single_batch_no_finding(self):
+        pages = [
+            {"page": 1, "page_info": {"batch_no": "B202201"}},
+            {"page": 2, "page_info": {"batch_no": "B202201"}},
+        ]
+        findings = _check_batch_consistency(pages)
+        assert findings == []
+
+    def test_multiple_batch_nos_critical(self):
+        pages = [
+            {"page": 1, "page_info": {"batch_no": "B202201"}},
+            {"page": 2, "page_info": {"batch_no": "B202202"}},
+        ]
+        findings = _check_batch_consistency(pages)
+        assert len(findings) == 1
+        assert findings[0]["severity"] == "critical"
+        assert findings[0]["type"] == "batch_inconsistency"
+        assert "装订错误" in findings[0]["description"]
+
+    def test_pages_without_batch_no_skipped(self):
+        pages = [
+            {"page": 1, "page_info": {}},
+            {"page": 2, "page_info": {"batch_no": "B202201"}},
+        ]
+        findings = _check_batch_consistency(pages)
+        assert findings == []
+
+    def test_ocr_variants_of_same_batch_merged(self):
+        """真实 51 页批记录：同一批号出现 15 种 OCR 变体
+        （空格/·/° 分隔符、截断提取、i→1 数字混淆、-02~-06 工序后缀），
+        归一化后应归并为同一批号 → 不报 critical。"""
+        variants = [
+            "1127011N 250101", "1127011N250101-02", "1127011N 250101 -03",
+            "1127011N·250101 -04", "112701", "1127011N·250101-04",
+            "1127011N250101-05", "1127011N 250101 -05", "1127011N·250101-06",
+            "1127011N", "1127011N250101", "1127011N 250101 -04",
+            "1127011N 25010i", "1127011N250101-03",
+        ]
+        pages = [{"page": i + 1, "page_info": {"batch_no": v}} for i, v in enumerate(variants)]
+        findings = _check_batch_consistency(pages)
+        assert findings == []
+
+    def test_genuine_different_batch_not_merged(self):
+        """真实不同批号（B202201 vs B202202）仍报 critical —
+        归一化只针对分隔符/截断/工序后缀，不吞真实批次差异。"""
+        pages = [
+            {"page": 1, "page_info": {"batch_no": "1127011N 250101"}},
+            {"page": 2, "page_info": {"batch_no": "1127011N250101-02"}},
+            {"page": 5, "page_info": {"batch_no": "2245D P20260115"}},
+        ]
+        findings = _check_batch_consistency(pages)
+        assert len(findings) == 1
+        assert findings[0]["severity"] == "critical"
+        assert "2245D P20260115" in findings[0]["ocr_text"]
+        assert "已归并" in findings[0]["description"]
+
+    def test_batch_no_normalizer(self):
+        from core.rules.parsing import _normalize_batch_no
+
+        assert _normalize_batch_no("1127011N 250101") == "1127011N250101"
+        assert _normalize_batch_no("1127011N·250101 -04") == "1127011N250101-04"
+        assert _normalize_batch_no("1127011N° 241203") == "1127011N241203"
+        assert _normalize_batch_no("1127011N 25010i") == "1127011N250101"
+        assert _normalize_batch_no("　1127011N２５０１０１　") == "1127011N250101"
+        assert _normalize_batch_no("") == ""
+        assert _normalize_batch_no(None) == ""
+
+    def test_batch_no_normalizer_strips_symbol_noise(self):
+        """真实轮次实测的符号噪声（`^*`、`/`）必须被剥离 —— 它们是 OCR 把
+        上标/标点混进批号，不是批号的有效内容（"-" 例外，留给工序后缀切分）。"""
+        from core.rules.parsing import _normalize_batch_no
+
+        assert _normalize_batch_no("1127011N^*250101") == "1127011N250101"
+        assert _normalize_batch_no("11270111/250101") == "11270111250101"
+        assert _normalize_batch_no("1127011N(250101)") == "1127011N250101"
+        assert _normalize_batch_no("1127011N·250101-04") == "1127011N250101-04"
+
+    def test_symbol_and_single_char_variants_voted_away(self):
+        """R2 投票归一：归一后仍会剩"多组批号"，但逐组看是**同一批号**的 OCR
+        写法 —— `^*` 符号噪声、`/` 分隔符、`N`↔`1` 单字符误读。多数读法覆盖
+        ≥60% 时，编辑距离 ≤1 的组被吸收为变体 → 不再报 critical。"""
+        variants = (
+            ["1127011N250101"] * 8
+            + ["1127011N^*250101"] * 5
+            + ["11270111/250101"] * 3
+        )
+        pages = [{"page": i + 1, "page_info": {"batch_no": v}}
+                 for i, v in enumerate(variants)]
+        assert _check_batch_consistency(pages) == []
+
+    def test_vote_not_decisive_reports_all_groups(self):
+        """多数批号覆盖不足 `_BATCH_VOTE_MIN_SHARE` → 投票不决定性 →
+        近邻变体也照原样全报（保守：宁可多报，不可把真实混批吃掉）。"""
+        variants = ["1127011N250101"] * 2 + ["11270111250101"] * 2
+        pages = [{"page": i + 1, "page_info": {"batch_no": v}}
+                 for i, v in enumerate(variants)]
+        findings = _check_batch_consistency(pages)
+        assert len(findings) == 1
+        assert "检测到 2 组不同批号" in findings[0]["description"]
+
+    def test_vote_absorption_is_disclosed(self):
+        """被归一吸收的变体数量与被吸收的**别名读法**必须**明示**在描述里
+        （不静默归一）。"""
+        variants = (
+            ["1127011N250101"] * 10
+            + ["11270111250101"] * 2      # 单字符近邻（N→1）→ 被吸收
+            + ["2245DP20260115"] * 2      # 真实不同批号 → 存活
+        )
+        pages = [{"page": i + 1, "page_info": {"batch_no": v}}
+                 for i, v in enumerate(variants)]
+        findings = _check_batch_consistency(pages)
+        assert len(findings) == 1
+        desc = findings[0]["description"]
+        assert "已归并 1 个" in desc
+        # 别名必须点名，复核员才知道哪个读法被并掉了
+        assert "11270111250101" in desc
+        assert "并入基准" in desc
+        assert "2245DP20260115" in findings[0]["ocr_text"]
+
+
+# ===========================================================================
+# QA 签名检查（R6 扩展）
+# ===========================================================================
+
+
+class TestQaSignatureCheck:
+    """QA 签名检查 — 关键操作应有 QA 签名（info 级提示，避免误报过多）。"""
+
+    def test_missing_qa_signature(self):
+        pages = [{
+            "page": 1,
+            "steps": [{
+                "step_no": 1,
+                "operation": "称量",
+                "start_time": "2022-05-07 14:00",
+                "end_time": "2022-05-07 15:00",
+                "signatures": [{"role": "operator", "name": "张三"}],
+            }],
+        }]
+        findings = _check_completeness(pages)
+        qa_findings = [f for f in findings if "QA" in f["description"]]
+        assert len(qa_findings) == 1
+
+
+# ===========================================================================
+# 步骤无日期检查（R6 扩展）
+# ===========================================================================
+
+
+class TestStepWithoutDate:
+    """步骤无日期检查 — 有操作描述但无执行时间的步骤应被标记（GMP 可追溯性要求）。"""
+
+    def test_step_with_operation_but_no_time(self):
+        pages = [{
+            "page": 1,
+            "steps": [{
+                "step_no": 1,
+                "operation": "称量原料",
+                "signatures": [{"role": "operator", "name": "张三"}],
+            }],
+        }]
+        findings = _check_completeness(pages)
+        no_time_findings = [f for f in findings if "缺少执行时间" in f["description"]]
+        assert len(no_time_findings) == 1
+
+
+# ===========================================================================
+# R8: 低置信度参数值人工复核提示
+# ===========================================================================
+
+
+class TestLowConfidenceParams:
+    """R8: 低置信度参数值标记人工复核。
+
+    OCR 可能误读手写数值（如 "0.974" → "0.914"），低置信度值即使通过规格
+    检查也可能掩盖真实的越界结果，需提示人工核对原值。
+
+    注意：原 measurements 中的 confidence/name/actual 字段在 v3 prompt
+    schema 中不存在（measurements 为 {time, values:{列名:{spec,actual,unit,in_spec}}}），
+    故移除针对单个 measurement 的低置信度检查，仅保留 overall_confidence
+    页级检查（该字段由 per-page LLM 实际产出）。
+    """
+
+    def test_high_confidence_not_flagged(self):
+        pages = [{
+            "page": 1,
+            "steps": [{
+                "step_no": 1,
+                "measurements": [
+                    {"name": "温度", "actual": "25.5", "confidence": "high"},
+                ],
+            }],
+        }]
+        findings = _check_low_confidence_params(pages)
+        assert findings == []
+
+    def test_page_level_low_confidence(self):
+        pages = [{"page": 1, "overall_confidence": "low", "steps": []}]
+        findings = _check_low_confidence_params(pages)
+        assert len(findings) == 1
+        assert "整体识别置信度较低" in findings[0]["description"]
+
+    def test_ocr_empty_page_not_flagged(self):
+        """空页（_ocr_empty）不触发低置信度规则 — 与"此页无 OCR 内容，
+        未执行分析"横幅矛盾（空页未分析，"手写体干扰"是误导性描述）。"""
+        # data 嵌套形态（stage3 → analyze_cross_page 生产路径）
+        pages_nested = [{"page": 5, "data": {"overall_confidence": "low", "_ocr_empty": True}}]
+        assert _check_low_confidence_params(pages_nested) == []
+        # 顶层形态（单测直传）
+        pages_top = [{"page": 5, "_ocr_empty": True, "overall_confidence": "low"}]
+        assert _check_low_confidence_params(pages_top) == []
+
+    def test_no_confidence_field_not_flagged(self):
+        pages = [{
+            "page": 1,
+            "steps": [{
+                "step_no": 1,
+                "measurements": [{"name": "温度", "actual": "25.5"}],
+            }],
+        }]
+        findings = _check_low_confidence_params(pages)
+        assert findings == []
+
+
+# ===========================================================================
+# Phase 10: 用户自定义合规规则注入
+# ===========================================================================
+
+
+class TestUserRulesInjection:
+    """用户规则注入 LLM 提示词（_user_rules_section + _llm_based_check）。"""
+
+    def test_no_active_rules_returns_none_section(self, tmp_path):
+        import json
+        cfg = tmp_path / "config.json"
+        cfg.write_text(json.dumps({"user_rules": [
+            {"text": "停用规则", "active": False},
+        ]}), encoding="utf-8")
+        with patch("config._config_path", return_value=cfg):
+            section, rules_hash = _user_rules_section()
+        assert section == ""
+        assert rules_hash == "none"
+
+    def test_no_rules_returns_none_section(self, tmp_path):
+        import json
+        cfg = tmp_path / "config.json"
+        cfg.write_text(json.dumps({"LLM_PROVIDER": "deepseek"}), encoding="utf-8")
+        with patch("config._config_path", return_value=cfg):
+            section, rules_hash = _user_rules_section()
+        assert section == ""
+        assert rules_hash == "none"
+
+    def test_active_rules_produce_section_and_stable_hash(self, tmp_path):
+        import json
+        cfg = tmp_path / "config.json"
+        cfg.write_text(json.dumps({"user_rules": [
+            {"id": "fixed-1", "text": "中间体储存温度必须 15-25°C", "active": True},
+            {"id": "fixed-2", "text": "关键工序必须双人复核", "active": True},
+        ]}), encoding="utf-8")
+        with patch("config._config_path", return_value=cfg):
+            section, rules_hash = _user_rules_section()
+        assert "15-25°C" in section
+        assert "双人复核" in section
+        assert "[规则ID: " in section  # 每条规则注入唯一 ID 供 LLM 回填 rule_id
+        assert rules_hash != "none"
+        assert len(rules_hash) == 8
+        with patch("config._config_path", return_value=cfg):
+            _, rules_hash2 = _user_rules_section()
+        assert rules_hash2 == rules_hash  # 相同内容 → 相同 hash
+
+    def test_llm_based_check_injects_user_rules(self, tmp_path):
+        """启用规则时 prompt 应包含规则段，prompt_version 应带 rules hash。"""
+        import json
+        cfg = tmp_path / "config.json"
+        cfg.write_text(json.dumps({"user_rules": [
+            {"text": "产品 X 储存温度必须 15-25°C", "active": True},
+        ]}), encoding="utf-8")
+
+        captured = {}
+
+        class FakeClient:
+            async def chat_json(self, system_prompt, user_content, **kwargs):
+                captured["system"] = system_prompt
+                captured["user"] = user_content
+                captured["audit"] = kwargs.get("audit_ctx", {})
+                return []
+
+        with patch("config._config_path", return_value=cfg), \
+             patch("core.rules.llm_checks.get_llm_client",
+                   return_value=FakeClient()):
+            asyncio.run(_llm_based_check("摘要内容", job_id="job-1"))
+
+        assert "15-25°C" in captured["user"]
+        assert "<USER_RULES>" in captured["user"]
+        assert captured["user"].startswith("<USER_RULES>")
+        assert captured["user"].endswith("摘要内容")
+        assert captured["audit"]["prompt_version"].startswith("semantic_v2+rules")
+
+    def test_llm_based_check_without_rules_uses_semantic_v2(self, tmp_path):
+        """无规则时 prompt_version 应为 semantic_v2。"""
+        import json
+        cfg = tmp_path / "config.json"
+        cfg.write_text(json.dumps({}), encoding="utf-8")
+
+        captured = {}
+
+        class FakeClient:
+            async def chat_json(self, system_prompt, user_content, **kwargs):
+                captured["user"] = user_content
+                captured["audit"] = kwargs.get("audit_ctx", {})
+                return []
+
+        with patch("config._config_path", return_value=cfg), \
+             patch("core.rules.llm_checks.get_llm_client",
+                   return_value=FakeClient()):
+            asyncio.run(_llm_based_check("摘要内容", job_id="job-1"))
+
+        # Round 10 #3: exemplar feedback may be prepended to user message
+        assert "摘要内容" in captured["user"]
+        # prompt_version includes +fbN suffix when exemplars are injected
+        assert "semantic_v2" in captured["audit"]["prompt_version"]
+
+    def test_user_rule_findings_marked_with_user_rule_source(self, tmp_path):
+        """type=user_rule **且规则存在**时标记 source=user_rule，其余保持 llm_cross。
+
+        R95 收窄：旧实现只看 `type == "user_rule"` 就打 `source=user_rule`，
+        于是**未配置任何规则**时模型编出来的 user_rule 也拿到"确定性判据"分级
+        （`finding_quality.REVIEW_TIER_BY_SOURCE` 把 user_rule 算 rule 层），
+        且绕过 `llm_finding_guard`（`LLM_SOURCES` 不含 user_rule）⇒ 误报被当成
+        规则命中。现在 `source` 只在 rule_id 命中**启用规则集合**时保留；无指称
+        的条目降级为 llm_cross 并按文案回填类型。正/负两个分支都在本用例里钉住。
+        """
+        import json
+        cfg = tmp_path / "config.json"
+        cfg.write_text(json.dumps({"user_rules": [
+            {"id": "abc123", "text": "储存温度必须 15-25°C", "active": True},
+        ]}), encoding="utf-8")
+
+        class FakeClient:
+            async def chat_json(self, system_prompt, user_content, **kwargs):
+                return [
+                    # 有指称：rule_id 命中启用集合 → 保留 user_rule
+                    {"page": 1, "type": "user_rule", "severity": "warning",
+                     "description": "储存温度 30°C 超出用户规则 15-25°C",
+                     "rule_id": "abc123"},
+                    # 非 user_rule 类型不受影响
+                    {"page": 2, "type": "signature_mismatch", "severity": "critical",
+                     "description": "签名不一致"},
+                    # 无指称：没给 rule_id → 降级 + 按"判定词+区间"回填类型
+                    {"page": 3, "type": "user_rule", "severity": "warning",
+                     "description": "储存温度 30°C 超出用户规则 15-25°C"},
+                ]
+
+        with patch("config._config_path", return_value=cfg), \
+             patch("core.rules.llm_checks.get_llm_client",
+                   return_value=FakeClient()):
+            findings = asyncio.run(_llm_based_check("摘要", job_id="job-1"))
+
+        by_page = {f["page"]: f for f in findings}
+        assert by_page[1]["source"] == "user_rule"
+        assert by_page[1]["rule_id"] == "abc123"
+        assert by_page[1]["type"] == "user_rule"
+        assert by_page[2]["source"] == "llm_cross"
+        assert by_page[3]["source"] == "llm_cross"
+        assert by_page[3]["rule_id"] is None
+        # "超出…15-25°C" 是真超差断言 ⇒ 不得洗成 completeness
+        assert by_page[3]["type"] == "param_out_of_spec"
+
+    def test_user_rule_findings_carry_valid_rule_id(self, tmp_path):
+        """rule_id 只在启用规则集合内保留；幻觉/缺失 id 一律置 None（防伪）。"""
+        import json
+        cfg = tmp_path / "config.json"
+        cfg.write_text(json.dumps({"user_rules": [
+            {"id": "abc123", "text": "储存温度必须 15-25°C", "active": True},
+            {"id": "def456", "text": "双人复核", "active": False},
+        ]}), encoding="utf-8")
+
+        class FakeClient:
+            async def chat_json(self, system_prompt, user_content, **kwargs):
+                return [
+                    # 合法 id → 保留
+                    {"page": 1, "type": "user_rule", "severity": "warning",
+                     "description": "温度超标", "rule_id": "abc123"},
+                    # 幻觉 id（不在启用集合，且指向停用规则）→ None
+                    {"page": 2, "type": "user_rule", "severity": "warning",
+                     "description": "复核缺失", "rule_id": "def456"},
+                    # 完全编造 → None
+                    {"page": 3, "type": "user_rule", "severity": "warning",
+                     "description": "混批", "rule_id": "fake999"},
+                    # 缺失 → None
+                    {"page": 4, "type": "user_rule", "severity": "info",
+                     "description": "无 id"},
+                    # 非 user_rule 类型不受影响
+                    {"page": 5, "type": "signature_mismatch", "severity": "critical",
+                     "description": "签名不一致", "rule_id": "abc123"},
+                ]
+
+        with patch("config._config_path", return_value=cfg), \
+             patch("core.rules.llm_checks.get_llm_client",
+                   return_value=FakeClient()):
+            findings = asyncio.run(_llm_based_check("摘要", job_id="job-1"))
+
+        by_page = {f["page"]: f["rule_id"] for f in findings}
+        assert by_page[1] == "abc123"
+        assert by_page[2] is None
+        assert by_page[3] is None
+        assert by_page[4] is None
+        assert by_page[5] is None  # 非 user_rule 一律不带 rule_id
+
+
+# ─── F4 跨页测量校验规则（R-M1 / R-M2）────────────────────────
+
+
+class TestMeasurementCrossPageRules:
+    """R-M1 跨页测量时间序列 + R-M2 跨页列一致性。"""
+
+    def test_sequence_reversal_across_pages_flagged(self):
+        from core.cross_page_analyzer import _check_measurement_time_sequence
+
+        pages = _norm([
+            _make_page(1, [_make_step(3, measurements=[
+                {"time": "09:00", "values": {"A": _make_cell(1, "1")}},
+                {"time": "09:10", "values": {"A": _make_cell(1, "1")}},
+            ])], page_info={"production_date": "2025-06-01"}),
+            # 第 2 页同一工序测量时间倒序（早于第 1 页最后一行）
+            _make_page(2, [_make_step(3, measurements=[
+                {"time": "08:50", "values": {"A": _make_cell(1, "1")}},
+            ])], page_info={"production_date": "2025-06-01"}),
+        ])
+        findings = _check_measurement_time_sequence(pages)
+        assert len(findings) == 1
+        assert findings[0]["severity"] == "warning"
+        assert "工序3" in findings[0]["description"]
+        assert findings[0]["page"] == 2
+        assert "09:10" in findings[0]["ocr_text"] and "08:50" in findings[0]["ocr_text"]
+
+    def test_sequence_monotonic_no_finding(self):
+        from core.cross_page_analyzer import _check_measurement_time_sequence
+
+        pages = _norm([
+            _make_page(1, [_make_step(3, measurements=[
+                {"time": "09:00", "values": {"A": _make_cell(1, "1")}},
+                {"time": "09:10", "values": {"A": _make_cell(1, "1")}},
+            ])], page_info={"production_date": "2025-06-01"}),
+            _make_page(2, [_make_step(3, measurements=[
+                {"time": "09:20", "values": {"A": _make_cell(1, "1")}},
+            ])], page_info={"production_date": "2025-06-01"}),
+        ])
+        assert _check_measurement_time_sequence(pages) == []
+
+    def test_sequence_equal_times_not_flagged(self):
+        """同一分钟多次重复测量（相等）不算倒序。"""
+        from core.cross_page_analyzer import _check_measurement_time_sequence
+
+        pages = _norm([
+            _make_page(1, [_make_step(3, measurements=[
+                {"time": "09:00", "values": {"A": _make_cell(1, "1")}},
+                {"time": "09:00", "values": {"A": _make_cell(1, "1")}},
+            ])], page_info={"production_date": "2025-06-01"}),
+        ])
+        assert _check_measurement_time_sequence(pages) == []
+
+    def test_sequence_unparseable_breaks_continuity(self):
+        """解析失败的时间点打断连续性（不误报跨断点倒序）。"""
+        from core.cross_page_analyzer import _check_measurement_time_sequence
+
+        pages = _norm([
+            _make_page(1, [_make_step(3, measurements=[
+                {"time": "09:00", "values": {"A": _make_cell(1, "1")}},
+                {"time": "疑似乱码!!", "values": {"A": _make_cell(1, "1")}},
+                {"time": "08:00", "values": {"A": _make_cell(1, "1")}},
+            ])], page_info={"production_date": "2025-06-01"}),
+        ])
+        assert _check_measurement_time_sequence(pages) == []
+
+    def test_sequence_date_only_prev_vs_same_day_datetime_no_finding(self):
+        """date-only 行（2025-06-01 整天）与同日带时间行（14:30 在前）不应误报
+        倒序（年月日 vs 年月日小时分钟混比场景：修复前 14:30 > 00:00 误报）。"""
+        from core.cross_page_analyzer import _check_measurement_time_sequence
+
+        pages = _norm([
+            _make_page(1, [_make_step(3, measurements=[
+                {"time": "2025-06-01 14:30", "values": {"A": _make_cell(1, "1")}},
+                {"time": "2025-06-01", "values": {"A": _make_cell(1, "1")}},
+            ])], page_info={"production_date": "2025-06-01"}),
+        ])
+        assert _check_measurement_time_sequence(pages) == []
+
+    def test_sequence_date_only_prev_previous_day_vs_datetime_finding(self):
+        """date-only 行整天在前、带时间行（前一日）在后应报倒序。"""
+        from core.cross_page_analyzer import _check_measurement_time_sequence
+
+        pages = _norm([
+            _make_page(1, [_make_step(3, measurements=[
+                {"time": "2025-06-02", "values": {"A": _make_cell(1, "1")}},
+                {"time": "2025-06-01 14:30", "values": {"A": _make_cell(1, "1")}},
+            ])], page_info={"production_date": "2025-06-01"}),
+        ])
+        findings = _check_measurement_time_sequence(pages)
+        assert len(findings) == 1
+        assert "2025-06-02" in findings[0]["ocr_text"]
+
+    def test_missing_column_across_pages_flagged(self):
+        from core.cross_page_analyzer import _check_measurement_column_consistency
+
+        pages = _norm([
+            _make_page(1, [_make_step(4, measurements=[
+                {"time": "09:00", "values": {
+                    "温度": _make_cell(25, "20-30", "℃"),
+                    "湿度": _make_cell(50, "40-60", "%"),
+                    "压力": _make_cell(2.0, "1-3", "kPa"),
+                }},
+            ])]),
+            # 第 2 页缺"压力"列（整列提取丢失）
+            _make_page(2, [_make_step(4, measurements=[
+                {"time": "09:10", "values": {
+                    "温度": _make_cell(25, "20-30", "℃"),
+                    "湿度": _make_cell(50, "40-60", "%"),
+                }},
+            ])]),
+        ])
+        findings = _check_measurement_column_consistency(pages)
+        assert len(findings) == 1
+        assert findings[0]["page"] == 2
+        assert findings[0]["severity"] == "info"
+        assert "压力" in findings[0]["description"]
+
+    def test_consistent_columns_no_finding(self):
+        from core.cross_page_analyzer import _check_measurement_column_consistency
+
+        pages = _norm([
+            _make_page(1, [_make_step(4, measurements=[
+                {"time": "09:00", "values": {
+                    "温度": _make_cell(25, "20-30", "℃"),
+                    "湿度": _make_cell(50, "40-60", "%"),
+                }},
+            ])]),
+            _make_page(2, [_make_step(4, measurements=[
+                {"time": "09:10", "values": {
+                    "温度": _make_cell(25, "20-30", "℃"),
+                    "湿度": _make_cell(50, "40-60", "%"),
+                }},
+            ])]),
+        ])
+        assert _check_measurement_column_consistency(pages) == []
+
+    def test_single_page_column_rule_skipped(self):
+        """单页（非跨页大表）不做列一致性检查，避免小样本误报。"""
+        from core.cross_page_analyzer import _check_measurement_column_consistency
+
+        pages = _norm([
+            _make_page(1, [_make_step(4, measurements=[
+                {"time": "09:00", "values": {
+                    "温度": _make_cell(25, "20-30", "℃"),
+                }},
+            ])]),
+        ])
+        assert _check_measurement_column_consistency(pages) == []
+
+
+class TestHandwrittenRule:
+
+    def test_handwritten_content_surfaced(self):
+        from core.cross_page_analyzer import _check_handwritten_notes
+
+        pages = _norm([
+            _make_page(1, [_make_step(2, start_time="09:00", end_time="09:30",
+                                      handwritten=["庞明女署2027.01.17"])]),
+        ])
+        findings = _check_handwritten_notes(pages)
+        assert len(findings) == 1
+        assert findings[0]["page"] == 1
+        assert findings[0]["type"] == "handwritten"
+        assert findings[0]["severity"] == "info"
+        assert findings[0]["source"] == "rule"
+        assert "庞明女署" in findings[0]["description"]
+        assert "人工核对" in findings[0]["description"]
+        assert "庞明女署" in findings[0]["ocr_text"]
+
+    def test_multiple_notes_single_finding(self):
+        from core.cross_page_analyzer import _check_handwritten_notes
+
+        pages = _norm([
+            _make_page(1, [_make_step(2, handwritten=["A", "B"])]),
+        ])
+        findings = _check_handwritten_notes(pages)
+        assert len(findings) == 1
+        assert "2 条" in findings[0]["description"]
+
+    def test_empty_and_missing_handwritten_no_finding(self):
+        from core.cross_page_analyzer import _check_handwritten_notes
+
+        pages = _norm([
+            _make_page(1, [_make_step(1), _make_step(2, handwritten=[])]),
+            _make_page(2, [_make_step(1, handwritten=["  "])]),
+        ])
+        assert _check_handwritten_notes(pages) == []
+
+    def test_dedup_repeated_step(self):
+        """LLM 可能重复输出同一 step —— 同一 (page, step_no, 内容) 只报一次。"""
+        from core.cross_page_analyzer import _check_handwritten_notes
+
+        pages = _norm([
+            _make_page(1, [
+                _make_step(2, handwritten=["庞明女署"]),
+                _make_step(2, handwritten=["庞明女署"]),
+            ]),
+        ])
+        findings = _check_handwritten_notes(pages)
+        assert len(findings) == 1

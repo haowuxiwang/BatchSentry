@@ -1,0 +1,458 @@
+/* ============================================================
+   Settings page — Notion 风格 (v3 Sidebar 重构版)
+   - 左侧 sidebar 导航: 参考 GitHub/Notion/Linear
+   - 4 个扁平 section: LLM / OCR / Rules / Feishu
+   - Active 状态: 浅蓝背景 + font-weight 500 (GitHub 模式)
+   - 响应式: 桌面 sidebar → 移动端横排 tabs
+   ============================================================ */
+
+/* ─── Sidebar Layout ─── */
+.settings-layout {
+  display: flex;
+  gap: 2rem;
+  align-items: flex-start;
+}
+
+/* ─── Desktop Sidebar — 参考 GitHub/Notion (240px) ─── */
+.settings-nav {
+  width: 240px;
+  flex-shrink: 0;
+  padding: 0 12px;
+  position: sticky;
+  top: 2.5rem;
+}
+.settings-nav-link {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 400;
+  color: hsl(var(--muted-foreground));
+  min-height: 36px;
+  text-decoration: none;
+  transition: background var(--motion-hover), color var(--motion-hover);
+  user-select: none;
+}
+.settings-nav-link:hover {
+  background: hsl(var(--muted) / 0.4);
+  color: hsl(var(--foreground));
+}
+.settings-nav-link.active {
+  background: hsl(var(--foreground));
+  color: hsl(var(--background));
+  font-weight: 500;
+}
+
+/* ─── Mobile Horizontal Tabs — 参考 GitHub Primer ─── */
+.settings-nav-mobile {
+  display: none;
+  width: 100%;
+  border-bottom: 1px solid hsl(var(--border));
+  gap: 0;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+.settings-nav-mobile::-webkit-scrollbar {
+  display: none;
+}
+.settings-nav-mobile .settings-nav-link {
+  border-radius: 0;
+  border-bottom: 2px solid transparent;
+  white-space: nowrap;
+  min-height: 44px;
+  padding: 10px 16px;
+  font-size: 13px;
+}
+.settings-nav-mobile .settings-nav-link.active {
+  background: transparent;
+  border-bottom-color: hsl(var(--foreground));
+}
+
+/* ─── Content Area ─── */
+.settings-panels {
+  flex: 1;
+  min-width: 0;
+}
+
+/* ─── 响应式: 窄屏 sidebar → 横排 tabs ─── */
+/* 桌面端: sidebar显示, tabs隐藏 */
+@media (min-width: 768px) {
+  .settings-nav {
+    display: flex;
+  }
+  .settings-nav-mobile {
+    display: none !important;
+  }
+}
+/* 移动端: sidebar隐藏, tabs显示 */
+@media (max-width: 767px) {
+  .settings-nav {
+    display: none !important;
+  }
+  .settings-nav-mobile {
+    display: flex;
+  }
+}
+html,
+body {
+  background: hsl(var(--background));
+  color: hsl(var(--foreground));
+  font-feature-settings: "cv11", "ss01";
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-thumb {
+  background: hsl(var(--border));
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: hsl(var(--muted-foreground) / 0.4);
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* 表单字段 — 统一尺寸 */
+.field-label {
+  display: block;
+  font-size: 14px;
+  font-weight: 500;
+  color: hsl(var(--foreground));
+  margin-bottom: 6px;
+}
+.field-hint {
+  /* WCAG 可读性：辅助文本最低可读字号 */
+  font-size: 13px;
+  color: hsl(var(--muted-foreground));
+  margin-top: 4px;
+}
+.input {
+  width: 100%;
+  padding: 7px 11px;
+  border: 1px solid hsl(var(--border));
+  border-radius: 6px;
+  background: hsl(var(--card));
+  color: hsl(var(--foreground));
+  font-size: 13px;
+  outline: none;
+  transition: border-color var(--motion-hover), box-shadow var(--motion-hover);
+}
+.input:focus {
+  border-color: hsl(var(--foreground));
+  box-shadow: 0 0 0 2px hsl(var(--foreground) / 0.08);
+}
+.input::placeholder {
+  color: hsl(var(--muted-foreground) / 0.5);
+}
+
+/* Segmented control — OCR 后端切换 */
+.seg {
+  display: inline-flex;
+  border: 1px solid hsl(var(--border));
+  border-radius: 6px;
+  overflow: hidden;
+  background: hsl(var(--card));
+}
+.seg button {
+  padding: 6px 16px;
+  font-size: 13px;
+  font-weight: 500;
+  background: transparent;
+  color: hsl(var(--muted-foreground));
+  border: none;
+  cursor: pointer;
+  transition: all var(--motion-hover);
+}
+.seg button:hover {
+  color: hsl(var(--foreground));
+  background: hsl(var(--muted) / 0.4);
+}
+.seg button.active {
+  background: hsl(var(--foreground));
+  color: hsl(var(--background));
+}
+
+/* 状态徽章 */
+.badge-ok {
+  color: hsl(var(--success));
+  font-size: 12px;
+}
+.badge-no {
+  color: hsl(var(--muted-foreground));
+  font-size: 12px;
+}
+
+/* ============================================================
+   统一按钮系统 — sidebar 底部操作按钮
+   测试连接: 边框次操作 (唯一实现在此的按钮，模板无 #save-btn)
+   ============================================================ */
+#test-conn-btn {
+  font-size: 13px;
+  font-weight: 500;
+  padding: 6px 16px;
+  min-height: 30px;
+  border-radius: 6px;
+  transition: all var(--motion-hover);
+  cursor: pointer;
+  background: hsl(var(--card));
+  color: hsl(var(--foreground));
+  border: 1px solid hsl(var(--border));
+}
+#test-conn-btn:hover:not(:disabled) {
+  background: hsl(var(--muted) / 0.4);
+  border-color: hsl(var(--muted-foreground) / 0.4);
+}
+#test-conn-btn:active:not(:disabled) {
+  transform: scale(0.98);
+}
+#test-conn-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* ============================================================
+   Provider 行 — Notion 风格扁平列表（P2-1: 去嵌套卡片）
+   外层 section 已是卡片容器，行内不再做边框/圆角/阴影 —
+   border-bottom 细分隔 + hover 背景，active 用左侧指示条
+   ============================================================ */
+.provider-row {
+  border-bottom: 1px solid hsl(var(--border));
+}
+.provider-row:last-child {
+  border-bottom: none;
+}
+.provider-row:hover {
+  background: hsl(var(--muted) / 0.25);
+}
+.provider-row.is-active {
+  background: hsl(var(--muted) / 0.25);
+}
+.provider-row.is-active::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: hsl(var(--foreground));
+}
+.provider-row {
+  position: relative;
+}
+.provider-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  cursor: pointer;
+  user-select: none;
+  transition: background var(--motion-pressed);
+}
+.provider-head:hover {
+  background: hsl(var(--muted) / 0.25);
+}
+.provider-name-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+}
+.provider-name {
+  font-size: 13px;
+  font-weight: 500;
+  color: hsl(var(--foreground));
+}
+.provider-active-tag {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 1px 7px;
+  background: hsl(var(--foreground));
+  color: hsl(var(--background));
+  border-radius: 3px;
+  line-height: 1.6;
+  letter-spacing: 0.02em;
+}
+.provider-status {
+  font-size: 12px;
+  color: hsl(var(--muted-foreground));
+  margin-left: 8px;
+}
+
+/* ============================================================
+   Provider 操作按钮 — 统一 ghost 风格
+   12px 字体, 24px 高度, 紧凑排列
+   ============================================================ */
+.provider-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.provider-use-btn,
+.provider-test-btn,
+.provider-toggle-btn,
+.provider-remove-btn {
+  /* WCAG 2.5.8 目标尺寸：高度 24px；字号 12px（11px→12px 可读性） */
+  font-size: 12px;
+  font-weight: 500;
+  padding: 4px 10px;
+  height: 24px;
+  background: transparent;
+  border: 1px solid transparent;
+  color: hsl(var(--muted-foreground));
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all var(--motion-pressed);
+  white-space: nowrap;
+}
+/* "设为当前" — 轻量主操作 */
+.provider-use-btn {
+  color: hsl(var(--foreground));
+  background: hsl(var(--muted) / 0.3);
+}
+.provider-use-btn:hover {
+  background: hsl(var(--muted) / 0.5);
+}
+/* "测试" — 次操作 */
+.provider-test-btn:hover {
+  color: hsl(var(--foreground));
+  background: hsl(var(--muted) / 0.4);
+}
+/* "更换 Key" / "展开" — 边框按钮 */
+.provider-toggle-btn {
+  border-color: hsl(var(--border));
+  color: hsl(var(--foreground));
+}
+.provider-toggle-btn:hover {
+  background: hsl(var(--muted) / 0.4);
+  border-color: hsl(var(--muted-foreground) / 0.4);
+}
+/* "移除" — 危险操作 */
+.provider-remove-btn:hover {
+  color: hsl(var(--destructive));
+  background: hsl(var(--destructive) / 0.06);
+}
+/* active 按钮反馈 */
+.provider-use-btn:active,
+.provider-test-btn:active,
+.provider-toggle-btn:active,
+.provider-remove-btn:active {
+  transform: scale(0.96);
+}
+
+/* Provider body 展开区 */
+.provider-body {
+  padding: 0 14px 14px 14px;
+  border-top: 1px solid hsl(var(--border));
+  animation: providerExpand var(--motion-hover);
+}
+@keyframes providerExpand {
+  from { opacity: 0; transform: translateY(-2px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* ============================================================
+   API Key 展示 + 操作按钮
+   ============================================================ */
+.key-display {
+  padding: 7px 11px;
+  border: 1px solid hsl(var(--border));
+  border-radius: 6px;
+  background: hsl(var(--muted) / 0.15);
+  font-size: 12px;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  color: hsl(var(--foreground));
+  letter-spacing: 0.02em;
+}
+.key-display .muted {
+  color: hsl(var(--muted-foreground));
+  font-family: inherit;
+}
+.key-replace-section {
+  margin-top: 8px;
+  padding: 10px;
+  border: 1px solid hsl(var(--border));
+  border-radius: 6px;
+  background: hsl(var(--card));
+}
+
+/* 小按钮 — provider 卡片内操作 (保存Key/移除Key/取消) */
+.btn-primary-small,
+.btn-danger-small,
+.btn-text {
+  font-size: 12px;
+  font-weight: 500;
+  padding: 4px 10px;
+  height: 24px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all var(--motion-pressed);
+  white-space: nowrap;
+}
+.btn-primary-small {
+  background: hsl(var(--foreground));
+  color: hsl(var(--background));
+  border: 1px solid hsl(var(--foreground));
+}
+.btn-primary-small:hover:not(:disabled) {
+  opacity: 0.88;
+}
+.btn-primary-small:active:not(:disabled) {
+  transform: scale(0.96);
+}
+.btn-primary-small:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.btn-danger-small {
+  background: transparent;
+  color: hsl(var(--destructive));
+  border: 1px solid hsl(var(--destructive) / 0.3);
+}
+.btn-danger-small:hover {
+  background: hsl(var(--destructive) / 0.06);
+  border-color: hsl(var(--destructive) / 0.6);
+}
+.btn-danger-small:active {
+  transform: scale(0.96);
+}
+.btn-text {
+  background: transparent;
+  color: hsl(var(--muted-foreground));
+  border: none;
+}
+.btn-text:hover {
+  color: hsl(var(--foreground));
+}
+
+/* Provider 测试结果显示 */
+.provider-test-result {
+  padding: 8px 14px 10px 14px;
+  border-top: 1px solid hsl(var(--border));
+  background: hsl(var(--muted) / 0.1);
+  font-size: 12px;
+}
+.provider-test-result.hidden {
+  display: none;
+}
+.provider-test-result .muted {
+  color: hsl(var(--muted-foreground));
+}
+
+/* OCR 移除按钮 */
+.ocr-clear-btn {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+/* save-msg 提示文字 */
+#save-msg {
+  font-size: 12px;
+  line-height: 1.4;
+}

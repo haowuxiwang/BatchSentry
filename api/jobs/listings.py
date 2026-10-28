@@ -1,0 +1,280 @@
+"""Job listings — history list, live snapshots, archives, stats."""
+from __future__ import annotations
+
+import json
+import logging
+from pathlib import Path
+
+from fastapi import HTTPException, Request
+
+from config import config
+from db.client import get_db
+from api.jobs import router
+# 注意：不得在此顶层导入 api.jobs.status —— api/jobs/__init__.py 先导入
+# listings 再导入 status；顶层 from api.jobs.status import ... 会令 status.py
+# 的路由（/{job_id}）在 /live 之前注册，FastAPI 按注册顺序匹配，
+# GET /api/jobs/live 会命中 /{job_id} 返回 "Job not found"（模块拆分回归，
+# 冻结版 e2e 发现）。status 符号改为函数体内延迟解析（与仓库
+# monkeypatch 约定一致）。
+
+logger = logging.getLogger(__name__)
+
+@router.get("")
+async def list_jobs(page: int = 1, page_size: int = 20, request: Request = None):
+    """List active (non-archived) jobs with pagination.
+
+    Returns JSON for AJAX-loaded history list (no full page reload).
+    """
+    # P2-1: GET 读端点守卫统一 — 本地单用户数据（文件名/状态/耗时）不暴露给
+    # 任意网页探测（恶意站点可用 <img>/<script> 发起无 CORS 的 GET 侧信道）。
+    # request=None 时跳过（单元测试直接调用路径）。
+    from core.security import is_local_request
+    if request is not None and not is_local_request(request):
+        raise HTTPException(403, "Forbidden (non-local request)")
+    page = max(1, page)
+    page_size = max(1, min(page_size, 100))  # cap to prevent abuse
+    offset = (page - 1) * page_size
+
+    db = await get_db()
+    count_cursor = await db.execute(
+        "SELECT COUNT(*) FROM jobs WHERE status != 'archived'"
+    )
+    total_jobs = (await count_cursor.fetchone())[0]
+    total_pages = (total_jobs + page_size - 1) // page_size
+
+    cursor = await db.execute(
+        # #134(P0)：必须投影 failed_pages / error_message。
+        # 此前这两列**不在 SELECT 里**，而 `static/upload.js` 依赖它们渲染
+        # 失败页数与失败原因 ⇒ 冷加载时 failedPages 恒 []、原因恒 hidden：
+        # 列表上只剩一个颜色点，用户无法区分"记录真的无异常"与"这次没分析成功"
+        # （GMP 假阴性表面）。注意 `/api/jobs/{id}` 早已返回这两列 ——
+        # 同一字段在详情与列表行为不一致，正是本缺陷的成因。
+        # #171：同一成因下还漏了 ocr_backend_used（见下方逐字段注释）。
+        "SELECT id, filename, status, total_pages, created_at, finished_at, pdf_path, "
+        "ocr_progress, failed_pages, error_message, ocr_backend_used "
+        "FROM jobs WHERE status != 'archived' "
+        "ORDER BY created_at DESC LIMIT ? OFFSET ?",
+        (page_size, offset),
+    )
+    rows = [dict(r) for r in await cursor.fetchall()]
+    # Don't expose pdf_path in JSON response
+    from api.jobs.status import (  # call-time (route order)
+        _count_analyzed_pages,
+        _derive_phase,
+        _ocr_backend_display,
+        _parse_cross_progress,
+        _parse_failed_pages,
+        _parse_ocr_progress,
+        _parse_self_heal_progress,
+    )
+    for r in rows:
+        r.pop("pdf_path", None)
+        # #171（契约机检发现）：本端点此前只补 failed_pages / error_message
+        # 两列，而 `static/upload.js` 的 renderJobRow **是冷加载唯一的行构建
+        # 器** —— 它共消费 13 个字段，列表只给了 9 个。缺的 5 个里
+        # `ocr_backend_used` 影响最实在：失败时 `ocrTagEl` 被隐藏，
+        # 而这个标签的用途正是"failover/自愈后留痕，GMP 追溯可见"
+        # ⇒ 老任务（超出 SSE 的 10 分钟推送窗口）**永远不会**显示它，
+        # 界面上表现为"这份记录没用过 OCR"，与"用了备用后端"无法区分。
+        #
+        # 修法上**一律复用 status.py 的派生函数**，不在此处内联实现 ——
+        # 两个端点各自解析同一列就会成为两套口径，正是 #132/#134 的成因。
+        # 守卫：tests/integration/test_frontend_field_contract.py::
+        # TestDerivationsAreSharedNotDuplicated。
+        raw_ocr = r.get("ocr_progress")   # 解析前留原值：下面三个派生都从它来
+        r["ocr_progress"] = _parse_ocr_progress(raw_ocr)
+        r["self_heal_progress"] = _parse_self_heal_progress(raw_ocr)
+        cross = _parse_cross_progress(raw_ocr)
+        # 实测成本（20 job × 51 页 ≈ 1020 行结构化数据）：逐 job 调用约 5.3 ms，
+        # 与"一条分组查询"的 4.5 ms 仅差 1.2×（瓶颈是 structured_json 的读取量，
+        # 不在往返次数）⇒ 复用单 job 口径函数即可，不值得为 0.8 ms 引入
+        # 第二套判据（`_parse_error` 排除逻辑在 stage2._get_analyzed_pages 里）。
+        r["pages_analyzed"] = await _count_analyzed_pages(db, r["id"])
+        r["phase"] = _derive_phase(
+            r["status"], r["pages_analyzed"], r["total_pages"] or 0,
+            cross_started=bool(cross),
+        )
+        r["ocr_backend_display"] = _ocr_backend_display(r)
+        # #132 同源解析：该列在 SQLite 里是 TEXT，直接透传会得到
+        # `"[2, 1]"` 这样的**字符串**，前端 `Array.isArray` 一判即静默丢弃。
+        r["failed_pages"] = _parse_failed_pages(r.get("failed_pages"))
+        # error_message 可为 NULL（normal 终态）→ 保持 None，前端据此
+        # 决定是否渲染原因行；**不要**归一成空串（会让"无原因"和
+        # "原因为空"在接口上不可区分）。
+        if "error_message" in r and not r["error_message"]:
+            r["error_message"] = None
+
+    return {
+        "jobs": rows,
+        "page": page,
+        "page_size": page_size,
+        "total_jobs": total_jobs,
+        "total_pages": total_pages,
+    }
+
+async def _live_jobs_snapshot(db) -> list[dict]:
+    """收集所有活跃任务 + 最近终态任务的进度快照（/api/jobs/live 推送体）。
+
+    活跃任务之外，终态 job（review/error/cancelled 等，近 10 分钟内）也
+    继续推送：upload 页的行状态/按钮要等收到终态快照才会切换到"可复核"，
+    只推活跃任务会让任务行永远卡在"分析中"、归档/删除按钮永不启用
+    （对抗审查发现，需刷新页面才恢复）。archived 排除（归档区单独渲染）。
+
+    终态 job 的快照永不变，故其重算开销由 `_get_job_progress` 内置的
+    终态快照缓存吸收（M6/T6.2）—— 本函数不再自持缓存（历史上这里
+    另有一份，与 status 侧重复，易漂移）。
+
+    抽成纯函数便于单测（httpx ASGITransport 无法交付永不结束的
+    SSE 流——它要等 app 完成后才返回 Response）。
+    """
+    # Runtime resolution — tests monkeypatch api.jobs._ACTIVE_STATUSES.
+    from api.jobs import _ACTIVE_STATUSES
+    placeholders = ",".join("?" * len(_ACTIVE_STATUSES))
+    cursor = await db.execute(
+        f"SELECT id, status, finished_at FROM jobs WHERE status IN ({placeholders}) "
+        "OR (status NOT IN ('archived') "
+        "AND finished_at IS NOT NULL "
+        "AND finished_at > datetime('now', 'localtime', '-10 minutes'))",
+        _ACTIVE_STATUSES,
+    )
+    rows = await cursor.fetchall()
+    snapshots = []
+    # call-time (route order)：status 符号在调用期解析，避免模块导入顺序问题。
+    from api.jobs.status import (
+        _get_job_progress,
+        cached_terminal_snapshot,
+    )
+    for r in rows:
+        # 候举行已带 status/finished_at → 直接拼缓存键，命中则零查询复用
+        # （T6.2 稳态 QPS 下降的关键：终态 job 每轮 5 条查询 → 0）。
+        if r["status"] not in _ACTIVE_STATUSES:
+            cached = cached_terminal_snapshot(r["id"], r["status"], r["finished_at"])
+            if cached is not None:
+                snapshots.append(cached)
+                continue
+        progress = await _get_job_progress(db, r["id"])
+        if progress:
+            snapshots.append(progress)
+    return snapshots
+
+@router.get("/live")
+async def stream_all_live_jobs(request: Request = None):
+    """SSE 聚合端点：单连接推送所有活跃任务的进度快照。
+
+    解决 HTTP/1.1 每域 6 条 EventSource 连接上限：upload 页多任务并行
+    时不再每个任务各开一条连接（MAX_CONCURRENT_JOBS 默认 5 时多标签页
+    很容易撞上限），而是聚合为一条流，事件体为
+    {"jobs": [{job 快照}, ...]}，前端按 job_id 分发。
+    """
+    # P2-1: 守卫统一（EventSource 跨源受 CORS 限制，但读端点统一策略）
+    from core.security import is_local_request
+    if request is not None and not is_local_request(request):
+        raise HTTPException(403, "Forbidden (non-local request)")
+    import asyncio
+    from fastapi.responses import StreamingResponse
+    from api.jobs import _SSE_POLL_SECONDS  # 调用期解析（测试可 patch）
+
+    async def event_generator():
+        db = await get_db()
+        seq = 0
+        yield f"retry: {int(_SSE_POLL_SECONDS * 1000)}\n\n"
+        try:
+            while True:
+                if await request.is_disconnected():
+                    return
+                try:
+                    snapshots = await _live_jobs_snapshot(db)
+                except Exception as e:
+                    # P0-4 修复：与单 job 流同款守卫 — DB 异常记录后跳过本轮，
+                    # 不让聚合流静默中断（多任务进度全断）。
+                    logger.error(f"SSE live snapshot query failed: {e!r}")
+                    await asyncio.sleep(_SSE_POLL_SECONDS)
+                    continue
+                seq += 1
+                yield f"id: {seq}\ndata: {json.dumps({'jobs': snapshots}, ensure_ascii=False)}\n\n"
+                await asyncio.sleep(_SSE_POLL_SECONDS)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error(f"SSE live stream crashed: {e!r}", exc_info=True)
+            raise
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+@router.get("/archived/list")
+async def list_archived(request: Request = None):
+    """列出已归档的 jobs。"""
+    # P2-1: GET 读端点守卫统一
+    from core.security import is_local_request
+    if request is not None and not is_local_request(request):
+        raise HTTPException(403, "Forbidden (non-local request)")
+    db = await get_db()
+    cursor = await db.execute(
+        "SELECT id, filename, status, total_pages, created_at, finished_at "
+        "FROM jobs WHERE status = 'archived' ORDER BY created_at DESC LIMIT 100"
+    )
+    rows = [dict(r) for r in await cursor.fetchall()]
+    return {"archived": rows, "count": len(rows)}
+
+@router.get("/stats/overview")
+async def stats_overview(request: Request = None):
+    """数据库存储统计 — 用于监控累积情况。"""
+    # P2-1: GET 读端点守卫统一
+    from core.security import is_local_request
+    if request is not None and not is_local_request(request):
+        raise HTTPException(403, "Forbidden (non-local request)")
+    import os
+    db = await get_db()
+
+    # 数据库文件大小
+    db_path = config["app"].database_path
+    db_size = os.path.getsize(db_path) if os.path.exists(db_path) else 0
+
+    # 各表记录数
+    cursor = await db.execute("SELECT COUNT(*) FROM jobs")
+    total_jobs = (await cursor.fetchone())[0]
+    cursor = await db.execute("SELECT COUNT(*) FROM jobs WHERE status != 'archived'")
+    active_jobs = (await cursor.fetchone())[0]
+    cursor = await db.execute("SELECT COUNT(*) FROM page_cache")
+    total_pages = (await cursor.fetchone())[0]
+    cursor = await db.execute("SELECT COUNT(*) FROM findings")
+    total_findings = (await cursor.fetchone())[0]
+    cursor = await db.execute("SELECT COUNT(*) FROM audit_log")
+    total_audit = (await cursor.fetchone())[0]
+
+    # output 目录大小
+    output_dir = Path(config["app"].output_dir)
+    pdf_size = 0
+    pdf_count = 0
+    if output_dir.exists():
+        for f in output_dir.rglob("*.pdf"):
+            pdf_size += f.stat().st_size
+            pdf_count += 1
+
+    return {
+        "database": {
+            "path": str(db_path),
+            "size_mb": round(db_size / 1024 / 1024, 2),
+        },
+        "jobs": {
+            "total": total_jobs,
+            "active": active_jobs,
+            "archived": total_jobs - active_jobs,
+        },
+        "page_cache": total_pages,
+        "findings": total_findings,
+        "audit_log": total_audit,
+        "pdf_storage": {
+            "dir": str(output_dir),
+            "count": pdf_count,
+            "size_mb": round(pdf_size / 1024 / 1024, 2),
+        },
+    }

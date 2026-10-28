@@ -1,0 +1,814 @@
+"""Pipeline engine: launch/run entry points + _run_pipeline_impl + sliced path (module refactor)"""
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import time
+from pathlib import Path
+
+from config import config
+from db.client import get_db
+from core.pipeline.locks import (
+    _pipeline_locks, _pipeline_tasks, _locks_guard, _SLICE_QUEUE_TIMEOUT,
+    live_tasks_for, register_pipeline_task, unregister_pipeline_task,
+    ChildTasks,
+)
+from core.pipeline.ocr_support import _sanitize_ocr_text, assess_ocr_page
+from core.pipeline.state import (
+    InvalidTransitionError, _audit_log, transition_status,
+)
+from core.pipeline.stage1 import _run_stage1_full, _get_existing_pages
+from core.pipeline.stage2 import (
+    _analyze_one,
+    _run_stage2_analysis,
+    _get_analyzed_pages,
+)
+from core.pipeline.stage3 import _run_stage3_cross_analysis
+from core.security import redact_urls
+
+logger = logging.getLogger(__name__)
+
+# #140 子任务收尾等待上限。取值依据：页分析被取消后走 CancelledError 分支
+# 直接退出（不再等 LLM 返回），故秒级足够；给足余量以免在慢机器上
+# 误判"未退出"而留下日志噪声。**不是**停滞阈值，不参与看门狗判据。
+_CHILD_DRAIN_TIMEOUT_S = 10.0
+def launch_pipeline(job_id: str, pdf_path: str) -> asyncio.Task:
+    """启动 pipeline 后台 task 并注册到 _pipeline_tasks。
+
+    替代 FastAPI 的 background_tasks.add_task，以便：
+    1. 优雅关闭时可通过 _pipeline_tasks 取消所有运行中的任务
+    2. task 完成后自动从注册表移除（避免内存泄漏）
+
+    用法（api/jobs.py）：
+        from core.pipeline import launch_pipeline
+        launch_pipeline(job_id, str(pdf_path))
+    """
+    def _on_done(task: asyncio.Task, jid: str = job_id):
+        # 只从**集合**里摘掉自己（不清空整个键）—— 同 job 可能还有持锁的
+        # 真凶或在排队的等待者，它们仍是"活跃 pipeline"，必须留在注册表里
+        # 以供关闭端点/看门狗取消（#141：单值覆盖会把它们弄丢）。
+        removed = unregister_pipeline_task(jid, task)
+        active_after = len(_pipeline_tasks)
+        if task.cancelled():
+            logger.info(
+                f"[{jid}] Pipeline task cancelled and unregistered "
+                f"(was_registered={removed}, active_after={active_after})"
+            )
+        elif task.exception():
+            logger.error(
+                f"[{jid}] Pipeline task crashed: {task.exception()!r} "
+                f"(was_registered={removed}, active_after={active_after})"
+            )
+        else:
+            logger.info(
+                f"[{jid}] Pipeline task completed and unregistered "
+                f"(was_registered={removed}, active_after={active_after})"
+            )
+
+    from core.pipeline import run_pipeline as _run_pipeline
+    task = asyncio.create_task(_run_pipeline(job_id, pdf_path))
+    pending_before = len(live_tasks_for(job_id))
+    register_pipeline_task(job_id, task)
+    task.add_done_callback(_on_done)
+    if pending_before:
+        # 同一 job 已有未完成 task（持锁者仍在校尾，或等待者排队）——
+        # 这是 retry 的正常路径，但值得留痕：它正是 #141 关注的场景。
+        logger.warning(
+            f"[{job_id}] Launch while {pending_before} task(s) for this job still "
+            f"unfinished — registry now holds {len(_pipeline_tasks.get(job_id, ()))} task(s)"
+        )
+    logger.info(
+        f"[{job_id}] Pipeline task launched and registered "
+        f"(pdf={Path(pdf_path).name}, active={len(_pipeline_tasks)})"
+    )
+    return task
+
+
+async def run_pipeline(job_id: str, pdf_path: str):
+    """Main async pipeline. Runs in background task.
+
+    Phase 7: acquires a per-job async lock to prevent cancel+retry race.
+    If a retry is requested while a previous pipeline is still draining,
+    the retry waits for the lock, then sees status=cancelled and exits
+    cleanly without spawning duplicate LLM calls.
+
+    资源清理：pipeline 结束后（无论成功/失败/取消）删除上传的 PDF 临时文件。
+    OCR 完成后 raw_html 已存入数据库，PDF 文件不再需要。
+
+    progress_futures：OCR 线程经 run_coroutine_threadsafe 调度回主 loop 的
+    进度更新 future。测试场景 loop 即刻关闭会导致协程悬挂（RuntimeWarning
+    "was never awaited"）；统一在收尾 flush（超时 1s，不阻塞退出）。
+
+    Per-job lock 用引用计数管理注册表条目（对抗审查 T3.1）：
+    - 每个进入 run_pipeline 的协程 refs +1，退出（无论是否拿到锁/被取消）-1
+    - 仅当 refs 归零才 pop 条目 —— 等待中的协程仍持有 refs，不会发生
+      "等待者被取消时误删持有者锁 entry" 的并发窗口（旧实现无脑 pop：
+      A 持锁 B 等待时 B 被取消会删掉 A 的锁条目，第三个协程 C 随后
+      setdefault 建新锁而与 B 并行执行同一 job）。
+    """
+    progress_futures: list = []
+    # #140 结构化并发：本 job 派生的**页分析子任务**登记在这里。
+    # 父 task 一旦被取消（看门狗 / 关闭端点 / retry 的旧轮），子任务必须
+    # 跟着停 —— 否则孤儿协程继续跑 LLM（单页最长 240s）、继续 touch_activity
+    # （把心跳刷成"在动"、掩盖真正的停滞）、继续写 page_cache/findings
+    # （与 retry 后的新一轮抢同一页）。stage2 / 分片路径从本对象 spawn。
+    children = ChildTasks(job_id)
+    # Acquire per-job lock — prevents two pipelines on the same job_id.
+    # Registry entry = {lock, refs}; refs counts every coroutine that
+    # entered run_pipeline (holding or waiting/cancelled) so the entry is
+    # only removed when no one is involved with this job anymore.
+    async with _locks_guard:
+        entry = _pipeline_locks.setdefault(job_id, {"lock": asyncio.Lock(), "refs": 0})
+        refs_before = entry["refs"]
+        entry["refs"] += 1
+        lock = entry["lock"]
+    if refs_before > 0:
+        logger.info(f"[{job_id}] Lock contention: another pipeline still draining, waiting...")
+    try:
+        if lock.locked():
+            logger.info(f"[{job_id}] Per-job lock held by another coroutine, waiting to acquire")
+        async with lock:
+            logger.info(f"[{job_id}] Per-job lock acquired")
+            await _run_pipeline_impl(job_id, pdf_path, progress_futures, children)
+    finally:
+        # ── #140 级联取消：**先**停子任务，再做任何状态收敛 ──────────
+        # 顺序不可颠倒：子任务会在 transition_status 期间继续写库，
+        # 把"已收敛的终态"再改回去（例如把 error 的心跳刷新）。
+        # 这里**不**受"是否发生异常"影响 —— 正常结束也要 drain（幂等）。
+        try:
+            await children.drain(cancel=True, timeout=_CHILD_DRAIN_TIMEOUT_S)
+        except Exception as e:      # drain 自身已吞异常；兜底防逃逸
+            logger.warning(f"[{job_id}] 子任务收尾异常: {e}")
+        # Flush any in-flight progress coroutines before the loop may close
+        if progress_futures:
+            try:
+                real_futures = [
+                    f for f in progress_futures if asyncio.isfuture(f)
+                ]
+                if real_futures:
+                    await asyncio.wait_for(
+                        asyncio.gather(*real_futures, return_exceptions=True),
+                        timeout=1.0,
+                    )
+            except asyncio.TimeoutError:
+                pass
+            progress_futures.clear()
+        # Cleanup lock entry — only when the last coroutine for this job
+        # exits (waiter cancellation must not delete the holder's entry).
+        popped = None
+        async with _locks_guard:
+            cur = _pipeline_locks.get(job_id)
+            if cur is not None:
+                cur["refs"] -= 1
+                if cur["refs"] <= 0:
+                    popped = _pipeline_locks.pop(job_id, None)
+        removed = popped
+        logger.info(
+            f"[{job_id}] Per-job lock released "
+            f"(registry_removed={removed is not None})"
+        )
+        # NOTE: PDF 文件不在此处删除 — 复核页 /api/jobs/{id}/pdf 需要它。
+        # PDF 在 job 删除 (DELETE /api/jobs/{id}) 或归档时清理。
+        # OCR 完成后 raw_html 已存入数据库，但 PDF 仍需保留用于人工复核预览。
+        logger.info(f"[{job_id}] Pipeline exited, PDF retained for review: {Path(pdf_path).name}")
+
+
+# 「上一轮失败状态」列（**单一真值**）：重试 / 流水线启动都必须清空这四列。
+# 失败页清单 `failed_pages` 与三阶段耗时原先**只由 Stage 3 终态覆盖**，而重跑
+# 是从头再来 —— 期间（OCR + 逐页分析可能几十分钟）复核页、任务列表、报告都
+# 在展示上一轮的值。见 `reset_run_state()` 与 TODO #147。
+_RESET_STATE_COLUMNS = ("failed_pages", "stage1_ms", "stage2_ms", "stage3_ms")
+
+
+async def reset_run_state(db, job_id: str) -> dict:
+    """清空上一轮遗留的失败状态，返回被清掉的旧值（供审计）。
+
+    ## 为什么要清 `failed_pages` / 阶段耗时（TODO #147）
+
+    `error_message` / `finished_at` 一直在这里清（重试场景下避免复核页残留
+    "任务处理失败"）。但 `failed_pages` 与 `stage1/2/3_ms` **只由 Stage 3 的
+    终态 UPDATE 覆盖** —— 也就是说，用户点"重试"之后、Stage 3 跑完之前，
+    界面和报告读到的都是**上一轮**的失败页与耗时。后果不是"显示不好看"：
+
+    - 用户刚点重试就看到"2 页失败"，无法分辨是旧结果还是本次新失败；
+    - 报告（GMP 导出件）在这段时间里会把上一轮的失败页当成这一轮的结论。
+
+    ## 为什么和 `api/jobs/actions.py::retry_job` 有两处
+
+    两处的**列集合必须一致**（由 `tests/integration/test_r123_failure_state_reset.py`
+    的行为用例锁定：两条路径都断言四列全为 NULL）。但 SQL 没有合并成一份，
+    因为事务边界不同：retry 在 `db_lock` 内、且审计只能用裸 INSERT（`_audit_log`
+    自取 db_lock，非重入），这里则无锁、审计走 `_audit_log`。
+
+    ⚠️ 不在这里 commit —— 调用方决定事务边界（retry 要与归档/删除同一次提交）。
+    ⚠️ 不清 `total_pages`：那是物理页数，与"这一轮跑成什么样"无关。
+    """
+    # ⚠️ SELECT 的列必须与 `_RESET_STATE_COLUMNS` 一致 —— 写成常量而不是
+    # `", ".join(...)`，因为 `scripts/scan_unlocked_db_writes.py` 只能从
+    # **字面量**里认出这是读（`_sql_kind` 看首词），拼出来的 SQL 会被记成
+    # "UNKNOWN 写"，等于给护栏开一个盲区。两边一致由
+    # `test_r123_failure_state_reset.py` 的行为用例锁定（四列都必须是 NULL）。
+    cursor = await db.execute(
+        "SELECT failed_pages, stage1_ms, stage2_ms, stage3_ms "
+        "FROM jobs WHERE id = ?",
+        (job_id,),
+    )
+    row = await cursor.fetchone()
+    stale = {c: row[c] for c in _RESET_STATE_COLUMNS
+             if row is not None and row[c] is not None}
+    # ⚠️ 前 48 字符不要动：`scripts/scan_unlocked_db_writes.py` 用 SQL 前缀做
+    # 行号无关的基线键（`_sql_head(limit=48)`），改动前缀会让基线键漂移。
+    await db.execute(
+        "UPDATE jobs SET error_message = NULL, finished_at = NULL, "
+        "failed_pages = NULL, stage1_ms = NULL, stage2_ms = NULL, "
+        "stage3_ms = NULL, ocr_progress = NULL WHERE id = ?",
+        (job_id,),
+    )
+    return stale
+
+
+def format_reset_detail(stale: dict) -> str:
+    """把被清掉的旧值拼成审计 detail（两处调用点共用，避免文案漂移）。"""
+    parts = [f"{c}={stale[c]}" for c in _RESET_STATE_COLUMNS if c in stale]
+    return "清空上一轮失败状态：" + "；".join(parts)
+
+
+async def _run_pipeline_impl(job_id: str, pdf_path: str, progress_futures: list,
+                             children: "ChildTasks | None" = None):
+    """Pipeline implementation — guarded by per-job lock from run_pipeline.
+
+    `children`（#140）：本 job 派生子任务的登记器。默认 None 时内部自建一个
+    **私有**实例，使直接调用本函数的测试/旧路径仍能级联取消自己的子任务。
+    """
+    if children is None:
+        children = ChildTasks(job_id)
+    # Runtime resolution — tests patch core.pipeline.{_is_cancelled,
+    # _update_ocr_progress}.
+    from core.pipeline import (
+        _is_cancelled as _run_is_cancelled,
+        _update_ocr_progress as _run_update_ocr_progress,
+    )
+    db = await get_db()
+    pipeline_start = time.time()
+
+    try:
+        # 清除上次运行的 error_message / finished_at / failed_pages / 阶段耗时
+        # （重试场景下避免界面与报告残留上一轮的"任务失败"表面）。retry 端点
+        # 也会清除，此处为兜底，覆盖直接调用 launch_pipeline 的路径（如未来
+        # 新增的 API）。旧值有内容时留一条审计 —— 清掉的东西必须可追溯。
+        stale = await reset_run_state(db, job_id)
+        await db.commit()
+        if stale:
+            await _audit_log(db, job_id, "pipeline_reset",
+                             format_reset_detail(stale))
+
+        # ── Stage 1: OCR ────────────────────────────────────────
+        await transition_status(db, job_id, "ocr_running", "开始 OCR 识别")
+        ocr_backend = config["app"].ocr_backend
+        await _audit_log(db, job_id, "pipeline_start",
+                         f"pdf={Path(pdf_path).name} ocr_backend={ocr_backend}")
+        logger.info(f"[{job_id}] Stage 1: Starting OCR (backend={ocr_backend})...")
+
+        # Stage 1 流式反馈：OCR 轮询线程（to_thread）中回调进度 →
+        # run_coroutine_threadsafe 调度回主事件循环 → 更新 job.ocr_progress
+        # → SSE 推送，让用户实时看到 "OCR 12/51" 而不是 0% 白屏。
+        loop = asyncio.get_running_loop()
+        last_progress: tuple = (None, None)
+
+        def _ocr_progress_cb(done: int, total: int):
+            nonlocal last_progress
+            if (done, total) == last_progress:
+                return
+            last_progress = (done, total)
+            try:
+                fut = asyncio.run_coroutine_threadsafe(
+                    _run_update_ocr_progress(job_id, done, total), loop
+                )
+                progress_futures.append(fut)
+            except Exception as e:
+                logger.warning(f"[{job_id}] OCR progress callback failed: {e}")
+
+        # OCR 分片（MinerU, OCR_SLICES>1）：流式输出 — 一片 OCR 完成即
+        # 落库并开始该片页面分析，用户无需等全部页 OCR 完成才看到结果。
+        # 整份 OCR（默认, 含 Paddle）保持原有阻塞式流程。
+        slice_pages = int(getattr(config["app"], "ocr_slices", 1) or 1)
+        # T7.1：能力判定走单一来源（ocr_support.supports_slicing），
+        # 不再硬编码 `=="paddle"` / `=="mineru"`。
+        from core.pipeline.ocr_support import supports_slicing
+        if slice_pages > 1 and not supports_slicing(ocr_backend):
+            logger.warning(
+                f"[{job_id}] OCR_SLICES={slice_pages} ignored — sliced mode "
+                f"该后端不支持分片流式，回退整份 OCR（backend={ocr_backend}）"
+            )
+            slice_pages = 1
+        stage1_ms = 0
+        stage2_ms = 0
+        failed_pages: list[int] = []
+        # 门禁 3 双后端对比结果（整份路径填充；分片路径跳过并记审计）
+        dual_diff: list[dict] = []
+        if supports_slicing(ocr_backend) and slice_pages > 1:
+            logger.info(
+                f"[{job_id}] Stage 1 (sliced): OCR_SLICES={slice_pages} pages/slice, "
+                f"streaming per-slice analysis enabled"
+            )
+            if getattr(config["app"], "ocr_dual_compare", False):
+                await _audit_log(
+                    db, job_id, "dual_compare_skipped",
+                    "sliced 模式（OCR_SLICES>1）暂不支持双后端对比",
+                )
+            # 分片路径此前直接提交原件，绕过了整份路径的异常 MediaBox
+            # 规范化；这正会让 72dpi 错误嵌入的大扫描件退化成页眉/表格
+            # stub。分片也必须用同一个 OCR 工作副本。
+            from core.pipeline.ocr_support import _prepare_ocr_pdf
+            # GIL 隔离：与整份路径同款 — 批量重渲染持 GIL 饿死事件循环
+            from core.procpool import run_cpu
+            # 对抗审查 P2：Stage 0 取消检查点（与整份路径 stage1 同语义）
+            if await _run_is_cancelled(job_id):
+                return
+            ocr_pdf_path, normalized_pages = await run_cpu(
+                _prepare_ocr_pdf, pdf_path, job_id, label="stage0_normalize_sliced"
+            )
+            if await _run_is_cancelled(job_id):
+                return
+            if normalized_pages:
+                await _audit_log(
+                    db, job_id, "ocr_input_normalized",
+                    f"pages={normalized_pages} (O1/O2/O3 密度规范化) "
+                    f"— sliced working copy",
+                )
+            # 页级 PDF 结构诊断（与整份路径同款 — 低 DPI / 异常页面盒
+            # 证据；分片路径此前缺失该层完整性证据）。基于规范化工作
+            # 副本计算，与实际提交 OCR 的内容一致。
+            from core.pipeline.ocr_support import _pdf_page_diagnostics
+            try:
+                sliced_pdf_diags = await asyncio.to_thread(
+                    _pdf_page_diagnostics, ocr_pdf_path
+                )
+            except Exception:
+                sliced_pdf_diags = {}
+            stage1_ms, stage2_ms, failed_pages, sliced_total = (
+                await _run_sliced_stage1_2(
+                    db, job_id, ocr_pdf_path, slice_pages, _ocr_progress_cb,
+                    pdf_diags=sliced_pdf_diags, children=children,
+                )
+            )
+            # 0 页兜底：所有片均失败/空
+            if sliced_total <= 0:
+                err_msg = f"OCR 返回 0 页（backend={ocr_backend}, sliced）— 上游服务未返回任何页面内容"
+                logger.error(f"[{job_id}] {err_msg}")
+                await db.execute(
+                    "UPDATE jobs SET error_message = ?, finished_at = datetime('now','localtime'), "
+                    "stage1_ms = ? WHERE id = ?",
+                    (err_msg, stage1_ms, job_id),
+                )
+                await transition_status(db, job_id, "error", "OCR 返回 0 页")
+                await db.commit()
+                await _audit_log(db, job_id, "stage1_empty", err_msg)
+                return
+            # 取消检查（分片函数每片回调后已检查，此处兜底）
+            if await _run_is_cancelled(job_id):
+                return
+            pages = []  # Stage 3 不依赖 pages（数据已在 page_cache）
+        else:
+            # Stage 1 (模块化): 整份 OCR 流程已拆入 _run_stage1_full —
+            # 复用检测 / 双后端 failover / page_cache 写入 / 空页自愈 /
+            # 门禁 3 双后端对比。
+            stage_out = await _run_stage1_full(
+                db, job_id, pdf_path, _ocr_progress_cb, loop
+            )
+            if stage_out is None:
+                return
+            pages, used_backend, stage1_ms, failed_pages, dual_diff = stage_out
+            # ── Stage 2 (整份路径专属; 切片路径已在 _run_sliced_stage1_2 完成)
+            stage2_ms = await _run_stage2_analysis(
+                db, job_id, pages, failed_pages, children=children
+            )
+        # ── Stage 3 (两路径共享) ─────────────────────────────────
+        await _run_stage3_cross_analysis(
+            db, job_id, stage1_ms, stage2_ms, failed_pages, pipeline_start,
+            dual_diff=dual_diff,
+        )
+
+
+    except asyncio.CancelledError:
+        # 优雅关闭：应用退出时 background task 被取消
+        # 将 job 标记为 error（带"中断"标记），允许用户重试
+        logger.warning(f"[{job_id}] Pipeline cancelled (app shutdown or task revoke)")
+        try:
+            await transition_status(db, job_id, "error", "流水线中断（应用退出或任务撤销）")
+        except InvalidTransitionError:
+            # 已是终态（review/cancelled），保持不变
+            pass
+        # 重新抛出让 asyncio 正常清理
+        raise
+    except InvalidTransitionError as e:
+        # P-C3 修复：Stage 3 期间用户取消 → status=cancelling，pipeline 末尾
+        # 调用 transition_status(..., "review") 会因 cancelling → review 非法
+        # 而抛 InvalidTransitionError。原代码仅记日志不做状态恢复，job 卡在
+        # cancelling（非终态）。此处检查当前状态：cancelling → cancelled（合法
+        # 终态），否则 → error，确保 job 进入终态。
+        logger.warning(f"[{job_id}] Invalid transition at pipeline end: {e}")
+        final_recovery_status = None
+        try:
+            cur = await db.execute("SELECT status FROM jobs WHERE id = ?", (job_id,))
+            cur_row = await cur.fetchone()
+            cur_status = cur_row["status"] if cur_row else None
+            if cur_status == "cancelling":
+                await transition_status(db, job_id, "cancelled", "第 3 阶段执行期间收到取消")
+                final_recovery_status = "cancelled"
+            elif cur_status in ("cancelled", "review", "partial_review",
+                                "error", "archived"):
+                # 已是终态（e2e cancel 轮实证：取消在 stage1 尾部确认后，
+                # 残余的 ocr_done 转换抛 InvalidTransitionError 到此）——
+                # 终态语义不得覆盖：cancelled 被改成 error 会破坏取消审计链，
+                # 通知也会重发。保持现状即可。
+                logger.info(
+                    f"[{job_id}] Job already terminal ({cur_status}) — "
+                    f"keeping status after invalid transition"
+                )
+            else:
+                # 其他非预期状态 → error（直接 UPDATE，与 recover_stuck_jobs 同模式）
+                force_msg = f"任务处理失败: 状态转换异常 {e}"
+                await db.execute(
+                    "UPDATE jobs SET status = 'error', error_message = ?, "
+                    "finished_at = datetime('now','localtime') WHERE id = ?",
+                    (force_msg, job_id),
+                )
+                await db.commit()
+                # GMP 审计链：强制置 error 属关键状态变更，必须留痕
+                await _audit_log(
+                    db, job_id, "status_forced_error", force_msg[:200]
+                )
+                final_recovery_status = "error"
+        except Exception as recover_err:
+            # 恢复失败也不抛出，避免异常逃逸导致 job 卡死；记日志供排查
+            logger.error(
+                f"[{job_id}] Recovery after InvalidTransition failed: {recover_err}",
+                exc_info=True,
+            )
+        # 与正常 error 终态一致地发终态通知（对抗审查：此前该恢复路径
+        # 静默无通知，GMP 任务失败用户不知道）
+        if final_recovery_status:
+            try:
+                from core.notify import notify_job
+
+                await notify_job(job_id, final_recovery_status)
+            except Exception:
+                pass  # notify_job 自身已兜底，此处双保险防异常逃逸
+    except Exception as e:
+        logger.error(f"[{job_id}] Pipeline failed: {redact_urls(str(e))}", exc_info=True)
+        await _audit_log(db, job_id, "pipeline_error", redact_urls(str(e))[:200])
+        # P1-7：签名 URL 反刍兜底 — OCR 客户端异常消息可能回显完整签名 URL
+        # （requests MaxRetryError），error_message 会出现在报告/飞书通知中
+        error_msg = redact_urls(str(e))[:500]
+        try:
+            await transition_status(db, job_id, "error", f"任务处理失败: {redact_urls(str(e))[:100]}")
+            # transition_status 只更新 status 字段，还需显式写入 error_message + finished_at
+            await db.execute(
+                "UPDATE jobs SET error_message = ?, finished_at = datetime('now','localtime') WHERE id = ?",
+                (error_msg, job_id),
+            )
+            await db.commit()
+            # 飞书通知（旁路，失败不影响主流程）
+            try:
+                from core.notify import notify_job
+                await notify_job(job_id, "error")
+            except Exception:
+                pass  # notify_job 自身已兜底，此处双保险防异常逃逸
+        except InvalidTransitionError as ie:
+            # P-W7 修复：已是终态，直接更新 error_message；但 DB 写入本身可能
+            # 失败（连接断开/锁竞争），用内层 try/except 兜住，避免异常逃逸
+            # 导致 job 卡在非终态。记日志但不抛出。
+            logger.warning(f"[{job_id}] {ie}")
+            try:
+                await db.execute(
+                    "UPDATE jobs SET error_message = ?, finished_at = datetime('now','localtime') WHERE id = ?",
+                    (error_msg, job_id),
+                )
+                await db.commit()
+            except Exception as audit_err:
+                logger.error(
+                    f"[{job_id}] Failed to update error_message after InvalidTransition: {audit_err}",
+                    exc_info=True,
+                )
+
+
+
+async def _run_sliced_stage1_2(
+    db, job_id: str, pdf_path: str, slice_pages: int, ocr_progress_cb,
+    pdf_diags: dict | None = None, children: "ChildTasks | None" = None,
+) -> tuple[int, int, list[int], int]:
+    """MinerU 分片 OCR + 渐进分析（流式输出核心，问题 2）。
+
+    分片 OCR：PDF 切成多片独立提交 MinerU batch 并行轮询；**一片 OCR
+    完成立即落库 page_cache 并启动该片页面的 LLM 分析**（不等其他片），
+
+    用户无需等全部页 OCR 完成才看到 findings。
+
+    pdf_diags: _pdf_page_diagnostics 结果（整份路径同款页级 PDF 结构
+    诊断 — 低 DPI / 异常页面盒证据，分片路径此前缺失）。
+
+    返回 (stage1_ms, stage2_ms, failed_pages, total_pages)。
+    取消时提前返回（stage1/2_ms 可能为部分值），主流程的取消检查兜底。
+    """
+    # Runtime resolution — tests patch core.pipeline.{_is_cancelled,
+    # _update_ocr_progress} and rebuild core.pipeline.db_lock.
+    from core.pipeline import _is_cancelled as _run_is_cancelled
+    from core.pipeline import db_lock
+    from core.mineru_client import run_ocr_sliced
+
+    loop = asyncio.get_running_loop()
+    q: asyncio.Queue = asyncio.Queue()
+
+    def _on_batch(start_page: int, pages: list, total: int):
+        loop.call_soon_threadsafe(q.put_nowait, (start_page, pages, total))
+
+    ocr_task: asyncio.Task = asyncio.create_task(
+        asyncio.to_thread(
+            run_ocr_sliced, pdf_path, slice_pages, _on_batch,
+            ocr_progress_cb, job_id=job_id,
+        )
+    )
+
+    concurrency = config["app"].llm_concurrency
+    sem = asyncio.Semaphore(concurrency)
+    state_lock = asyncio.Lock()
+    failed_pages: list[int] = []
+    completed = {"n": 0}
+    # #144：配置级故障暂存 —— 与整份路径（stage2._run_stage2_analysis）同口径。
+    # 此前分片路径**不传** config_error ⇒ _handle_page_failure 收到 None ⇒
+    # 不提升到 job 级 ⇒ jobs.error_message 保持 NULL。而大文档正是走分片路径：
+    # 凭据失效时呈现「0 条 finding + 无原因」，与「记录确实无异常」不可区分
+    # —— 正是 #127 要消灭的 GMP 假阴性，却只修了整份路径。
+    # 并发页共用同一 dict，首因由 _handle_page_failure 写入并充当「只写一次」守卫。
+    config_error: dict = {}
+    # #140：分片路径的页分析子任务全部经 `children.spawn` 登记 ——
+    # 父 task 被取消时由 run_pipeline 的 finally 级联取消，不再游离。
+    if children is None:
+        children = ChildTasks(job_id)
+    analysis_tasks: list[asyncio.Task] = []
+
+    stage1_start = time.time()
+    existing = await _get_existing_pages(db, job_id)
+    analyzed = await _get_analyzed_pages(db, job_id)
+    new_pages = 0
+    total_pages = 0
+    seen_max = 0
+    # 对抗审查 P1-1：记录已收到回调的页区间，OCR 结束后计算缺口。
+    # 原实现只在 seen_max < total_pages 时补记尾页 — 中间片失败时
+    # （如第 2 片失败、第 3 片成功）seen_max 可达 total，缺页静默通过。
+    received_ranges: list[tuple[int, int]] = []
+
+    while True:
+        try:
+            start_page, pages, total = await asyncio.wait_for(q.get(), timeout=_SLICE_QUEUE_TIMEOUT)
+        except asyncio.TimeoutError:
+            if ocr_task.done():
+                exc = ocr_task.exception()
+                if exc is not None:
+                    # P1-1 修复：单片 OCR 失败不再整单 error — 已产出的片
+                    # 照常分析（analysis_tasks 已入队），缺失页由下方
+                    # stage1_complete 前的缺页补记并入 failed_pages，job
+                    # 以 partial_review 收尾，用户可见而非静默炸单。
+                    logger.warning(
+                        f"[{job_id}] Sliced OCR failed mid-way: {exc} — "
+                        f"continuing with {seen_max} produced pages"
+                    )
+                    await _audit_log(db, job_id, "stage1_slice_failed", str(exc)[:500])
+                break
+            continue
+        total_pages = total
+        if pages:
+            seen_max = max(seen_max, start_page + len(pages) - 1)
+            received_ranges.append((start_page, start_page + len(pages) - 1))
+        # 该片页面落库（INSERT OR IGNORE 兼容 resume）
+        # P1-3 修复：落库 + commit 整体持 db_lock — 否则与 _analyze_one 的
+        # rollback() 竞争：分析失败回滚会撤销本循环尚未提交的 INSERT，
+        # 随后本循环的 commit 提交空事务 → 该片 raw_html 永久丢失。
+        # B2-8：本片新增页数**必须单独计数** —— 旧实现只打印跨片累计值
+        # `new_pages`，于是第 2 片起的日志显示的不是"本片落了几页"（日志说谎）。
+        slice_new = 0
+        async with db_lock:
+            for i, page in enumerate(pages):
+                page_num = start_page + i
+                if page_num in existing:
+                    continue
+                raw_html = page.get("markdown", {}).get("text", "")
+                diagnostics, integrity_reasons = assess_ocr_page(
+                    page, (pdf_diags or {}).get(page_num)
+                )
+                # 与整份路径使用完全相同的、基于结构证据的完整性警告。
+                # 分片提前启动 LLM，必须在启动前注入，不能等 OCR 全部结束。
+                if integrity_reasons:
+                    raw_html = (
+                        f"[OCR 警告: {'；'.join(integrity_reasons)}，以下内容可能不完整，"
+                        f"分析仅供参考]\n\n{raw_html}"
+                    )
+                raw_html = _sanitize_ocr_text(raw_html)
+                await db.execute(
+                    "INSERT OR IGNORE INTO page_cache "
+                    "(job_id, page, raw_html, ocr_diagnostics) VALUES (?, ?, ?, ?)",
+                    (job_id, page_num, raw_html,
+                     json.dumps(diagnostics, ensure_ascii=False)),
+                )
+                # P0-1 修复（与整份路径一致）：回写内存，_analyze_one 读取
+                # 清洗+警告版而非原始文本。
+                page["markdown"]["text"] = raw_html
+                new_pages += 1
+                slice_new += 1
+            await db.execute(
+                # 对抗审查 P1-1 关联：必须用 split_pdf 的权威总数 total_pages，
+                # 不能用 seen_max — 中间片失败时 seen_max < 真实页数，会把
+                # jobs.total_pages 永久覆盖成小值（复核页导航/报告全错）
+                "UPDATE jobs SET total_pages = ? WHERE id = ?", (total_pages, job_id)
+            )
+            await db.commit()
+            logger.info(
+                f"[{job_id}] Stage 1 (sliced): slice start={start_page} "
+                f"pages={len(pages)} persisted ({slice_new} this slice, "
+                f"{new_pages} total)"
+            )
+        # 立即启动该片页面分析（跳过已分析页）
+        for i, page in enumerate(pages):
+            page_num = start_page + i
+            if page_num in existing or page_num in analyzed:
+                continue
+            analysis_tasks.append(
+                children.spawn(
+                    _analyze_one(
+                        db, job_id, page_num, page, sem, failed_pages,
+                        state_lock, completed, total_pages,
+                        config_error=config_error,
+                    )
+                )
+            )
+        if await _run_is_cancelled(job_id):
+            # 取消已排队的分析任务：否则孤儿协程继续跑 LLM（最长 240s）
+            # 并写入已取消的 job（对抗审查 — retry 后新旧 pipeline 对同一
+            # 页写入互相竞争，应用退出时还抛 "Task was destroyed"）。
+            for t in analysis_tasks:
+                t.cancel()
+            if analysis_tasks:
+                await asyncio.gather(*analysis_tasks, return_exceptions=True)
+            return 0, 0, failed_pages, total_pages
+
+    stage1_ms = int((time.time() - stage1_start) * 1000)
+    # 对抗审查 P1-1：缺页显式暴露 — 按"已收到回调的区间"计算全部缺口
+    # （不仅限尾页）。中间片失败（第 2 片失败、第 3 片成功）时原逻辑
+    # seen_max==total 会漏报，GMP 复核页数错乱而 job 仍显示成功。
+    if total_pages:
+        received_ranges.sort()
+        missing_pages: list[int] = []
+        ptr = 1
+        for s, e in received_ranges:
+            for pn in range(ptr, min(s, total_pages + 1)):
+                missing_pages.append(pn)
+            ptr = max(ptr, e + 1)
+        for pn in range(ptr, total_pages + 1):
+            missing_pages.append(pn)
+        for pn in missing_pages:
+            if pn not in failed_pages:
+                failed_pages.append(pn)
+        if missing_pages:
+            logger.warning(
+                f"[{job_id}] Sliced OCR pages missing: {missing_pages} "
+                f"(total={total_pages}, produced={received_ranges})"
+            )
+            await _audit_log(
+                db, job_id, "stage1_pagemismatch",
+                f"sliced: missing {len(missing_pages)}/{total_pages} pages "
+                f"ranges={received_ranges}",
+            )
+    logger.info(
+        f"[{job_id}] Stage 1 (sliced): OCR complete: {new_pages} new pages "
+        f"(total={total_pages}) in {stage1_ms}ms"
+    )
+    # 分片路径也记录实际后端（分片仅 MinerU 支持）— 与整单路径 :529 对齐，
+    # 保证 GMP 审计字段 ocr_backend_used 在所有路径下都有值
+    await db.execute(
+        "UPDATE jobs SET ocr_backend_used = ? WHERE id = ?", ("mineru", job_id)
+    )
+    await _audit_log(db, job_id, "stage1_complete",
+                     f"pages={total_pages} duration={stage1_ms}ms")
+
+    async def _drain_analysis_tasks() -> None:
+        # 与片内取消分支一致：先取消并等待已排队分析任务再退出
+        # （孤儿协程会继续跑 LLM 并写入已取消的 job）
+        for t in analysis_tasks:
+            t.cancel()
+        if analysis_tasks:
+            await asyncio.gather(*analysis_tasks, return_exceptions=True)
+
+    # 取消检查点（对齐整份路径 stage1 尾部）：转换前确认取消，避免
+    # cancelling → ocr_done 非法转换抛 InvalidTransitionError 后跳过
+    # 已排队分析任务的清理。
+    if await _run_is_cancelled(job_id):
+        await _drain_analysis_tasks()
+        return stage1_ms, 0, failed_pages, total_pages
+    try:
+        await transition_status(db, job_id, "ocr_done", f"分片 OCR 完成：共 {total_pages} 页")
+        await db.commit()
+    except InvalidTransitionError:
+        # 竞态窗口：检查点后、转换前用户取消（ocr_running → cancelling）。
+        # 分析任务清理必须执行，异常交给引擎恢复分支完成取消迁移。
+        await _drain_analysis_tasks()
+        raise
+    if await _run_is_cancelled(job_id):
+        await _drain_analysis_tasks()
+        return stage1_ms, 0, failed_pages, total_pages
+
+    # Stage 2 收尾：等待所有已排队的分析任务（含最后一片刚入队的）
+    await transition_status(db, job_id, "analyzing", "分片模式开始逐页分析")
+    stage2_start = time.time()
+    await asyncio.gather(*analysis_tasks)
+
+    if config_error:
+        # #144：确诊后 _analyze_one 的闸门会让**尚未尝试**的页直接跳过
+        # （不再发起 LLM 调用）。那些页既没有产出、也没进 failed_pages ——
+        # 不补记会让复核者以为「页数齐了」（与 Stage 1 缺页同口径）。
+        # 成功集取自 _get_analyzed_pages（单一真值源，排除 _parse_error），
+        # 与整份路径的早停收尾（stage2._run_stage2_analysis）做同一件事。
+        succeeded = await _get_analyzed_pages(db, job_id)
+        async with state_lock:
+            for pn in range(1, total_pages + 1):
+                if pn not in failed_pages and pn not in succeeded:
+                    failed_pages.append(pn)
+        logger.warning(
+            f"[{job_id}] Stage 2 (sliced): early-stop on config error "
+            f"(first cause at page {config_error.get('page')}): "
+            f"{config_error.get('reason')}"
+        )
+        await _audit_log(
+            db, job_id, "stage2_config_error",
+            f"sliced: first_cause_page={config_error.get('page')} "
+            f"failed={len(failed_pages)}/{total_pages}",
+        )
+
+    # 空页自愈（分片路径补齐 — 与整份路径同机制）。skip_pages 只排除
+    # "已成功分析"的页：其警告前缀会命中缺失标记，不自愈前排除会清掉
+    # 已有 structured_json 触发无谓重跑。_ocr_empty / _parse_error /
+    # 未分析页保持可自愈（恢复后补跑分析）。
+    from core.pipeline import _self_heal_empty_pages as _run_heal
+    heal_skip: set[int] = set()
+    cur = await db.execute(
+        "SELECT page, structured_json FROM page_cache WHERE job_id = ?",
+        (job_id,),
+    )
+    for row in await cur.fetchall():
+        sj = row["structured_json"]
+        if not sj:
+            continue  # 未分析 → 可自愈
+        try:
+            data = json.loads(sj)
+        except json.JSONDecodeError:
+            continue  # 结构损坏 → 可自愈
+        if data.get("_ocr_empty") or data.get("_parse_error"):
+            continue  # 空页短路/解析失败 → 自愈后补分析
+        heal_skip.add(row["page"])
+    if config_error:
+        # #144：自愈走的是同一条 LLM 链路 ⇒ 必然同样失败；而 _run_heal
+        # 还要先跑一遍 MinerU OCR（昂贵且无用）。与整份路径同口径：
+        # 确诊后不再做后续阶段。未产出的页已在上方 backfill 计入。
+        logger.warning(
+            f"[{job_id}] Stage 2 (sliced): skip self-heal "
+            f"(config error: {config_error.get('reason')})"
+        )
+        recovered = []
+    else:
+        recovered = await _run_heal(
+            db, job_id, pdf_path, [], "mineru", skip_pages=heal_skip
+        )
+    if recovered:
+        logger.info(
+            f"[{job_id}] Sliced self-heal recovered {len(recovered)} pages "
+            f"— re-analyzing: p{recovered}"
+        )
+        ph = ",".join("?" * len(recovered))
+        cur = await db.execute(
+            f"SELECT page, raw_html FROM page_cache "
+            f"WHERE job_id = ? AND page IN ({ph})",
+            [job_id, *recovered],
+        )
+        heal_tasks: list[asyncio.Task] = []
+        for row in await cur.fetchall():
+            page_dict = {"markdown": {"text": row["raw_html"] or ""}}
+            heal_tasks.append(
+                children.spawn(
+                    _analyze_one(
+                        db, job_id, row["page"], page_dict, sem,
+                        failed_pages, state_lock, completed, total_pages,
+                        config_error=config_error,
+                    )
+                )
+            )
+        await asyncio.gather(*heal_tasks)
+
+    stage2_ms = int((time.time() - stage2_start) * 1000)
+    logger.info(
+        f"[{job_id}] Stage 2 (sliced): Complete in {stage2_ms}ms, "
+        f"{len(failed_pages)} pages failed"
+    )
+    await _audit_log(db, job_id, "stage2_complete",
+                     f"duration={stage2_ms}ms failed={failed_pages}")
+    return stage1_ms, stage2_ms, failed_pages, total_pages

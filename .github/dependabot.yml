@@ -1,0 +1,82 @@
+# Dependabot 配置（0-51）—— `ci.yml:48` 一直引用本文件，但文件**不存在**。
+#
+# 三条与"通用模板"不同的取舍，都是本仓库踩过的具体事实，不要随手删：
+#
+# 1. **`electron` 必须 ignore**。`package.json` 把它钉在**精确版本** 43.7.4，
+#    理由见 docs/PROJECT_PITFALLS.md §四十五：43.7.5 在 npmmirror / 华为云 /
+#    腾讯云 / 清华**全部 404**，而 GitHub releases 在本机不可达 ⇒ 一旦被自动
+#    升到 43.7.5，`electron-builder` 就"拿不到二进制"，构建**必然**失败。
+#    升级 electron 是**人工**动作：先确认镜像上有那个版本，再改 package.json。
+#
+# 2. **github-actions 必须保留**。所有 action 都钉了完整 commit SHA（tag 可变 =
+#    可被替换成任意代码）。钉 SHA 的代价是"永不自动更新"——只有 Dependabot 会
+#    同时更新 SHA 与行尾版本注释，这也是 `ci.yml` 里那句注释的依据。
+#
+# 3. **pip 只开 patch/minor 分组**。`requirements*.txt` 是**精确锁定**（`==`），
+#    且覆盖率门禁 95% 是在这一组版本上标定的（见 ci.yml 顶部"为什么跑在
+#    Windows 上"）。major 升级会静默改变覆盖率口径 ⇒ 不自动开 PR，人工处理。
+version: 2
+
+updates:
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Asia/Shanghai"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      # 补丁与次版本合并成一个 PR：本仓库依赖面窄，逐个开 PR 只会淹没真正的红。
+      pip-minor-patch:
+        applies-to: version-updates
+        update-types:
+          - "minor"
+          - "patch"
+    ignore:
+      # 与 CI 平台/覆盖率口径强绑定，升级须同步重标 95% 门禁
+      - dependency-name: "pytest"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "pytest-cov"
+        update-types: ["version-update:semver-major"]
+
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Asia/Shanghai"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      npm-minor-patch:
+        applies-to: version-updates
+        update-types:
+          - "minor"
+          - "patch"
+    ignore:
+      # 见文件头第 1 条：镜像上没有 43.7.5，自动升级会让构建必然失败。
+      - dependency-name: "electron"
+      # electron-builder 的版本与 electron 的产物布局耦合，人工升级。
+      - dependency-name: "electron-builder"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Asia/Shanghai"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(ci)"
+    groups:
+      actions-minor-patch:
+        applies-to: version-updates
+        update-types:
+          - "minor"
+          - "patch"

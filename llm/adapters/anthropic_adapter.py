@@ -1,0 +1,133 @@
+"""Anthropic Messages API protocol adapter.
+
+Covers providers that speak Anthropic's `/v1/messages` wire format:
+  - Anthropic Claude models (api.anthropic.com)
+
+Differences from OpenAI protocol:
+  - Auth header: `x-api-key: <key>` instead of `Authorization: Bearer <key>`
+  - Required header: `anthropic-version: 2023-06-01`
+  - `system` is a top-level field, not a message in the messages array
+  - Response: `content[0].text` instead of `choices[0].message.content`
+  - Usage fields: `input_tokens` / `output_tokens` (not prompt/completion)
+
+Uses the official `anthropic` AsyncAnthropic SDK. The dependency is OPTIONAL
+— importing this module fails fast only when an anthropic-protocol provider
+is actually instantiated, not at app startup.
+"""
+from __future__ import annotations
+
+import logging
+
+from config import ProviderConfig
+from .base import (
+    LLMAdapter, ChatResult, ContentInput, ImagePart, content_parts,
+    normalize_finish_reason,
+)
+
+logger = logging.getLogger(__name__)
+
+
+def _to_anthropic_content(user_content: ContentInput) -> str | list[dict]:
+    """翻译成 Anthropic 的 content 形态。
+
+    ⚠️ 与 OpenAI **不通用**（这正是 adapter 存在的理由）：
+        OpenAI:    {"type": "image_url", "image_url": {"url": "data:..."}}
+        Anthropic: {"type": "image", "source": {"type": "base64",
+                     "media_type": ..., "data": ...}}
+    纯文本同样**原样返回字符串**，理由见 openai_adapter 的同名函数。
+    """
+    parts = content_parts(user_content)
+    if len(parts) == 1 and isinstance(parts[0], str):
+        return parts[0]
+    out: list[dict] = []
+    for p in parts:
+        if isinstance(p, ImagePart):
+            out.append({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": p.media_type,
+                    "data": p.base64_data,
+                },
+            })
+        else:
+            out.append({"type": "text", "text": p})
+    return out
+
+
+class AnthropicAdapter(LLMAdapter):
+    """Adapter for Anthropic Messages API."""
+
+    def __init__(self, provider_cfg: ProviderConfig):
+        super().__init__(provider_cfg)
+        try:
+            from anthropic import AsyncAnthropic
+        except ImportError as e:
+            raise RuntimeError(
+                "Provider '%s' is configured with protocol='anthropic' but "
+                "the 'anthropic' package is not installed. "
+                "Run: pip install anthropic" % provider_cfg.name
+            ) from e
+        # base_url defaults to https://api.anthropic.com when None
+        self.client = AsyncAnthropic(
+            api_key=provider_cfg.api_key or "EMPTY",
+            base_url=provider_cfg.base_url or None,
+        )
+
+    async def chat(
+        self,
+        system_prompt: str,
+        user_content: ContentInput,
+        max_tokens: int = 4000,
+        temperature: float = 0.1,
+        timeout: float = 180.0,
+        response_format: dict | None = None,
+    ) -> ChatResult:
+        # Anthropic uses a top-level `system` field, not a system message.
+        # response_format: Anthropic 无等价参数，忽略（JSON 约束由 prompt
+        # + client 侧修复链承担）。
+        resp = await self.client.messages.create(
+            model=self.model,
+            system=system_prompt,
+            messages=[{
+                "role": "user",
+                "content": _to_anthropic_content(user_content),
+            }],
+            max_tokens=max_tokens,
+            temperature=temperature,
+            timeout=timeout,
+        )
+        # content is a list of content blocks; concatenate text blocks
+        text_parts = []
+        for block in resp.content:
+            block_text = getattr(block, "text", None)
+            if block_text is not None:
+                text_parts.append(block_text)
+        content = "".join(text_parts)
+
+        usage = resp.usage
+        prompt_tokens = getattr(usage, "input_tokens", None) if usage else None
+        completion_tokens = getattr(usage, "output_tokens", None) if usage else None
+        total = (prompt_tokens + completion_tokens) if (prompt_tokens is not None and completion_tokens is not None) else None
+
+        # 0-38：Anthropic 用 `stop_reason`（`max_tokens` = 截断）—— 归一化
+        # 收敛在 base.normalize_finish_reason，调用方只看统一枚举。
+        raw_finish = getattr(resp, "stop_reason", None)
+        return ChatResult(
+            content=content,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total,
+            model=self.model,
+            finish_reason=normalize_finish_reason(raw_finish, self.protocol),
+            raw_finish_reason=str(raw_finish or ""),
+        )
+
+    def client_info(self) -> dict:
+        return {
+            "provider": self.provider_name,
+            "protocol": self.protocol,
+            "model": self.model,
+            "base_url": self.provider_cfg.base_url or "https://api.anthropic.com",
+            "configured": self.is_configured,
+        }

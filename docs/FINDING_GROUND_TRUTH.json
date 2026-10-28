@@ -1,0 +1,301 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-09-11",
+  "description": "Finding 质量金标（M2/T2.1）。只存**标签**，不存业务原文：每条期望/禁止以 (page, type) 表达，配套的合成输入由 scripts/synthetic_corpus.py 确定性构造（case_id 一一对应，由 eval_findings.py 交叉校验）。",
+  "scoring": {
+    "tp": "期望的 (page,type) 在产出中出现",
+    "fn": "期望的 (page,type) 未出现",
+    "fp": "产出的 (page,type) 既非期望、type 也不在 allowed_extra_types 内",
+    "noise": "type 属于 noise_types 的产出条数（单列为噪声 KPI，不计入 FP）"
+  },
+  "noise_types": [
+    "completeness"
+  ],
+  "cases": [
+    {
+      "case_id": "clean_page",
+      "intent": "精度护栏：干净页不得报出任何高价值缺陷（越界/倒序/批号/日期类）",
+      "expect": [],
+      "allowed_extra_types": [
+        "completeness"
+      ],
+      "known_gap": false
+    },
+    {
+      "case_id": "param_out_of_spec",
+      "intent": "参数越界必须报出",
+      "expect": [
+        {
+          "page": 1,
+          "type": "param_out_of_spec"
+        }
+      ],
+      "allowed_extra_types": [
+        "completeness"
+      ],
+      "known_gap": false
+    },
+    {
+      "case_id": "time_reversal_in_page",
+      "intent": "页内开始晚于结束必须报出",
+      "expect": [
+        {
+          "page": 1,
+          "type": "time_reversal"
+        }
+      ],
+      "allowed_extra_types": [
+        "completeness"
+      ],
+      "known_gap": false
+    },
+    {
+      "case_id": "batch_inconsistency",
+      "intent": "跨页批号不一致必须报出（critical）",
+      "expect": [
+        {
+          "page": 1,
+          "type": "batch_inconsistency"
+        }
+      ],
+      "allowed_extra_types": [
+        "completeness"
+      ],
+      "known_gap": false
+    },
+    {
+      "case_id": "suspicious_future_date",
+      "intent": "远超当前年份的日期必须报出",
+      "expect": [
+        {
+          "page": 1,
+          "type": "suspicious_date"
+        }
+      ],
+      "allowed_extra_types": [
+        "completeness"
+      ],
+      "known_gap": false
+    },
+    {
+      "case_id": "missing_exec_time",
+      "intent": "有操作描述但缺执行时间 —— 应报 completeness（warning）",
+      "expect": [
+        {
+          "page": 1,
+          "type": "completeness"
+        }
+      ],
+      "allowed_extra_types": [
+        "completeness"
+      ],
+      "known_gap": false
+    },
+    {
+      "case_id": "self_review_operator_eq_reviewer",
+      "intent": "操作人=复核人（自检自核）—— M4/R12 已落地，由 known_gap 转为验收",
+      "expect": [
+        {
+          "page": 1,
+          "type": "self_review"
+        }
+      ],
+      "allowed_extra_types": [
+        "completeness"
+      ],
+      "known_gap": false
+    },
+    {
+      "case_id": "mass_balance_unverifiable",
+      "intent": "收率/物料平衡已声明合格范围但未记录实测值（R11）",
+      "expect": [
+        {
+          "page": 1,
+          "type": "mass_balance"
+        }
+      ],
+      "allowed_extra_types": [
+        "completeness"
+      ],
+      "known_gap": false
+    },
+    {
+      "case_id": "doc_version_conflict",
+      "intent": "同一文件编号出现两个版本（R15，旧版/作废版在用）",
+      "expect": [
+        {
+          "page": 1,
+          "type": "doc_version"
+        }
+      ],
+      "allowed_extra_types": [
+        "completeness"
+      ],
+      "known_gap": false
+    },
+    {
+      "case_id": "equipment_check_unfilled",
+      "intent": "设备/清洁确认项已声明（是/否）但未填写（R13）",
+      "expect": [
+        {
+          "page": 1,
+          "type": "equipment_state"
+        }
+      ],
+      "allowed_extra_types": [
+        "completeness"
+      ],
+      "known_gap": false
+    },
+    {
+      "case_id": "deviation_missing_link",
+      "intent": "记录有异常但未填写偏差编号，未关联偏差流程（R16）",
+      "expect": [
+        {
+          "page": 1,
+          "type": "deviation_link"
+        }
+      ],
+      "allowed_extra_types": [
+        "completeness"
+      ],
+      "known_gap": false
+    }
+  ],
+  "real_baselines": {
+    "note": "真实 job 的类型分布基线（回归对照，非真值）。truth=false 表示未人工裁决，只用于检测'类型分布漂移'。noise_reduction 为把该 job 的 findings **离线重放**过 core.finding_noise 的实测前后（非重新跑流水线，故为模型化估计）。⚠️ 本块**不是判据**（见 `criterion` / `criterion_note`）：真实 job 计数**非确定**（同输入两次跑实测 41 vs 51），单次值不得当阈值。",
+    "truth": false,
+    "criterion": false,
+    "criterion_note": "**本块不参与任何 pass/fail。** 唯一的判据是 `cases`（合成语料、规则层、零 LLM/零 OCR、逐位可复现）的 F1（`scripts/eval_findings.py --min-f1`）。真实 job 的 findings 数**非确定**：同输入/同产物/同后端/同模型两次跑实测 **41 vs 51**（+24%，见 jobs[1].observed_total_range）⇒ 任何**单次**计数都不得当阈值或回归判据。",
+    "jobs": [
+      {
+        "job_id": "749ead79-7b8",
+        "filename": "丝裂霉素提取批记录.pdf",
+        "total_pages": 51,
+        "total_findings": 784,
+        "by_type": {
+          "completeness": 678,
+          "handwritten": 24,
+          "param_out_of_spec": 26,
+          "time_reversal": 17,
+          "signature_time_anomaly": 11,
+          "suspicious_date": 10,
+          "year_contradiction": 8,
+          "signature_mismatch": 5,
+          "user_rule": 4,
+          "batch_inconsistency": 1
+        },
+        "noise_ratio": 0.8648,
+        "provenance": {
+          "measured_at": "≤ 2026-09-11（无独立记录）",
+          "ocr_backend": "mineru",
+          "llm_model": "unknown",
+          "app_version": "unknown",
+          "reproducible": false,
+          "reason": "数字只存在于本文件：全仓无脚本重算它（R77 实测无代码消费者）⇒ 不可复现"
+        },
+        "comparable_to_current": false,
+        "runs": 1,
+        "observed_total_range": [784, 784],
+        "non_comparable_reason": "**跨版本 + 跨后端**：当前版本 + `paddle` 对**同一份**文件实测 **208** 条（R76）⇒ 与 784 的差是版本/后端差异，**不是回归**。拿 784 当基线去“修回归”会白干。",
+        "noise_reduction": {
+          "method": "离线重放 reduce_completeness_noise（含 spec_unverifiable 重分类）",
+          "before": 784,
+          "after": 268,
+          "reduction_ratio": 0.6582,
+          "warning_before": 572,
+          "warning_after": 87,
+          "critical_before": 33,
+          "critical_after": 33,
+          "aggregated": {
+            "qa": 34,
+            "time": 74,
+            "spec_unverifiable": 411
+          },
+          "downgraded_extraction_uncertain": 41,
+          "preserved_types": [
+            "param_out_of_spec", "handwritten", "time_reversal",
+            "signature_time_anomaly", "suspicious_date", "year_contradiction",
+            "signature_mismatch", "user_rule", "batch_inconsistency"
+          ]
+        }
+      },
+      {
+        "job_id": "012e351f-1ea",
+        "filename": "试用批记录.pdf",
+        "total_pages": 10,
+        "runs": 2,
+        "total_findings": 51,
+        "observed_total_range": [41, 51],
+        "provenance": {
+          "measured_at": "2026-10-09",
+          "ocr_backend": "paddle",
+          "llm_model": "deepseek-ai/DeepSeek-V3.2",
+          "app_version": "dist/pbc-server/pbc-server.exe sha256[:12]=46a589a2201d",
+          "reproducible": true,
+          "reason": "driver `devlogs/_verify/r76_b6_real2.py` 可复跑；但两次跑结果不同 ⇒ 单次计数不得当阈值"
+        },
+        "comparable_to_current": true
+      }
+    ]
+  },
+  "real_samples": {
+    "note": "真实批记录上的**人工标注**样本（与 `cases` 的合成语料**不同口径**）。⚠️ 本块**不是判据**，且**尚无标签**：标注人圈出了规格行与实测行，但「该行应为 OOS 还是合规」**未与业务方确认** ⇒ `annotation.label: null` / `intent_confirmed: false`。用途：把「真实样本口径」与「合成集口径」**分开**呈现，**禁止**把本块并进 P/R。",
+    "truth_declared": false,
+    "criterion": false,
+    "criterion_note": "**本块不参与任何 pass/fail，也不产生 P/R。** 唯一判据仍是 `cases`（合成语料、规则层、零 LLM / 零 OCR、逐位可复现）的 F1（`scripts/eval_findings.py --min-f1`）。本块只登记「真实样本上的观察」，且其系统输出来自**旧版本产物**（见 `observed_system_output.app_version`）。",
+    "samples": [
+      {
+        "sample_id": "annotation-ph-p6",
+        "source": "用户标注.png（仓库根；509,676 B）",
+        "annotation": {
+          "spec_text": "▲pH 为 6.8~7.0。",
+          "measured_text": "中和后 pH 6.88",
+          "what_is_annotated": "红框同时圈出规格行与实测行（两行相邻）",
+          "label": null,
+          "intent_confirmed": false,
+          "intent_question": "该行**应为 OOS 还是合规**尚未与业务方确认（6.88 落在 [6.8, 7.0] 内）⇒ 不得当作已知真值使用（TODO #161 原文要求）"
+        },
+        "locator": {
+          "job_id": "670672f3-d0f",
+          "filename": "丝裂霉素提取批记录.pdf",
+          "page": 6,
+          "method": "R76 记录（.workbuddy-ai/memory/2026-10-09.md）+ 本仓 `devlogs/_verify/r91b_161_real_sample_evidence.py` 只读复核",
+          "pixel_binding": false,
+          "pixel_binding_note": "**未做像素级绑定**：两份 PDF 均为纯扫描件（零文本层，`devlogs/_verify/r90z_locate_annotation.py` 实测每页 text_len=0）⇒ 定位只能靠图像；全页多尺度模板匹配在 51 页上 >11 分钟未收敛（已放弃）⇒ 页码来自 R76 记录 + DB 内容复核，**不是**图像定位结论。"
+        },
+        "observed_system_output": {
+          "measured_at": "2026-08-19 06:57:36（job created_at）",
+          "app_version": "unknown（旧产物；DB 无版本列，且本 job 早于本轮多次行为变更）",
+          "ocr_backend": "mineru",
+          "status": "partial_review",
+          "total_pages": 51,
+          "job_total_findings": 720,
+          "job_by_type": {
+            "completeness": 589,
+            "handwritten": 50,
+            "param_out_of_spec": 24,
+            "signature_time_anomaly": 15,
+            "suspicious_date": 13,
+            "year_contradiction": 12,
+            "time_reversal": 10,
+            "signature_mismatch": 6,
+            "batch_inconsistency": 1
+          },
+          "page_findings": 14,
+          "page_types": ["completeness"],
+          "page_param_out_of_spec": 0,
+          "measured_value_hits_in_job": 0,
+          "spec_string_hits_in_job": 1,
+          "spec_string_hit_note": "唯一命中是一条 `completeness` finding 的 description：`第6页 工序4 中和:用磷酸调节 R2101 预处理罐发酵液▲pH为6.8~7.0。 有操作描述但缺少执行时间记录`（**规格**进了系统，**实测值 6.88 没有**）",
+          "page_param_cap_findings": 5,
+          "job_param_cap_findings": 356,
+          "param_cap_reason_value": 422,
+          "param_cap_note": "该页参数判定被 fail-closed 分支整体吞没：`core/rules/llm_checks.py:109-118` 在 `len(llm_queue) > _LLM_FALLBACK_BATCH_MAX(=50)` 时**不调 LLM**，改为 flag 人工复核；本 job 的 reason 内嵌计数 = 422，而带该 reason 的 findings = **356**（差 **66，成因未查**）。"
+        },
+        "usable_as_criterion": false,
+        "usable_as_criterion_note": "① 无标签；② 系统输出**非确定**（同输入两次跑 41 vs 51，见 `real_baselines.criterion_note`）；③ 来自**旧版本**产物 ⇒ **不得**用于 P/R 或阈值。"
+      }
+    ]
+  }
+}

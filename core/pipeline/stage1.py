@@ -1,0 +1,317 @@
+"""Stage 1 — full-path OCR orchestration (module refactor)"""
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import time
+
+from config import config
+from core.pipeline.ocr_support import (
+    _KNOWN_BACKENDS,
+    _pdf_page_diagnostics,
+    _sanitize_ocr_text,
+    assess_ocr_page,
+    supports_page_subset,
+)
+from core.pipeline.regions import extract_regions
+from core.pipeline.state import _audit_log, transition_status
+
+logger = logging.getLogger(__name__)
+async def _run_stage1_full(
+    db, job_id: str, pdf_path: str, progress_cb, loop,
+) -> tuple | None:
+    """Non-sliced OCR flow; returns (pages, used_backend, stage1_ms,
+    failed_pages) or None on early exit (cancel / fatal). (refactor)"""
+    # Runtime resolution — tests patch core.pipeline.{_is_cancelled,
+    # _pdf_page_count, _run_ocr_with_failover}.
+    from core.pipeline import (
+        _is_cancelled as _run_is_cancelled,
+        _pdf_page_count as _run_pdf_page_count,
+        _run_ocr_with_failover as _run_failover,
+    )
+    stage1_start = time.time()
+    failed_pages: list[int] = []
+    ocr_backend = config["app"].ocr_backend
+    # Stage 0 — OCR 输入规范化（对抗审查：扫描件错误导出为超大页面盒
+    # 3000x4000pt 时 MinerU 整表降级为 simple_table stub；规范化为
+    # 300dpi 等效工作副本后提交，原件保留）。异常页重渲染期间不可取消
+    # 检测（极快），规范化失败时回退原 PDF 不阻断流程。
+    # GIL 隔离（2026-08-24 e2e 实证）：批量 300dpi 重渲染的 fitz C 调用
+    # 持 GIL 数十秒，to_thread 会饿死事件循环（status GET 超时）—
+    # 改投子进程执行（procpool.run_cpu）。
+    from core.pipeline.ocr_support import _prepare_ocr_pdf as _run_prepare
+    from core.procpool import run_cpu
+    # 对抗审查 P2：取消语义覆盖 Stage 0 —— 提交前/完成后各一个检查点，
+    # 避免已取消任务仍排队执行秒~分钟级规范化（procpool 单 worker 会
+    # 连带阻塞后续任务的提交）。worker 体内协作式取消暂不支持（fn 已
+    # pickle 到子进程），此处保证"取消后不再启动/不采纳结果"。
+    if await _run_is_cancelled(job_id):
+        return None
+    ocr_pdf_path, normalized_pages = await run_cpu(
+        _run_prepare, pdf_path, job_id, label="stage0_normalize"
+    )
+    if await _run_is_cancelled(job_id):
+        # 规范化完成但用户已取消 —— 不进入 OCR，走正式取消迁移
+        return None
+    if normalized_pages:
+        await _audit_log(
+            db, job_id, "ocr_input_normalized",
+            f"pages={normalized_pages} (O1/O2/O3 密度规范化) — re-rendered "
+            f"300dpi working copy, original untouched",
+        )
+    # （典型场景：Stage 2/3 失败后 retry），跳过真实 OCR，直接从缓存
+    # 重建 pages 列表进入 Stage 2。省掉整个 PDF 重传重 OCR（上游配额
+    # + 数分钟等待）。仅整份路径生效（分片路径按片流的语义，不复用）。
+    reuse_pages = None
+    cursor = await db.execute(
+        "SELECT total_pages FROM jobs WHERE id = ?", (job_id,)
+    )
+    jrow = await cursor.fetchone()
+    target_pages = (jrow["total_pages"] or 0) if jrow else 0
+    if target_pages > 0:
+        cursor = await db.execute(
+            "SELECT raw_html FROM page_cache WHERE job_id = ? AND raw_html IS NOT NULL "
+            "ORDER BY page",
+            (job_id,),
+        )
+        cached_rows = await cursor.fetchall()
+        if len(cached_rows) >= target_pages:
+            reuse_pages = [
+                {"markdown": {"text": r["raw_html"] or ""}}
+                for r in cached_rows
+            ]
+            await _audit_log(
+                db, job_id, "stage1_skipped",
+                f"reuse {len(reuse_pages)} cached pages (no re-OCR)",
+            )
+            logger.info(
+                f"[{job_id}] Stage 1 skipped: reusing {len(reuse_pages)} cached pages"
+            )
+    if reuse_pages is not None:
+        # used_backend="cached" 仅用于日志/审计；不覆盖 jobs.ocr_backend_used
+        # （保留上次真实后端，见下方 UPDATE 条件）。
+        pages, used_backend, ocr_failures = reuse_pages, "cached", []
+    else:
+        # 双 OCR 兜底：主后端失败（异常 / 0 页 / 严重缺页）自动切换备后端
+        # 整单重试，job 记录实际使用的后端（jobs.ocr_backend_used）审计。
+        from core.ocr_client import OCRCancelled
+
+        try:
+            pages, used_backend, ocr_failures = await _run_failover(
+                db, job_id, ocr_pdf_path, progress_cb
+            )
+        except OCRCancelled:
+            # 轮询线程内同步探针发现取消而中止 — 此处在事件循环上跑
+            # _is_cancelled 完成 cancelling→cancelled 正式迁移 + 审计，
+            # 然后按既定取消路径返回 None（engine 直接结束流水线）。
+            if await _run_is_cancelled(job_id):
+                return None
+            raise
+    stage1_ms = int((time.time() - stage1_start) * 1000)
+    if not pages:
+        reason = ocr_failures[0] if ocr_failures else f"backend={ocr_backend}"
+        err_parts = [f"OCR 处理失败（{ocr_backend}）— {reason}"]
+        if len(ocr_failures) > 1:
+            err_parts.append(
+                "备选失败: " + "; ".join(ocr_failures[1:])
+            )
+        err_msg = "; ".join(err_parts)[:2000]
+        logger.error(f"[{job_id}] {err_msg}")
+        await db.execute(
+            "UPDATE jobs SET error_message = ?, finished_at = datetime('now','localtime'), "
+            "stage1_ms = ? WHERE id = ?",
+            (err_msg, stage1_ms, job_id),
+        )
+        await transition_status(db, job_id, "error", "OCR 失败（所有后端）")
+        await db.commit()
+        await _audit_log(db, job_id, "stage1_failed", err_msg)
+        return
+
+    if used_backend != "cached":
+        # F3: 缓存复用路径不覆盖 jobs.ocr_backend_used — 保留上次真实后端
+        # 供 GMP 溯源（"cached" 不是 OCR 后端，写进去会污染审计显示）。
+        await db.execute(
+            "UPDATE jobs SET ocr_backend_used = ? WHERE id = ?",
+            (used_backend, job_id),
+        )
+    logger.info(
+        f"[{job_id}] Stage 1: OCR complete: {len(pages)} pages "
+        f"in {stage1_ms}ms (backend={used_backend})"
+    )
+    await _audit_log(
+        db, job_id, "stage1_complete",
+        f"pages={len(pages)} duration={stage1_ms}ms backend={used_backend}",
+    )
+
+    # 轻微页数差异（缺 ≤5 页且 ≤20%）→ 不阻断，但必须显式暴露：
+    # P1-4 修复 — 缺失页码并入 failed_pages，job 以 partial_review 收尾，
+    # 复核页横幅列出缺失页码，规则层虽无法分析缺页但用户可见，
+    # 不再是"静默通过"（GMP 合规工具的核心要求）。
+    pdf_total = await asyncio.to_thread(_run_pdf_page_count, ocr_pdf_path)
+    if pdf_total is not None and len(pages) != pdf_total:
+        missing = pdf_total - len(pages)
+        warn_msg = (
+            f"OCR 页数与 PDF 物理页数不一致: PDF {pdf_total} 页, "
+            f"OCR 返回 {len(pages)} 页（差异 {missing} 页）— 分析可能不完整"
+        )
+        logger.warning(f"[{job_id}] {warn_msg}")
+        await _audit_log(db, job_id, "stage1_pagemismatch", warn_msg)
+        missing_pages = list(range(len(pages) + 1, pdf_total + 1))
+        for pn in missing_pages:
+            if pn not in failed_pages:
+                failed_pages.append(pn)
+
+    if await _run_is_cancelled(job_id):
+        return None
+
+    # Save raw HTML to page_cache (skip if already exists)
+    existing_pages = await _get_existing_pages(db, job_id)
+    # 门禁 1（doc 页级诊断）：基于 OCR 实际提交的规范化工作副本扫描每页
+    # 结构诊断（媒体盒/旋转/有效 DPI），并入页级完整性证据 — 低 DPI 页
+    # 不静默标记成功。用工作副本而非原件：畸形页（O1 微型/O2 极端长宽比/
+    # O3 超大盒）已被 _prepare_ocr_pdf 重渲染修复，按原件诊断会给已修复页
+    # 挂过时的 low_dpi/页面盒警告误导 LLM 与复核员；分片路径同语义。
+    # 原件诊断另存审计（原始证据链保留，可回答"此件为何被规范化"）。
+    pdf_diags = {}
+    try:
+        pdf_diags = await asyncio.to_thread(_pdf_page_diagnostics, ocr_pdf_path)
+    except Exception as exc:
+        # B2-2：诊断是**软失败**（不影响主流程），但**不许静默** ——
+        # 否则"页级诊断全空"与"这份 PDF 真的没有异常页"不可区分，
+        # 排障时会把一个失败当成长正常态（用户明确关注项：日志要方便定位）。
+        logger.warning(
+            f"[{job_id}] Stage 1: 页级诊断扫描失败（软失败，主流程继续）"
+            f" file={ocr_pdf_path!r}: {type(exc).__name__}: {exc}"
+        )
+    if normalized_pages:
+        try:
+            orig_diags = await asyncio.to_thread(_pdf_page_diagnostics, pdf_path)
+            await _audit_log(
+                db, job_id, "ocr_input_normalized_diag",
+                f"original_pdf_diags={json.dumps(orig_diags, ensure_ascii=False)[:1500]}",
+            )
+        except Exception as exc:
+            # 同上：这条失败会让「输入已规范化」的**审计行缺失**，
+            # 事后无法回答"此件为何被规范化" ⇒ 必须留痕。
+            logger.warning(
+                f"[{job_id}] Stage 1: 原件诊断/审计行写入失败（软失败）"
+                f" file={pdf_path!r}: {type(exc).__name__}: {exc}"
+            )
+    new_pages = 0
+    for i, page in enumerate(pages):
+        page_num = i + 1
+        # P0-3：区域级证据锚 —— 从 OCR 原始版面抽块级 bbox（归一化）。
+        # 两后端都**不提供单元格级** bbox，故只到区域级；抽不到（无坐标系/无
+        # bbox/后端降级为纯文本拆分）就写 NULL，绝不写裸坐标。
+        region_payload = extract_regions(page)
+        if page_num in existing_pages:
+            # 页已有原文（重试/续跑路径）：原文不覆盖（证据链不可改写），
+            # 但可**补写**此前缺失的区域锚 —— 否则历史 job 永远没有锚，
+            # 复核页会误以为"该页就是不支持定位"。
+            if region_payload is not None:
+                await db.execute(
+                    "UPDATE page_cache SET regions_json = ? "
+                    "WHERE job_id = ? AND page = ? "
+                    "AND (regions_json IS NULL OR regions_json = '')",
+                    (
+                        json.dumps(region_payload, ensure_ascii=False),
+                        job_id, page_num,
+                    ),
+                )
+            continue
+        raw_html = page.get("markdown", {}).get("text", "")
+        diagnostics, integrity_reasons = assess_ocr_page(
+            page, pdf_diags.get(page_num)
+        )
+        # OCR 不完整标记必须同时进入 LLM 输入、复核页和审计存储；不能只
+        # 依赖“有多少页”判断成功。
+        if integrity_reasons:
+            raw_html = (
+                f"[OCR 警告: {'；'.join(integrity_reasons)}，以下内容可能不完整，"
+                f"分析仅供参考]\n\n{raw_html}"
+            )
+        raw_html = _sanitize_ocr_text(raw_html)
+        await db.execute(
+            "INSERT OR IGNORE INTO page_cache "
+            "(job_id, page, raw_html, ocr_diagnostics, regions_json) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (
+                job_id, page_num, raw_html,
+                json.dumps(diagnostics, ensure_ascii=False),
+                json.dumps(region_payload, ensure_ascii=False)
+                if region_payload is not None else None,
+            ),
+        )
+        # P0-1 修复：回写内存 dict — Stage 2 (_analyze_one) 从内存
+        # page dict 读取文本，此前只写 DB 不回写 → 首次运行 LLM 收到
+        # 未 sanitize、无丢弃警告前缀的原始文本（警告注入/清洗仅在
+        # retry 复用 DB 的路径上生效）。回写后两路数据一致。
+        page["markdown"]["text"] = raw_html
+        new_pages += 1
+    await db.execute(
+        "UPDATE jobs SET total_pages = ? WHERE id = ?",
+        (len(pages), job_id),
+    )
+
+    # 空页自动重试（OCR 完整性抗挫折）：
+    # MinerU 服务端处理超大 PDF（百 MB 级）存在丢页缺陷 — 同一页
+    # 在大文件里输出空、小切片后完整识别（51 页实测丢 6 页，单页
+    # 切片 1111-1702 字符全部完整）。对空页做小批量切片重跑并替换
+    # page_cache，重跑仍空则保留原样（服务端也识别不了，走既有
+    # _ocr_empty 提示路径）。对 mineru/paddle 且大小不限的文件触发
+    # （小文件 <10 页也启用 — 单页切片重跑仅一次调用，收益大于
+    # 直接静默空页的成本，见 self_heal.py）；sliced 路径（OCR_SLICES>1）
+    # 本身就按片跑。
+    # F5d 覆盖面修复：原实现只检查本次 OCR 新返回的 pages 且要求
+    # used_backend=="mineru" — retry 复用缓存（F3, used_backend=
+    # "cached"）时空页检测被跳过，丢页缺陷时期遗留的历史空页永远
+    # 不会被恢复（真实 51pages job 6 页空页实证，用户复核只见
+    # "## 第 N 页" 标题）。改为对 page_cache 统一检出空页，后端
+    # 判定兼容 cached（回查 jobs.ocr_backend_used 保留的上次真实后端）。
+    self_heal_backend = used_backend
+    if self_heal_backend == "cached":
+        cursor = await db.execute(
+            "SELECT ocr_backend_used FROM jobs WHERE id = ?", (job_id,)
+        )
+        row = await cursor.fetchone()
+        self_heal_backend = row["ocr_backend_used"] if row else ""
+
+    if supports_page_subset(self_heal_backend):
+        from core.pipeline import _self_heal_empty_pages as _run_heal
+        await _run_heal(db, job_id, ocr_pdf_path, pages, self_heal_backend)
+
+    # 门禁 3（OCR_GOLDEN_CORPUS.md）：双后端输出对比。主后端成功且
+    # OCR_DUAL_COMPARE 开启时，用备选后端复跑同一工作副本并逐页对比，
+    # 差异页以 findings 呈现并强制 partial_review（stage3 消费）。
+    # cached 复用路径跳过（无新 OCR 产物可比；历史任务如需对比走 retry）。
+    dual_diff: list[dict] = []
+    if used_backend in _KNOWN_BACKENDS:
+        from core.pipeline.dual_compare import run_dual_compare
+        dual_diff = await run_dual_compare(
+            db, job_id, ocr_pdf_path, used_backend, pages
+        )
+
+    # 取消检查点（e2e cancel 轮实证）：self-heal / 双后端对比期间取消
+    # 已确认（status=cancelled）后，此处无条件 transition ocr_done 抛
+    # InvalidTransitionError，引擎恢复分支误将取消终态覆盖为 error。
+    # 与 Stage 0 前后检查点同模式：取消即整体退出，不进入 Stage 2。
+    if await _run_is_cancelled(job_id):
+        return None
+    await transition_status(db, job_id, "ocr_done", f"OCR 识别完成：共 {len(pages)} 页")
+    await db.commit()
+    logger.info(
+        f"[{job_id}] DB: page_cache inserted {new_pages} new pages, "
+        f"jobs.total_pages={len(pages)} ({len(existing_pages)} cached)"
+    )
+    return pages, used_backend, stage1_ms, failed_pages, dual_diff
+
+
+
+
+async def _get_existing_pages(db, job_id: str) -> set[int]:
+    """Get page numbers that already have raw_html in page_cache."""
+    cursor = await db.execute(
+        "SELECT page FROM page_cache WHERE job_id = ?", (job_id,)
+    )
+    return {row["page"] for row in await cursor.fetchall()}

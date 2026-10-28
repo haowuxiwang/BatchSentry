@@ -1,0 +1,156 @@
+"""Downstream service health probes.
+
+Checks reachability of configured OCR and LLM endpoints BEFORE submitting
+real work, so misconfiguration fails fast instead of after a 10-minute OCR
+timeout.
+
+Used by:
+- /api/health/downstream endpoint (manual check from Settings page)
+- pipeline pre-flight check (optional)
+"""
+import asyncio
+import logging
+import time
+
+import requests
+
+from config import config
+from llm.client import _mask_secrets, get_llm_client
+
+logger = logging.getLogger(__name__)
+
+_PROBE_TIMEOUT = 8  # seconds — short, fail fast
+
+
+def probe_paddle_ocr() -> dict:
+    """Probe PaddleOCR service: GET the base URL with auth header."""
+    cfg = config["paddle_ocr"]
+    if not cfg.api_url or not cfg.token:
+        return {"ok": False, "reason": "未配置 PaddleOCR API URL 或 Token"}
+    try:
+        start = time.time()
+        # Use OPTIONS or HEAD to minimize side effects; fall back to GET.
+        headers = {"Authorization": f"bearer {cfg.token}"}
+        resp = requests.request("OPTIONS", cfg.api_url, headers=headers, timeout=_PROBE_TIMEOUT)
+        elapsed = (time.time() - start) * 1000
+        # Many APIs return 405 for OPTIONS but that still proves reachability
+        reachable = resp.status_code < 500
+        return {
+            "ok": reachable,
+            "status": resp.status_code,
+            "latency_ms": round(elapsed, 0),
+            "reason": "" if reachable else f"HTTP {resp.status_code}",
+        }
+    except requests.exceptions.Timeout:
+        return {"ok": False, "reason": f"探测超时（{_PROBE_TIMEOUT}s）"}
+    except requests.exceptions.ConnectionError as e:
+        return {"ok": False, "reason": f"连接失败: {e.__class__.__name__}"}
+    except Exception as e:
+        return {"ok": False, "reason": f"{e.__class__.__name__}: {e}"}
+
+
+def probe_mineru() -> dict:
+    """Probe MinerU service: just verify token is configured."""
+    cfg = config["mineru"]
+    if not cfg.token:
+        return {"ok": False, "reason": "未配置 MinerU Token"}
+    # MinerU has no simple health endpoint; configured is the best we can check
+    # without submitting a real job.
+    return {"ok": True, "reason": "Token 已配置（连通性在首个任务时探测）"}
+
+
+def probe_docling() -> dict:
+    """Probe docling（本地可选依赖）: 只探测是否可导入，无需网络/token。
+
+    M7/T7.2：docling 是本地后端，可用性 = 依赖是否安装；未装时
+    `_get_ocr_chain` 会优雅降级，此处如实反映"未安装"。
+    """
+    from core import docling_client
+    if docling_client.is_available():
+        return {"ok": True, "reason": "本地依赖已安装（无需网络）"}
+    return {"ok": False, "reason": "docling 可选依赖未安装（pip install docling）"}
+
+
+async def probe_llm() -> dict:
+    """Probe LLM service: send a minimal chat completion via the adapter.
+
+    Uses the adapter layer (not the raw SDK client) so this works for both
+    OpenAI and Anthropic protocols. Catches the case where the configured
+    provider has no API key (adapter construction may still succeed but
+    the actual request will fail with an auth error, which is what we want
+    to surface to the user).
+
+    短路逻辑：如果 provider 未配置 API key，直接返回 not configured，
+    避免用空 key 实际调用 API（浪费 8 秒超时 + 触发 SDK 重试）。
+    """
+    try:
+        client = get_llm_client()
+        info = client.adapter.client_info()
+        # 短路：未配置 API key 时直接返回，不发起真实请求
+        if not client.adapter.is_configured:
+            return {
+                "ok": False,
+                "model": client.model,
+                "provider": client.provider,
+                "protocol": info.get("protocol", "?"),
+                "reason": "未配置 API Key",
+            }
+        start = time.time()
+        # Tiny prompt to verify auth + connectivity. Goes through adapter.chat
+        # which routes to OpenAI chat.completions.create or Anthropic
+        # messages.create as appropriate. max_tokens=1 to minimize cost.
+        await client.adapter.chat(
+            system_prompt="",
+            user_content="ping",
+            max_tokens=1,
+            temperature=0,
+            timeout=_PROBE_TIMEOUT,
+        )
+        elapsed = (time.time() - start) * 1000
+        return {
+            "ok": True,
+            "model": client.model,
+            "provider": client.provider,
+            "protocol": info.get("protocol", "?"),
+            "latency_ms": round(elapsed, 0),
+            "reason": "",
+        }
+    except Exception as e:
+        # Best-effort model/provider reporting — adapter may not be built
+        try:
+            client = get_llm_client()
+            model = client.model
+            provider = client.provider
+        except Exception:
+            model, provider = "?", "?"
+        return {
+            "ok": False,
+            "model": model,
+            "provider": provider,
+            # P1 修复：SDK/代理异常消息可能回显带 API key 的 URL（全项目
+            # 唯一未过 _mask_secrets 的对外错误路径）— reason 直接进
+            # /api/health/downstream 响应展示给前端，必须脱敏。
+            "reason": _mask_secrets(f"{e.__class__.__name__}: {str(e)[:200]}"),
+        }
+
+
+async def probe_all() -> dict:
+    """Probe all configured downstream services in parallel."""
+    backend = config["app"].ocr_backend
+    if backend == "mineru":
+        ocr_probe = probe_mineru
+    elif backend == "docling":
+        ocr_probe = probe_docling
+    else:
+        ocr_probe = probe_paddle_ocr
+
+    ocr_result, llm_result = await asyncio.gather(
+        asyncio.to_thread(ocr_probe),
+        probe_llm(),
+    )
+    return {
+        "ocr_backend": backend,
+        "ocr": ocr_result,
+        "llm": llm_result,
+        "all_ok": ocr_result["ok"] and llm_result["ok"],
+    }

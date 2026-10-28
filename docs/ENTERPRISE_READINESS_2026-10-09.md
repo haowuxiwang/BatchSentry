@@ -1,0 +1,158 @@
+# 企业级就绪度评估（2026-10-10 · R85 第二十五批）
+
+> **触发**：用户问「当前应用是否足够健壮？是否足够作为企业级的应用？」
+> **方法**：三个**只读**审计代理分头取证（安全面 / 鲁棒性 / 泛化与企业级），
+> 关键断言由我**逐条复核**（不采信代理的"未确认"项当结论）；外部基线用
+> **Electron 官方安全清单**（20 项）与 **21 CFR 11.10(a)–(k)** 原文。
+> **本文件只写有证据的**；未能确认的一律另列（§5），**不得**读成"已通过"。
+>
+> 相关：`docs/RELEASE_READINESS_PLAN.md`（分发就绪，§1 安全）、
+> `docs/ADVERSARIAL_AUDIT.md`（§6 鲁棒性/泛化）、`docs/B6-1_GENERALIZATION_REPORT.md`（泛化实测）、
+> `docs/CVE_REACHABILITY.md` / `docs/DEPENDENCY_AUDIT.json`（依赖公告）。
+
+## §0 一页结论
+
+**对它的既定定位 —— 本机、单用户、桌面工具 —— 工程水准明显高于同类。**
+已经做实的（**有代码与机检证据**）：本机请求守卫在**读 body 之前**判定
+（`main.py` 的 `LocalGuardMiddleware`，且注册次序有 **AST 护栏**）；请求体**流式**硬上限
+（`Content-Length` 非法值/重复头/负数一律拒 —— 对应 `CVE-2026-53540` 与走私形态）；
+CSP + `nosniff` + `X-Frame-Options` + `base-uri`；上传**三重**校验（扩展名 + **magic bytes**
++ 尺寸/像素/页数上限）；**且这些入口拒绝路径已在产物层验证**（**34 例** HTTP 矩阵：保留设备名（含**带路径前缀**形态）/ 扩展名 / magic bytes / 过小 / 路径剥离 / 本机请求 / 去重，含 **7 例阴性对照**；`tests/e2e_rejections.py`，**34/34 达成**，连跑两次）；SQL **全部参数化**；`GET /api/settings` **掩码**回显密钥；
+Electron `contextIsolation: true` / `nodeIntegration: false`；门禁 **11 项**含
+依赖漏洞与运行时 EOL 的 **fail-closed** 机检。
+
+**但作为"企业级应用"（多用户 / 受监管 / 要审计追踪与判定质量证据）—— 不足**，
+且缺口是**结构性**的。最硬的三条：
+
+| # | 缺口 | 证据（可复核） | 为什么是阻断项 |
+|---|---|---|---|
+| **G1** | **无身份 / 权限 / 电子签名** | 全仓无任何鉴权（唯一闸门是本机守卫）；`core/security.py` 自述 "local single-user app" | 11.10(d)(g) 不满足。在共享机 / RDP / 多账户上，**任何本地进程**都能读全部批记录、改结论、读或覆写 API 密钥、删库、触发关机 |
+| **G2** | **审计追踪可被删除** | `api/jobs/actions.py:277-278`：删 job 时 `DELETE FROM audit_log` 与 `DELETE FROM llm_call_audit`；只留一条 `_system job_deleted` **摘要**行 | 11.10(e)：「record changes shall not obscure previously recorded information」且「audit trail shall be **retained** at least as long as the subject records」。当前设计把**被删记录自己的轨迹**一起销毁 |
+| **G3** | **判定质量无可信数字** | 无人工标注集；`FINDING_GROUND_TRUTH.json` 的唯一 pass/fail 判据是**合成语料**的规则层 F1（零 LLM/OCR）；真实 job 同输入两次跑 **41 vs 51**（+24%，**R85 第二十五批已修**：采样温度单一真值 0.0） | 11.10(a) 的系统验证与"辨别被改动记录"**无从量化**。目前**回答不了**"漏报率/误报率是多少" |
+
+## §1 对照 21 CFR 11.10（a）–（k）
+
+| 条 | 要求（要点） | 现状 | 判定 |
+|---|---|---|---|
+| (a) | 系统验证：准确性、可靠性、能辨别被改动的记录 | 门禁 11 项 + 3900+ 单测 + 变异验证；**但判定质量无标注集** | **部分** |
+| (b) | 生成**人可读 + 电子**形式的完整副本 | 有报告导出（md/json）；**无数据库级完整导出** | **部分** |
+| (c) | 记录保护：保留期内准确、可随时检索 | SQLite + 日志轮转 5；**无备份/保留策略**，删除即销毁 | **部分** |
+| (d) | 访问限于**授权个人** | **无身份体系** | **✗** |
+| (e) | 安全、计算机生成、带时间戳的审计追踪；**改动不得遮蔽先前记录**；保留期 ≥ 记录 | 有 `audit_log`/`llm_call_audit`；**但删 job 会 DELETE 它们**（见 G2） | **✗** |
+| (f) | 操作顺序检查 | 状态机 + `transition_status`（有护栏） | **✓** |
+| (g) | 权限检查（谁能用/签名/改记录） | **无** | **✗** |
+| (h) | 设备检查（数据来源有效性） | 本机守卫（Host/Origin）+ 端口绑定 | **部分** |
+| (i) | 人员资质 | 软件不适用 | **N/A** |
+| (j) | 书面政策与问责 | 软件不适用 | **N/A** |
+| (k) | 系统文档控制（分发/访问/变更控制） | `CHANGELOG` + `PROVENANCE.txt` + 门禁 + 产物指纹 | **✓** |
+
+## §2 对照 Electron 官方安全清单（20 项，节选有判别力的）
+
+| 官方项 | 现状 |
+|---|---|
+| 3. Enable context isolation | ✅ `contextIsolation: true`（**两处窗口都有**，已加护栏） |
+| 4. Enable process sandboxing | ✅ **本轮显式写出** `sandbox: true`（Electron ≥20 本就默认 true ⇒ **原先不是活漏洞**，但隐式默认可被 `nodeIntegration: true` 连带关掉）；已加机检 |
+| 2. Do not enable Node.js integration for remote content | ✅ `nodeIntegration: false` |
+| 6. Do not disable `webSecurity` | ✅ 未关闭（护栏禁止回流） |
+| 7. Define a restrictive CSP | ⚠️ **有**（`default-src 'self'` + `base-uri 'self'`），但 `script-src` 含 `'unsafe-inline'`（代码已自述成因，待 nonce 重构） |
+| 13/14. Disable/limit navigation & new windows | ✅ `setWindowOpenHandler` 仅放行 http(s) 转 `shell.openExternal`；`will-navigate` 拦非本机 |
+| 16. Use a current Electron version | ✅ Electron **43.7.4**（门禁 `runtime_eol` 机检在支持线 41/42/43 内） |
+| 17. Validate the `sender` of IPC messages | N/A（无 IPC / 无 preload） |
+| 19/20. Fuses / 不向不可信内容暴露 API | ✅ **已核并关闭**（R80 第二十批）—— `build.electronFuses` 显式关掉 `RunAsNode` / `EnableNodeOptionsEnvironmentVariable` / `EnableNodeCliInspectArguments`；**产物** fuse wire 逐位断言三项 OFF（`tests/unit/test_electron_fuses.py`，含合成伪二进制正负对照）；行为对照：`ELECTRON_RUN_AS_NODE=1 --version` 由 `v24.21.0`（Node）→ 以 Electron 启动。另三个改**启动语义**的 fuse **刻意未改**（见 §4） |
+
+## §3 已修（**13 项**，全部带护栏 + 变异验证）
+
+| 修复 | 内容 | 证据 |
+|---|---|---|
+| **F1** Electron 沙箱**显式化** | 两处 `webPreferences` 显式 `sandbox: true`（防隐式默认被连带关闭） | `tests/unit/test_electron_security_flags.py`（5 条）；变异 E1–E4 |
+| **F2** 全局异常处理器 | 未捕获异常由**纯文本 500** 改为与 `HTTPException` **同形**的 JSON，**只**回显请求号（`str(exc)` 可能含路径/上游 URL/密钥片段）；完整栈只进服务端日志 | `tests/unit/test_unhandled_exception_handler.py`（3 条）；变异 X1–X4 |
+| **F3** 上传**磁盘余量**守卫 | 入口预检（507），不足即拒；覆盖 chunked/撒谎头（流式写完后按真实字节数复核） | `tests/unit/test_upload_disk_headroom.py`（5 条）；变异 D1–D4 |
+| **F5** `innerHTML` 转义纪律**机检**（R79 第十九批补） | 前端拆模块后 `innerHTML` **46 处**（38 个赋值点）**逐个依赖 `esc()` 却无任何机检**。判据**三层显式**（纯字面量 / 含已知转义器 / 受审计渲染器且白名单函数确存在），未自动通过者**显式登记 + 陈旧检测**；扫描过 tokenizer（注释/字符串/模板 `${}`）；站点数下限防空转 | `tests/unit/test_innerhtml_escaping.py`（6 条）；变异 **10/10 达成**（`devlogs/_verify/r78_innerhtml_mutation.py`） |
+| **F4** §SEC-6 **文档漂移** | `RELEASE_READINESS_PLAN.md` 原写「`\|safe`/`Markup(`/`innerHTML` **零命中** → 已复核、无需动作」—— **与实测相反**（`innerHTML` **46 处**、`Markup(` **4 处**；前端 R63/R65 **拆模块后**才出现）。已更正并加**事实绑定**护栏 | `tests/unit/test_doc_release_plan_sec6_claim.py`（3 条）；变异 S1–S3 |
+| **F6** Electron **fuses 显式化**（R80 第二十批补） | `build.electronFuses` 关掉 `RunAsNode` / `EnableNodeOptionsEnvironmentVariable` / `EnableNodeCliInspectArguments`（此前**未配置** ⇒ 保留 Electron 默认，三个全 ON ⇒ 产物可被 `ELECTRON_RUN_AS_NODE` 降级成纯 Node、并接收 `NODE_OPTIONS`） | `tests/unit/test_electron_fuses.py`（6 条，含读**真二进制** fuse wire 逐位断言）；变异 F1–F5 **全 CAUGHT**（`devlogs/_verify/r80_mutation.py`） |
+| **F7** 上传文件名 **Windows 保留设备名**守卫（R80 第二十批补） | `NUL.pdf` 写盘「成功」却不落文件 ⇒ 误导性 400；`COM1.pdf` 的 `open` 抛 ⇒ 误导性 500。入口改为**点名拒绝**（400 + 原因 + 回显文件名），且**先于**建目录/写盘 | `tests/unit/test_upload_reserved_names.py`（24 条真值表 + 防空转 + 端点 400 + 拒绝先于写盘 + 正常名对照）；变异 U1–U5 **全 CAUGHT** |
+| **F8** 报告缓存 key **未覆盖全部渲染输入**（R84 第二十四批补） | 旧 key 只覆盖 findings 派生字段 + 豁免**规模**，漏了 `total_pages` / `empty_pages` / `unanalyzed_pages` / `filename` ⇒ 这些在 findings 不变时改变（`retry` 后重分析）会让 `report.md` 静默返回**过期**内容 | `tests/integration/test_report_cache_coverage.py`（3 条，逐输入判别力）；变异 **4/4 CAUGHT**（`devlogs/_verify/r83c_mutation.py`） |
+| **F9** 判定产出**采样温度未固定**（R85 第二十五批补） | 页面分析（`core/page_analyzer.py` 2 处）与跨页语义检查（`core/rules/llm_checks.py` 2 处）都传 `temperature=0.1` ⇒ 采样随机性逐页累积 ⇒ 同输入两次跑 findings **41 vs 51（+24%）**。修法：单一真值 `llm.client.DETERMINISTIC_TEMPERATURE = 0.0` | `tests/unit/test_llm_determinism.py`（4 条：常量 + 2 处**行为**断言 + 源码扫描）；变异 **5/5 CAUGHT**（`devlogs/_verify/r85_mutation.py`） |
+| **F10** 并发额度默认 **3 → 5**（R85 第二十五批补） | `api/jobs._MAX_CONCURRENT_JOBS` 默认 3 ⇒ 第 4 个并发审核任务起 **409 硬拒绝**，不满足“5 个文件并发”。修法：默认 5（env 可覆盖）+ 兜底分支同步；并更正原注释“~2GB”的错误归因（实测单 job ≈ 102MB） | `tests/unit/test_upload_quota_contract.py::TestDefaultQuotaSupportsFiveConcurrentReviews`（默认 ≥ 5 + 兜底 ≥ 5）；变异 M4/M5 CAUGHT |
+| **F11** 第三方日志降噪名单**不完整**（R85 第二十五批补） | `logging_config._NOISY_THIRD_PARTY_LOGGERS`（#145）漏掉 `aiosqlite`（历史 8,116 行）与 `chardet`（当天 `pharma.log` 100%）⇒ 有效级别仍 `DEBUG`（继承 root），#145「把自家 DEBUG 挤出去」未达成。修法：两者补入名单 | `tests/unit/test_logging_config.py::TestThirdPartyNoiseSuppression`（3 条：名单完整性 + `setup_logging` **行为**断言 + 子 logger 继承）；变异 M6–M9 CAUGHT（累计 **9/9**） |
+| **F12** 产物级入口拒绝矩阵**静默前置条件**（R85 第二十五批补） | 产物未配置真实 LLM provider 时**每个**上传都 400 ⇒ 矩阵"期望 400"用例全部**假绿**、阳性用例全红 ⇒ 表面 **13/34** 却**零判别力**。修法：`tests/e2e_rejections.py` 加前置 fail-fast（读 `GET /api/settings` 的 `llm.providers[].configured`），未满足即 rc=2 + 打印 seed 路径 | **双向验证**：正控（有 config）⇒ rc=0 / **34/34**；负控（隐藏 config）⇒ rc=2 + 明确提示。⚠️ 首版按顶层 `providers` 取值 ⇒ 恒判 False，**只有正控抓到** |
+| **F13** 额度**槽位回收**无断言（R85 第二十五批补） | 既有用例只钉「占满 ⇒ 409」；**回收方向**（终态 job 释放额度后新上传能否被接受）**无任何断言** ⇒ 若计数 SQL 被改成 `NOT IN (TERMINAL)`（或 ACTIVE 集混入终态）会「永久占满」而现有用例**全绿**。修法：新增 `TestQuotaSlotIsReleasedWhenAJobReachesTerminal`（自带**同轮负控**，且**必须**用 `test_db` 隔离库） | `tests/unit/test_upload_quota_contract.py::TestQuotaSlotIsReleasedWhenAJobReachesTerminal`；变异 **3/3**（`devlogs/_verify/r85i_quota_recycle_mutation.py`：M0 负控绿 / M1·M2 CAUGHT）；产物级 `devlogs/_verify/r85h_slot_recycle.py` **6/6** |
+
+> 变异合计 **15/15 CAUGHT + 基线绿**（`devlogs/_verify/r78_hardening_mutation.py`，覆盖 F1–F4）；F5（0-19 机检）另有 **10/10 达成**（`devlogs/_verify/r78_innerhtml_mutation.py`）。
+> R80 第二十批另有 **10/10 CAUGHT**（F1–F5 + U1–U5，`devlogs/_verify/r80_mutation.py`）+ 基线绿。
+> ⚠️ 首版 harness 曾把"临时树无 `.git` ⇒ 护栏自身报错"读成 CAUGHT ⇒ **基线红**暴露了
+> 这个**假 CAUGHT**；已把该护栏改为**不依赖 VCS** 的文件系统扫描。
+
+## §4 本轮**登记未修**（需产品/设计决策，不擅自改语义）
+
+| # | 事项 | 建议 |
+|---|---|---|
+| **0-18** | **审计追踪不可删**（G2） | 二选一：① 软删除（job 行保留 + `deleted_at`）；② 删除前把该 job 的 `audit_log`/`llm_call_audit` **归档**到独立表。**属产品语义变更，须你拍板** |
+| — | 无身份/RBAC/电子签名（G1） | 企业部署前必须有；至少先做"多账户下的数据隔离"评估 |
+| — | 无人工标注集（G3） | 需要领域数据；在此之前**不得**对外宣称任何精度/召回（**分阶段方案见 §7**） |
+| — | `script-src 'unsafe-inline'` | 用 CSP nonce 重构（代码内已注明） |
+| — | 密钥明文落盘 | 可评估 Windows DPAPI；注意会改变配置格式与迁移路径 |
+| — | 无 DB 备份/导出端点、无 `LICENSE` 文件 | 分发前补 |
+| — | 磁盘满的**中途**行为、`-wal` 断电重放 | 无端到端证据（见 §5） |
+| — | Electron 另三个 fuse（`enableEmbeddedAsarIntegrityValidation` / `onlyLoadAppFromAsar` / `grantFileProtocolExtraPrivileges`）**未改** | 打开它们会改**启动语义**；本环境**无法**验证 Electron GUI ⇒ 需在**真实终端**先验证能启动，再逐个打开（**能改 ≠ 该改**） |
+
+## §5 未验证边界（**不得**读成"已通过"）
+
+- 本评估基于**源码与文档**；三个代理**均未**运行应用做动态验证（除本轮 e2e）。
+- Electron `sandbox` 的**运行时**生效值未实测（本 agent 环境下 Electron 层 e2e 不可复现）。
+- `%APPDATA%/PBC/config.json` 的**实际 ACL** 未测（明文已知）。
+- `innerHTML` 的 46 处：**已有静态纪律机检**（每个站点要么含已知转义器、要么在 `_AUDITED` 显式登记），但**未逐处**证明转义**充分** —— 登记项按**人工理由**放行，且机检**不**验证渲染出的 HTML 无注入（见 0-19）。**另**：转义原语 `esc` 在 **3 个页面 bundle 里各有一份**（结构性：三页互不加载对方脚本，无公共基座）—— 三份的**行为等价**现已由机检锁定（`tests/unit/test_esc_single_source.py`：替换链逐项按序 + 副本集合登记 + 解码器镜像；变异 **4/4**）；跨 bundle 的**真**单一真值登记为 **0-25 待决策**。
+- 磁盘写满在 pipeline **中途**的确切行为无端到端证据。
+- Stage2 单页**最坏时长**可能超过 `analyzing` 看门狗阈值（代码推导：`(3+2)×480s = 2400s > 1800s`）
+  ⇒ 存在**误判停滞**风险；本轮 e2e 实测到单页 `latency=313.3s` + fix-hint 重试，
+  但**尚未**观察到越过阈值（登记于 `docs/TODO.md` 的 **0-10**）。
+- `Qwen/Qwen3.5-35B-A3B` **从未**产品级验证通过（仅有 >930s 无日志挂起的历史记录）。**R83 第二十三批**用**真实 v4 页分析提示**（system 3553 字符 + user 1770 字符 / `max_tokens=4000`）**复现**：单次调用 **903s 超时未返回**（300s × 3 次 SDK 内部重试），而最小调用 8.2s 正常 ⇒ 该模型**可用但属思考型**（返回 `reasoning_content`），单页墙钟远超产品单次尝试超时（`_PAGE_TIMEOUT=480s`）⇒ 与 **0-9** 的「预算错配」一致（e2e **930s 冒烟预算** < 看门狗 1 页阈值 **2280s**）。证据 `devlogs/_verify/r83_qwen_latency_probe.py`。
+- Electron fuses 的**运行时**语义只在本机受限环境验到「产物能起来 + 不再被 `ELECTRON_RUN_AS_NODE` 降级成 Node」；**GUI 层**（窗口/渲染）仍不可复现（见 0-2）。另三个 fuse 未改。
+- 保留设备名守卫只枚举 **ASCII 形态**（`CON`/`PRN`/`AUX`/`NUL`/`COM1-9`/`LPT1-9`）；Windows 文档提到的**上标数字变体**（如 `COM¹`）**未**覆盖 —— 本机**未实测**其行为，登记为已知缺口（不做未验证的断言）。**另**：该守卫的「先剥离、后判定」**载荷顺序**现已**三重锁定**（单测 `TestEndpointStripsBeforeChecking` + 产物级 e2e **34 例** + 变异 **3/3**，且三条变异下**旧用例保持绿** ⇒ 新用例是唯一判别力来源）。
+- 5 路**同时**上传 138MB×5 的**网络/磁盘峰值**未测（本轮在本机 localhost，非生产网络）。
+
+## §6 基线判定：现有 e2e 能否作基线（R85 第二十五批新增）
+
+**答：分两类，不可一刀切。** 确定性路径**可作基线**；依赖上游采样的**判定质量**暂**不可**设单值基线。
+
+### §6.1 可作基线（判据确定、与上游采样无关）
+
+| 基线 | 判据 | 本轮实测 | 复现命令 |
+|---|---|---|---|
+| 入口拒绝 / 敌意矩阵 | HTTP 状态码 + job 建/拒 | **34/34**（连跑两次；正控 rc=0） | `tests/e2e_rejections.py`（须先 seed `%TEMP%/pbc_e2e_appdata/PBC/config.json`；未配置 LLM 即 rc=2） |
+| 5 文件并发 + UI | UI 200 / 并发 5 全 200 / 第 6 份 409 / job 离开 pending | **7/7** | `devlogs/_verify/r85_five_concurrency.py` |
+| 5 路并发**端到端** | 5/5 准入 + 第 6 份**配额** 409 + 并发峰值 + 全部终态 + 存储层隔离 | **9/9**（峰值=**5** 真并发；5/5 到 `review`、0 error；findings 逐 job `[1,1,1,18,25]` 隔离；总墙钟 **715s < 1260s** 串行和） | `devlogs/_verify/r85_five_e2e.py` |
+| 产物门禁 | 11 项 fail-closed | **10/11**（唯一红 = `artifact_freshness`，**指名**本轮改动的 3 个**入包源** `core/pipeline/ocr_support.py` / `main.py` / `templates/upload.html` ⇒ **重建前必红，设计如此**；其余 10 项绿：worktree_clean / 1 份完整产物 / **4080 passed 0 failed** / coverage **95.09%** / 依赖 **0** 公告 / Electron 43.7.4 在支持线） | `scripts/release_gate.py --fail-under 95 --json` |
+| 冻结产物多轮 e2e | 终态 + SSE 事件链 + OCR 后端归属 + LLM 成功率（**非** findings 计数） | **ALL ROUNDS PASSED**（RC=0；`pdf,img,mineru,rot,robust,cancel,dual`） | `devlogs/_verify/r83b_multiround.py` |
+| 额度**槽位回收** | 取消 1 个后，其余仍在跑时第 6 份应 **200**（同轮负控：取消前 409） | **6/6**（cancel 后其余 **4/4** 在跑时新上传 200 且为**新** job_id） | `devlogs/_verify/r85h_slot_recycle.py` |
+| 大记录 ×5 并发 | 5×200 准入 + 峰值 5 + 5/5 全 51 页 + 0 error + 全终态 + LLM 失败**必须披露** | **6/6**（51 页/138MB ×5；总墙钟 **2593s**；1 次 cross-page 超时**已披露**） | `devlogs/_verify/r85k_bigfive_e2e.py` → 事后核验 `r85k_verify_bigfive.py` |
+| 硬崩溃恢复 | 硬杀后重启 ⇒ 卡死 job 收敛终态 + 审计 + **额度释放** | **5/5**（5/5 `ocr_running` 时 `taskkill /F` ⇒ 重启 5/5→`error`（4s）、`stuck_recovery` 审计 +5、新上传 200） | `devlogs/_verify/r85m_crash_recovery.py` |
+
+> 多轮尾段明细：`rot` paddle / llm 5/5 / 旋转自愈 page2,3@90° / `rot_lost=[]`；
+> `robust` o6(4pt+72dpi) 与 o1 均 `review`、llm 2/2；`cancel` 终态 `cancelled`（1s，入 `ocr_running` 后取消）；
+> `dual` 6 页 `partial_review`、backend=**mineru**、llm 8/8、`dual_compare_done`。
+> ⚠️ 首轮 `pdf/img/mineru` 的**逐轮明细**因 harness `stdout[-4000:]` 截断**未落盘**（仅有汇总判决 `ALL ROUNDS PASSED`）；
+> 已修 `r83b_multiround.py` 改为**全量落盘** `_r83b_multiround_full.out`。**该 3 轮只有汇总判决、无逐轮明细**。
+
+### §6.2 不可作基线（非确定，随上游采样波动）
+
+**findings 计数**。受控重放（`devlogs/_verify/r85_temp_probe.py`，桩捕获 → 真 client 重放）实测：
+`page4 n=6`，`temperature=0.0 → [2,2,3,2,2,2]`、`0.1 → [3,2,3,2,2,2]`，**spread 均 1（50%）** ⇒
+即使客户端已把温度固定为 0，**本上游仍有残余方差**（推测为服务端实现/量化/负载路由）。
+⇒ **任何 `findings == N` 式断言都不是稳定基线**；只能给 **N 次重复的区间**（登记 **0-29**）。
+
+**规模化佐证**（**同一份** 51 页记录**并发跑 5 次**，`devlogs/_verify/r85k_bigfive_e2e.py`）：
+findings 逐 job **199 / 203 / 204 / 217 / 220**（**同一输入**！spread **21**，rel **≈10.6%**，均值 208.6）⇒ 在**真实规模**上同样不可复现；且**类型集合**亦不同。
+
+**⇒ 结论**：回归基线用**确定路径**（拒绝 / 准入 / 并发 / 终态 / 事件链 / 后端归属）；
+判定质量**不设单值基线**，改设**区间 + 方差披露**。
+
+## §7 「判定质量无可信数字」（G3）具体方案（**不编造数字**）
+
+| 阶段 | 做法 | 能给出的量 | 依赖 |
+|---|---|---|---|
+| 短期（**本轮已做**） | 消除**客户端**随机源（F9，温度单一真值 0.0）；判定类结论**一律**用 N 次重复的**区间**表达，禁用单次计数 | 区间 + 方差 | 无 |
+| 中期（可执行） | ① 对**植入型**半合成用例（刻意植入漏签 / 参数越界 / 步骤缺项，真值由**植入定义**）测**命中率**；② 扩展 `FINDING_GROUND_TRUTH.json` 的合成语料从**规则层**覆盖到 **LLM 层**；③ 对**同一批**记录重复跑，报 findings 区间 + 噪声类型分布 | **植入用例命中率**（可测）；重复跑**区间** | 无（用例自造） |
+| 长期（需领域数据） | 与 QA / 药企共建**人工标注集**（每页逐条 finding 的 ground truth） | **漏报率 / 误报率 / 精确率 / 召回** | **人工标注** |
+
+⚠️ 在**长期**项完成前，**不得**对外宣称任何精度 / 召回数字（呼应 §4 G3 行）。

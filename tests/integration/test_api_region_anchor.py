@@ -1,0 +1,263 @@
+"""P0-3 区域级证据锚 —— 读端（AJAX API + SSR 首屏）集成测试。
+
+两层必须给出**同一套**锚：首屏由 SSR 渲染、翻页后由 AJAX 渲染，只要有一处
+漏挂，就会出现"翻页前能定位、翻页后不能"（或反之）的假缺陷。
+"""
+import json
+
+import pytest
+import pytest_asyncio
+from httpx import ASGITransport, AsyncClient
+
+# 归一化后的真实形态（Paddle 1440×1920 → aspect 0.75）
+_PAYLOAD = {
+    "backend": "paddle",
+    "space": [1440, 1920],
+    "space_aspect": 0.75,
+    "regions": [
+        {"label": "table", "bbox": [0.05, 0.05, 0.95, 0.5],
+         "text": "T2101a 进料压力 0.16 MPa"},
+        {"label": "text", "bbox": [0.05, 0.6, 0.3, 0.65],
+         "text": "操作人 张三"},
+    ],
+}
+
+
+# 服务端**转正过**的页（实测第 8 页形态）：坐标系 1920×1440 且 angle=270
+_ROTATED_PAYLOAD = {
+    "backend": "paddle",
+    "space": [1920, 1440],
+    "space_aspect": round(1920 / 1440, 4),
+    "space_rotation": 270,
+    "regions": [
+        {"label": "table", "bbox": [0.1, 0.2, 0.3, 0.6],
+         "text": "T2101a 进料压力 0.16 MPa"},
+    ],
+}
+
+
+def _by_prefix(findings: list[dict], prefix: str) -> dict:
+    """按 description 前缀取条目（description 才是稳定的查找键）。"""
+    for f in findings:
+        if str(f.get("description") or "").startswith(prefix):
+            return f
+    raise AssertionError(f"未找到 description 以 {prefix!r} 开头的 finding")
+
+
+def _extract_json_object(text: str, marker: str) -> dict:
+    """从模板渲染结果里取出 ``marker`` 之后的那个 JSON 对象（花括号配平）。
+
+    不能用 `index("}")` —— ctx 里的值是嵌套对象，首个 `}` 只是内层闭合，
+    截出来的片段不是合法 JSON（会误判成"没注入"）。
+    """
+    start = text.index(marker) + len(marker)
+    while text[start] in " \t":
+        start += 1
+    depth = 0
+    for i in range(start, len(text)):
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return json.loads(text[start:i + 1])
+    raise AssertionError(f"未能在 {marker!r} 之后找到配平的 JSON 对象")
+
+
+@pytest_asyncio.fixture
+async def anchor_client(test_db):
+    await test_db.execute(
+        "INSERT INTO jobs (id, filename, pdf_path, status, total_pages) "
+        "VALUES (?, ?, ?, ?, ?)",
+        ("anchor-job", "test.pdf", "/tmp/test.pdf", "review", 2),
+    )
+    await test_db.execute(
+        "INSERT INTO page_cache (job_id, page, raw_html, regions_json) "
+        "VALUES (?, ?, ?, ?)",
+        ("anchor-job", 1, "<p>原文</p>", json.dumps(_PAYLOAD, ensure_ascii=False)),
+    )
+    # 第 2 页有原文但无区域（后端降级为纯文本拆分的情形）
+    await test_db.execute(
+        "INSERT INTO page_cache (job_id, page, raw_html) VALUES (?, ?, ?)",
+        ("anchor-job", 2, "<p>第 2 页</p>"),
+    )
+    await test_db.executemany(
+        "INSERT INTO findings (job_id, page, type, severity, source, "
+        "description, ocr_text, status) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')",
+        [
+            # 命中区域 1（数值 0.16 在区域文本里）
+            ("anchor-job", 1, "param_out_of_spec", "critical", "rule",
+             "T2101a 进料压力 0.16 MPa 超出规格范围", "T2101a 进料压力 0.16 MPa"),
+            # 无特征词 → 不锚（宁缺勿错）
+            ("anchor-job", 1, "completeness", "info", "rule",
+             "缺少复核人签名", ""),
+            # 该页没有区域 → 不锚
+            ("anchor-job", 2, "param_out_of_spec", "warning", "rule",
+             "温度 42.1 超出规格", "温度 42.1"),
+        ],
+    )
+    await test_db.commit()
+
+    from main import app
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://localhost:8000"
+    ) as client:
+        yield client
+
+
+class TestFindingsApiAnchor:
+    @pytest.mark.asyncio
+    async def test_anchor_returned_for_matching_finding(self, anchor_client):
+        r = await anchor_client.get("/api/jobs/anchor-job/findings?page=1")
+        assert r.status_code == 200
+        hit = _by_prefix(r.json()["findings"], "T2101a")
+        assert hit["region_ref"] is not None
+        assert hit["region_ref"]["label"] == "table"
+        assert hit["region_ref"]["bbox"] == [0.05, 0.05, 0.95, 0.5]
+        assert hit["region_ref"]["space_aspect"] == 0.75
+        assert hit["region_ref"]["backend"] == "paddle"
+
+    @pytest.mark.asyncio
+    async def test_no_anchor_when_nothing_matches(self, anchor_client):
+        r = await anchor_client.get("/api/jobs/anchor-job/findings?page=1")
+        miss = _by_prefix(r.json()["findings"], "缺少复核人")
+        assert miss["region_ref"] is None
+
+    @pytest.mark.asyncio
+    async def test_no_anchor_when_page_has_no_regions(self, anchor_client):
+        r = await anchor_client.get("/api/jobs/anchor-job/findings?page=2")
+        assert r.status_code == 200
+        assert r.json()["findings"][0]["region_ref"] is None
+
+    @pytest.mark.asyncio
+    async def test_anchor_coords_are_normalized(self, anchor_client):
+        """禁止把未归一化坐标递给前端 —— 前端按 0..1 比例绘制。"""
+        r = await anchor_client.get("/api/jobs/anchor-job/findings")
+        for f in r.json()["findings"]:
+            ref = f.get("region_ref")
+            if not ref:
+                continue
+            assert all(0.0 <= v <= 1.0 for v in ref["bbox"]), ref
+
+
+class TestSsrAnchor:
+    @pytest.mark.asyncio
+    async def test_ssr_page_renders_button_and_ctx_map(self, anchor_client):
+        r = await anchor_client.get("/jobs/anchor-job/review?page=1")
+        assert r.status_code == 200
+        html = r.text
+        assert 'id="region-overlay"' in html
+        assert "locateRegion(event," in html, "首屏必须带定位入口"
+        assert "region_refs:" in html, "首屏锚点必须随 ctx 注入"
+        # ctx 里的锚与 API 一致（同一推导函数）
+        refs = _extract_json_object(html, "region_refs: ")
+        assert refs, "首屏 ctx 必须含锚点"
+        ref = next(iter(refs.values()))
+        assert ref["bbox"] == [0.05, 0.05, 0.95, 0.5]
+        assert ref["space_aspect"] == 0.75
+
+    @pytest.mark.asyncio
+    async def test_ssr_page_without_regions_has_no_locate_button(self, anchor_client):
+        r = await anchor_client.get("/jobs/anchor-job/review?page=2")
+        assert r.status_code == 200
+        assert "locateRegion(event," not in r.text, "锚不上时不得显示入口"
+
+    @pytest.mark.asyncio
+    async def test_ssr_tolerates_bad_kb_refs_json(self, anchor_client, test_db):
+        """kb_refs 坏 JSON 不得拖垮整页渲染（安全退化）。
+
+        kb_refs 是**可选**依据富集（v8 引入）：一条脏数据若让复核页 500，
+        等于把整页 finding 都藏起来 —— 比少显示一条依据严重得多。
+        """
+        await test_db.executemany(
+            "INSERT INTO findings (job_id, page, type, severity, source, "
+            "description, ocr_text, status, kb_refs) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)",
+            [
+                ("anchor-job", 2, "param_out_of_spec", "info", "rule",
+                 "备注一：坏 kb_refs", "温度 42.1", "{不是合法 JSON"),
+                ("anchor-job", 2, "param_out_of_spec", "info", "rule",
+                 "备注二：好 kb_refs", "温度 42.1",
+                 json.dumps([{"source": "gmp2010", "article": "第 75 条"}],
+                            ensure_ascii=False)),
+                # 合法 JSON 但**不是**列表 → 也必须退化为空，不得把 dict 当引用渲染
+                ("anchor-job", 2, "param_out_of_spec", "info", "rule",
+                 "备注三：非列表 kb_refs", "温度 42.1", '{"source": "gmp2010"}'),
+            ],
+        )
+        await test_db.commit()
+
+        r = await anchor_client.get("/jobs/anchor-job/review?page=2")
+        assert r.status_code == 200, r.text
+        assert "备注一：坏 kb_refs" in r.text, "坏依据不得让该条目从页面上消失"
+        assert "备注三：非列表 kb_refs" in r.text
+
+
+class TestRotatedPageAnchor:
+    """服务端转正过的页（实测第 8 页形态：1920×1440 + angle=270）。
+
+    前端只按 0..1 比例画，**不做**旋转 —— 所以后端必须把框换回页面空间再给
+    它，并且另给一个"页面应有宽高比"（旋转页取倒数）供闸门比对。
+    """
+
+    async def _switch_to_rotated(self, test_db):
+        await test_db.execute(
+            "UPDATE page_cache SET regions_json = ? "
+            "WHERE job_id = ? AND page = 1",
+            (json.dumps(_ROTATED_PAYLOAD, ensure_ascii=False), "anchor-job"),
+        )
+        await test_db.commit()
+
+    @pytest.mark.asyncio
+    async def test_api_hands_frontend_page_space_box(
+        self, anchor_client, test_db
+    ):
+        await self._switch_to_rotated(test_db)
+        r = await anchor_client.get("/api/jobs/anchor-job/findings?page=1")
+        assert r.status_code == 200
+        ref = _by_prefix(r.json()["findings"], "T2101a")["region_ref"]
+        assert ref["space_rotation"] == 270 and ref["rotated"] is True
+        # OCR 空间的原始框留痕（可回查服务端当时给的坐标）
+        assert ref["bbox"] == [0.1, 0.2, 0.3, 0.6]
+        # 交给前端的是**页面空间**坐标：270° 逆映射 (v, 1-u)
+        assert ref["page_bbox"] == [0.2, 0.7, 0.6, 0.9]
+        assert all(0.0 <= v <= 1.0 for v in ref["page_bbox"])
+        # 页面是竖向 —— 若这里仍是 1.3333，前端闸门会误判成"方向不一致"而拒画
+        assert ref["page_aspect"] == 0.75
+
+    @pytest.mark.asyncio
+    async def test_ssr_agrees_with_api_on_rotated_page(
+        self, anchor_client, test_db
+    ):
+        """首屏（SSR）与翻页（AJAX）必须给出**同一个**页面空间框。"""
+        await self._switch_to_rotated(test_db)
+        api = await anchor_client.get("/api/jobs/anchor-job/findings?page=1")
+        api_ref = _by_prefix(api.json()["findings"], "T2101a")["region_ref"]
+
+        page = await anchor_client.get("/jobs/anchor-job/review?page=1")
+        assert page.status_code == 200
+        refs = _extract_json_object(page.text, "region_refs: ")
+        assert refs, "旋转页在首屏也必须注入锚点（否则首屏点了没反应）"
+        ssr_ref = next(iter(refs.values()))
+        assert ssr_ref["page_bbox"] == api_ref["page_bbox"]
+        assert ssr_ref["page_aspect"] == api_ref["page_aspect"]
+
+    @pytest.mark.asyncio
+    async def test_unknown_rotation_falls_back_to_gate(
+        self, anchor_client, test_db
+    ):
+        """上游没上报 angle：不得猜方向 —— 原框透传，由前端闸门拒画。"""
+        payload = dict(_ROTATED_PAYLOAD)
+        payload.pop("space_rotation")
+        await test_db.execute(
+            "UPDATE page_cache SET regions_json = ? "
+            "WHERE job_id = ? AND page = 1",
+            (json.dumps(payload, ensure_ascii=False), "anchor-job"),
+        )
+        await test_db.commit()
+
+        r = await anchor_client.get("/api/jobs/anchor-job/findings?page=1")
+        ref = _by_prefix(r.json()["findings"], "T2101a")["region_ref"]
+        assert ref["page_bbox"] == ref["bbox"] == [0.1, 0.2, 0.3, 0.6]
+        assert ref["page_aspect"] == ref["space_aspect"] != 0.75
+        assert ref["rotated"] is False

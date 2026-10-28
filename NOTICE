@@ -1,0 +1,60 @@
+BatchSentry
+Copyright 2026 the BatchSentry authors
+
+This product is licensed under the GNU Affero General Public License,
+version 3 (SPDX: AGPL-3.0-only). A copy of the License is provided in
+the file named LICENSE.
+
+    https://www.gnu.org/licenses/agpl-3.0.html
+
+
+Scope of the license grant
+==========================
+
+The AGPL-3.0 grant in LICENSE covers only the original source code and
+documentation authored for this project.
+
+It does NOT cover, and must not be read as granting any right to:
+
+  1. Third-party GMP batch production records, scanned page images, OCR
+     output, or any other material supplied by a third party -- whether
+     or not such material is present in this repository or in its git
+     history. Nothing in LICENSE grants a license to data this project
+     does not own. Such material is not part of the "Corresponding
+     Source" of this program.
+
+  2. Trademarks, trade names, product names, or logos. The AGPL does not
+     grant trademark rights; marks belonging to third parties appear in
+     test fixtures and documentation for the sole purpose of reproducing
+     the layout of a record. Their presence is not a claim of any right
+     and not a grant of any right.
+
+  3. Third-party components that are vendored or bundled into a
+     distribution artifact. Those remain under their own licenses, which
+     are listed in requirements.txt and package.json.
+
+
+Network use (AGPL section 13)
+=============================
+
+The program includes a local HTTP interface. If you modify the program
+and let other users interact with it over a network, AGPL section 13
+requires you to offer those users the Corresponding Source of your
+modified version. Running an unmodified build locally does not by itself
+create that obligation.
+
+
+Third-party components
+======================
+
+This project depends on third-party open-source packages. Their licenses
+are declared by the packages themselves; the machine-readable inventory
+is requirements.txt (Python) and package.json (Node/Electron). A license
+scan of that inventory is recorded in docs/LICENSE_AND_DEPENDENCY_AUDIT.md.
+
+At the time of writing, PyMuPDF is dual licensed under AGPL-3.0 / Artifex
+Commercial. It is a hard runtime dependency and is bundled into the frozen
+distribution artifact. Because this project itself is distributed under
+AGPL-3.0, that bundled combination is license-compatible. If you instead
+obtain a commercial Artifex license, the terms of that license govern your
+use of PyMuPDF.

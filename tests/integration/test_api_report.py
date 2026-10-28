@@ -1,0 +1,296 @@
+"""Report API 集成测试 — Markdown + JSON 报告生成。
+
+覆盖：
+- GET /api/jobs/{id}/report.md（Markdown 报告）
+- GET /api/jobs/{id}/report.json（结构化 JSON 报告）
+- 404 for nonexistent job
+- 报告内容包含 filename / findings count / severity breakdown
+"""
+import pytest
+import pytest_asyncio
+from httpx import AsyncClient
+
+
+@pytest_asyncio.fixture
+async def report_client(test_db):
+    """提供带 findings 数据的报表测试客户端。"""
+    await test_db.execute(
+        "INSERT INTO jobs (id, filename, pdf_path, status, total_pages) "
+        "VALUES (?, ?, ?, ?, ?)",
+        ("report-job", "test.pdf", "/tmp/test.pdf", "review", 2),
+    )
+    await test_db.executemany(
+        "INSERT INTO findings (job_id, page, type, severity, source, description, status) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [
+            ("report-job", 1, "参数越界", "critical", "rule", "温度超出", "pending"),
+            ("report-job", 1, "时间逻辑", "warning", "llm_page", "工序倒序", "confirmed"),
+            ("report-job", 2, "完整性", "info", "rule", "缺少签名", "rejected"),
+        ],
+    )
+    await test_db.commit()
+    from main import app
+    from httpx import ASGITransport
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://localhost:8000") as client:
+        yield client
+
+
+class TestReportMarkdown:
+    """GET /api/jobs/{id}/report.md。"""
+
+    @pytest.mark.asyncio
+    async def test_report_md_returns_200(self, report_client):
+        r = await report_client.get("/api/jobs/report-job/report.md")
+        assert r.status_code == 200
+
+    @pytest.mark.asyncio
+    async def test_report_md_content_type(self, report_client):
+        """Markdown 报告应返回 text/markdown 媒体类型。"""
+        r = await report_client.get("/api/jobs/report-job/report.md")
+        assert "text/markdown" in r.headers.get("content-type", "")
+
+    @pytest.mark.asyncio
+    async def test_report_md_contains_filename(self, report_client):
+        """报告应包含 job 的文件名。"""
+        r = await report_client.get("/api/jobs/report-job/report.md")
+        assert "test.pdf" in r.text
+
+    @pytest.mark.asyncio
+    async def test_report_md_contains_findings_count(self, report_client):
+        """报告应包含 findings 总数。"""
+        r = await report_client.get("/api/jobs/report-job/report.md")
+        assert "**总 Findings**: 3" in r.text
+
+    @pytest.mark.asyncio
+    async def test_report_md_contains_severity_breakdown(self, report_client):
+        """报告应按严重度分组并显示每组的数量。"""
+        r = await report_client.get("/api/jobs/report-job/report.md")
+        text = r.text
+        # 三种严重度各 1 条（中文化，zh_map）
+        assert "🔴 严重 (1)" in text
+        assert "🟡 警告 (1)" in text
+        assert "🔵 信息 (1)" in text
+
+    @pytest.mark.asyncio
+    async def test_report_md_contains_job_id(self, report_client):
+        """报告应包含 Job ID。"""
+        r = await report_client.get("/api/jobs/report-job/report.md")
+        assert "report-job" in r.text
+
+    @pytest.mark.asyncio
+    async def test_report_md_contains_finding_descriptions(self, report_client):
+        """报告应包含 finding 描述。"""
+        r = await report_client.get("/api/jobs/report-job/report.md")
+        text = r.text
+        assert "温度超出" in text
+        assert "工序倒序" in text
+        assert "缺少签名" in text
+
+    @pytest.mark.asyncio
+    async def test_report_md_nonexistent_job_returns_404(self, report_client):
+        r = await report_client.get("/api/jobs/nonexistent-id/report.md")
+        assert r.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_report_md_warns_on_incomplete_coverage(self, test_db):
+        """对抗审查 P1 回归：空页/未分析页存在时报告不得宣称"无需人工复核"。
+
+        OCR 全部返回空文本且自愈失败时 job 照样终态 review + 0 findings，
+        旧报告输出"✅ 未发现问题，无需人工复核" = 静默合规通过假象。
+        """
+        import json as _json
+        await test_db.execute(
+            "INSERT INTO jobs (id, filename, pdf_path, status, total_pages) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("coverage-job", "scan.pdf", "/tmp/scan.pdf", "review", 3),
+        )
+        await test_db.executemany(
+            "INSERT INTO page_cache (job_id, page, raw_html, structured_json) "
+            "VALUES (?, ?, ?, ?)",
+            [
+                # 页1 空页标记 / 页2 无 structured_json（未完成分析）/ 页3 正常
+                ("coverage-job", 1, "", _json.dumps({"_ocr_empty": True})),
+                ("coverage-job", 2, "<p>partial</p>", None),
+                ("coverage-job", 3, "<p>ok</p>", _json.dumps({"steps": []})),
+            ],
+        )
+        await test_db.commit()
+        from main import app
+        from httpx import ASGITransport
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://localhost:8000"
+        ) as client:
+            r = await client.get("/api/jobs/coverage-job/report.md")
+        assert r.status_code == 200
+        # 头部覆盖声明 + 汇总警告
+        assert "页面覆盖" in r.text
+        assert "1 页 OCR 内容为空" in r.text
+        assert "1 页未完成分析" in r.text
+        assert "无需人工复核" not in r.text
+
+    @pytest.mark.asyncio
+    async def test_report_md_clean_job_still_positive_summary(self, report_client):
+        """对照组：findings 齐全且无覆盖缺失 → 保持原"无需人工复核"文案。"""
+        r = await report_client.get("/api/jobs/report-job/report.md")
+        assert r.status_code == 200
+        assert "页面覆盖" not in r.text
+
+    @pytest.mark.asyncio
+    async def test_report_md_escapes_html_in_findings(self, report_client, test_db):
+        """对抗审查(cr-7): LLM/OCR 生成的 description 可能含 HTML/脚本，
+        Markdown 文件中必须 HTML-escape，防止 Typora/Obsidian 渲染 XSS。"""
+        await test_db.execute(
+            "INSERT INTO findings (job_id, page, type, severity, source, description, status) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("report-job", 1, "xss", "warning", "llm_page",
+             "<script>alert(1)</script> & <b>bold</b>", "pending"),
+        )
+        await test_db.commit()
+        r = await report_client.get("/api/jobs/report-job/report.md")
+        assert r.status_code == 200
+        assert "<script>alert(1)</script>" not in r.text
+        # 对抗审查 P1-B：(-) 也转义 → 断言更新为实体形式
+        assert "&lt;script&gt;alert&#40;1&#41;&lt;/script&gt;" in r.text
+        assert "&lt;b&gt;bold&lt;/b&gt;" in r.text
+
+    @pytest.mark.asyncio
+    async def test_report_md_escapes_markdown_injection(self, report_client, test_db):
+        """对抗审查 P1-B: LLM 生成的 description 含 `![img](url)` / `[x](url)`
+        Markdown 图片/链接语法时，在 Typora/Obsidian 打开会触发远端图片请求
+        （隐私泄露/追踪）或可点击链接 — 必须转义 ! [ ] ( ) 使其成为纯文本。"""
+        # 独立 job：_report_cache 是模块级缓存，fixture 每测试重建的 findings
+        # 拥有相同的 (job_id, count, last_id, status_hash) → 会命中其他测试
+        # 已生成的报告缓存（GMP 缓存 key 语义在生产正确，此处是测试隔离问题）
+        await test_db.execute(
+            "INSERT INTO jobs (id, filename, pdf_path, status, total_pages) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("report-job-md", "test2.pdf", "/tmp/test2.pdf", "review", 2),
+        )
+        await test_db.execute(
+            "INSERT INTO findings (job_id, page, type, severity, source, description, status) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("report-job-md", 1, "md-inject", "warning", "llm_cross",
+             "![追](http://evil.example/t.png) [点我](javascript:void(0))", "pending"),
+        )
+        await test_db.commit()
+        r = await report_client.get("/api/jobs/report-job-md/report.md")
+        assert r.status_code == 200
+        # ! [ ] ( ) 全部转义后不再是 Markdown 图片/链接语法
+        assert "![" not in r.text
+        assert "](" not in r.text
+        assert "http://evil.example" in r.text  # URL 本身还在（纯文本）
+
+    @pytest.mark.asyncio
+    async def test_report_cache_invalidates_on_note_or_corrected_change(
+        self, report_client, test_db
+    ):
+        """对抗审查 P1-A：复核接口允许不改 status 单独更新
+        corrected_text/reviewer_note — 旧缓存 key 只看 (id, status)，二次
+        修正后导出仍返回旧文本（GMP 报告静默携带过期内容）。key 必须
+        纳入这两个字段。"""
+        r1 = await report_client.get("/api/jobs/report-job/report.md")
+        assert "修正为" not in r1.text
+
+        # 不改 status，仅给某 finding 追加 corrected_text
+        await test_db.execute(
+            "UPDATE findings SET corrected_text = '应填 25.0 而非 250.0' "
+            "WHERE job_id = ? AND id = 1",
+            ("report-job",),
+        )
+        await test_db.commit()
+
+        r2 = await report_client.get("/api/jobs/report-job/report.md")
+        assert "修正为" in r2.text
+        assert "25.0" in r2.text  # 新内容出现在报告里，而非旧缓存
+
+        # 再改 reviewer_note 也应失效
+        await test_db.execute(
+            "UPDATE findings SET reviewer_note = '复核人：张工（8/17 复核）' "
+            "WHERE job_id = ? AND id = 1",
+            ("report-job",),
+        )
+        await test_db.commit()
+        r3 = await report_client.get("/api/jobs/report-job/report.md")
+        assert "张工" in r3.text
+
+
+class TestReportJson:
+    """GET /api/jobs/{id}/report.json。"""
+
+    @pytest.mark.asyncio
+    async def test_report_json_returns_200(self, report_client):
+        r = await report_client.get("/api/jobs/report-job/report.json")
+        assert r.status_code == 200
+
+    @pytest.mark.asyncio
+    async def test_report_json_has_job_metadata(self, report_client):
+        """JSON 报告应包含 job 元数据。"""
+        r = await report_client.get("/api/jobs/report-job/report.json")
+        data = r.json()
+        assert "job" in data
+        assert data["job"]["id"] == "report-job"
+        assert data["job"]["filename"] == "test.pdf"
+        assert data["job"]["status"] == "review"
+        assert data["job"]["total_pages"] == 2
+
+    @pytest.mark.asyncio
+    async def test_report_json_findings_count(self, report_client):
+        """JSON 报告应返回正确的 findings 数量。"""
+        r = await report_client.get("/api/jobs/report-job/report.json")
+        data = r.json()
+        assert data["count"] == 3
+        assert len(data["findings"]) == 3
+
+    @pytest.mark.asyncio
+    async def test_report_json_severity_breakdown(self, report_client):
+        """JSON findings 应覆盖三种严重度。"""
+        r = await report_client.get("/api/jobs/report-job/report.json")
+        findings = r.json()["findings"]
+        severities = [f["severity"] for f in findings]
+        assert severities.count("critical") == 1
+        assert severities.count("warning") == 1
+        assert severities.count("info") == 1
+
+    @pytest.mark.asyncio
+    async def test_report_json_findings_sorted_by_severity(self, report_client):
+        """findings 应按严重度排序（critical 优先）。"""
+        r = await report_client.get("/api/jobs/report-job/report.json")
+        findings = r.json()["findings"]
+        assert findings[0]["severity"] == "critical"
+        assert findings[1]["severity"] == "warning"
+        assert findings[2]["severity"] == "info"
+
+    @pytest.mark.asyncio
+    async def test_report_json_nonexistent_job_returns_404(self, report_client):
+        r = await report_client.get("/api/jobs/nonexistent-id/report.json")
+        assert r.status_code == 404
+
+
+class TestReportExportAudit:
+    """报告导出必须写 audit_log（GMP 追溯：谁何时导出了什么）。"""
+
+    @pytest.mark.asyncio
+    async def test_report_md_export_audited(self, report_client):
+        r = await report_client.get("/api/jobs/report-job/report.md")
+        assert r.status_code == 200
+        from db.client import get_db
+        db = await get_db()
+        cur = await db.execute(
+            "SELECT detail FROM audit_log WHERE action='report_export'"
+        )
+        rows = await cur.fetchall()
+        assert len(rows) == 1
+        assert "format=md" in rows[0][0]
+
+    @pytest.mark.asyncio
+    async def test_report_json_export_audited(self, report_client):
+        r = await report_client.get("/api/jobs/report-job/report.json")
+        assert r.status_code == 200
+        from db.client import get_db
+        db = await get_db()
+        cur = await db.execute(
+            "SELECT detail FROM audit_log WHERE action='report_export'"
+        )
+        rows = await cur.fetchall()
+        assert len(rows) == 1
+        assert "json" in rows[0][0]

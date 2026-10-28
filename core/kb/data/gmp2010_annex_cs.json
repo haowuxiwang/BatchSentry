@@ -1,0 +1,287 @@
+{
+ "source_id": "gmp2010_annex_cs",
+ "title": "药品生产质量管理规范（2010年修订）附录：计算机化系统",
+ "effective": "2015-12-01",
+ "promulgated": "2015-05-26",
+ "authority": "国家食品药品监督管理总局",
+ "document_no": "2015年第54号公告 附件1",
+ "origin_url": "https://www.cfdi.org.cn/resource/news/9154.html",
+ "text_kind": "original",
+ "lang": "zh",
+ "license": "官方文件（国家机关公文，依《著作权法》第五条不适用于著作权保护）",
+ "retrieved_at": "2026-09-11",
+ "chapters": [
+  {
+   "no": 1,
+   "label": "第一章",
+   "name": "范围"
+  },
+  {
+   "no": 2,
+   "label": "第二章",
+   "name": "原则"
+  },
+  {
+   "no": 3,
+   "label": "第三章",
+   "name": "人员"
+  },
+  {
+   "no": 4,
+   "label": "第四章",
+   "name": "验证"
+  },
+  {
+   "no": 5,
+   "label": "第五章",
+   "name": "系统"
+  },
+  {
+   "no": 6,
+   "label": "第六章",
+   "name": "术语"
+  }
+ ],
+ "entries": [
+  {
+   "entry_id": "gmp2010_annex_cs-1",
+   "source_id": "gmp2010_annex_cs",
+   "chapter": "第一章 范围",
+   "article_label": "第一条",
+   "no": 1,
+   "text_kind": "original",
+   "lang": "zh",
+   "text": "本附录适用于在药品生产质量管理过程中应用的计算机化系统。计算机化系统由一系列硬件和软件组成，以满足特定的功能。"
+  },
+  {
+   "entry_id": "gmp2010_annex_cs-2",
+   "source_id": "gmp2010_annex_cs",
+   "chapter": "第二章 原则",
+   "article_label": "第二条",
+   "no": 2,
+   "text_kind": "original",
+   "lang": "zh",
+   "text": "计算机化系统代替人工操作时，应当确保不对产品的质量、过程控制和其质量保证水平造成负面影响，不增加总体风险。"
+  },
+  {
+   "entry_id": "gmp2010_annex_cs-3",
+   "source_id": "gmp2010_annex_cs",
+   "chapter": "第二章 原则",
+   "article_label": "第三条",
+   "no": 3,
+   "text_kind": "original",
+   "lang": "zh",
+   "text": "风险管理应当贯穿计算机化系统的生命周期全过程，应当考虑患者安全、数据完整性和产品质量。作为质量风险管理的一部分，应当根据书面的风险评估结果确定验证和数据完整性控制的程度。"
+  },
+  {
+   "entry_id": "gmp2010_annex_cs-4",
+   "source_id": "gmp2010_annex_cs",
+   "chapter": "第二章 原则",
+   "article_label": "第四条",
+   "no": 4,
+   "text_kind": "original",
+   "lang": "zh",
+   "text": "企业应当针对计算机化系统供应商的管理制定操作规程。供应商提供产品或服务时（如安装、配置、集成、验证、维护、数据处理等），企业应当与供应商签订正式协议，明确双方责任。\n企业应当基于风险评估的结果提供与供应商质量体系和审计信息相关的文件。"
+  },
+  {
+   "entry_id": "gmp2010_annex_cs-5",
+   "source_id": "gmp2010_annex_cs",
+   "chapter": "第三章 人员",
+   "article_label": "第五条",
+   "no": 5,
+   "text_kind": "original",
+   "lang": "zh",
+   "text": "计算机化系统生命周期中所涉及的各种活动，如验证、使用、维护、管理等，需要各相关的职能部门人员之间的紧密合作。应当明确所有使用和管理计算机化系统人员的职责和权限，并接受相应的使用和管理培训。\n应当确保有适当的专业人员，对计算机化系统的设计、验证、安装和运行等方面进行培训和指导。"
+  },
+  {
+   "entry_id": "gmp2010_annex_cs-6",
+   "source_id": "gmp2010_annex_cs",
+   "chapter": "第四章 验证",
+   "article_label": "第六条",
+   "no": 6,
+   "text_kind": "original",
+   "lang": "zh",
+   "text": "计算机化系统验证包括应用程序的验证和基础架构的确认，其范围与程度应当基于科学的风险评估。风险评估应当充分考虑计算机化系统的使用范围和用途。\n应当在计算机化系统生命周期中保持其验证状态。"
+  },
+  {
+   "entry_id": "gmp2010_annex_cs-7",
+   "source_id": "gmp2010_annex_cs",
+   "chapter": "第四章 验证",
+   "article_label": "第七条",
+   "no": 7,
+   "text_kind": "original",
+   "lang": "zh",
+   "text": "企业应当建立包含药品生产质量管理过程中涉及的所有计算机化系统清单，标明与药品生产质量管理相关的功能。清单应当及时更新。"
+  },
+  {
+   "entry_id": "gmp2010_annex_cs-8",
+   "source_id": "gmp2010_annex_cs",
+   "chapter": "第四章 验证",
+   "article_label": "第八条",
+   "no": 8,
+   "text_kind": "original",
+   "lang": "zh",
+   "text": "企业应当指定专人对通用的商业化计算机软件进行审核，确认其满足用户需求。\n在对定制的计算机化系统进行验证时，企业应当建立相应的操作规程，确保在生命周期内评估系统的质量和性能。"
+  },
+  {
+   "entry_id": "gmp2010_annex_cs-9",
+   "source_id": "gmp2010_annex_cs",
+   "chapter": "第四章 验证",
+   "article_label": "第九条",
+   "no": 9,
+   "text_kind": "original",
+   "lang": "zh",
+   "text": "数据转换格式或迁移时，应当确认数据的数值及含义没有改变。"
+  },
+  {
+   "entry_id": "gmp2010_annex_cs-10",
+   "source_id": "gmp2010_annex_cs",
+   "chapter": "第五章 系统",
+   "article_label": "第十条",
+   "no": 10,
+   "text_kind": "original",
+   "lang": "zh",
+   "text": "系统应当安装在适当的位置，以防止外来因素干扰。"
+  },
+  {
+   "entry_id": "gmp2010_annex_cs-11",
+   "source_id": "gmp2010_annex_cs",
+   "chapter": "第五章 系统",
+   "article_label": "第十一条",
+   "no": 11,
+   "text_kind": "original",
+   "lang": "zh",
+   "text": "关键系统应当有详细阐述的文件（必要时，要有图纸），并须及时更新。此文件应当详细描述系统的工作原理、目的、安全措施和适用范围、计算机运行方式的主要特征，以及如何与其他系统和程序对接。"
+  },
+  {
+   "entry_id": "gmp2010_annex_cs-12",
+   "source_id": "gmp2010_annex_cs",
+   "chapter": "第五章 系统",
+   "article_label": "第十二条",
+   "no": 12,
+   "text_kind": "original",
+   "lang": "zh",
+   "text": "软件是计算机化系统的重要组成部分。企业应当根据风险评估的结果，对所采用软件进行分级管理（如针对软件供应商的审计），评估供应商质量保证系统，保证软件符合企业需求。"
+  },
+  {
+   "entry_id": "gmp2010_annex_cs-13",
+   "source_id": "gmp2010_annex_cs",
+   "chapter": "第五章 系统",
+   "article_label": "第十三条",
+   "no": 13,
+   "text_kind": "original",
+   "lang": "zh",
+   "text": "在计算机化系统使用之前，应当对系统进行全面测试，并确认系统可以获得预期的结果。当计算机化系统替代某一人工系统时，可采用两个系统（人工和计算机化）平行运行的方式作为测试和验证内容的一部分。"
+  },
+  {
+   "entry_id": "gmp2010_annex_cs-14",
+   "source_id": "gmp2010_annex_cs",
+   "chapter": "第五章 系统",
+   "article_label": "第十四条",
+   "no": 14,
+   "text_kind": "original",
+   "lang": "zh",
+   "text": "只有经许可的人员才能进入和使用系统。企业应当采取适当的方式杜绝未经许可的人员进入和使用系统。\n应当就进入和使用系统制订授权、取消以及授权变更的操作规程。必要时，应当考虑系统能记录未经许可的人员试图访问系统的行为。对于系统自身缺陷，无法实现人员控制的，必须具有书面程序、相关记录本及相关物理隔离手段，保证只有经许可的人员方能进行操作。"
+  },
+  {
+   "entry_id": "gmp2010_annex_cs-15",
+   "source_id": "gmp2010_annex_cs",
+   "chapter": "第五章 系统",
+   "article_label": "第十五条",
+   "no": 15,
+   "text_kind": "original",
+   "lang": "zh",
+   "text": "当人工输入关键数据时，应当复核输入记录以确保其准确性。这个复核可以由另外的操作人员完成，或采用经验证的电子方式。必要时，系统应当设置复核功能，确保数据输入的准确性和数据处理过程的正确性。"
+  },
+  {
+   "entry_id": "gmp2010_annex_cs-16",
+   "source_id": "gmp2010_annex_cs",
+   "chapter": "第五章 系统",
+   "article_label": "第十六条",
+   "no": 16,
+   "text_kind": "original",
+   "lang": "zh",
+   "text": "计算机化系统应当记录输入或确认关键数据人员的身份。只有经授权人员，方可修改已输入的数据。每次修改已输入的关键数据均应当经过批准，并应当记录更改数据的理由。应当根据风险评估的结果，考虑在计算机化系统中建立数据审计跟踪系统，用于记录数据的输入和修改以及系统的使用和变更。"
+  },
+  {
+   "entry_id": "gmp2010_annex_cs-17",
+   "source_id": "gmp2010_annex_cs",
+   "chapter": "第五章 系统",
+   "article_label": "第十七条",
+   "no": 17,
+   "text_kind": "original",
+   "lang": "zh",
+   "text": "计算机化系统的变更应当根据预定的操作规程进行，操作规程应当包括评估、验证、审核、批准和实施变更等规定。计算机化系统的变更，应经过该部分计算机化系统相关责任人员的同意，变更情况应有记录。"
+  },
+  {
+   "entry_id": "gmp2010_annex_cs-18",
+   "source_id": "gmp2010_annex_cs",
+   "chapter": "第五章 系统",
+   "article_label": "第十八条",
+   "no": 18,
+   "text_kind": "original",
+   "lang": "zh",
+   "text": "对于电子数据和纸质打印文稿同时存在的情况，应当有文件明确规定以电子数据为主数据还是以纸质打印文稿为主数据。"
+  },
+  {
+   "entry_id": "gmp2010_annex_cs-19",
+   "source_id": "gmp2010_annex_cs",
+   "chapter": "第五章 系统",
+   "article_label": "第十九条",
+   "no": 19,
+   "text_kind": "original",
+   "lang": "zh",
+   "text": "以电子数据为主数据时，应当满足以下要求：\n（一）为满足质量审计的目的，存储的电子数据应当能够打印成清晰易懂的文件。\n（二）必须采用物理或者电子方法保证数据的安全，以防止故意或意外的损害。日常运行维护和系统发生变更（如计算机设备或其程序）时，应当检查所存储数据的可访问性及数据完整性。\n（三）应当建立数据备份与恢复的操作规程，定期对数据备份，以保护存储的数据供将来调用。备份数据应当储存在另一个单独的、安全的地点，保存时间应当至少满足本规范中关于文件、记录保存时限的要求。"
+  },
+  {
+   "entry_id": "gmp2010_annex_cs-20",
+   "source_id": "gmp2010_annex_cs",
+   "chapter": "第五章 系统",
+   "article_label": "第二十条",
+   "no": 20,
+   "text_kind": "original",
+   "lang": "zh",
+   "text": "企业应当建立应急方案，以便系统出现损坏时启用。应急方案启用的及时性应当与需要使用该方案的紧急程度相关。例如，影响召回产品的相关信息应当能够及时获得。"
+  },
+  {
+   "entry_id": "gmp2010_annex_cs-21",
+   "source_id": "gmp2010_annex_cs",
+   "chapter": "第五章 系统",
+   "article_label": "第二十一条",
+   "no": 21,
+   "text_kind": "original",
+   "lang": "zh",
+   "text": "应当建立系统出现故障或损坏时进行处理的操作规程，必要时对该操作规程的相关内容进行验证。\n包括系统故障和数据错误在内的所有事故都应当被记录和评估。重大的事故应当进行彻底调查，识别其根本原因，并采取相应的纠正措施和预防措施。"
+  },
+  {
+   "entry_id": "gmp2010_annex_cs-22",
+   "source_id": "gmp2010_annex_cs",
+   "chapter": "第五章 系统",
+   "article_label": "第二十二条",
+   "no": 22,
+   "text_kind": "original",
+   "lang": "zh",
+   "text": "当采用计算机化系统放行产品时，计算机化系统应当能明示和记录放行产品人员的身份。"
+  },
+  {
+   "entry_id": "gmp2010_annex_cs-23",
+   "source_id": "gmp2010_annex_cs",
+   "chapter": "第五章 系统",
+   "article_label": "第二十三条",
+   "no": 23,
+   "text_kind": "original",
+   "lang": "zh",
+   "text": "电子数据可以采用电子签名的方式，电子签名应当遵循相应法律法规的要求。"
+  },
+  {
+   "entry_id": "gmp2010_annex_cs-24",
+   "source_id": "gmp2010_annex_cs",
+   "chapter": "第六章 术语",
+   "article_label": "第二十四条",
+   "no": 24,
+   "text_kind": "original",
+   "lang": "zh",
+   "text": "下列术语含义是：\n（一）电子签名：是指电子数据中以电子形式所含、所附用于识别签名人身份并表明签名人认可其中内容的数据。\n（二）电子数据：也称数据电文，是指以电子、光学、磁或者类似手段生成、发送、接收或者储存的信息。\n（三）基础架构：为应用程序提供平台使其实现功能的一系列硬件和基础软件，如网络软件和操作系统。\n（四）计算机化系统生命周期：计算机化系统从提出用户需求到终止使用的过程，包括设计、设定标准、编程、测试、安装、运行、维护等阶段。\n（五）数据审计跟踪：是一系列有关计算机操作系统、应用程序及用户操作等事件的记录，用以帮助从原始数据追踪到有关的记录、报告或事件，或从记录、报告、事件追溯到原始数据。\n（六）数据完整性：是指数据的准确性和可靠性，用于描述存储的所有数据值均处于客观真实的状态。\n（七）应用程序：安装在既定的平台/硬件上，提供特定功能的软件。"
+  }
+ ]
+}

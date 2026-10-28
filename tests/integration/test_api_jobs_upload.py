@@ -1,0 +1,799 @@
+"""API 集成测试 — jobs 上传与生命周期端点（test_api_jobs.py 未覆盖的补集）。
+
+覆盖：
+- POST /api/jobs          （上传 PDF + 启动 pipeline）
+- GET  /api/jobs/stats/overview
+- GET  /api/jobs/archived/list
+- POST /api/jobs/{id}/cancel
+- POST /api/jobs/{id}/retry
+
+关键约束：
+- Mock `api.jobs.launch_pipeline` 避免 real OCR/LLM 执行
+- 上传测试使用 PyMuPDF (fitz) 生成真实临时 PDF
+- 复用 conftest.test_db fixture（隔离的 SQLite + 临时 output_dir）
+"""
+import pytest
+import pytest_asyncio
+from unittest.mock import patch
+from httpx import AsyncClient, ASGITransport
+
+
+@pytest_asyncio.fixture
+async def client(test_db):
+    """提供基于 ASGITransport 的 API 客户端（依赖 test_db 隔离数据库）。"""
+    from main import app
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://localhost:8000"
+    ) as c:
+        yield c
+
+
+class TestUploadPdf:
+    """POST /api/jobs — 上传 PDF 并创建 job。"""
+
+    @pytest.mark.asyncio
+    async def test_upload_rejected_from_non_local_host(self, test_db):
+        """对抗审查（cr-13）：非本地 Host 的上传请求必须 403（CSRF 防护）。"""
+        from main import app
+        from io import BytesIO
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://evil.com:8000"
+        ) as c:
+            files = {"file": ("test.pdf", BytesIO(b"%PDF-1.4 test"), "application/pdf")}
+            r = await c.post("/api/jobs", files=files)
+        assert r.status_code == 403
+        assert "non-local" in r.text
+
+    @pytest.mark.asyncio
+    async def test_upload_pdf_creates_job(self, client, tmp_path, test_db):
+        """上传真实 PDF 应返回 job_id，并将 job 写入 DB（status=pending）。"""
+        import fitz
+
+        # 生成真实 PDF
+        doc = fitz.open()
+        page = doc.new_page()
+        page.insert_text((50, 50), "Test batch record")
+        pdf_path = tmp_path / "batch.pdf"
+        doc.save(str(pdf_path))
+        doc.close()
+
+        # Mock pipeline 避免真实 OCR/LLM
+        with patch("api.jobs.launch_pipeline") as mock_pipe:
+            with open(pdf_path, "rb") as f:
+                r = await client.post(
+                    "/api/jobs",
+                    files={"file": ("batch.pdf", f, "application/pdf")},
+                )
+
+        assert r.status_code == 200
+        data = r.json()
+        assert "job_id" in data
+        assert data["filename"] == "batch.pdf"
+        assert data["status"] == "pending"
+
+        # pipeline 应被调度一次
+        assert mock_pipe.call_count == 1
+        job_id = mock_pipe.call_args.args[0]
+        assert job_id == data["job_id"]
+
+        # DB 应有对应 job 记录，status=pending
+        cursor = await test_db.execute(
+            "SELECT id, filename, status, pdf_path FROM jobs WHERE id = ?",
+            (data["job_id"],),
+        )
+        row = await cursor.fetchone()
+        assert row is not None
+        assert row["filename"] == "batch.pdf"
+        assert row["status"] == "pending"
+        assert row["pdf_path"] is not None
+
+        # audit_log 应记录 pipeline_start
+        cursor = await test_db.execute(
+            "SELECT action FROM audit_log WHERE job_id = ?",
+            (data["job_id"],),
+        )
+        logs = [r["action"] for r in await cursor.fetchall()]
+        assert "pipeline_start" in logs
+
+    @pytest.mark.asyncio
+    async def test_upload_rejects_non_pdf_filename(self, client, tmp_path):
+        """非 .pdf 后缀应返回 400。"""
+        fake = tmp_path / "notes.txt"
+        fake.write_bytes(b"not a pdf")
+
+        with patch("api.jobs.launch_pipeline"):
+            with open(fake, "rb") as f:
+                r = await client.post(
+                    "/api/jobs",
+                    files={"file": ("notes.txt", f, "text/plain")},
+                )
+        assert r.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_upload_rejects_empty_file(self, client):
+        """空文件应返回 400。"""
+        with patch("api.jobs.launch_pipeline"):
+            r = await client.post(
+                "/api/jobs",
+                files={"file": ("empty.pdf", b"", "application/pdf")},
+            )
+        assert r.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_upload_rejects_encrypted_pdf(self, client):
+        """加密 PDF（fitz needs_pass=True）应 400 拒绝，不启动 pipeline。
+
+        云端 OCR 后端无法解密加密 PDF，上传时拒绝比 pipeline 跑完才 error 体验好。
+        """
+        from unittest.mock import MagicMock
+
+        doc = MagicMock()
+        doc.needs_pass = True
+        doc.page_count = 3
+        doc.__enter__.return_value = doc
+        with patch("api.jobs.launch_pipeline") as mock_pipe, patch("fitz.open", return_value=doc):
+            r = await client.post(
+                "/api/jobs",
+                files={"file": ("locked.pdf", b"%PDF-1.4 encrypted", "application/pdf")},
+            )
+        assert r.status_code == 400
+        assert "加密" in r.text
+        mock_pipe.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_upload_rejects_zero_page_pdf(self, client):
+        """0 页 PDF 应 400 拒绝，不启动 pipeline。"""
+        from unittest.mock import MagicMock
+
+        doc = MagicMock()
+        doc.needs_pass = False
+        doc.page_count = 0
+        doc.__enter__.return_value = doc
+        with patch("api.jobs.launch_pipeline") as mock_pipe, patch("fitz.open", return_value=doc):
+            r = await client.post(
+                "/api/jobs",
+                files={"file": ("nopages.pdf", b"%PDF-1.4 x", "application/pdf")},
+            )
+        assert r.status_code == 400
+        assert "页面" in r.text
+        mock_pipe.assert_not_called()
+
+
+class TestUploadDedup:
+    """上传去重 — 相同内容（md5）二次上传应 409，force=1 可绕过。"""
+
+    @staticmethod
+    def _make_pdf(tmp_path, name: str, text: str):
+        import fitz
+        doc = fitz.open()
+        doc.new_page().insert_text((50, 50), text)
+        pdf_path = tmp_path / name
+        doc.save(str(pdf_path))
+        doc.close()
+        return pdf_path
+
+    @pytest.mark.asyncio
+    async def test_duplicate_upload_returns_409(self, client, tmp_path, test_db):
+        """相同内容二次上传：409 + 提示已有任务，不创建第二个 job、不启动 pipeline、
+        新上传的临时目录被清理。"""
+        pdf_path = self._make_pdf(tmp_path, "dup.pdf", "duplicate me")
+
+        with patch("api.jobs.launch_pipeline") as mock_pipe:
+            with open(pdf_path, "rb") as f:
+                r1 = await client.post(
+                    "/api/jobs", files={"file": ("dup.pdf", f, "application/pdf")}
+                )
+            with open(pdf_path, "rb") as f:
+                r2 = await client.post(
+                    "/api/jobs", files={"file": ("dup.pdf", f, "application/pdf")}
+                )
+
+        assert r1.status_code == 200
+        assert r2.status_code == 409
+        detail = r2.json()["detail"]
+        assert r1.json()["job_id"] in detail
+        assert mock_pipe.call_count == 1  # 去重后未再次调度 pipeline
+
+        # DB 中只有 1 个 job，且 md5 已写入
+        cursor = await test_db.execute("SELECT COUNT(*) FROM jobs WHERE md5 IS NOT NULL")
+        assert (await cursor.fetchone())[0] == 1
+
+        # 上传目录只有 1 个 job 目录（二次上传的孤儿目录已清理）
+        from config import config as _cfg
+        from pathlib import Path
+        out = Path(_cfg["app"].output_dir)
+        assert [d.name for d in out.iterdir() if d.is_dir()] == [r1.json()["job_id"]]
+
+    @pytest.mark.asyncio
+    async def test_duplicate_upload_force_creates_second_job(self, client, tmp_path, test_db):
+        """force=1 应绕过去重，创建第二个 job。"""
+        pdf_path = self._make_pdf(tmp_path, "force.pdf", "force me")
+
+        with patch("api.jobs.launch_pipeline") as mock_pipe:
+            with open(pdf_path, "rb") as f:
+                r1 = await client.post(
+                    "/api/jobs", files={"file": ("force.pdf", f, "application/pdf")}
+                )
+            with open(pdf_path, "rb") as f:
+                r2 = await client.post(
+                    "/api/jobs?force=1",
+                    files={"file": ("force.pdf", f, "application/pdf")},
+                )
+
+        assert r1.status_code == 200
+        assert r2.status_code == 200
+        assert r1.json()["job_id"] != r2.json()["job_id"]
+        assert mock_pipe.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_different_content_both_accepted(self, client, tmp_path, test_db):
+        """内容不同的文件都应正常接受。"""
+        pdf_a = self._make_pdf(tmp_path, "a.pdf", "content A")
+        pdf_b = self._make_pdf(tmp_path, "b.pdf", "content B")
+
+        with patch("api.jobs.launch_pipeline"):
+            with open(pdf_a, "rb") as f:
+                r1 = await client.post(
+                    "/api/jobs", files={"file": ("same.pdf", f, "application/pdf")}
+                )
+            with open(pdf_b, "rb") as f:
+                r2 = await client.post(
+                    "/api/jobs", files={"file": ("same.pdf", f, "application/pdf")}
+                )
+
+        assert r1.status_code == 200
+        assert r2.status_code == 200
+
+        cursor = await test_db.execute(
+            "SELECT COUNT(DISTINCT md5) FROM jobs WHERE md5 IS NOT NULL"
+        )
+        assert (await cursor.fetchone())[0] == 2
+
+    @pytest.mark.asyncio
+    async def test_archived_job_does_not_block_reupload(self, client, tmp_path, test_db):
+        """归档任务（软删除）不应拦截相同 md5 的重传 — 归档不占用内容指纹，
+        用户归档旧任务后可直接重新上传分析（回归：发布前审查发现归档任务
+        仍触发 409「已上传过」，用户删除旧任务后才允许重传，体验与审计冲突）。
+        """
+        pdf_path = self._make_pdf(tmp_path, "arch.pdf", "archived content")
+
+        with patch("api.jobs.launch_pipeline"):
+            with open(pdf_path, "rb") as f:
+                r1 = await client.post(
+                    "/api/jobs", files={"file": ("arch.pdf", f, "application/pdf")}
+                )
+            job_id = r1.json()["job_id"]
+
+            # 归档第一个任务（先置为终态 — 状态机健壮性修复后归档拒绝运行中的 job）
+            await test_db.execute(
+                "UPDATE jobs SET status = 'review' WHERE id = ?", (job_id,)
+            )
+            await test_db.commit()
+            ar = await client.post(f"/api/jobs/{job_id}/archive")
+            assert ar.status_code == 200
+
+            # 同内容再次上传：不再 409，直接创建新任务
+            with open(pdf_path, "rb") as f:
+                r2 = await client.post(
+                    "/api/jobs", files={"file": ("arch.pdf", f, "application/pdf")}
+                )
+            with open(pdf_path, "rb") as f:
+                r3 = await client.post(
+                    "/api/jobs", files={"file": ("arch.pdf", f, "application/pdf")}
+                )
+
+        assert r1.status_code == 200
+        assert r2.status_code == 200
+        assert r2.json()["job_id"] != job_id
+        # 新任务创建后再传同文件，仍被去重拦截（非归档任务）
+        assert r3.status_code == 409
+
+        # 归档任务保留在表中，新任务已创建
+        cursor = await test_db.execute(
+            "SELECT COUNT(*) FROM jobs WHERE md5 IS NOT NULL"
+        )
+        assert (await cursor.fetchone())[0] == 2
+
+
+class TestStatsOverview:
+    """GET /api/jobs/stats/overview。"""
+
+    @pytest.mark.asyncio
+    async def test_stats_returns_all_fields(self, client):
+        r = await client.get("/api/jobs/stats/overview")
+        assert r.status_code == 200
+        data = r.json()
+        # 必须包含全部 6 个顶层字段
+        for key in ("database", "jobs", "page_cache", "findings", "audit_log", "pdf_storage"):
+            assert key in data, f"missing field: {key}"
+
+    @pytest.mark.asyncio
+    async def test_stats_database_field_structure(self, client):
+        data = (await client.get("/api/jobs/stats/overview")).json()
+        assert "path" in data["database"]
+        assert "size_mb" in data["database"]
+
+    @pytest.mark.asyncio
+    async def test_stats_jobs_field_structure(self, client):
+        data = (await client.get("/api/jobs/stats/overview")).json()
+        assert {"total", "active", "archived"} <= set(data["jobs"])
+
+    @pytest.mark.asyncio
+    async def test_stats_pdf_storage_field_structure(self, client):
+        data = (await client.get("/api/jobs/stats/overview")).json()
+        assert {"dir", "count", "size_mb"} <= set(data["pdf_storage"])
+
+    @pytest.mark.asyncio
+    async def test_stats_reflects_inserted_job(self, client, test_db):
+        """插入 job + finding 后，stats 计数应反映。"""
+        await test_db.execute(
+            "INSERT INTO jobs (id, filename, pdf_path, status, total_pages) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("stats-job", "s.pdf", "/tmp/s.pdf", "review", 3),
+        )
+        await test_db.execute(
+            "INSERT INTO findings (job_id, page, type, severity, description, status) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            ("stats-job", 1, "参数越界", "critical", "test", "pending"),
+        )
+        await test_db.commit()
+
+        data = (await client.get("/api/jobs/stats/overview")).json()
+        assert data["jobs"]["total"] >= 1
+        assert data["findings"] >= 1
+
+
+class TestArchivedList:
+    """GET /api/jobs/archived/list。"""
+
+    @pytest.mark.asyncio
+    async def test_archived_list_empty_by_default(self, client):
+        r = await client.get("/api/jobs/archived/list")
+        assert r.status_code == 200
+        data = r.json()
+        assert "archived" in data
+        assert "count" in data
+        assert data["count"] == 0
+        assert data["archived"] == []
+
+    @pytest.mark.asyncio
+    async def test_archived_list_returns_archived_jobs(self, client, test_db):
+        """已归档 job 应出现在列表中。"""
+        await test_db.execute(
+            "INSERT INTO jobs (id, filename, pdf_path, status, total_pages) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("archived-1", "a.pdf", "/tmp/a.pdf", "archived", 2),
+        )
+        await test_db.execute(
+            "INSERT INTO jobs (id, filename, pdf_path, status, total_pages) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("active-1", "b.pdf", "/tmp/b.pdf", "review", 2),
+        )
+        await test_db.commit()
+
+        r = await client.get("/api/jobs/archived/list")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["count"] == 1
+        ids = [j["id"] for j in data["archived"]]
+        assert "archived-1" in ids
+        assert "active-1" not in ids
+
+
+class TestCancelJob:
+    """POST /api/jobs/{id}/cancel。"""
+
+    @pytest.mark.asyncio
+    async def test_cancel_rejected_from_non_local_origin(self, test_db):
+        """对抗审查（cr-18）：恶意 Origin 的 cancel 请求必须 403（CSRF 防护）。"""
+        from main import app
+        await test_db.execute(
+            "INSERT INTO jobs (id, filename, pdf_path, status) "
+            "VALUES (?, ?, ?, ?)",
+            ("cancel-evil", "p.pdf", "/tmp/p.pdf", "pending"),
+        )
+        await test_db.commit()
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://evil.com:8000"
+        ) as c:
+            r = await c.post("/api/jobs/cancel-evil/cancel")
+        assert r.status_code == 403
+        assert "non-local" in r.text
+
+    @pytest.mark.asyncio
+    async def test_cancel_pending_job_returns_200(self, client, test_db):
+        """pending → cancelling 合法，应返回 200。"""
+        await test_db.execute(
+            "INSERT INTO jobs (id, filename, pdf_path, status) "
+            "VALUES (?, ?, ?, ?)",
+            ("cancel-pending", "p.pdf", "/tmp/p.pdf", "pending"),
+        )
+        await test_db.commit()
+
+        r = await client.post("/api/jobs/cancel-pending/cancel")
+        assert r.status_code == 200
+        assert r.json()["status"] == "cancelling"
+
+    @pytest.mark.asyncio
+    async def test_cancel_review_job_returns_400(self, client, test_db):
+        """review → cancelling 非法（取消只对活跃流程有意义 — 终态 review 用重试/重新分析），应返回 400。"""
+        await test_db.execute(
+            "INSERT INTO jobs (id, filename, pdf_path, status) "
+            "VALUES (?, ?, ?, ?)",
+            ("cancel-review", "r.pdf", "/tmp/r.pdf", "review"),
+        )
+        await test_db.commit()
+
+        r = await client.post("/api/jobs/cancel-review/cancel")
+        assert r.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_cancel_nonexistent_returns_400(self, client):
+        """不存在的 job → transition_status 抛 InvalidTransitionError → 400。"""
+        r = await client.post("/api/jobs/does-not-exist/cancel")
+        assert r.status_code == 400
+
+
+class TestRetryJob:
+    """POST /api/jobs/{id}/retry。"""
+
+    @pytest.mark.asyncio
+    async def test_retry_rejected_from_non_local_origin(self, test_db):
+        """对抗审查（cr-18）：恶意 Origin 的 retry 请求必须 403（消耗配额类端点）。"""
+        from main import app
+        await test_db.execute(
+            "INSERT INTO jobs (id, filename, pdf_path, status) "
+            "VALUES (?, ?, ?, ?)",
+            ("retry-evil", "p.pdf", "/tmp/p.pdf", "error"),
+        )
+        await test_db.commit()
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://evil.com:8000"
+        ) as c:
+            r = await c.post("/api/jobs/retry-evil/retry")
+        assert r.status_code == 403
+        assert "non-local" in r.text
+
+    @pytest.mark.asyncio
+    async def test_retry_error_job_with_pdf_returns_200(self, client, test_db, tmp_path):
+        """error → pending 合法且 PDF 存在，应返回 200 并重新调度 pipeline。"""
+        # 创建真实 PDF 文件
+        import fitz
+        doc = fitz.open()
+        doc.new_page().insert_text((50, 50), "retry me")
+        pdf_path = tmp_path / "retry.pdf"
+        doc.save(str(pdf_path))
+        doc.close()
+
+        await test_db.execute(
+            "INSERT INTO jobs (id, filename, pdf_path, status) "
+            "VALUES (?, ?, ?, ?)",
+            ("retry-error", "retry.pdf", str(pdf_path), "error"),
+        )
+        await test_db.commit()
+
+        with patch("api.jobs.launch_pipeline") as mock_pipe:
+            r = await client.post("/api/jobs/retry-error/retry")
+
+        assert r.status_code == 200
+        assert r.json()["status"] == "pending"
+        assert mock_pipe.call_count == 1
+        assert mock_pipe.call_args.args[0] == "retry-error"
+
+    @pytest.mark.asyncio
+    async def test_retry_error_job_missing_pdf_returns_400(self, client, test_db):
+        """error 状态合法但 PDF 文件不在磁盘 → 400。"""
+        await test_db.execute(
+            "INSERT INTO jobs (id, filename, pdf_path, status) "
+            "VALUES (?, ?, ?, ?)",
+            ("retry-missing", "m.pdf", "/nonexistent/path/m.pdf", "error"),
+        )
+        await test_db.commit()
+
+        with patch("api.jobs.launch_pipeline"):
+            r = await client.post("/api/jobs/retry-missing/retry")
+        assert r.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_retry_review_job_returns_200_and_resets_analysis(self, client, test_db, tmp_path):
+        """P1-6: review → pending 合法（全量重新分析语义）：
+        findings 清空、structured_json 置 NULL、raw_html 保留（不重 OCR）、
+        audit_log 记录 analysis_reset。"""
+        import fitz
+        doc = fitz.open()
+        doc.new_page()
+        pdf_path = tmp_path / "review.pdf"
+        doc.save(str(pdf_path))
+        doc.close()
+
+        await test_db.execute(
+            "INSERT INTO jobs (id, filename, pdf_path, status) "
+            "VALUES (?, ?, ?, ?)",
+            ("retry-review", "review.pdf", str(pdf_path), "review"),
+        )
+        # 制造既有分析产物：1 条 finding + 已分析的 page_cache（含 raw_html 与
+        # structured_json），模拟 review 完成态
+        await test_db.execute(
+            "INSERT INTO page_cache (job_id, page, raw_html, structured_json) "
+            "VALUES (?, 1, '<table><tr><td>批号</td></tr></table>', '{\"steps\":[]}')",
+            ("retry-review",),
+        )
+        await test_db.execute(
+            "INSERT INTO findings (job_id, page, type, severity, source, description, status) "
+            "VALUES (?, 1, '完整性', 'warning', 'rule', '旧分析结果', 'pending')",
+            ("retry-review",),
+        )
+        await test_db.commit()
+
+        with patch("api.jobs.launch_pipeline") as mock_pipe:
+            r = await client.post("/api/jobs/retry-review/retry")
+
+        assert r.status_code == 200
+        assert r.json()["status"] == "pending"
+        assert mock_pipe.call_count == 1
+        assert mock_pipe.call_args.args[0] == "retry-review"
+
+        cursor = await test_db.execute(
+            "SELECT raw_html, structured_json FROM page_cache WHERE job_id = ?", ("retry-review",)
+        )
+        pc = await cursor.fetchone()
+        assert pc["raw_html"] is not None  # OCR 缓存保留（stage1_skipped 复用）
+        assert pc["structured_json"] is None  # 分析结果清空（全量重提取）
+
+        cursor = await test_db.execute(
+            "SELECT COUNT(*) AS n FROM findings WHERE job_id = ?", ("retry-review",)
+        )
+        assert (await cursor.fetchone())["n"] == 0
+
+        cursor = await test_db.execute(
+            "SELECT action FROM audit_log WHERE job_id = ?", ("retry-review",)
+        )
+        actions = [r["action"] for r in await cursor.fetchall()]
+        assert "analysis_reset" in actions
+
+    @pytest.mark.asyncio
+    async def test_retry_nonexistent_returns_404(self, client):
+        """job 不存在 → 404（在 transition 之前先查 job）。"""
+        with patch("api.jobs.launch_pipeline"):
+            r = await client.post("/api/jobs/does-not-exist/retry")
+        assert r.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_retry_cancelled_job_returns_200(self, client, test_db, tmp_path):
+        """cancelled → pending 合法，应返回 200。"""
+        import fitz
+        doc = fitz.open()
+        doc.new_page()
+        pdf_path = tmp_path / "cancelled.pdf"
+        doc.save(str(pdf_path))
+        doc.close()
+
+        await test_db.execute(
+            "INSERT INTO jobs (id, filename, pdf_path, status) "
+            "VALUES (?, ?, ?, ?)",
+            ("retry-cancelled", "cancelled.pdf", str(pdf_path), "cancelled"),
+        )
+        await test_db.commit()
+
+        with patch("api.jobs.launch_pipeline") as mock_pipe:
+            r = await client.post("/api/jobs/retry-cancelled/retry")
+        assert r.status_code == 200
+        assert r.json()["status"] == "pending"
+        assert mock_pipe.call_count == 1
+
+class TestGuardUnifiedReadDelete:
+    """B6（P2-1）：GET 读端点 + DELETE 破坏性端点守卫统一 — 非本地一律 403。"""
+
+    @pytest.mark.asyncio
+    async def test_delete_rejected_from_non_local_origin(self, test_db):
+        """恶意 Origin 的 DELETE 必须 403（与 cancel/archive 同口径）。"""
+        from main import app
+        await test_db.execute(
+            "INSERT INTO jobs (id, filename, pdf_path, status) "
+            "VALUES (?, ?, ?, ?)",
+            ("del-evil", "p.pdf", "/tmp/p.pdf", "review"),
+        )
+        await test_db.commit()
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://evil.com:8000"
+        ) as c:
+            r = await c.delete("/api/jobs/del-evil")
+        assert r.status_code == 403
+        assert "non-local" in r.text
+        # job 未被删除
+        cursor = await test_db.execute("SELECT COUNT(*) AS n FROM jobs WHERE id = 'del-evil'")
+        assert (await cursor.fetchone())["n"] == 1
+
+    @pytest.mark.asyncio
+    async def test_get_jobs_rejected_from_non_local_origin(self, test_db):
+        """恶意 Origin 的 GET /api/jobs（读端点）必须 403。"""
+        from main import app
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://evil.com:8000"
+        ) as c:
+            r = await c.get("/api/jobs")
+        assert r.status_code == 403
+        assert "non-local" in r.text
+
+    @pytest.mark.asyncio
+    async def test_get_report_rejected_from_non_local_origin(self, test_db):
+        """恶意 Origin 的 GET 报告（读端点）必须 403。"""
+        from main import app
+        await test_db.execute(
+            "INSERT INTO jobs (id, filename, pdf_path, status) "
+            "VALUES (?, ?, ?, ?)",
+            ("rep-evil", "p.pdf", "/tmp/p.pdf", "review"),
+        )
+        await test_db.commit()
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://evil.com:8000"
+        ) as c:
+            r = await c.get("/api/jobs/rep-evil/report.md")
+        assert r.status_code == 403
+        assert "non-local" in r.text
+
+
+class _GatedUpload:
+    """最小的 UploadFile 替身 —— 把"首次读盘"变成**闸门**。
+
+    `create_job` 在**前置快检之后**才第一次 `await file.read()`，所以在这里等待
+    等价于"已通过前置快检、尚未走到授权式检查" —— 正是 B2-7 那个 TOCTOU 窗口的
+    入口。用它才能**确定性**地复现竞态，而不是靠并发运气。
+    """
+
+    def __init__(self, data: bytes, filename: str, gate, arrived, counter, total):
+        self._data = data
+        self._pos = 0
+        self.filename = filename
+        self._gate = gate
+        self._arrived = arrived
+        self._counter = counter
+        self._total = total
+        self._waited = False
+
+    async def read(self, n: int = -1):
+        if not self._waited:
+            self._waited = True
+            self._counter.append(1)
+            if len(self._counter) >= self._total:
+                self._arrived.set()
+            await self._gate.wait()
+        if self._pos >= len(self._data):
+            return b""
+        end = len(self._data) if n is None or n < 0 else self._pos + n
+        chunk = self._data[self._pos:end]
+        self._pos = end
+        return chunk
+
+
+def _unique_pdfs(tmp_path, n: int):
+    """n 份**内容各不相同**的 PDF（避免撞上 md5 去重 409，混淆配额 409）。"""
+    import fitz
+
+    out = []
+    for i in range(n):
+        doc = fitz.open()
+        doc.new_page().insert_text((50, 50), f"Unique batch record #{i}")
+        p = tmp_path / f"quota_{i}.pdf"
+        doc.save(str(p))
+        doc.close()
+        out.append((p.name, p.read_bytes()))
+    return out
+
+
+class TestUploadQuotaIsAtomic:
+    """B2-7：并发上传不得突破 `MAX_CONCURRENT_JOBS`。
+
+    背景：配额检查在函数开头、INSERT 在其后，两者之间隔着**写盘 + PDF 解析**
+    （大文件可达分钟级）。若只在开头查一次，多个并发上传会**全部**通过那道检查
+    再各自写入 ⇒ 实际活跃数可远超上限，`MAX_CONCURRENT_JOBS` 形同虚设
+    （pipeline 的 per-job lock 并不限制**这个**上限）。
+
+    修法：把授权式检查放进 **INSERT 的同一把 db_lock 内**（中间不释放锁、无
+    await 让出点）⇒ "查过没过"与"写下这一行"对其他上传是原子的。
+
+    ⚠️ 用例自带**反空断言**：先证明 N 个请求确实都进到了窗口（否则前置快检就
+    把它们挡了，本用例会靠"什么都没发生"而假绿）。
+    """
+
+    @pytest.mark.asyncio
+    async def test_concurrent_uploads_stop_at_the_limit(self, test_db, tmp_path):
+        import asyncio
+
+        from fastapi import HTTPException
+
+        from api.jobs import _ACTIVE_STATUSES, create_job
+
+        n = 4
+        gate = asyncio.Event()
+        arrived = asyncio.Event()
+        counter: list[int] = []
+        payloads = _unique_pdfs(tmp_path, n)
+
+        uploads = [
+            _GatedUpload(data, name, gate, arrived, counter, n)
+            for name, data in payloads
+        ]
+
+        with patch("api.jobs._MAX_CONCURRENT_JOBS", 1), \
+                patch("api.jobs.launch_pipeline"):
+            tasks = [
+                asyncio.create_task(create_job(file=u, force=False, request=None))
+                for u in uploads
+            ]
+            # 等 N 个请求**全部**越过前置快检（即都卡在同一窗口里）
+            await asyncio.wait_for(arrived.wait(), timeout=20)
+            gate.set()
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # ── 反空断言：窗口确实被打开（否则本用例毫无判别力）──
+        assert len(counter) == n, (
+            f"只有 {len(counter)}/{n} 个请求到达闸门 ⇒ 窗口未复现，本用例是空断言"
+        )
+
+        ok = [r for r in results if not isinstance(r, BaseException)]
+        rejected = [r for r in results if isinstance(r, HTTPException)]
+        assert len(ok) == 1, f"MAX=1 时应恰好 1 个成功，实际 {len(ok)}（{results}）"
+        assert len(rejected) == n - 1
+        for e in rejected:
+            assert e.status_code == 409, e
+            assert "上限" in str(e.detail), e
+
+        cursor = await test_db.execute(
+            "SELECT COUNT(*) FROM jobs WHERE status IN ("
+            + ",".join("?" * len(_ACTIVE_STATUSES))
+            + ")",
+            _ACTIVE_STATUSES,
+        )
+        active = (await cursor.fetchone())[0]
+        assert active == 1, (
+            f"并发上传突破了上限：活跃 job={active}（MAX=1）"
+            f" —— 配额检查与 INSERT 必须在同一把锁内"
+        )
+
+    @pytest.mark.asyncio
+    async def test_gate_window_is_reachable_only_after_early_check(
+        self, test_db, tmp_path
+    ):
+        """正向对照：**已有活跃 job 占满额度**时，请求应在**前置快检**就被挡下。
+
+        说明"两道检查"的分工：窗口只有在额度过得去时才会走到，
+        所以上面那条用例测的确实是**授权式**检查，而不是快检。
+        """
+        import asyncio
+
+        from fastapi import HTTPException
+
+        from api.jobs import create_job
+
+        await test_db.execute(
+            "INSERT INTO jobs (id, filename, pdf_path, status) VALUES (?, ?, ?, ?)",
+            ("already-active", "a.pdf", "/tmp/a.pdf", "pending"),
+        )
+        await test_db.commit()
+
+        gate = asyncio.Event()
+        counter: list[int] = []
+        name, data = _unique_pdfs(tmp_path, 1)[0]
+
+        with patch("api.jobs._MAX_CONCURRENT_JOBS", 1), \
+                patch("api.jobs.launch_pipeline"):
+            # wait_for：若前置快检被删掉，这里会**超时污染**而不是挂死
+            # —— 挂死不算红灯，必须让它可断言地失败。
+            with pytest.raises(HTTPException) as ei:
+                await asyncio.wait_for(
+                    create_job(
+                        file=_GatedUpload(
+                            data, name, gate, asyncio.Event(), counter, 1
+                        ),
+                        force=False,
+                        request=None,
+                    ),
+                    timeout=15,
+                )
+
+        assert ei.value.status_code == 409
+        assert counter == [], (
+            "额度已满时不应走到读盘闸门（应立即在前置快检被拒）—— "
+            "否则大文件会被白传一遍"
+        )

@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "updated_at": "2026-09-23",
+  "maintained_by": "人工维护（发版前核对一次）",
+  "why_in_repo": [
+    "release_gate.py 的定位是**零网络**的聚合检查 —— 运行时支持线若每次联网抓取，离线构建会误红，且判据会随外部数据漂移（同一天两次跑出不同结论）。",
+    "所以支持线写进仓库**显式维护**：门禁只做'产物里的版本 vs 本表'的确定性比对。",
+    "代价（不得假装没有）：本表会过期。门禁对'表本身过老'给出 WARN 提醒复核。"
+  ],
+  "components": {
+    "electron": {
+      "supported_major": [41, 42, 43],
+      "checked_at": "2026-09-23",
+      "source": "Electron 官方支持策略：只安全支持最新三个稳定大版本",
+      "note": "Electron 决定内置 Chromium 与 Node 的版本，故只判 Electron 主版本即可覆盖三者"
+    }
+  }
+}

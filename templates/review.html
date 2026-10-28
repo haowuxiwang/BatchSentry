@@ -1,0 +1,759 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="h-full">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>复核 — 批记录辅助审查</title>
+    <link rel="stylesheet" href="/static/design-tokens.css?v={{ asset_ver('design-tokens.css') }}">
+    <link rel="stylesheet" href="/static/app.css?v={{ asset_ver('app.css') }}">
+    <link rel="stylesheet" href="/static/review.css?v={{ asset_ver('review.css') }}">
+    {# 中英文映射：DB 中 severity/source/status/confidence 为英文枚举，前端统一渲染为中文 #}
+    {% set severity_zh = {'critical': '严重', 'warning': '警告', 'info': '信息'} %}
+    {% set source_zh = {'rule': '规则', 'llm_page': 'LLM单页', 'llm_fallback': 'LLM兜底', 'llm_cross': 'LLM跨页', 'user_rule': '用户规则'} %}
+    {# finding 状态映射（与 static/review.js statusZh 保持一致） #}
+    {% set status_zh = {'pending': '待复核', 'confirmed': '已确认', 'rejected': '已拒绝', 'corrected': '已修正'} %}
+    {# job 状态映射（与 static/upload.js STATUS_ZH job 部分保持一致） #}
+    {% set job_status_zh = {'pending': '待处理', 'queued': '排队中', 'processing': '处理中', 'ocr_running': '识别中', 'ocr_done': '识别完成', 'analyzing': '分析中', 'review': '可复核', 'partial_review': '部分可复核', 'error': '出错', 'cancelled': '已取消', 'cancelling': '取消中', 'done': '已完成', 'archived': '已归档'} %}
+    {% set confidence_zh = {'high': '高', 'medium': '中', 'low': '低'} %}
+    {# finding type 映射（与 static/review.js typeZh 保持一致 — SSR/AJAX 必须同源，否则同一 finding 首屏英文、翻页后变中文） #}
+    {% set type_zh = {'time_reversal': '时间倒序', 'year_contradiction': '年份矛盾', 'suspicious_date': '日期可疑', 'signature_time_anomaly': '签名时间异常', 'completeness': '信息缺失', 'batch_inconsistency': '批号不一致', 'param_out_of_spec': '参数超标', 'low_confidence': '低置信度', 'handwritten': '手写内容需核对', 'signature_mismatch': '签名不符', 'user_rule': '用户规则', 'ocr_noise': 'OCR 噪音', 'time_anomaly': '时间异常', 'step_gap': '工序缺号', 'spec_unverifiable': '规格无法核定', 'uncategorized': '未分类', 'mass_balance': '物料平衡/收率', 'self_review': '自检自核', 'signature_unreadable': '签名无法辨认', 'equipment_state': '设备/清洁状态', 'env_monitor': '环境监测', 'doc_version': '文件版本', 'deviation_link': '偏差关联', 'alteration': '涂改规范'} %}
+</head>
+<body class="h-full flex flex-col">
+    <a href="#main-content" class="skip-link">跳到主要内容</a>
+    <!-- ============= Top App Bar — 48px, 无 logo, 纯文字 ============= -->
+    <header class="border-b border-border bg-background/80 backdrop-blur-sm sticky top-0 z-40">
+        <div class="max-w-[1700px] mx-auto px-6 h-12 flex items-center gap-3">
+            <span class="text-[11px] font-medium text-muted-foreground tracking-wide uppercase">BatchSentry</span>
+            <span class="text-muted-foreground/40">/</span>
+            <a href="/" class="btn-press text-[13px] font-medium hover:text-muted-foreground transition-colors">
+                批记录辅助审查
+            </a>
+            <span class="text-muted-foreground/40">/</span>
+            <span class="text-[13px] font-medium truncate max-w-[280px]">{{ filename }}</span>
+            <span class="inline-flex items-center gap-1 text-[11px] text-muted-foreground">
+                {# #133(P0)：状态点颜色必须随 status 变化。旧实现把 bg-success 写死在这里，
+                   而 review.js 的 SSE 只改文案不改 class ⇒ error/partial_review 显示"绿点+出错"。
+                   单一真值在 static/status.js 的 statusDotClass；SSR 侧用后端同源实现
+                   （core/zh_map.py:status_dot_class），二者由机检锁定一致。 #}
+                <span id="status-dot" class="w-1.5 h-1.5 rounded-full {{ status_dot_class }}"></span>
+                <span id="status-badge">{{ job_status_zh.get(status, status) }}</span>
+            </span>
+            <span class="text-[11px] text-muted-foreground font-mono">{{ job_id }}</span>
+            {# cr-19: 实际 OCR 后端徽章 — failover/自愈后用户可见（GMP 追溯），
+               SSR 一次性渲染，SSE 期间由 review.js 实时更新 #}
+            {% if ocr_backend_display %}
+            <span id="ocr-backend-badge" class="text-[11px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground">{{ ocr_backend_display }}</span>
+            {% else %}
+            <span id="ocr-backend-badge" class="hidden text-[11px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground"></span>
+            {% endif %}
+            {# SSE 实时进度条：仅在非终态显示 #}
+            <span id="progress-bar-container" class="hidden items-center gap-2 text-[11px] text-muted-foreground">
+                <!-- aria-live：SSE 进度文本动态更新，读屏用户需感知 -->
+                <span id="progress-text" role="status" aria-live="polite">—</span>
+                <span class="w-24 h-1 bg-muted rounded overflow-hidden">
+                    <span id="progress-fill" class="block h-full bg-foreground transition-all duration-500" style="width:0%"></span>
+                </span>
+            </span>
+            <div class="flex-1"></div>
+            <!-- 上下文按钮：取消/重试/报告 — 按状态显示 -->
+            <nav class="flex items-center gap-2">
+                {% if status in ['ocr_running', 'ocr_done', 'analyzing', 'pending'] %}
+                <button onclick="cancelJob(event)" id="cancel-btn"
+                        class="btn-press focus-ring text-[12px] text-muted-foreground hover:text-destructive">
+                    取消任务
+                </button>
+                {% endif %}
+                {% if status in ['error', 'cancelled', 'partial_review'] %}
+                <button onclick="retryJob(event)"
+                        class="btn-press focus-ring text-[12px] text-muted-foreground hover:text-foreground">
+                    重试
+                </button>
+                {% elif status == 'review' %}
+                <button onclick="retryJob(event)" data-full-retry="1"
+                        class="btn-press focus-ring text-[12px] text-muted-foreground hover:text-foreground">
+                    重新分析
+                </button>
+                {% endif %}
+                {% if status in ['review', 'partial_review', 'done'] %}
+                {# round-61：改为站内报告查看页（裸链 .md 端点会脱离外壳、无法返回）；
+                   .md API 端点保留供 e2e/集成测试断言 #}
+                <a href="/jobs/{{ job_id }}/report"
+                   class="btn-press focus-ring text-[12px] text-muted-foreground hover:text-foreground">
+                    查看报告
+                </a>
+                {% endif %}
+                {# 审计记录入口（TODO 0-54）：/audit 与 /llm_audit 自 Phase 7 就存在，
+                   但引入本按钮前 `grep -rn audit static/ templates/` 是 0 命中 ——
+                   端点活着、界面全黑。面板见 static/review-audit.js。 #}
+                <button type="button" id="audit-btn" onclick="openAuditPanel(event)"
+                        class="btn-press focus-ring text-[12px] text-muted-foreground hover:text-foreground px-2 py-1 rounded transition-colors">
+                    审计记录
+                </button>
+                <a href="/settings"
+                   class="btn-press focus-ring text-[12px] text-muted-foreground hover:text-foreground px-2 py-1 rounded transition-colors">
+                    设置
+                </a>
+                <a href="/"
+                   class="btn-press focus-ring text-[12px] text-muted-foreground hover:text-foreground px-2 py-1 rounded transition-colors">
+                    首页
+                </a>
+            </nav>
+        </div>
+    </header>
+
+    <!-- ============= Main 3-column layout ============= -->
+    <div class="review-grid flex-1 max-w-[1700px] w-full mx-auto px-4 py-4 grid gap-4" id="main-content"
+         style="min-height: calc(100vh - 48px);">
+
+        <!-- LEFT: Page navigation sidebar — 扁平列表，无卡片包裹 -->
+        <aside class="flex flex-col min-w-0">
+            <div class="flex items-center justify-between px-1 py-1.5">
+                <h3 class="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">页码</h3>
+                <span id="page-nav-total" class="text-[11px] text-muted-foreground tabular-nums">{{ total_pages }}</span>
+            </div>
+            <div class="flex-1 overflow-y-auto border-t border-border" id="page-nav">
+                {# OCR/分析进行中时 total_pages=0，显示占位提示避免整列空白 #}
+                {% if total_pages == 0 %}
+                <div class="flex flex-col items-center justify-center gap-2 px-3 py-8 text-center">
+                    <div class="w-3 h-3 rounded-full bg-muted-foreground/30 animate-pulse"></div>
+                    <p class="text-[11px] text-muted-foreground">
+                        {% if status == 'pending' %}排队中，等待 OCR…
+                        {% elif status == 'ocr_running' %}OCR 识别中，页码待生成…
+                        {% elif status == 'analyzing' %}LLM 分析中，页码待生成…
+                        {% elif status == 'error' %}任务失败，请查看错误提示
+                        {% else %}等待处理…
+                        {% endif %}
+                    </p>
+                </div>
+                {% endif %}
+                {% for p in range(1, total_pages + 1) %}
+                {% set pfc = page_finding_counts.get(p, {"critical":0,"warning":0,"info":0,"total":0}) %}
+                {% set is_current = p == page %}
+                <a href="/jobs/{{ job_id }}/review?page={{ p }}"
+                   data-page="{{ p }}"
+                   onclick="event.preventDefault(); goPage({{ p }});"
+                   class="page-nav-item group relative flex items-center justify-between px-3 py-1.5 text-[12px] transition-colors duration-150 rounded-sm
+                   {% if is_current %}bg-foreground text-background font-medium{% else %}text-muted-foreground hover:text-foreground hover:bg-muted/50{% endif %}">
+                    <!-- 左侧指示条（选中时显示）-->
+                    {% if is_current %}
+                    <span class="absolute left-0 top-1 bottom-1 w-0.5 bg-foreground"></span>
+                    {% endif %}
+                    <span class="tabular-nums">第{{ p }}页</span>
+                    {% if pfc.total > 0 %}
+                    <span data-dots="1" class="flex items-center gap-1">
+                        {% if pfc.critical > 0 %}
+                        <span data-dot="critical" class="w-1 h-1 rounded-full bg-destructive" title="{{ pfc.critical }} 严重"></span>
+                        {% endif %}
+                        {% if pfc.warning > 0 %}
+                        <span data-dot="warning" class="w-1 h-1 rounded-full bg-warning" title="{{ pfc.warning }} 警告"></span>
+                        {% endif %}
+                        {% if pfc.info > 0 and pfc.critical == 0 and pfc.warning == 0 %}
+                        <span class="text-[11px] tabular-nums text-muted-foreground">{{ pfc.total }}</span>
+                        {% endif %}
+                    </span>
+                    {% endif %}
+                </a>
+                {% endfor %}
+            </div>
+        </aside>
+
+        <!-- CENTER: PDF preview -->
+        <section id="center-panel" class="flex flex-col gap-3 min-w-0">
+            <div class="flex items-center justify-between">
+                <h2 class="text-sm font-semibold text-muted-foreground tracking-wide">
+                    PDF 原图 · 第 <span id="page-num" class="text-foreground font-mono">{{ page }}</span> / <span id="page-total" class="text-foreground font-mono">{{ total_pages if total_pages else '?' }}</span> 页
+                </h2>
+                <div class="flex items-center gap-2">
+                    {# UX P1-4: PDF 预览缩放控制 — 原图 w-full 固定 100%，复核
+                       手写签名/小字数值时无法放大细节。zoom 步进 0.25，
+                       范围 50%-200%，DOM 更新不走 reload。 #}
+                    <button id="btn-zoom-out" onclick="zoomPdf(-0.25)" title="缩小"
+                            class="btn-press focus-ring inline-flex items-center justify-center h-8 w-8 rounded-md border border-border bg-card hover:bg-accent">
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor" class="w-4 h-4"><path stroke-linecap="round" stroke-linejoin="round" d="M5 12h14"/></svg>
+                    </button>
+                    <button id="btn-zoom-reset" onclick="resetZoom()" title="重置缩放 100%"
+                            class="btn-press focus-ring inline-flex items-center justify-center h-8 px-2 rounded-md border border-border bg-card hover:bg-accent">
+                        <span id="pdf-zoom-label" class="text-[11px] text-muted-foreground font-mono tabular-nums">100%</span>
+                    </button>
+                    <button id="btn-zoom-in" onclick="zoomPdf(0.25)" title="放大"
+                            class="btn-press focus-ring inline-flex items-center justify-center h-8 w-8 rounded-md border border-border bg-card hover:bg-accent">
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor" class="w-4 h-4"><path stroke-linecap="round" stroke-linejoin="round" d="M12 5v14M5 12h14"/></svg>
+                    </button>
+                    <button id="btn-prev-page" onclick="navPage(-1)" {% if page <= 1 %}disabled{% endif %}
+                            class="btn-press focus-ring inline-flex items-center justify-center h-8 w-8 rounded-md border border-border bg-card hover:bg-accent disabled:opacity-40 disabled:pointer-events-none">
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor" class="w-4 h-4"><path stroke-linecap="round" stroke-linejoin="round" d="M15.75 19.5L8.25 12l7.5-7.5"/></svg>
+                    </button>
+                    <span id="page-counter" class="text-sm text-muted-foreground font-mono tabular-nums w-16 text-center">{{ page }} / {{ total_pages if total_pages else '?' }}</span>
+                    <button id="btn-next-page" onclick="navPage(1)" {% if page >= total_pages %}disabled{% endif %}
+                            class="btn-press focus-ring inline-flex items-center justify-center h-8 w-8 rounded-md border border-border bg-card hover:bg-accent disabled:opacity-40 disabled:pointer-events-none">
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor" class="w-4 h-4"><path stroke-linecap="round" stroke-linejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5"/></svg>
+                    </button>
+                </div>
+            </div>
+
+            <div class="flex-1 border-t border-border overflow-hidden relative bg-card">
+                {% if pdf_url %}
+                <div id="pdf-loading" class="absolute inset-0 flex flex-col items-center justify-center gap-4 bg-background z-10">
+                    {# P3-2: 页面形骨架 — 占位形状 = PDF 页面形状（A4 比例），无布局跳动 #}
+                    <div class="w-56 h-80 rounded-md bg-muted/70 animate-pulse"></div>
+                    <p class="text-xs text-muted-foreground">正在渲染第 {{ page }} 页 ...</p>
+                </div>
+                {# PyMuPDF 后端渲染 PNG（/api/jobs/{id}/page/{n}）— 替代浏览器原生
+                   PDF viewer：新版 Chromium 忽略 toolbar=0 参数，自带打印/下载/
+                   更多操作按钮且缩放不可控。img + CSS width:100% 实现无按钮、
+                   fit-width 自适应的原图预览。 #}
+                <div class="absolute inset-0 overflow-auto" id="pdf-scroll">
+                    {# PNG 渲染页：w-full 按容器宽度等比缩放，不用 min-height 撑高（min-height 会在窄窗口下拉伸图片高度导致变形） #}
+                    {# P0-3 区域级证据锚：包装层是 overlay 的定位基准。区域框用
+                       js 以**图片自身**的 offset/offsetWidth 计算（非百分比）——
+                       放大时 img 宽度会超过包装层的 100%，用百分比会失准。 #}
+                    <div id="pdf-page-wrap" class="relative w-full">
+                        <img id="pdf-page-img" class="w-full h-auto block" alt="PDF 第 {{ page }} 页">
+                        <div id="region-overlay"
+                             class="absolute hidden pointer-events-none border-2 border-destructive/80 bg-destructive/10 rounded-sm"
+                             title="该问题在 OCR 版面中的区域（区域级，非单元格级）"></div>
+                    </div>
+                </div>
+                {% else %}
+                <div class="flex items-center justify-center h-full text-muted-foreground text-sm p-12">PDF 不可预览</div>
+                {% endif %}
+            </div>
+        </section>
+
+        <!-- RIGHT: Findings + Measurements -->
+        <section class="flex flex-col gap-4 min-w-0 overflow-y-auto" style="max-height: calc(100vh - 88px);">
+
+            {# Job-level error banner — status=error 时显示错误原因，
+               替代之前页面"空白"（findings=0 + OCR 无数据）的误导性展示。 #}
+            {% if status == 'error' and error_message %}
+            <div id="job-error-banner" class="job-error-banner sticky top-0 z-20 rounded-md border-l-2 border-destructive bg-card px-3 py-3 flex items-start gap-2">
+                <span class="w-1.5 h-1.5 rounded-full bg-destructive shrink-0 mt-1.5"></span>
+                <div class="flex-1 min-w-0">
+                    <div class="text-[12px] font-semibold text-foreground mb-1">任务处理失败</div>
+                    <p class="text-[12px] text-muted-foreground leading-relaxed break-words">{{ error_message }}</p>
+                    {# R113：「下一步」文案只在 static/review-progress.js 的
+                       JOB_ERROR_HINT 里维护一份（SSR 与 SSE 两条路径共用），
+                       这里只留空占位。原先把句子抄在这里，两处漂移后
+                       SSR 说"重新提交任务"、SSE 说同一句，而实际是续跑。 #}
+                    <p id="job-error-hint" class="text-[11px] text-muted-foreground mt-1.5"></p>
+                </div>
+            </div>
+            {% endif %}
+
+            {# robustness-B5: partial_review 状态横幅 — 列出失败/解析失败/缺页页码，
+               此前 failed_pages 被 main.py 解析但从未渲染，用户无法得知哪几页失败。
+               P1-4: OCR 缺页页码也并入 failed_pages，横幅同时覆盖缺页场景。 #}
+            {% if status == 'partial_review' and failed_pages %}
+            <div id="partial-review-banner" class="sticky top-0 z-20 rounded-md border-l-2 border-warning bg-card px-3 py-3 flex items-start gap-2">
+                <span class="w-1.5 h-1.5 rounded-full bg-warning shrink-0 mt-1.5"></span>
+                <div class="flex-1 min-w-0">
+                    <div class="text-[12px] font-semibold text-foreground mb-1">部分页面分析不完整</div>
+                    <p class="text-[12px] text-muted-foreground leading-relaxed break-words">
+                        以下页面未能完成分析（OCR 缺页或 LLM/JSON 解析失败），成果可能不完整，请以 PDF 原图为准：
+                        <span class="font-mono">{{ failed_pages | join('、') }} 页</span>
+                    </p>
+                    <p class="text-[11px] text-muted-foreground mt-1.5">可为整体任务点击右下角"重试"补分析失败页面（已分析的页面不会重复消耗）。</p>
+                </div>
+            </div>
+            {% endif %}
+
+            <!-- Severity summary — 扁平行内，不用卡片包裹 -->
+            <div class="severity-summary flex items-center gap-4 px-1">
+                <div class="flex items-center gap-1.5">
+                    <span class="w-1.5 h-1.5 rounded-full {% if severity_counts.critical > 0 %}bg-destructive{% else %}bg-muted-foreground/30{% endif %}"></span>
+                    <span class="text-[11px] text-muted-foreground">严重</span>
+                    <span class="text-sm font-semibold tabular-nums">{{ severity_counts.critical }}</span>
+                </div>
+                <div class="flex items-center gap-1.5">
+                    <span class="w-1.5 h-1.5 rounded-full {% if severity_counts.warning > 0 %}bg-warning{% else %}bg-muted-foreground/30{% endif %}"></span>
+                    <span class="text-[11px] text-muted-foreground">警告</span>
+                    <span class="text-sm font-semibold tabular-nums">{{ severity_counts.warning }}</span>
+                </div>
+                <div class="flex items-center gap-1.5">
+                    <span class="w-1.5 h-1.5 rounded-full {% if severity_counts.info > 0 %}bg-info{% else %}bg-muted-foreground/30{% endif %}"></span>
+                    <span class="text-[11px] text-muted-foreground">信息</span>
+                    <span class="text-sm font-semibold tabular-nums">{{ severity_counts.info }}</span>
+                </div>
+                <div class="flex-1"></div>
+                {% if page_confidence and not page_parse_error %}
+                <span id="page-confidence-badge" class="text-[11px] text-muted-foreground">置信度 {{ confidence_zh.get(page_confidence, page_confidence) }}</span>
+                {% else %}
+                <span id="page-confidence-badge" class="text-[11px] text-muted-foreground hidden"></span>
+                {% endif %}
+            </div>
+
+            <!-- round-23 C：复核反馈统计（AJAX 载入，可折叠）— 确认/驳回率、
+                 高频驳回类型、按来源驳回率（规则阈值调优信号）。裁决操作后
+                 页面自动 reload，面板随之刷新。 -->
+            <details id="review-stats-panel" class="review-stats px-1 mt-1">
+              <summary class="text-[11px] text-muted-foreground cursor-pointer select-none hover:text-foreground">
+                复核反馈统计<span id="review-stats-brief" class="ml-1.5 tabular-nums"></span>
+              </summary>
+              <div id="review-stats-body" class="text-[11px] text-muted-foreground mt-1.5 leading-relaxed"></div>
+            </details>
+
+            <!-- Critical banner — 仅 critical>0 时显示，红色左边框，不铺底。
+                 sticky top-0：滚动 findings 列表时保持可见，持续提醒优先复核（GMP 合规）。-->
+            {% set critical_count = findings | selectattr('severity', 'equalto', 'critical') | list | length %}
+            {% if critical_count > 0 %}
+            <div id="critical-banner" class="critical-banner critical-pulse sticky top-0 z-10 rounded-md border-l-2 border-destructive bg-card px-3 py-2 flex items-center gap-2">
+                <span class="w-1.5 h-1.5 rounded-full bg-destructive shrink-0"></span>
+                <span class="text-xs text-foreground">本页 <strong class="font-semibold">{{ critical_count }}</strong> 条严重问题，请优先复核</span>
+            </div>
+            {% else %}
+            <div id="critical-banner" class="critical-banner sticky top-0 z-10 rounded-md border-l-2 border-destructive bg-card px-3 py-2 flex items-center gap-2 hidden">
+                <span class="w-1.5 h-1.5 rounded-full bg-destructive shrink-0"></span>
+                <span class="text-xs text-foreground">本页 <strong class="font-semibold">0</strong> 条严重问题，请优先复核</span>
+            </div>
+            {% endif %}
+
+            {# P2 停滞可见性（2026-09-16）：任务长时间无新进展时**在界面上先告知**，
+               而不是让用户干等到看门狗收敛（阈值经两轮抬高后最长可达约 70 分钟）。
+               文案由 SSE 帧的 stall 字段驱动（review.js），此处只放骨架；
+               role=status + aria-live 让读屏用户同样能感知。 #}
+            <div id="stall-banner" class="rounded-md border-l-2 border-warning bg-card px-3 py-2 flex items-center gap-2 hidden">
+                <span class="w-1.5 h-1.5 rounded-full bg-warning shrink-0"></span>
+                <span id="stall-text" class="text-xs text-foreground" role="status" aria-live="polite"></span>
+            </div>
+
+            <!-- LLM parse error — 同样左边框样式，不铺底 -->
+            <div id="parse-error-banner" class="parse-error-banner rounded-md border-l-2 border-warning bg-card px-3 py-2 flex items-center gap-2{% if not page_parse_error %} hidden{% endif %}">
+                <span class="w-1.5 h-1.5 rounded-full bg-warning shrink-0"></span>
+                <span class="text-xs text-foreground" id="parse-error-text">此页 LLM 解析失败，分析结果仅供参考，请以 OCR 原文为准</span>
+            </div>
+
+            {# robustness-D1: 空页横幅 — OCR 对该页无任何内容，未调 LLM（节省
+               token 且避免幻觉），提示复核者直接参考 PDF 原图。 #}
+            {% if page_ocr_empty %}
+            <div id="ocr-empty-banner" class="ocr-empty-banner rounded-md border-l-2 border-warning bg-card px-3 py-2 flex items-center gap-2">
+                <span class="w-1.5 h-1.5 rounded-full bg-warning shrink-0"></span>
+                <span class="text-xs text-foreground">此页无 OCR 内容（空白页或扫描质量过低），未执行分析，请以 PDF 原图为准</span>
+            </div>
+            {% else %}
+            <div id="ocr-empty-banner" class="ocr-empty-banner rounded-md border-l-2 border-warning bg-card px-3 py-2 flex items-center gap-2 hidden">
+                <span class="w-1.5 h-1.5 rounded-full bg-warning shrink-0"></span>
+                <span class="text-xs text-foreground">此页无 OCR 内容（空白页或扫描质量过低），未执行分析，请以 PDF 原图为准</span>
+            </div>
+            {% endif %}
+
+            {# 缺陷 #120（2026-09-16）：本页因**上游容量受限**（队列满/限流）
+               未能完成旋转补救 —— 这与"此页确实没有内容"是两件事，故独立成条
+               并给出可行动建议（稍后重试本任务）。诊断键 rotation_blocked 与
+               rotation_probed 互斥，见 _self_heal_diag 的说明。 #}
+            {% if ocr_diagnostics and ocr_diagnostics.rotation_blocked %}
+            <div id="rotation-blocked-banner" class="rounded-md border-l-2 border-warning bg-card px-3 py-2 flex items-center gap-2">
+                <span class="w-1.5 h-1.5 rounded-full bg-warning shrink-0"></span>
+                <span class="text-xs text-foreground">上游 OCR 服务繁忙，此页未能完成旋转补救（并非确认无内容）— 稍后重试本任务可能可恢复，请先以 PDF 原图为准</span>
+            </div>
+            {% endif %}
+
+            {# robustness-E1: 稀疏内容页横幅 — OCR 页数无缺失但内容极少
+               （可能整页解析不完整），LLM 已在保守模式下分析，仍需人工核对。 #}
+            {% if page_ocr_sparse %}
+            <div id="ocr-sparse-banner" class="ocr-sparse-banner rounded-md border-l-2 border-warning bg-card px-3 py-2 flex items-center gap-2">
+                <span class="w-1.5 h-1.5 rounded-full bg-warning shrink-0"></span>
+                <span class="text-xs text-foreground">此页 OCR 内容极少，分析结果可能不完整，请以 PDF 原图核对</span>
+            </div>
+            {% else %}
+            <div id="ocr-sparse-banner" class="ocr-sparse-banner rounded-md border-l-2 border-warning bg-card px-3 py-2 flex items-center gap-2 hidden">
+                <span class="w-1.5 h-1.5 rounded-full bg-warning shrink-0"></span>
+                <span class="text-xs text-foreground">此页 OCR 内容极少，分析结果可能不完整，请以 PDF 原图核对</span>
+            </div>
+            {% endif %}
+
+            {# Todo 11: 截断透出横幅 — HTML 超上限被截，LLM 分析基于不完整
+               输入；标记已注入 prompt（LLM 知情），复核者需同步以原图为准。 #}
+            {% if page_ocr_truncated %}
+            <div id="ocr-truncated-banner" class="ocr-truncated-banner rounded-md border-l-2 border-warning bg-card px-3 py-2 flex items-center gap-2">
+                <span class="w-1.5 h-1.5 rounded-full bg-warning shrink-0"></span>
+                <span class="text-xs text-foreground">此页 OCR 内容过长已截断，分析基于不完整输入，请以 PDF 原图核对</span>
+            </div>
+            {% else %}
+            <div id="ocr-truncated-banner" class="ocr-truncated-banner rounded-md border-l-2 border-warning bg-card px-3 py-2 flex items-center gap-2 hidden">
+                <span class="w-1.5 h-1.5 rounded-full bg-warning shrink-0"></span>
+                <span class="text-xs text-foreground">此页 OCR 内容过长已截断，分析基于不完整输入，请以 PDF 原图核对</span>
+            </div>
+            {% endif %}
+
+            {# C3 修复（Round 3）：OCR 不完整警告横幅 — MinerU 低置信度丢弃
+               内容块时，LLM 已被降级提示（[系统警告]），复核者需同步看到
+               缺失原因，避免对低置信度分析结果误信。 #}
+            {% if page_ocr_warning %}
+            <div id="ocr-warning-banner" class="ocr-warning-banner rounded-md border-l-2 border-warning bg-card px-3 py-2 flex items-center gap-2">
+                <span class="w-1.5 h-1.5 rounded-full bg-warning shrink-0"></span>
+                <span class="text-xs text-foreground">此页 OCR 不完整：{{ page_ocr_warning }} — 分析已降级，请以 PDF 原图核对</span>
+            </div>
+            {% else %}
+            <div id="ocr-warning-banner" class="ocr-warning-banner rounded-md border-l-2 border-warning bg-card px-3 py-2 flex items-center gap-2 hidden">
+                <span class="w-1.5 h-1.5 rounded-full bg-warning shrink-0"></span>
+                <span class="text-xs text-foreground">此页 OCR 不完整 — 分析已降级，请以 PDF 原图核对</span>
+            </div>
+            {% endif %}
+
+<div id="ocr-integrity-banner" class="rounded-md border-l-2 border-warning bg-card px-3 py-2 flex items-start gap-2{% if not (ocr_diagnostics and ocr_diagnostics.integrity == 'incomplete' and not page_ocr_warning) %} hidden{% endif %}">
+                <span class="w-1.5 h-1.5 rounded-full bg-warning mt-[5px] shrink-0"></span>
+                <div class="flex-1 min-w-0">
+                    <p id="ocr-integrity-text" class="text-xs text-foreground">此页 OCR 完整性校验未通过：{% if ocr_diagnostics %}{{ ocr_diagnostics.reasons|join('；') }}{% endif %}。请以 PDF 原图为准。</p>
+                    {% if ocr_diagnostics %}
+                    <p id="ocr-detail-text" class="text-xs text-muted-foreground mt-0.5 font-mono">
+                        {%- if ocr_diagnostics.effective_dpi -%}有效 DPI={{ ocr_diagnostics.effective_dpi }}{% if ocr_diagnostics.low_dpi %}（低）{% endif %}；{% endif -%}
+                        {%- if ocr_diagnostics.media_box_pt -%}页面盒={{ ocr_diagnostics.media_box_pt[0]|round }}×{{ ocr_diagnostics.media_box_pt[1]|round }}pt；{% endif -%}
+                        {%- if ocr_diagnostics.rotation -%}旋转={{ ocr_diagnostics.rotation }}°；{% endif -%}
+                        {%- if ocr_diagnostics.aspect_ratio -%}长宽比={{ ocr_diagnostics.aspect_ratio }}；{% endif -%}
+                        {%- if ocr_diagnostics.text_chars -%}文本={{ ocr_diagnostics.text_chars }} 字符{% endif -%}
+                    </p>
+                    {% endif %}
+                    <div id="ocr-exemption-zone" class="mt-1.5"></div>
+                </div>
+            </div>
+
+            {# 幻觉防护横幅：LLM 提取的实测数值在 OCR 原文中找不到（疑似
+               臆造）。只提醒、不自动裁决 — 数字字符串匹配存在误报可能，
+               复核者应以 PDF 原图为准。 #}
+            {% if page_grounding_warn %}
+            <div id="grounding-warn-banner" class="grounding-warn-banner rounded-md border-l-2 border-destructive bg-card px-3 py-2 flex items-start gap-2">
+                <span class="w-1.5 h-1.5 rounded-full bg-destructive mt-[5px] shrink-0"></span>
+                <div class="flex-1 min-w-0">
+                    <p class="text-xs font-medium text-foreground">此页部分实测数值未能在 OCR 原文中找到，疑似提取错误，请以 PDF 原图重点核对：</p>
+                    <p class="text-xs text-muted-foreground mt-0.5 font-mono grounding-warn-text">{{ page_grounding_warn|join('；') }}</p>
+                </div>
+            </div>
+            {% else %}
+            <div id="grounding-warn-banner" class="grounding-warn-banner rounded-md border-l-2 border-destructive bg-card px-3 py-2 flex items-start gap-2 hidden">
+                <span class="w-1.5 h-1.5 rounded-full bg-destructive mt-[5px] shrink-0"></span>
+                <div class="flex-1 min-w-0">
+                    <p class="text-xs font-medium text-foreground">此页部分实测数值未能在 OCR 原文中找到，疑似提取错误，请以 PDF 原图重点核对</p>
+                </div>
+            </div>
+            {% endif %}
+
+            {# 对抗审查 P1：LLM 输出截断已恢复 / schema 校验未通过 — 数据可能
+               静默缺失（尾部 findings/测量值被丢弃），复核者必须知情。 #}
+            {% if page_llm_truncated or page_schema_warn %}
+            <div id="llm-integrity-banner" class="llm-integrity-banner rounded-md border-l-2 border-warning bg-card px-3 py-2 flex items-start gap-2">
+                <span class="w-1.5 h-1.5 rounded-full bg-warning mt-[5px] shrink-0"></span>
+                <div class="flex-1 min-w-0">
+                    <p class="text-xs font-medium text-foreground">此页 LLM 分析结果可能不完整{% if page_llm_truncated %}（输出过长被截断后自动恢复，尾部数据可能丢失）{% endif %}{% if page_llm_truncated and page_schema_warn %}；{% endif %}{% if page_schema_warn %}（结构校验未完全通过）{% endif %}，请以 PDF 原图核对此页全部内容</p>
+                    {% if page_schema_warn %}
+                    <p class="text-xs text-muted-foreground mt-0.5 font-mono llm-schema-warn-text">{{ page_schema_warn|join('；') }}</p>
+                    {% endif %}
+                </div>
+            </div>
+            {% else %}
+            <div id="llm-integrity-banner" class="llm-integrity-banner rounded-md border-l-2 border-warning bg-card px-3 py-2 flex items-start gap-2 hidden">
+                <span class="w-1.5 h-1.5 rounded-full bg-warning mt-[5px] shrink-0"></span>
+                <div class="flex-1 min-w-0">
+                    <p class="text-xs font-medium text-foreground llm-integrity-text">此页 LLM 分析结果可能不完整，请以 PDF 原图核对此页全部内容</p>
+                    <p class="text-xs text-muted-foreground mt-0.5 font-mono llm-schema-warn-text hidden"></p>
+                </div>
+            </div>
+            {% endif %}
+
+            <!-- Findings list — Linear 风格扁平列表，无外层卡片包裹 -->
+            <div class="flex flex-col">
+                <!-- 列表 header — 仅标题 + 计数，无卡片背景 -->
+                <div class="flex items-center justify-between px-1 py-1.5">
+                    <h3 class="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">问题清单</h3>
+                    <div class="flex items-center gap-2">
+                        {# 跨页总览入口（对抗审查 P1）：后端 /findings 早已支持**不带 page**
+                           的全量聚合 + 置信度排序 + offset 分页，而前端两处 fetch 恒带
+                           page= ⇒ 复核者只能逐页翻（300 页批次找 1 条 critical 要翻 300 次）。
+                           本按钮切到 #all-findings-panel（懒加载）。 #}
+                        <button id="all-findings-toggle" type="button"
+                                class="text-[11px] text-muted-foreground hover:text-foreground underline decoration-dotted underline-offset-2"
+                                aria-expanded="false" aria-controls="all-findings-panel">全部页</button>
+                        <span class="text-[11px] text-muted-foreground tabular-nums">{{ findings|length }}</span>
+                    </div>
+                </div>
+                {# 跨页问题总览（对抗审查 P1）—— **独立容器，不共用 #findings-list**：
+                   页内清单是 loadPageData / SSE refreshCurrentPageFindings 的重渲染目标，
+                   且 #tier-bar 的图例文案明确写着"本页"。给它加"全部"模式就要在所有刷新点
+                   插分支，图例还会显示全批数字却标着"本页"（误导）。独立容器是纯增量。
+                   offset 分页是**彻底**解法：只把 limit 提到 200 只是抬高天花板。 #}
+                <section id="all-findings-panel" class="hidden" aria-label="跨页问题总览">
+                    <div class="flex items-center justify-between gap-2 px-1 py-1.5">
+                        <span id="all-findings-summary" class="text-[11px] text-muted-foreground">按置信度升序（最需要人工关注的排在最前）</span>
+                        <button id="all-findings-more" type="button"
+                                class="hidden text-[11px] text-muted-foreground hover:text-foreground underline decoration-dotted underline-offset-2">加载更多</button>
+                    </div>
+                    <div id="all-findings-list" class="border-t border-border"></div>
+                </section>
+                {# 三色复核分级（M6/T6.4）— 按**检出来源**分层，与严重度正交：
+                   红=规则命中（确定性判据，必须逐条看）/ 蓝=LLM 辅助（可信度较低，
+                   可批量扫）/ 绿=系统校验通过（启用规则中未命中的类型，是覆盖面
+                   证明而非问题）。红蓝为**本页**口径（与下方清单一致），绿为
+                   **本批次**口径（规则是全批范围执行的，页级归因会失真）。 #}
+                <div id="tier-bar" class="tier-bar" role="group" aria-label="复核分级">
+                    <span class="tier-chip" title="本页由确定性规则判定命中的问题（必须逐条复核）">
+                        <span class="tier-dot tier-dot-rule"></span>规则命中
+                        <span class="tier-num" id="tier-count-rule">{{ tier_counts.rule }}</span>
+                    </span>
+                    <span class="tier-chip" title="本页由 LLM 辅助发现的问题（可信度较低，可批量复核）">
+                        <span class="tier-dot tier-dot-llm"></span>LLM 辅助
+                        <span class="tier-num" id="tier-count-llm">{{ tier_counts.llm }}</span>
+                    </span>
+                    <span class="tier-chip" title="本批次启用规则中未命中任何问题的类型（覆盖面证明）">
+                        <span class="tier-dot tier-dot-pass"></span>系统校验通过
+                        <span class="tier-num" id="tier-count-pass">{{ rule_coverage.passed_count }}</span>/<span class="tier-num">{{ rule_coverage.type_total }}</span>
+                    </span>
+                </div>
+                {% if rule_coverage %}
+                <details id="rule-coverage-panel" class="rule-coverage">
+                    <summary class="text-[11px] text-muted-foreground cursor-pointer select-none hover:text-foreground">
+                        本批次已通过的系统校验项（{{ rule_coverage.passed_count }} 类 / 共 {{ rule_coverage.rule_total }} 条规则）
+                    </summary>
+                    <ul class="rule-coverage-list space-y-1">
+                        {% for e in rule_coverage.passed %}
+                        <li class="text-[11px] text-muted-foreground leading-relaxed">
+                            <span class="font-medium text-foreground">{{ type_zh.get(e.type, e.type) }}</span>
+                            · {{ e.description }}
+                            <span class="opacity-70">({{ e.rule_ids|join('、') }})</span>
+                        </li>
+                        {% endfor %}
+                        {% if not rule_coverage.passed %}
+                        <li class="text-[11px] text-muted-foreground">无 — 本批次所有启用规则均有命中</li>
+                        {% endif %}
+                    </ul>
+                </details>
+                {% endif %}
+                <div id="findings-list" class="border-t border-border{% if critical_count > 0 %} findings-list-critical{% endif %}">
+                    {% if findings %}
+                        {% for f in findings %}
+                        {% set sev_dot = 'bg-destructive' if f.severity == 'critical' else ('bg-warning' if f.severity == 'warning' else 'bg-info') %}
+                        <div id="finding-{{ f.id }}"
+                             class="finding-card tier-{{ f.tier or 'rule' }} stagger-in hover-lift border-b border-border last:border-b-0 {% if f.status == 'confirmed' %}opacity-50{% elif f.status == 'rejected' %}opacity-40{% endif %} py-2.5 px-1"
+                             data-tier="{{ f.tier or 'rule' }}"
+                             data-ocr="{{ f.ocr_text | e }}"
+                             style="--i: {{ loop.index0 }}">
+                            <div class="flex items-start gap-2">
+                                <span class="w-1.5 h-1.5 rounded-full {{ sev_dot }} mt-[7px] shrink-0"></span>
+                                <div class="flex-1 min-w-0">
+                                    <!-- 第一行: type + 状态点（类似 Linear issue row）-->
+                                    <div class="flex items-center gap-2 mb-0.5">
+                                        <span class="text-[13px] font-medium text-foreground">{{ type_zh.get(f.type, f.type) }}</span>
+                                        {% if f.status != 'pending' %}
+                                        <span class="text-[11px] text-muted-foreground">· {{ status_zh.get(f.status, f.status) }}</span>
+                                        {% endif %}
+                                        {% if f.source %}
+                                        <span class="source-badge text-[11px] text-muted-foreground">· {{ source_zh.get(f.source, f.source) }}</span>
+                                        {% endif %}
+                                        <span class="text-[11px] text-muted-foreground uppercase tracking-wider ml-auto">{{ severity_zh.get(f.severity, f.severity) }}</span>
+                                    </div>
+                                    <!-- 第二行: 描述 -->
+                                    <p class="text-[13px] text-muted-foreground leading-relaxed">{{ f.description | render_page_links(job_id) }}</p>
+                                    {% if f.ocr_text %}
+                                    <p class="text-[11px] text-muted-foreground font-mono mt-1 truncate">OCR：{{ f.ocr_text[:100] }}</p>
+                                    {% endif %}
+                                    {% if f.gmp_basis %}
+                                    <p class="text-[11px] text-muted-foreground mt-1 border-l-2 border-border pl-1.5">依据：{{ f.gmp_basis }}</p>
+                                    {% endif %}
+                                    {% if f.kb_refs_list %}
+                                    <details class="mt-1 group">
+                                        <summary class="text-[11px] text-muted-foreground cursor-pointer select-none hover:text-foreground">依据条文（{{ f.kb_refs_list|length }}）</summary>
+                                        <div class="mt-1 space-y-1 border-l-2 border-border pl-1.5">
+                                            {% for r in f.kb_refs_list %}
+                                            <p class="text-[11px] text-muted-foreground leading-relaxed"><span class="font-medium text-foreground">{{ r.label }}</span>：{{ r.excerpt }}</p>
+                                            {% endfor %}
+                                        </div>
+                                    </details>
+                                    {% endif %}
+                                    {% if f.corrected_text %}
+                                    <p class="text-[11px] text-foreground mt-1">修正：{{ f.corrected_text }}</p>
+                                    {% endif %}
+                                    {% if f.reviewer_note %}
+                                    <p class="text-[11px] text-muted-foreground mt-1">备注：{{ f.reviewer_note }}</p>
+                                    {% endif %}
+                                    {# CR-1 ④（R120）：**系统判定说明**。与 review-findings.js
+                                       的 `guardInfo` **同款同位置** —— SSR 是 JS 接管前的首屏，
+                                       也是 JS 加载失败时唯一的可读面；只给 JS 那条路径加，
+                                       这两种情形下复核员就看不到"为什么是 info"。
+                                       默认折叠：R97 刚把内部语从正文拿掉，不能再摆回去。
+                                       `| e` 显式转义（理由含 LLM/规则拼的自由文本）。 #}
+                                    {% if f.guard_reason %}
+                                    <details class="mt-1 group">
+                                        <summary class="text-[11px] text-muted-foreground cursor-pointer select-none hover:text-foreground">系统判定说明</summary>
+                                        <p class="mt-1 text-[11px] text-muted-foreground leading-relaxed border-l-2 border-border pl-1.5">{{ f.guard_reason | e }}</p>
+                                    </details>
+                                    {% endif %}
+                                    {# P0-3 区域级证据锚：把该问题高亮到左侧页面的版面区域。
+                                       锚不上（无区域/无特征词命中）则不显示入口 —— 宁缺勿错。
+                                       区域级而非单元格级：两后端都不回传单元格 bbox。 #}
+                                    {% if f.region_ref %}
+                                    <div class="mt-1.5 flex items-center gap-2">
+                                        {# R63：区域锚版改名 locateRegion（消除与 card 版
+                                           locateFinding 的同名遮蔽，见 review-locate.js 头注） #}
+                                        <button onclick="locateRegion(event, {{ f.id }})"
+                                                class="btn-press focus-ring text-[11px] font-medium text-muted-foreground hover:text-foreground"
+                                                title="在左侧页面上高亮该问题所在的 OCR 版面区域（区域级定位，非单元格级）">
+                                            定位原图
+                                        </button>
+                                    </div>
+                                    {% endif %}
+                                    {% if f.status == 'pending' %}
+                                    <div class="action-btns mt-1.5 flex items-center gap-2">
+                                        <button onclick="updateFinding(event, {{ f.id }}, 'confirmed')"
+                                                class="btn-press focus-ring text-[11px] font-medium text-foreground hover:text-muted-foreground">
+                                            确认
+                                        </button>
+                                        <span class="text-muted-foreground/30">·</span>
+                                        <button onclick="updateFinding(event, {{ f.id }}, 'rejected')"
+                                                class="btn-press focus-ring text-[11px] font-medium text-muted-foreground hover:text-foreground">
+                                            拒绝
+                                        </button>
+                                        <span class="text-muted-foreground/30">·</span>
+                                        <button onclick="correctFinding(event, {{ f.id }})"
+                                                class="btn-press focus-ring text-[11px] font-medium text-muted-foreground hover:text-foreground">
+                                            修正
+                                        </button>
+                                    </div>
+                                    {% endif %}
+                                </div>
+                            </div>
+                        </div>
+                        {% endfor %}
+                    {% elif page_parse_error %}
+                        {# #136：解析失败的页**不得**显示"本页无问题" —— 那会让
+                           "分析失败"与"确实合规"在视觉上完全相同（GMP 假阴性）。
+                           失败页没有产出 finding 的原因是**没分析出来**，
+                           不是"检查过、无异常"。 #}
+                        <div class="py-8 text-center text-[13px] text-muted-foreground" id="findings-empty-note">
+                            本页未能分析（LLM 解析失败），<span class="text-foreground">问题清单为空不代表本页无问题</span>，请以 PDF 原图人工核对
+                        </div>
+                    {% elif page_ocr_empty %}
+                        <div class="py-8 text-center text-[13px] text-muted-foreground" id="findings-empty-note">
+                            本页无 OCR 内容（空白页或扫描质量过低），未执行分析
+                        </div>
+                    {% else %}
+                        <div class="py-8 text-center text-[13px] text-muted-foreground" id="findings-empty-note">本页无问题</div>
+                    {% endif %}
+                </div>
+            </div>
+
+            {# P0-2 抑制留痕：被降噪规则抑制的候选条目台账（抑制 ≠ 删除）。
+               EU GMP Annex 11 §16 / 中国附录《计算机化系统》第 15/16 条要求
+               关键数据修改需记录理由；本面板给出每条的**理由与命中证据**，
+               并提供"回退为正式问题"。内容由 review.js 渲染（与 AJAX 翻页
+               共用同一渲染函数，避免 SSR/AJAX 两套标记漂移）。 #}
+            <details id="suppression-panel" class="suppression-panel px-1 hidden">
+                <summary class="text-[11px] text-muted-foreground cursor-pointer select-none hover:text-foreground">
+                    已抑制条目<span id="suppression-brief" class="ml-1.5 tabular-nums"></span>
+                </summary>
+                <p class="text-[11px] text-muted-foreground mt-1 leading-relaxed">
+                    这些条目由降噪规则判定为不成立并已从问题清单中移除，原文与理由完整保留以备追溯与抽检；
+                    如认为判定有误，可回退为正式问题交人工裁决。
+                </p>
+                <div id="suppression-list" class="mt-1.5 border-t border-border"></div>
+            </details>
+
+            <!-- OCR text — 对抗审查: 默认全部展开(移除折叠按钮, GMP复核需要对照原文) -->
+            <div class="flex flex-col">
+                <div class="flex items-center justify-between px-1 py-1.5">
+                    <h3 class="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">OCR 文本</h3>
+                    <span class="text-[11px] text-muted-foreground">第 {{ page }} 页</span>
+                </div>
+                <div class="border-t border-border">
+                    <div id="ocr-text" class="px-3 py-3 text-[12px] leading-[1.6] text-muted-foreground whitespace-pre-wrap font-mono" data-raw="{{ (ocr_raw_html or '') | e }}">{{ (ocr_text or '无 OCR 数据') | e }}</div>
+                </div>
+            </div>
+
+            <!-- Measurements matrix — 仅在有数据时显示 -->
+            {% if measurements %}
+            <div id="measurements-section" class="flex flex-col">
+                <div class="flex items-center justify-between px-1 py-1.5">
+                    <h3 class="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">参数矩阵</h3>
+                    <span id="measurements-shape" class="text-[11px] text-muted-foreground tabular-nums">{{ measurements|length }} × {{ matrix_columns|length }}</span>
+                </div>
+                <div class="matrix-container overflow-x-auto border-t border-border">
+                    <table class="measurement-matrix w-full text-[12px] border-collapse">
+                        <thead>
+                            <tr id="measurements-header-row" class="border-b border-border">
+                                <th class="text-left px-3 py-1.5 font-medium text-muted-foreground">时间</th>
+                                {% for col in matrix_columns %}
+                                <th class="px-3 py-1.5 font-medium text-muted-foreground text-center whitespace-nowrap">{{ col }}</th>
+                                {% endfor %}
+                            </tr>
+                        </thead>
+                        <tbody id="measurements-body">
+                            {% for m in measurements %}
+                            <tr class="stagger-in border-b border-border/50 hover:bg-muted/50" style="--i: {{ loop.index0 }}">
+                                <td class="px-3 py-1.5 font-mono text-foreground">{{ m.time or '-' }}</td>
+                                {% for col in matrix_columns %}
+                                {% set cell = m['values'].get(col, {}) %}
+                                {% set cell_class = 'cell-ok' if cell.in_spec == true else ('cell-bad' if cell.in_spec == false else 'cell-unknown') %}
+                                <td class="px-3 py-1.5 text-center tabular-nums {{ cell_class }}"
+                                    title="规格: {{ cell.spec }} | 实测: {{ cell.actual }} | 单位: {{ cell.unit }}">
+                                    {{ cell.actual or '-' }}
+                                </td>
+                                {% endfor %}
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            {% else %}
+            <div id="measurements-section" class="flex flex-col hidden"></div>
+            {% endif %}
+
+        </section>
+    </div>
+
+    {# 服务端上下文注入：Jinja2 变量 → window.__PBC__，供 review.js 使用。
+       仅此一处内联脚本用于桥接 SSR 数据与外部 JS，无业务逻辑。 #}
+    <script>
+      window.__PBC__ = {
+        job_id: {{ job_id | tojson }},
+        filename: {{ filename | tojson }},
+        status: {{ status | tojson }},
+        page: {{ page }},
+        total_pages: {{ total_pages }},
+        findings_count: {{ findings | length }},
+        severity_counts: {{ severity_counts | tojson }},
+        has_measurements: {{ ((measurements | length) > 0) | tojson }},
+        matrix_shape: [{{ measurements | length }}, {{ matrix_columns | length }}],
+        pdf_url: {{ pdf_url | tojson }},
+        page_parse_error: {{ page_parse_error | tojson if page_parse_error is boolean else 'false' }},
+        {# #135：首屏横幅的具体失败原因（可为空 → JS 回退到模板里的通用文案）。
+           此前首屏只显示通用文案，DOMContentLoaded 又不调 updatePageLevelUI
+           ⇒ 直接打开终态任务看不到"401 凭据失效"这类全局原因。 #}
+        page_parse_error_reason: {{ page_parse_error_reason | tojson }},
+        page_confidence: {{ page_confidence | tojson }},
+        {# #171（契约机检发现）：`page_ocr_empty` 一直在 Jinja 上下文里
+           （main.py 已注入，模板 314/573 行据此 SSR 渲染），却**漏在了本
+           JS 桥接对象里** ⇒ review.js 读到的永远是 undefined。
+           后果不是"少个标记"而是**改错文案**：首屏兜底
+           （applyInitialPageLevelUI → emptyFindingsNote）把 OCR 空页的
+           SSR 文案"本页无 OCR 内容"覆盖成"本页无问题"—— 正是 #136 要消灭的
+           GMP 假阴性。守卫：test_frontend_field_contract.py::
+           TestSsrBridgeContract。 #}
+        page_ocr_empty: {{ page_ocr_empty | tojson }},
+        {# P0-3：首屏 findings 由 SSR 渲染、不经过 AJAX，锚点必须随 ctx 注入，
+           否则首屏的"定位原图"按钮点了没反应（翻页后才生效 = 假缺陷）。 #}
+        region_refs: {{ region_refs | tojson }},
+        page_finding_counts: {
+          {% for p, c in page_finding_counts.items() %}
+          {{ p }}: { critical: {{ c.critical }}, warning: {{ c.warning }}, info: {{ c.info }}, total: {{ c.total }} },
+          {% endfor %}
+        },
+      };
+    </script>
+    {# R63 拆分：review.js 按职责拆为 8 个模块，defer 按依赖序加载 —
+       review-state（命名空间）先行、共享件先于消费者、入口 review.js 最后。
+       完整性由 tests/unit/test_review_js_modules.py 机检锁定。 #}
+    <script src="/static/eta.js?v={{ asset_ver('eta.js') }}" defer></script>
+    <script src="/static/status.js?v={{ asset_ver('status.js') }}" defer></script>
+    <script src="/static/sse.js?v={{ asset_ver('sse.js') }}" defer></script>
+    <script src="/static/findings-map.js?v={{ asset_ver('findings-map.js') }}" defer></script>
+    <script src="/static/pbc-fallback.js?v={{ asset_ver('pbc-fallback.js') }}" defer></script>
+    <script src="/static/confirm-dialog.js?v={{ asset_ver('confirm-dialog.js') }}" defer></script>
+    <script src="/static/review-state.js?v={{ asset_ver('review-state.js') }}" defer></script>
+    <script src="/static/review-locate.js?v={{ asset_ver('review-locate.js') }}" defer></script>
+    <script src="/static/review-pageview.js?v={{ asset_ver('review-pageview.js') }}" defer></script>
+    <script src="/static/review-pageinfo.js?v={{ asset_ver('review-pageinfo.js') }}" defer></script>
+    <script src="/static/review-findings.js?v={{ asset_ver('review-findings.js') }}" defer></script>
+    <script src="/static/review-suppressions.js?v={{ asset_ver('review-suppressions.js') }}" defer></script>
+    <script src="/static/review-progress.js?v={{ asset_ver('review-progress.js') }}" defer></script>
+    <script src="/static/review-audit.js?v={{ asset_ver('review-audit.js') }}" defer></script>
+    <script src="/static/review.js?v={{ asset_ver('review.js') }}" defer></script>
+</body>
+</html>

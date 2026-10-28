@@ -1,0 +1,184 @@
+# Build artifacts
+dist/
+# Electron 产物。含标准目录 dist-electron/ 与自愈备用目录（build.ps1 检测到
+# dist-electron\win-unpacked 被安全软件占用时会自动改写为
+# -c.directories.output=dist-electron-locked 并尽力归位）。
+dist-electron*/
+# PyInstaller 的 workpath（build.ps1 用 `--workpath build`）。**必须锚定**：
+# 未锚定的 `build/` 会连 `electron/build/` 一起吃掉 —— 而后者是**打包图标**
+# 的落点（`package.json` 的 `directories.buildResources` 应指向它）。
+# 实测（2026-10-13）：未锚定时 `git check-ignore -v electron/build/icon.ico`
+# 命中本行 ⇒ 图标资产**从未进过版本控制**（`git log -- electron/build/` 为空），
+# 且这是**静默**的。全树 `build` 目录只有 `./build`（workpath）与 `./electron/build`。
+/build/
+# 打包图标暂存目录（`directories.buildResources` 的目标）。整目录忽略，**因为当前**
+# 里面的 `icon.ico` 是 190 B / 16x16 / 1-bpp 占位（electron-builder 要求 >=256x256）
+# ⇒ 入库等于把「坏的」登记成「能用的」。换成真实资产后**必须同时**做三件事：
+#   取消本行 + `package.json` 声明 `build.win.icon` + `electron/main.js` 指向同一文件。
+# 三者缺一，`tests/unit/test_distribution_parity.py::TestPackagingIconIsWired` 会红。
+# 现状与退出条件见 docs/TODO.md 0-39。
+electron/build/
+# 历史版本的归档 zip（CLAUDE.md「Repo hygiene」规则 2 指示打包到此，故必须忽略）。
+# ⚠️ 这条曾经缺失：规则让 agent 往 release-archive/ 写 zip，忽略清单却不拦 ——
+# 规则与忽略清单不一致时，agent 会照规则做，然后 zip 出现在 git status 里。
+# 新增任何"允许写入的产物落点"必须**同一次提交**补进本文件（机检见
+# tests/unit/test_repo_hygiene.py）。
+release-archive/
+*.spec.bak
+
+# PyInstaller
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+.installed.cfg
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.mimocode/
+.workbuddy/
+# AI 助手的工作区数据（memory/ 等），非源码。与 `.workbuddy/` 是两个不同目录，
+# 少了这条 `tests/unit/test_repo_hygiene.py::TestNoShadowDirectories` 会红
+# （影子目录：既无被跟踪文件、又未被忽略）。
+.workbuddy-ai/
+.trae/
+.npm-cache/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# App data (dev) — repo-root only. NOTE: the pattern must stay root-anchored
+# (`/data/`), otherwise it also swallows `core/kb/data/`, which is the
+# *committed* knowledge-base corpus (see seed_kb.py / .gitignore line ~122).
+/data/
+/output/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Secrets
+.env
+.env.local
+.env.production
+config.json
+config.json.bak*
+
+# Logs
+*.log
+logs/
+server_err.log
+server_out.log
+
+# Test coverage artifacts
+.coverage
+coverage.xml
+htmlcov/
+.pytest_cache/
+
+# Spike test artifacts
+spike_phase*.log
+spike_*.png
+screenshot*.png
+
+# Sample documents (large binaries — keep out of git)
+samples/*.pdf
+samples/*.docx
+
+# E2E test images (manual upload fixtures, keep out of git)
+test*.jpg
+test*.png
+
+# Temporary spike scripts (one-shot, not part of app)
+spike_phase*.py
+_flip_status.py
+
+# Pytest temp output files
+pytest_out.txt
+pytest_full.txt
+pytest_subset.txt
+pytest_result.txt
+pytest_clean.txt
+pytest_final.txt
+pytest_final2.txt
+pytest_v3.txt
+cov_result.txt
+cov_tmp.json
+coverage.json
+test_results.xml
+.coverage.*
+cache/
+
+# Spike 探索/一次性实验（设计笔记与临时脚本，不属于应用）。
+# 整个目录忽略，**不再按扩展名逐个列举** —— 按扩展名挡不住新形态：
+# 实测 `touch spike/__probe__.png` 会让 `git status` 立刻报 `?? spike/`。
+# CLAUDE.md 把该目录列为 agent 可写入的落点，故必须整目录忽略（机检见
+# tests/unit/test_repo_hygiene.py）。
+spike/
+
+
+cov.xml
+
+
+# Spike ad-hoc experiments (one-shot scripts + run logs)
+# 已由上面的 `spike/` 整目录覆盖；保留本节仅为记录"这些形态曾经存在"，
+# 新增 spike 产物时**不需要**再往这里加一行。
+
+# 真实批记录样本（含第三方企业数据，禁止入库）。
+#
+# ⚠️ **不逐个列真实文件名**（2026-10-28 改）。原来这里是三行字面量：
+# 两份批记录 PDF + 一份标注图。问题在于 —— **忽略规则必须写出真实文件名才能生效，
+# 而 .gitignore 本身是被跟踪的** ⇒ 等于用"禁止入库清单"把文件名公开了。
+# 这是"安全措施自身成为泄露渠道"的典型形态。
+#
+# 改为根锚定通配：仓库根的所有 PDF / PNG 一律不入库。
+# 前提：`git ls-files` 里这两类文件当前为 **0** 个（已核），故不误伤任何已跟踪资产。
+# 若将来确需在根目录提交 PDF/PNG，**必须**用 `git add -f` 并在此写明理由。
+/*.pdf
+/*.png
+# OCR 原始响应副本（core/ocr_client.py `_persist_paddle_original` 写在源 PDF 旁边，
+# 内容是整份批记录的识别结果 ⇒ 与源文件同级敏感）。同样按根锚定通配。
+/*.jsonl
+*_normalized.pdf
+e2e_*.log
+# e2e 运行时 SSE 帧证据（e2e_run.py 采集，运行产物不进库）
+e2e_sse_*.jsonl
+_tmp_*.pdf
+# 合成 e2e PDF（gen_e2e_pdf.py / gen_e2e_rot_pdf.py 可再生）
+e2e_test.pdf
+e2e_rot.pdf
+
+# KB seed source binary (derived JSON ships instead)
+docs/*.doc
+# dev-time temp patch scripts
+_patch_*.py
+
+# Dev-time artifacts archive (moved from repo root, all regenerable)
+devlogs/
+
+# 申报材料（含联系人 PII，禁止入库）。
+# ⚠️ **不写具体文件名**（2026-10-28 改，同下方批记录样本）：忽略规则本身被跟踪，
+#    写出真名等于把"存在这样一份含 PII 的申报材料"公开 —— 名字也是数据。
+#    这条是门禁 `no_pii_in_tracked_files` 抓出来的（手工脱敏时漏了它）。
+/*.docx
+
+# 外部工具产物：@tencent/slidep 以 **cwd** 为落点写 slidep.log ⇒ 在本仓库根
+# 生成 .slidep/。实测（2026-10-15）：该目录仅含 slidep.log，靠第 81 行 `*.log`
+# 侥幸被忽略；一旦工具写入非 .log 文件，`git status` 会立刻冒出 `?? .slidep/`
+# ⇒ `test_repo_hygiene.py::TestNoShadowDirectories` 正确地报了「影子目录」。
+# ⚠️ 必须锚定到根：未锚定的 `.slidep/` 会连子目录里的同名目录一起吃掉
+#（同 `/build/` 与 `/data/` 的教训，见 MEMORY §6）。
+/.slidep/

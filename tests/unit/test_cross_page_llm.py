@@ -1,0 +1,1606 @@
+"""Cross-page analyzer LLM 路径单元测试。
+
+覆盖：
+- _llm_fallback_check: 规则无法判定参数的 LLM 兜底判定
+- _llm_based_check: 规则跑完后的 LLM 语义检查
+- _check_year_contradiction: 同事件类型内年份不一致
+- _check_suspicious_dates: 异常年份（<2000 或 >当前年+1）
+- _check_signature_time_anomaly: 签名时间早于操作时间
+- analyze_cross_page 端到端 LLM 路径触发
+"""
+import asyncio
+from datetime import datetime
+from unittest.mock import patch, AsyncMock, MagicMock
+
+import pytest
+
+from core.cross_page_analyzer import (
+    analyze_cross_page,
+    _llm_fallback_check,
+    _llm_based_check,
+    _check_year_contradiction,
+    _check_suspicious_dates,
+    _check_signature_time_anomaly,
+    _normalize_pages,
+)
+from core.rules.rule_time import _check_signature_order
+
+
+def _make_page(page_no, steps, findings=None, page_info=None, event_year_groups=None):
+    """构造 analyze_cross_page 所需的页面结构（与 pipeline 一致）。"""
+    return {
+        "page": page_no,
+        "data": {
+            "steps": steps or [],
+            "findings": findings or [],
+            "page_info": page_info or {},
+            "event_year_groups": event_year_groups or {},
+        },
+    }
+
+
+def _norm(pages):
+    """将 raw page 结构归一化为 rule 函数所需的格式（顶层含 page_info/steps/...）。"""
+    return _normalize_pages(pages)
+
+
+def _make_step(step_no, start_time=None, end_time=None, operator="", reviewer="",
+               measurements=None, parameters=None, signatures=None, checks=None):
+    """构造 step 字典。"""
+    s = {"step_no": step_no}
+    if start_time:
+        s["start_time"] = start_time
+    if end_time:
+        s["end_time"] = end_time
+    if operator:
+        s["operator"] = operator
+    if reviewer:
+        s["reviewer"] = reviewer
+    if measurements:
+        s["measurements"] = measurements
+    if parameters:
+        s["parameters"] = parameters
+    if signatures:
+        s["signatures"] = signatures
+    if checks:
+        s["checks"] = checks
+    return s
+
+
+@pytest.fixture
+def mock_llm():
+    """Mock LLM 客户端 — 默认返回空 findings。
+
+    patch core.rules.llm_checks.get_llm_client，使被测函数内部
+    拿到的 client 完全可控。
+    """
+    mock_client = MagicMock()
+    mock_client.chat_json = AsyncMock(return_value={"findings": []})
+    with patch('core.rules.llm_checks.get_llm_client', return_value=mock_client):
+        yield mock_client
+
+
+# ===========================================================================
+# _llm_fallback_check 测试
+# ===========================================================================
+
+
+class TestLLMFallbackCheck:
+    """LLM 兜底判定 — 规则无法判定的参数（spec 非数字范围，如"应澄清"）。"""
+
+    @pytest.mark.asyncio
+    async def test_empty_queue_returns_empty(self, mock_llm):
+        """空队列不应调用 LLM。"""
+        result = await _llm_fallback_check([])
+        assert result == []
+        mock_llm.chat_json.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_queue_over_limit_is_batched_not_abandoned(self, mock_llm):
+        """0-41：队列超限必须**分批判定**，不再整份降级为人工复核。
+
+        改造前的行为（即缺陷）：60 个参数 ⇒ LLM **一次都不调**，只留 1 条
+        "参数数量过多"。真实样本（job 670672f3-d0f，51 页 / 400 个待判定参数）
+        因此**一条 `param_out_of_spec` 都没有**，用户标注页（page 6）的实测值
+        `6.88` 在全 job findings 中命中 0 次。
+
+        新契约：切块逐批判定；只有**越界/超预算/该批失败**才降级，且降级是
+        **按批**的汇总行（不会像更早的实现那样 407 参数 = 407 条噪音）。
+        """
+        from core.rules.llm_checks import _LLM_FALLBACK_BATCH_MAX
+        llm_queue = [
+            {"page": (i % 5) + 1, "step_no": 1, "name": f"参数{i}", "spec": "应澄清",
+             "actual": f"值{i}", "unit": "", "kind": "param"}
+            for i in range(_LLM_FALLBACK_BATCH_MAX + 10)
+        ]
+        # 每批都判成"越界"⇒ 断言 LLM 的判定结果确实被采用，而不是只数调用次数
+        mock_llm.chat_json.return_value = [
+            {"index": i + 1, "in_spec": False, "reason": "oos"}
+            for i in range(_LLM_FALLBACK_BATCH_MAX)
+        ]
+        findings = await _llm_fallback_check(llm_queue)
+
+        assert mock_llm.chat_json.await_count == 2, "60 个参数应切成 2 批"
+        assert len(findings) == len(llm_queue)
+        assert {f["type"] for f in findings} == {"param_out_of_spec"}
+        assert {f["source"] for f in findings} == {"llm_fallback"}
+        # 降级分支**未**被触发 —— 没有"参数数量过多"的汇总噪音
+        assert not any("参数数量过多" in f["description"] for f in findings)
+        # 切块真切：第 2 批的 prompt 只含第 2 批的参数
+        prompts = [c.args[1] for c in mock_llm.chat_json.await_args_list]
+        assert f"参数{_LLM_FALLBACK_BATCH_MAX - 1} " in prompts[0]
+        assert f"参数{_LLM_FALLBACK_BATCH_MAX} " not in prompts[0]
+        assert f"参数{_LLM_FALLBACK_BATCH_MAX} " in prompts[1]
+
+    @pytest.mark.asyncio
+    async def test_queue_within_limit_still_calls_llm(self, mock_llm):
+        """队列 ≤50 时仍走 LLM 判定（聚合仅限超限分支）。"""
+        mock_llm.chat_json.return_value = [
+            {"index": 1, "in_spec": True, "reason": "ok"},
+        ]
+        llm_queue = [
+            {"page": 1, "step_no": 1, "name": "外观", "spec": "应澄清",
+             "actual": "澄清", "unit": "", "kind": "param"},
+        ]
+        findings = await _llm_fallback_check(llm_queue)
+        mock_llm.chat_json.assert_called_once()
+        assert findings == []
+
+    @pytest.mark.asyncio
+    async def test_in_spec_false_produces_finding(self, mock_llm):
+        """LLM 判定不合规时应产生 param_out_of_spec finding。"""
+        llm_queue = [
+            {"page": 1, "step_no": 1, "name": "外观", "spec": "应澄清",
+             "actual": "浑浊", "unit": "", "kind": "param"},
+        ]
+        mock_llm.chat_json.return_value = [
+            {"index": 1, "in_spec": False, "reason": "溶液浑浊不符合澄清要求"},
+        ]
+        findings = await _llm_fallback_check(llm_queue)
+        assert len(findings) == 1
+        f = findings[0]
+        assert f["type"] == "param_out_of_spec"
+        assert f["severity"] == "warning"
+        assert f["source"] == "llm_fallback"
+        assert f["page"] == 1
+        assert "外观" in f["description"]
+        assert "应澄清" in f["description"]
+        assert "LLM 判定" in f["description"]
+        assert f["ocr_text"] == "外观: spec=应澄清 actual=浑浊"
+
+    @pytest.mark.asyncio
+    async def test_in_spec_null_produces_completeness_finding(self, mock_llm):
+        """LLM 无法判定（in_spec=null）时应产生 completeness finding。"""
+        llm_queue = [
+            {"page": 2, "step_no": 3, "name": "含量", "spec": "符合要求",
+             "actual": "99.5%", "unit": "", "kind": "param"},
+        ]
+        mock_llm.chat_json.return_value = [
+            {"index": 1, "in_spec": None, "reason": "无法判定"},
+        ]
+        findings = await _llm_fallback_check(llm_queue)
+        assert len(findings) == 1
+        f = findings[0]
+        assert f["type"] == "completeness"
+        assert f["severity"] == "warning"
+        assert f["source"] == "llm_fallback"
+        assert f["page"] == 2
+        assert "含量" in f["description"]
+        assert "符合要求" in f["description"]
+        assert "人工确认" in f["description"]
+
+    @pytest.mark.asyncio
+    async def test_in_spec_true_no_finding(self, mock_llm):
+        """LLM 判定合规时不应产生 finding。"""
+        llm_queue = [
+            {"page": 1, "step_no": 1, "name": "外观", "spec": "应澄清",
+             "actual": "澄清", "unit": "", "kind": "param"},
+        ]
+        mock_llm.chat_json.return_value = [
+            {"index": 1, "in_spec": True, "reason": "溶液澄清"},
+        ]
+        findings = await _llm_fallback_check(llm_queue)
+        assert findings == []
+
+    @pytest.mark.asyncio
+    async def test_exception_returns_review_findings(self, mock_llm):
+        """LLM 调用异常时应 fail-closed：返回人工复核 findings 而非空列表。"""
+        llm_queue = [
+            {"page": 1, "step_no": 1, "name": "外观", "spec": "应澄清",
+             "actual": "澄清", "unit": "", "kind": "param"},
+        ]
+        mock_llm.chat_json.side_effect = RuntimeError("LLM unavailable")
+        findings = await _llm_fallback_check(llm_queue)
+        assert len(findings) == 1
+        f = findings[0]
+        assert f["type"] == "completeness"
+        assert f["severity"] == "warning"
+        assert f["source"] == "rule"
+        assert f["page"] == 1
+        assert "外观" in f["description"]
+        assert "应澄清" in f["description"]
+        assert "人工确认" in f["description"]
+        assert "LLM 调用失败" in f["description"]
+        assert "RuntimeError" in f["description"]
+
+    @pytest.mark.asyncio
+    async def test_parse_error_returns_review_findings(self, mock_llm):
+        """LLM 返回 _parse_error 时应 fail-closed：返回人工复核 findings。"""
+        llm_queue = [
+            {"page": 1, "step_no": 1, "name": "外观", "spec": "应澄清",
+             "actual": "澄清", "unit": "", "kind": "param"},
+        ]
+        mock_llm.chat_json.return_value = {"_parse_error": True, "_raw": "garbage"}
+        findings = await _llm_fallback_check(llm_queue)
+        assert len(findings) == 1
+        f = findings[0]
+        assert f["type"] == "completeness"
+        assert f["severity"] == "warning"
+        assert f["source"] == "rule"
+        assert f["page"] == 1
+        assert "外观" in f["description"]
+        assert "应澄清" in f["description"]
+        assert "人工确认" in f["description"]
+
+    @pytest.mark.asyncio
+    async def test_polluted_items_do_not_crash(self, mock_llm):
+        """P1-2: fallback 返回类型污染（items 含非 dict、index 非数字、
+        result 非 list/dict）→ 跳过非法项，不抛异常。"""
+        llm_queue = [
+            {"page": 1, "step_no": 1, "name": "外观", "spec": "应澄清",
+             "actual": "澄清", "unit": "", "kind": "param"},
+            {"page": 2, "step_no": 1, "name": "pH", "spec": "5-9",
+             "actual": "11", "unit": "", "kind": "param"},
+        ]
+        mock_llm.chat_json.return_value = [
+            "garbage-item",
+            {"index": "1", "in_spec": False, "reason": "浑浊"},
+            {"index": "not-a-number", "in_spec": False, "reason": "bogus"},
+            {"index": 99, "in_spec": False, "reason": "out of range"},
+        ]
+        findings = await _llm_fallback_check(llm_queue)
+        # 只有 index=1 的合法项生效；非 dict / index 非法项被跳过
+        assert len(findings) == 1
+        assert findings[0]["page"] == 1
+        assert findings[0]["type"] == "param_out_of_spec"
+
+    @pytest.mark.asyncio
+    async def test_polluted_result_object_returns_no_findings(self, mock_llm):
+        """P1-2: fallback 返回非 list/dict（如字符串）→ 空 findings，不崩溃。"""
+        llm_queue = [
+            {"page": 1, "step_no": 1, "name": "外观", "spec": "应澄清",
+             "actual": "澄清", "unit": "", "kind": "param"},
+        ]
+        mock_llm.chat_json.return_value = "not-json-at-all"
+        findings = await _llm_fallback_check(llm_queue)
+        assert findings == []
+
+    @pytest.mark.asyncio
+    async def test_dict_result_with_items_key(self, mock_llm):
+        """LLM 返回 dict 包含 items 键时也能正确解析。"""
+        llm_queue = [
+            {"page": 1, "step_no": 1, "name": "外观", "spec": "应澄清",
+             "actual": "浑浊", "unit": "", "kind": "param"},
+        ]
+        mock_llm.chat_json.return_value = {
+            "items": [{"index": 1, "in_spec": False, "reason": "浑浊"}],
+        }
+        findings = await _llm_fallback_check(llm_queue)
+        assert len(findings) == 1
+        assert findings[0]["type"] == "param_out_of_spec"
+
+    @pytest.mark.asyncio
+    async def test_invalid_index_skipped(self, mock_llm):
+        """index 越界时该条目应被跳过。"""
+        llm_queue = [
+            {"page": 1, "step_no": 1, "name": "外观", "spec": "应澄清",
+             "actual": "浑浊", "unit": "", "kind": "param"},
+        ]
+        mock_llm.chat_json.return_value = [
+            {"index": 99, "in_spec": False, "reason": "..."},  # 越界，跳过
+            {"index": 1, "in_spec": False, "reason": "..."},   # 有效
+        ]
+        findings = await _llm_fallback_check(llm_queue)
+        assert len(findings) == 1
+        assert findings[0]["page"] == 1
+
+    @pytest.mark.asyncio
+    async def test_cell_kind_with_time_field(self, mock_llm):
+        """cell 类型参数（带 time 字段）也能正确判定。"""
+        llm_queue = [
+            {"page": 1, "step_no": 2, "name": "温度", "time": "10:00",
+             "spec": "符合要求", "actual": "异常", "unit": "℃", "kind": "cell"},
+        ]
+        mock_llm.chat_json.return_value = [
+            {"index": 1, "in_spec": False, "reason": "温度异常"},
+        ]
+        findings = await _llm_fallback_check(llm_queue)
+        assert len(findings) == 1
+        assert findings[0]["type"] == "param_out_of_spec"
+        assert "温度" in findings[0]["description"]
+
+    @pytest.mark.asyncio
+    async def test_multiple_items_mixed_judgements(self, mock_llm):
+        """队列中多条目混合判定（合规/不合规/无法判定）。"""
+        llm_queue = [
+            {"page": 1, "step_no": 1, "name": "外观", "spec": "应澄清",
+             "actual": "澄清", "unit": "", "kind": "param"},
+            {"page": 1, "step_no": 2, "name": "颜色", "spec": "无色",
+             "actual": "黄色", "unit": "", "kind": "param"},
+            {"page": 2, "step_no": 1, "name": "气味", "spec": "符合要求",
+             "actual": "异常", "unit": "", "kind": "param"},
+        ]
+        mock_llm.chat_json.return_value = [
+            {"index": 1, "in_spec": True, "reason": "澄清"},
+            {"index": 2, "in_spec": False, "reason": "颜色异常"},
+            {"index": 3, "in_spec": None, "reason": "无法判定"},
+        ]
+        findings = await _llm_fallback_check(llm_queue)
+        assert len(findings) == 2
+        types = {f["type"] for f in findings}
+        assert "param_out_of_spec" in types
+        assert "completeness" in types
+
+
+# ===========================================================================
+# _llm_based_check 测试
+# ===========================================================================
+
+
+class TestLLMBasedCheck:
+    """LLM 语义检查 — 规则跑完后捕获遗漏的语义异常。"""
+
+    @pytest.mark.asyncio
+    async def test_empty_summary_returns_empty(self, mock_llm):
+        """空 summary 不应调用 LLM。"""
+        result = await _llm_based_check("")
+        assert result == []
+        mock_llm.chat_json.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_whitespace_summary_returns_empty(self, mock_llm):
+        """纯空白 summary 不应调用 LLM。"""
+        result = await _llm_based_check("   \n  \t ")
+        assert result == []
+        mock_llm.chat_json.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_list_result_surfaces_findings(self, mock_llm):
+        """LLM 返回 list 时应正确转换为 findings。"""
+        mock_llm.chat_json.return_value = [
+            {
+                "page": 1,
+                "type": "signature_mismatch",
+                "severity": "warning",
+                "description": "操作人与签名不一致",
+                "ocr_text": "张三/李四",
+                "operator": "张三",
+            },
+        ]
+        findings = await _llm_based_check("第1页 ...")
+        assert len(findings) == 1
+        f = findings[0]
+        assert f["source"] == "llm_cross"
+        assert f["page"] == 1
+        assert f["type"] == "signature_mismatch"
+        assert f["severity"] == "warning"
+        assert f["ocr_text"] == "张三/李四"
+        assert f["operator"] == "张三"
+
+    @pytest.mark.asyncio
+    async def test_dict_result_with_findings_key(self, mock_llm):
+        """LLM 返回 dict 包含 findings 键时也能正确解析。"""
+        mock_llm.chat_json.return_value = {
+            "findings": [
+                {
+                    "page": 2,
+                    "type": "completeness",
+                    "severity": "info",
+                    "description": "缺少复核人签名",
+                },
+            ],
+        }
+        findings = await _llm_based_check("第2页 ...")
+        assert len(findings) == 1
+        assert findings[0]["page"] == 2
+        assert findings[0]["source"] == "llm_cross"
+
+    @pytest.mark.asyncio
+    async def test_default_fields_added(self, mock_llm):
+        """缺少 ocr_text/operator 时应填充默认值。"""
+        mock_llm.chat_json.return_value = [
+            {
+                "page": 1,
+                "type": "param_out_of_spec",
+                "severity": "warning",
+                "description": "参数漂移",
+            },
+        ]
+        findings = await _llm_based_check("第1页 ...")
+        assert len(findings) == 1
+        assert findings[0]["ocr_text"] == ""
+        assert findings[0]["operator"] == ""
+        assert findings[0]["source"] == "llm_cross"
+
+    @pytest.mark.asyncio
+    async def test_invalid_finding_missing_fields_filtered(self, mock_llm):
+        """缺少必需字段的 finding 应被过滤。"""
+        mock_llm.chat_json.return_value = [
+            {"page": 1, "type": "x", "severity": "warning"},  # 缺 description
+            {"page": 1, "type": "x", "description": "...", "severity": "warning"},  # 有效
+        ]
+        findings = await _llm_based_check("第1页 ...")
+        assert len(findings) == 1
+
+    @pytest.mark.asyncio
+    async def test_non_dict_finding_filtered(self, mock_llm):
+        """非 dict 类型的 finding 应被过滤。"""
+        mock_llm.chat_json.return_value = [
+            "not a dict",
+            {"page": 1, "type": "x", "severity": "warning", "description": "..."},
+        ]
+        findings = await _llm_based_check("第1页 ...")
+        assert len(findings) == 1
+
+    @pytest.mark.asyncio
+    async def test_exception_returns_review_finding(self, mock_llm):
+        """LLM 调用异常时应 fail-closed：返回人工复核 finding 而非空列表。"""
+        mock_llm.chat_json.side_effect = RuntimeError("LLM unavailable")
+        findings = await _llm_based_check("第1页 ...")
+        assert len(findings) == 1
+        f = findings[0]
+        assert f["type"] == "completeness"
+        assert f["severity"] == "info"
+        assert f["source"] == "rule"
+        assert f["page"] == 0
+        assert "人工复核" in f["description"]
+        assert "RuntimeError" in f["description"]
+
+    @pytest.mark.asyncio
+    async def test_parse_error_returns_review_finding(self, mock_llm):
+        """LLM 返回 _parse_error 时应 fail-closed：返回人工复核 finding。"""
+        mock_llm.chat_json.return_value = {"_parse_error": True, "_raw": "garbage"}
+        findings = await _llm_based_check("第1页 ...")
+        assert len(findings) == 1
+        f = findings[0]
+        assert f["type"] == "completeness"
+        assert f["severity"] == "info"
+        assert f["source"] == "rule"
+        assert f["page"] == 0
+        assert "人工复核" in f["description"]
+        assert "JSON 解析失败" in f["description"]
+
+
+# ===========================================================================
+# _check_year_contradiction 测试
+# ===========================================================================
+
+
+class TestYearContradiction:
+    """R2: 同事件类型内年份不一致。"""
+
+    def test_single_event_multiple_years_produces_finding(self):
+        """同事件类型有多个不同年份时应产生 finding。"""
+        pages = _norm([
+            _make_page(1, [], event_year_groups={"draft": [2024, 2025]}),
+        ])
+        findings = _check_year_contradiction(pages)
+        assert len(findings) == 1
+        f = findings[0]
+        assert f["type"] == "year_contradiction"
+        assert f["severity"] == "warning"
+        assert f["page"] == 1
+        assert f["source"] == "rule"
+        assert f["operator"] == ""
+        assert "draft" in f["description"]
+        assert "2024" in f["ocr_text"]
+        assert "2025" in f["ocr_text"]
+        assert "需人工确认" in f["description"]
+
+    def test_single_year_no_finding(self):
+        """事件类型只有一个年份时不应产生 finding。"""
+        pages = _norm([
+            _make_page(1, [], event_year_groups={"draft": [2024]}),
+        ])
+        findings = _check_year_contradiction(pages)
+        assert findings == []
+
+    def test_duplicate_years_no_finding(self):
+        """重复的同一年份不应产生 finding（去重后只有一个）。"""
+        pages = _norm([
+            _make_page(1, [], event_year_groups={"draft": [2024, 2024, 2024]}),
+        ])
+        findings = _check_year_contradiction(pages)
+        assert findings == []
+
+    def test_multiple_events_same_page(self):
+        """同一页多个事件类型都有年份冲突时应分别产生 finding。"""
+        pages = _norm([
+            _make_page(1, [], event_year_groups={
+                "draft": [2024, 2025],
+                "production": [2023, 2024],
+            }),
+        ])
+        findings = _check_year_contradiction(pages)
+        assert len(findings) == 2
+        event_types = {f["description"].split(" ")[1] for f in findings}
+        assert "draft" in event_types
+        assert "production" in event_types
+
+    def test_empty_event_year_groups_no_finding(self):
+        """空 event_year_groups 不应产生 finding。"""
+        pages = _norm([_make_page(1, [])])
+        findings = _check_year_contradiction(pages)
+        assert findings == []
+
+    def test_unsupported_event_type_ignored(self):
+        """不在枚举范围内的事件类型不应被检查。"""
+        pages = _norm([
+            _make_page(1, [], event_year_groups={"custom_event": [2024, 2025]}),
+        ])
+        findings = _check_year_contradiction(pages)
+        assert findings == []
+
+    def test_multiple_pages_each_checked(self):
+        """多页应分别检查。"""
+        pages = _norm([
+            _make_page(1, [], event_year_groups={"draft": [2024, 2025]}),
+            _make_page(2, [], event_year_groups={"review": [2023, 2024]}),
+        ])
+        findings = _check_year_contradiction(pages)
+        assert len(findings) == 2
+        pages_in_findings = {f["page"] for f in findings}
+        assert pages_in_findings == {1, 2}
+
+
+# ===========================================================================
+# _check_suspicious_dates 测试
+# ===========================================================================
+
+
+class TestSuspiciousDates:
+    """R4: 异常年份（<2000 或 >当前年+1）。"""
+
+    def test_old_year_produces_finding(self):
+        """年份早于 2000 应产生 finding。"""
+        pages = _norm([
+            _make_page(1, [], page_info={"production_date": "1990.05.01"}),
+        ])
+        findings = _check_suspicious_dates(pages)
+        assert len(findings) == 1
+        f = findings[0]
+        assert f["type"] == "suspicious_date"
+        assert f["severity"] == "warning"
+        assert f["page"] == 1
+        assert f["source"] == "rule"
+        assert f["operator"] == ""
+        assert "1990" in f["description"]
+        assert "异常" in f["description"]
+        assert f["ocr_text"] == "1990.05.01"
+
+    def test_future_year_produces_finding(self):
+        """年份晚于当前年+1 应产生 finding。"""
+        future_year = datetime.now().year + 10
+        pages = _norm([
+            _make_page(1, [], page_info={"production_date": f"{future_year}.06.15"}),
+        ])
+        findings = _check_suspicious_dates(pages)
+        assert len(findings) == 1
+        assert findings[0]["type"] == "suspicious_date"
+        assert str(future_year) in findings[0]["description"]
+
+    def test_normal_year_no_finding(self):
+        """正常年份不应产生 finding。"""
+        pages = _norm([
+            _make_page(1, [], page_info={"production_date": "2024.05.01"}),
+        ])
+        findings = _check_suspicious_dates(pages)
+        assert findings == []
+
+    def test_step_time_old_year_produces_finding(self):
+        """step 的 start_time/end_time 含异常年份也应产生 finding。"""
+        pages = _norm([
+            _make_page(1, [
+                _make_step(1, start_time="1985.01.01 10:00", end_time="1985.01.01 11:00"),
+            ]),
+        ])
+        findings = _check_suspicious_dates(pages)
+        assert len(findings) >= 1
+        assert all(f["type"] == "suspicious_date" for f in findings)
+        assert all("1985" in f["description"] for f in findings)
+
+    def test_signature_time_future_year_produces_finding(self):
+        """签名时间含异常年份也应产生 finding。"""
+        future_year = datetime.now().year + 5
+        pages = _norm([
+            _make_page(1, [
+                _make_step(1, start_time="2024.01.01 10:00", end_time="2024.01.01 11:00",
+                           signatures=[{"role": "operator", "name": "张三",
+                                        "sign_time": f"{future_year}.02.01 10:30"}]),
+            ]),
+        ])
+        findings = _check_suspicious_dates(pages)
+        assert any(f["type"] == "suspicious_date" and str(future_year) in f["description"]
+                   for f in findings)
+
+    def test_duplicate_date_strings_deduplicated(self):
+        """相同的日期字符串应去重，只产生一个 finding。"""
+        pages = _norm([
+            _make_page(1, [
+                _make_step(1, start_time="2024.01.01 10:00", end_time="2024.01.01 11:00",
+                           signatures=[
+                               {"role": "operator", "name": "张三",
+                                "sign_time": "1990.01.01 09:00"},
+                               {"role": "reviewer", "name": "李四",
+                                "sign_time": "1990.01.01 09:00"},
+                           ]),
+            ]),
+        ])
+        findings = _check_suspicious_dates(pages)
+        suspicious_1990 = [f for f in findings if "1990" in f.get("description", "")]
+        assert len(suspicious_1990) == 1
+
+    def test_multiple_pages_each_checked(self):
+        """多页应分别检查。"""
+        pages = _norm([
+            _make_page(1, [], page_info={"production_date": "1990.01.01"}),
+            _make_page(2, [], page_info={"production_date": "1985.06.15"}),
+        ])
+        findings = _check_suspicious_dates(pages)
+        assert len(findings) == 2
+        pages_in_findings = {f["page"] for f in findings}
+        assert pages_in_findings == {1, 2}
+
+
+# ===========================================================================
+# _check_signature_time_anomaly 测试
+# ===========================================================================
+
+
+class TestSignatureTimeAnomaly:
+    """R5: 签名时间早于操作时间。"""
+
+    def test_sign_before_op_produces_finding(self):
+        """签名时间早于操作开始时间应产生 finding。"""
+        pages = _norm([
+            _make_page(1, [
+                _make_step(1, start_time="2024.01.01 10:00", end_time="2024.01.01 11:00",
+                           signatures=[
+                               {"role": "operator", "name": "张三",
+                                "sign_time": "2024.01.01 09:00"},
+                           ]),
+            ]),
+        ])
+        findings = _check_signature_time_anomaly(pages)
+        assert len(findings) == 1
+        f = findings[0]
+        assert f["type"] == "signature_time_anomaly"
+        assert f["severity"] == "warning"
+        assert f["page"] == 1
+        assert f["source"] == "rule"
+        assert "张三" in f["description"]
+        assert "签名时间" in f["description"]
+        assert "操作时间" in f["description"]
+        assert f["operator"] == "张三"
+        assert f["ocr_text"] == "张三 2024.01.01 09:00"
+
+    def test_sign_after_op_no_finding(self):
+        """签名时间晚于操作时间不应产生 finding。"""
+        pages = _norm([
+            _make_page(1, [
+                _make_step(1, start_time="2024.01.01 10:00", end_time="2024.01.01 11:00",
+                           signatures=[
+                               {"role": "operator", "name": "张三",
+                                "sign_time": "2024.01.01 12:00"},
+                           ]),
+            ]),
+        ])
+        findings = _check_signature_time_anomaly(pages)
+        assert findings == []
+
+    def test_sign_equal_op_no_finding(self):
+        """签名时间等于操作时间不应产生 finding（仅严格早于才报）。"""
+        pages = _norm([
+            _make_page(1, [
+                _make_step(1, start_time="2024.01.01 10:00",
+                           signatures=[
+                               {"role": "operator", "name": "张三",
+                                "sign_time": "2024.01.01 10:00"},
+                           ]),
+            ]),
+        ])
+        findings = _check_signature_time_anomaly(pages)
+        assert findings == []
+
+    def test_no_signatures_no_finding(self):
+        """没有签名不应产生 finding。"""
+        pages = _norm([
+            _make_page(1, [
+                _make_step(1, start_time="2024.01.01 10:00", end_time="2024.01.01 11:00"),
+            ]),
+        ])
+        findings = _check_signature_time_anomaly(pages)
+        assert findings == []
+
+    def test_empty_sign_time_skipped(self):
+        """空 sign_time 应被跳过。"""
+        pages = _norm([
+            _make_page(1, [
+                _make_step(1, start_time="2024.01.01 10:00",
+                           signatures=[
+                               {"role": "operator", "name": "张三", "sign_time": ""},
+                           ]),
+            ]),
+        ])
+        findings = _check_signature_time_anomaly(pages)
+        assert findings == []
+
+    def test_unparseable_sign_time_skipped(self):
+        """无法解析的 sign_time 应被跳过（不抛异常）。"""
+        pages = _norm([
+            _make_page(1, [
+                _make_step(1, start_time="2024.01.01 10:00",
+                           signatures=[
+                               {"role": "operator", "name": "张三", "sign_time": "无效日期"},
+                           ]),
+            ]),
+        ])
+        findings = _check_signature_time_anomaly(pages)
+        assert findings == []
+
+    def test_date_only_sign_vs_datetime_op_same_day_no_finding(self):
+        """date-only 签名时间（整天）与同日带时间操作时间不应误报（年月日 vs
+        年月日小时分钟混比场景：修复前 sign=00:00 < op=14:30 误报）。"""
+        pages = _norm([
+            _make_page(1, [
+                _make_step(1, start_time="2024.01.01 14:30",
+                           signatures=[
+                               {"role": "operator", "name": "张三",
+                                "sign_time": "2024.01.01"},
+                           ]),
+            ]),
+        ])
+        findings = _check_signature_time_anomaly(pages)
+        assert findings == []
+
+    def test_date_only_sign_previous_day_vs_datetime_op_finding(self):
+        """date-only 签名时间（前一天整天）早于带时间操作时间应报异常。"""
+        pages = _norm([
+            _make_page(1, [
+                _make_step(1, start_time="2024.01.01 10:00",
+                           signatures=[
+                               {"role": "operator", "name": "张三",
+                                "sign_time": "2023.12.31"},
+                           ]),
+            ]),
+        ])
+        findings = _check_signature_time_anomaly(pages)
+        assert len(findings) == 1
+        assert findings[0]["type"] == "signature_time_anomaly"
+
+    def test_time_only_sign_uses_fallback_date(self):
+        """只有 HH:MM 的签名时间应使用 page_info.production_date 作为 fallback。"""
+        pages = _norm([
+            _make_page(1, [
+                _make_step(1, start_time="2024.01.01 10:00",
+                           signatures=[
+                               {"role": "operator", "name": "张三", "sign_time": "09:00"},
+                           ]),
+            ], page_info={"production_date": "2024.01.01"}),
+        ])
+        findings = _check_signature_time_anomaly(pages)
+        assert len(findings) == 1
+        assert findings[0]["type"] == "signature_time_anomaly"
+
+    def test_end_time_used_when_no_start_time(self):
+        """没有 start_time 时应使用 end_time 作为操作时间。"""
+        pages = _norm([
+            _make_page(1, [
+                _make_step(1, end_time="2024.01.01 11:00",
+                           signatures=[
+                               {"role": "reviewer", "name": "李四",
+                                "sign_time": "2024.01.01 10:00"},
+                           ]),
+            ]),
+        ])
+        findings = _check_signature_time_anomaly(pages)
+        assert len(findings) == 1
+        assert "李四" in findings[0]["description"]
+        assert "2024.01.01 11:00" in findings[0]["description"]
+
+    def test_multiple_signatures_multiple_findings(self):
+        """多个签名异常应分别产生 finding。"""
+        pages = _norm([
+            _make_page(1, [
+                _make_step(1, start_time="2024.01.01 10:00",
+                           signatures=[
+                               {"role": "operator", "name": "张三",
+                                "sign_time": "2024.01.01 09:00"},
+                               {"role": "reviewer", "name": "李四",
+                                "sign_time": "2024.01.01 08:30"},
+                           ]),
+            ]),
+        ])
+        findings = _check_signature_time_anomaly(pages)
+        assert len(findings) == 2
+        names = {f["operator"] for f in findings}
+        assert names == {"张三", "李四"}
+
+    def test_year_gap_over_2_flags_ocr_confusion(self):
+        """签名时间与操作时间年份相差 >2 年时（OCR 2015/2025 混淆，
+        签名真实为 2025 却被读成 2015），仍报异常但描述附带 OCR 混淆提示，
+        而非铁口断言时间矛盾。"""
+        pages = _norm([
+            _make_page(1, [
+                _make_step(1, start_time="2025.01.20 10:00",
+                           signatures=[
+                               {"role": "operator", "name": "张三",
+                                "sign_time": "2015.01.20"},
+                           ]),
+            ]),
+        ])
+        findings = _check_signature_time_anomaly(pages)
+        assert len(findings) == 1
+        assert "年份相差 10 年" in findings[0]["description"]
+        assert "OCR 提取错误" in findings[0]["description"]
+
+    def test_year_gap_within_2_no_ocr_hint(self):
+        """年份差 ≤2 时不附加 OCR 混淆提示（正常时间矛盾）。"""
+        pages = _norm([
+            _make_page(1, [
+                _make_step(1, start_time="2024.01.01 10:00",
+                           signatures=[
+                               {"role": "operator", "name": "张三",
+                                "sign_time": "2023.12.31"},
+                           ]),
+            ]),
+        ])
+        findings = _check_signature_time_anomaly(pages)
+        assert len(findings) == 1
+        assert "OCR 提取错误" not in findings[0]["description"]
+
+
+# ===========================================================================
+# R9a: 签名间顺序（复核/QA 必须晚于操作者签名）
+# ===========================================================================
+
+
+class TestSignatureOrder:
+    """签名顺序规则 — reviewer/QA 签名时间不得早于 operator。"""
+
+    def test_reviewer_before_operator_finding(self):
+        pages = _norm([
+            _make_page(1, [
+                _make_step(1, start_time="2024.01.01 08:00",
+                           signatures=[
+                               {"role": "operator", "name": "张三",
+                                "sign_time": "2024.01.01 10:00"},
+                               {"role": "reviewer", "name": "李四",
+                                "sign_time": "2024.01.01 09:00"},
+                           ]),
+            ]),
+        ])
+        findings = _check_signature_order(pages)
+        assert len(findings) == 1
+        f = findings[0]
+        assert f["type"] == "signature_time_anomaly"
+        assert "李四" in f["description"]
+        assert "早于" in f["description"]
+
+    def test_reviewer_after_operator_no_finding(self):
+        pages = _norm([
+            _make_page(1, [
+                _make_step(1, start_time="2024.01.01 08:00",
+                           signatures=[
+                               {"role": "operator", "name": "张三",
+                                "sign_time": "2024.01.01 09:00"},
+                               {"role": "reviewer", "name": "李四",
+                                "sign_time": "2024.01.01 10:00"},
+                           ]),
+            ]),
+        ])
+        assert _check_signature_order(pages) == []
+
+    def test_date_only_reviewer_same_day_no_finding(self):
+        """date-only 复核签名（整天）与同日操作签名点不误报。"""
+        pages = _norm([
+            _make_page(1, [
+                _make_step(1, start_time="2024.01.01 08:00",
+                           signatures=[
+                               {"role": "operator", "name": "张三",
+                                "sign_time": "2024.01.01 09:30"},
+                               {"role": "reviewer", "name": "李四",
+                                "sign_time": "2024.01.01"},
+                           ]),
+            ]),
+        ])
+        assert _check_signature_order(pages) == []
+
+    def test_unranked_role_ignored(self):
+        pages = _norm([
+            _make_page(1, [
+                _make_step(1, start_time="2024.01.01 08:00",
+                           signatures=[
+                               {"role": "witness", "name": "王五",
+                                "sign_time": "2024.01.01 07:00"},
+                               {"role": "operator", "name": "张三",
+                                "sign_time": "2024.01.01 10:00"},
+                           ]),
+            ]),
+        ])
+        assert _check_signature_order(pages) == []
+
+    def test_same_role_adjacent_no_finding(self):
+        """对抗审查 P2：同角色相邻对不比较 — 两名复核人之间的先后在 GMP
+        上通常无约束，逐对比较会结构性误报。"""
+        pages = _norm([
+            _make_page(1, [
+                _make_step(1, start_time="2024.01.01 08:00",
+                           signatures=[
+                               {"role": "operator", "name": "张三",
+                                "sign_time": "2024.01.01 09:00"},
+                               # 王五早于李四，但同为 reviewer → 不报
+                               {"role": "reviewer", "name": "李四",
+                                "sign_time": "2024.01.01 10:00"},
+                               {"role": "reviewer", "name": "王五",
+                                "sign_time": "2024.01.01 09:30"},
+                           ]),
+            ]),
+        ])
+        assert _check_signature_order(pages) == []
+
+    def test_cross_level_still_detected_among_same_role_pairs(self):
+        """同角色豁免不放过跨级违规：reviewer 早于 operator 仍必须报。"""
+        pages = _norm([
+            _make_page(1, [
+                _make_step(1, start_time="2024.01.01 08:00",
+                           signatures=[
+                               {"role": "operator", "name": "张三",
+                                "sign_time": "2024.01.01 10:00"},
+                               # 早于操作签名（跨级违规）
+                               {"role": "reviewer", "name": "李四",
+                                "sign_time": "2024.01.01 09:30"},
+                               # 同为 reviewer 的第二人（应被豁免）
+                               {"role": "reviewer", "name": "王五",
+                                "sign_time": "2024.01.01 09:00"},
+                           ]),
+            ]),
+        ])
+        findings = _check_signature_order(pages)
+        assert len(findings) == 1
+        assert "李四" in findings[0]["description"]
+        assert "早于" in findings[0]["description"]
+
+    def test_year_gap_over_2_flags_ocr(self):
+        pages = _norm([
+            _make_page(1, [
+                _make_step(1, start_time="2025.01.20 08:00",
+                           signatures=[
+                               {"role": "operator", "name": "张三",
+                                "sign_time": "2025.01.20 09:00"},
+                               {"role": "reviewer", "name": "李四",
+                                "sign_time": "2015.01.20"},
+                           ]),
+            ]),
+        ])
+        findings = _check_signature_order(pages)
+        assert len(findings) == 1
+        assert "年份相差 10 年" in findings[0]["description"]
+
+
+# ===========================================================================
+# R8b: 勾选一致性（复核项勾选"否"/无法识别）
+# ===========================================================================
+
+
+class TestCheckConsistency:
+    """勾选一致性 — 检查项勾选"否"必须提示偏差处理，勾选不清提示人工核对。"""
+
+    def test_checked_no_warning(self):
+        from core.rules.rule_doc import _check_check_consistency
+
+        pages = _norm([
+            _make_page(1, [
+                _make_step(1, checks=[
+                    {"item": "生产场地是否整洁", "selected": "否", "marker": "√"},
+                ]),
+            ]),
+        ])
+        findings = _check_check_consistency(pages)
+        assert len(findings) == 1
+        assert findings[0]["severity"] == "warning"
+        assert "生产场地是否整洁" in findings[0]["description"]
+        # B1-15 同轮：文案改**中性**后，不得再替用户断言「否」= 需要偏差处理
+        assert "偏差处理" not in findings[0]["description"]
+        assert "原页" in findings[0]["description"]
+
+    def test_no_polarity_inference(self):
+        """R8 **不得**按题面措辞翻转判定或文案（B1-12 禁止措辞驱动）。
+
+        实测 p51 三条（是否发生偏差 / 是否发生 OOS/OOT / 是否发生变更）答「否」
+        **本来就是正常答案**（无偏差），旧文案却提示"需确认是否已启动偏差处理"
+        ⇒ 对否定式提问方向反了。正确做法不是猜极性，而是**不猜**：
+        文案只陈述事实 + 请人工确认。
+        判据：肯定式与否定式题面的文案**模板必须一致**（只差检查项名）。
+        """
+        pos = self._one("否", "√", item="地面是否干净")
+        neg = self._one("否", "√", item="是否发生偏差")
+        assert len(pos) == 1 and len(neg) == 1
+        assert (pos[0]["description"].replace("地面是否干净", "X")
+                == neg[0]["description"].replace("是否发生偏差", "X")), \
+            "两条文案模板必须一致 ⇒ 说明未按措辞翻转"
+        for f in (pos[0], neg[0]):
+            assert "偏差处理" not in f["description"], "不得替用户下结论"
+            assert "原页" in f["description"] and "确认" in f["description"]
+
+    def test_checked_yes_no_finding(self):
+        from core.rules.rule_doc import _check_check_consistency
+
+        pages = _norm([
+            _make_page(1, [
+                _make_step(1, checks=[
+                    {"item": "生产场地是否整洁", "selected": "是", "marker": "☑"},
+                    {"item": "设备状态标志使用是否正确", "selected": "N/A", "marker": "☑"},
+                ]),
+            ]),
+        ])
+        assert _check_check_consistency(pages) == []
+
+    def test_unrecognizable_selection_info(self):
+        from core.rules.rule_doc import _check_check_consistency
+
+        pages = _norm([
+            _make_page(1, [
+                _make_step(1, checks=[
+                    {"item": "洁净区压差是否符合要求", "selected": "无法识别", "marker": "手绘"},
+                ]),
+            ]),
+        ])
+        findings = _check_check_consistency(pages)
+        assert len(findings) == 1
+        assert findings[0]["severity"] == "info"
+
+    def test_empty_checks_no_finding(self):
+        from core.rules.rule_doc import _check_check_consistency
+
+        pages = _norm([
+            _make_page(1, [
+                _make_step(1, checks=[]),
+                _make_step(2),
+            ]),
+        ])
+        assert _check_check_consistency(pages) == []
+
+    # -----------------------------------------------------------------
+    # B1-15：`selected='否'` 配**空框**是记录内部自相矛盾 ⇒ 不得据此断言
+    # "勾选为否"。实测 p45 就是这一档（`marker='☐'`），原页上打 √ 的是「是」框。
+    # ⚠️ 本档只覆盖**可从记录内部证明**的那部分；`否`+`√`（p39/p46 ×7 条）
+    #    记录内部自洽、只有原图能证伪 ⇒ **判不了**，维持原判（fail-open），
+    #    治本在抽取层（与 B1-14 的字段/列溯源同源）。
+    # -----------------------------------------------------------------
+
+    _EMPTY_BOXES = ["☐", "□", "◻", "○", "◯"]
+
+    def _one(self, selected, marker, item="是否将柱内甲醇压干"):
+        from core.rules.rule_doc import _check_check_consistency
+
+        pages = _norm([
+            _make_page(45, [
+                _make_step(1, checks=[
+                    {"item": item, "selected": selected, "marker": marker},
+                ]),
+            ]),
+        ])
+        return _check_check_consistency(pages)
+
+    def test_empty_box_with_no_is_downgraded_to_info(self):
+        """`否` + 空框 ⇒ 降为 info 且**不得**再断言"勾选为否"（B1-15 核心）。
+
+        这是**具名**用例，同时充当变异验证的稳定锚点（`mutation_harness` 按 nodeid
+        精确匹配，而 parametrize 的非 ASCII id 会被 pytest 转义）。
+        """
+        f = self._one("否", "☐")
+        assert len(f) == 1
+        assert f[0]["severity"] == "info", "空框 ⇒ 内部矛盾 ⇒ 必须降级"
+        assert "勾选为“否”" not in f[0]["description"], "不得再断言勾选为否"
+        assert "不一致" in f[0]["description"]
+        assert "人工核对" in f[0]["description"]
+
+    @pytest.mark.parametrize("glyph", _EMPTY_BOXES, ids=[f"box{i}" for i in range(5)])
+    def test_all_empty_box_glyphs_downgraded(self, glyph):
+        """5 个空框字形都必须触发降级（不是只修了碰巧遇到的那一个）。"""
+        f = self._one("否", glyph)
+        assert len(f) == 1 and f[0]["severity"] == "info"
+
+    def test_check_mark_marker_keeps_warning(self):
+        """`否` + `√` ⇒ 记录**内部自洽** ⇒ 维持 warning（**fail-open**）。
+
+        实测 p39 ×6 / p46 ×1 是这一档。把它也降级就等于"因为可能错所以永不说"，
+        会把真偏差一起吞掉 ⇒ 明确不这么做。
+        """
+        f = self._one("否", "√")
+        assert len(f) == 1 and f[0]["severity"] == "warning"
+        assert "勾选为“否”" in f[0]["description"]
+
+    def test_missing_marker_keeps_warning(self):
+        """marker 缺失/空白 = **不知道**（不是矛盾）⇒ 维持 warning。"""
+        for marker in ("", "   "):
+            f = self._one("否", marker)
+            assert len(f) == 1 and f[0]["severity"] == "warning"
+
+    def test_mixed_marker_keeps_warning(self):
+        """`√☐` 混合里有勾号 ⇒ 说不清 ⇒ 维持 warning（不扩大判据）。"""
+        f = self._one("否", "√☐")
+        assert len(f) == 1 and f[0]["severity"] == "warning"
+
+    def test_yes_with_empty_box_unaffected(self):
+        """对照：`是` + 空框同样矛盾，但 R8 **本来就不判「是」** ⇒ 仍无 finding。
+
+        没有这条，"把整个 `否` 分支删掉"也能让上面几条变绿。
+        """
+        assert self._one("是", "☐") == []
+
+
+# ===========================================================================
+# R3: 边缘超范围降噪（手写 OCR 误读可能）
+# ===========================================================================
+
+
+class TestOutOfSpecEdgeMargin:
+    """param_out_of_spec 边缘降噪：≤10% 偏差降 info，>10% 维持 warning。"""
+
+    def _run(self, spec, actual):
+        from core.rules.rule_spec import _check_param_out_of_spec
+
+        pages = _norm([
+            _make_page(1, [
+                _make_step(1, parameters=[
+                    {"name": "温度", "spec_range": spec, "value": actual},
+                ]),
+            ]),
+        ])
+        findings = _check_param_out_of_spec(pages, [])
+        return findings
+
+    def test_edge_deviation_info(self):
+        """5.4 vs ≤5（8% 超差）→ info + OCR 提示。"""
+        f = self._run("≤5.0℃", "5.4℃")
+        assert len(f) == 1
+        assert f[0]["severity"] == "info"
+        assert "手写 OCR 误读" in f[0]["description"]
+
+    def test_large_deviation_warning(self):
+        """25 vs ≤5（400% 超差）→ warning 铁口。"""
+        f = self._run("≤5.0℃", "25℃")
+        assert len(f) == 1
+        assert f[0]["severity"] == "warning"
+        assert "OCR 误读" not in f[0]["description"]
+
+    def test_between_edge_low_side_info(self):
+        """0.96 vs 1.0-2.0（4% 低于下限）→ info。"""
+        f = self._run("1.0-2.0", "0.96")
+        assert len(f) == 1
+        assert f[0]["severity"] == "info"
+
+    def test_exact_boundary_is_in_spec(self):
+        """恰好 5.0 vs ≤5 → 合格，无 finding。"""
+        assert self._run("≤5.0℃", "5.0℃") == []
+
+
+# ===========================================================================
+# 集成：通过 analyze_cross_page 触发 LLM 路径
+# ===========================================================================
+
+
+class TestAnalyzeCrossPageLLMPaths:
+    """通过 analyze_cross_page 主入口验证 LLM 路径被正确触发。"""
+
+    def test_unparseable_spec_goes_to_llm_fallback(self, mock_llm):
+        """spec 无法解析（如"应澄清"）时应进入 LLM fallback 队列并被判定。"""
+        pages = [
+            _make_page(1, [
+                _make_step(1, start_time="2024.01.01 10:00", end_time="2024.01.01 11:00",
+                           operator="张三", reviewer="李四",
+                           parameters=[
+                               {"name": "外观", "spec_range": "应澄清",
+                                "value": "浑浊", "unit": ""},
+                           ]),
+            ]),
+        ]
+        # 第一次 chat_json 调用：_llm_fallback_check
+        # 第二次 chat_json 调用：_llm_based_check
+        mock_llm.chat_json.side_effect = [
+            [{"index": 1, "in_spec": False, "reason": "溶液浑浊不符合澄清要求"}],
+            [],
+        ]
+        findings = asyncio.run(analyze_cross_page(pages))
+        fallback_findings = [f for f in findings if f.get("source") == "llm_fallback"]
+        assert len(fallback_findings) == 1
+        assert fallback_findings[0]["type"] == "param_out_of_spec"
+        assert "外观" in fallback_findings[0]["description"]
+        assert "应澄清" in fallback_findings[0]["description"]
+        # 应调用 LLM 两次
+        assert mock_llm.chat_json.call_count == 2
+
+    def test_llm_based_check_findings_surfaced(self, mock_llm):
+        """_llm_based_check 产生的 findings 应出现在最终结果中。"""
+        pages = [
+            _make_page(1, [
+                _make_step(1, start_time="2024.01.01 10:00", end_time="2024.01.01 11:00",
+                           operator="张三", reviewer="李四"),
+            ]),
+        ]
+        # llm_queue 为空，_llm_fallback_check 不会调用 chat_json
+        # 只有 _llm_based_check 调用一次 chat_json
+        mock_llm.chat_json.return_value = [
+            {
+                "page": 1,
+                "type": "signature_mismatch",
+                "severity": "warning",
+                "description": "签名与操作人不一致",
+                "ocr_text": "张三/王五",
+                "operator": "张三",
+            },
+        ]
+        findings = asyncio.run(analyze_cross_page(pages))
+        llm_findings = [f for f in findings if f.get("source") == "llm_cross"]
+        assert len(llm_findings) == 1
+        assert llm_findings[0]["type"] == "signature_mismatch"
+        assert llm_findings[0]["page"] == 1
+        assert llm_findings[0]["operator"] == "张三"
+        # 只调用一次（llm_fallback 因空队列未调用）
+        assert mock_llm.chat_json.call_count == 1
+
+    def test_per_page_llm_findings_pass_through(self, mock_llm):
+        """per-page LLM 产生的 findings 应透传到最终结果（source=llm_page）。"""
+        pages = [
+            _make_page(1, [
+                _make_step(1, start_time="2024.01.01 10:00", end_time="2024.01.01 11:00",
+                           operator="张三", reviewer="李四"),
+            ], findings=[
+                {
+                    "type": "time_reversal",
+                    "severity": "critical",
+                    "description": "页面级 LLM 发现的时间倒序",
+                    "ocr_text": "...",
+                    "operator": "",
+                },
+            ]),
+        ]
+        mock_llm.chat_json.return_value = []
+        findings = asyncio.run(analyze_cross_page(pages))
+        per_page_findings = [f for f in findings if f.get("source") == "llm_page"]
+        assert len(per_page_findings) == 1
+        assert per_page_findings[0]["page"] == 1
+        assert per_page_findings[0]["type"] == "time_reversal"
+        assert per_page_findings[0]["severity"] == "critical"
+
+    def test_empty_pages_no_llm_call(self, mock_llm):
+        """空页面列表不应调用 LLM。"""
+        findings = asyncio.run(analyze_cross_page([]))
+        assert findings == []
+        mock_llm.chat_json.assert_not_called()
+
+    def test_llm_fallback_and_llm_based_both_invoked(self, mock_llm):
+        """同时存在 unparseable spec 和正常 step 时，两个 LLM 路径都应被触发。"""
+        pages = [
+            _make_page(1, [
+                _make_step(1, start_time="2024.01.01 10:00", end_time="2024.01.01 11:00",
+                           operator="张三", reviewer="李四",
+                           parameters=[
+                               {"name": "外观", "spec_range": "应澄清",
+                                "value": "澄清", "unit": ""},
+                           ]),
+            ]),
+        ]
+        mock_llm.chat_json.side_effect = [
+            # _llm_fallback_check: 判定合规
+            [{"index": 1, "in_spec": True, "reason": "澄清"}],
+            # _llm_based_check: 返回 1 条语义 finding
+            [{"page": 1, "type": "completeness", "severity": "info",
+              "description": "批次逻辑存疑"}],
+        ]
+        findings = asyncio.run(analyze_cross_page(pages))
+        # LLM fallback 合规，无 finding
+        fallback_findings = [f for f in findings if f.get("source") == "llm_fallback"]
+        assert len(fallback_findings) == 0
+        # LLM based check 返回 1 条
+        llm_findings = [f for f in findings if f.get("source") == "llm_cross"]
+        assert len(llm_findings) == 1
+        assert llm_findings[0]["type"] == "completeness"
+        # 两个路径都调用了 chat_json
+        assert mock_llm.chat_json.call_count == 2
+
+
+# ===========================================================================
+# Fail-closed 行为测试（GMP 安全原则：LLM 不可用时不得静默放行）
+# ===========================================================================
+
+
+class TestLlmFallbackFailClosed:
+    """LLM 兜底/语义检查失败时应 fail-closed，标记人工复核而非返回空列表。"""
+
+    @pytest.mark.asyncio
+    async def test_llm_exception_returns_review_findings(self):
+        """LLM 调用失败时应返回人工复核 findings 而非空列表。"""
+        from core.cross_page_analyzer import _llm_fallback_check
+        llm_queue = [
+            {"page": 1, "step_no": 1, "name": "温度", "spec": "≤25°C", "actual": "30", "unit": "°C"},
+        ]
+        with patch("core.rules.llm_checks.get_llm_client") as mock:
+            mock.return_value.chat_json.side_effect = RuntimeError("API down")
+            findings = await _llm_fallback_check(llm_queue, job_id="test")
+        assert len(findings) == 1
+        assert findings[0]["type"] == "completeness"
+        assert "人工确认" in findings[0]["description"]
+        assert findings[0]["source"] == "rule"
+
+    @pytest.mark.asyncio
+    async def test_llm_exception_flags_all_queued_params(self):
+        """LLM 调用失败时队列中所有参数都应被标记（不可只标记第一个）。"""
+        from core.cross_page_analyzer import _llm_fallback_check
+        llm_queue = [
+            {"page": 1, "step_no": 1, "name": "温度", "spec": "≤25°C", "actual": "30", "unit": "°C"},
+            {"page": 2, "step_no": 3, "name": "外观", "spec": "应澄清", "actual": "浑浊", "unit": ""},
+            {"page": 3, "step_no": 5, "name": "pH", "spec": "6.0-7.0", "actual": "5.5", "unit": ""},
+        ]
+        with patch("core.rules.llm_checks.get_llm_client") as mock:
+            mock.return_value.chat_json.side_effect = TimeoutError("timeout")
+            findings = await _llm_fallback_check(llm_queue, job_id="test")
+        assert len(findings) == 3
+        pages = {f["page"] for f in findings}
+        assert pages == {1, 2, 3}
+        assert all(f["type"] == "completeness" for f in findings)
+        assert all(f["source"] == "rule" for f in findings)
+        assert all("人工确认" in f["description"] for f in findings)
+        assert all("TimeoutError" in f["description"] for f in findings)
+
+    @pytest.mark.asyncio
+    async def test_llm_parse_error_returns_review_findings(self):
+        """LLM 返回无法解析的 JSON 时应 fail-closed 标记人工复核。"""
+        from core.cross_page_analyzer import _llm_fallback_check
+        llm_queue = [
+            {"page": 2, "step_no": 2, "name": "含量", "spec": "≥98.0%", "actual": "97.0", "unit": "%"},
+        ]
+        with patch("core.rules.llm_checks.get_llm_client") as mock:
+            mock.return_value.chat_json = AsyncMock(return_value={"_parse_error": True, "_raw": "not json"})
+            findings = await _llm_fallback_check(llm_queue, job_id="test")
+        assert len(findings) == 1
+        f = findings[0]
+        assert f["type"] == "completeness"
+        assert f["source"] == "rule"
+        assert f["page"] == 2
+        assert "JSON 解析失败" in f["description"]
+        assert "人工确认" in f["description"]
+
+    def test_fallback_fail_closed_through_analyze_cross_page(self, mock_llm):
+        """端到端：LLM fallback 异常时 findings 应进入最终结果（不丢失）。"""
+        pages = [
+            _make_page(1, [
+                _make_step(1, start_time="2024.01.01 10:00", end_time="2024.01.01 11:00",
+                           operator="张三", reviewer="李四",
+                           signatures=[{"role": "qa", "name": "王五"}],
+                           parameters=[
+                               {"name": "外观", "spec_range": "应澄清",
+                                "value": "浑浊", "unit": ""},
+                           ]),
+            ]),
+        ]
+        # 第一次 chat_json：_llm_fallback_check 抛异常 → fail-closed
+        # 第二次 chat_json：_llm_based_check 返回空 list（成功）
+        mock_llm.chat_json.side_effect = [
+            RuntimeError("API down"),
+            [],
+        ]
+        findings = asyncio.run(analyze_cross_page(pages))
+        review_findings = [f for f in findings if f.get("type") == "completeness"
+                           and f.get("source") == "rule"]
+        assert len(review_findings) == 1
+        assert "外观" in review_findings[0]["description"]
+        assert "人工确认" in review_findings[0]["description"]
+
+
+class TestSummaryTruncation:
+    """_build_summary context-budget 护栏：字段压缩 → 逐行截断 + 显式标记。
+
+    对应 best practice：跨页 prompt 注入量必须封顶（51 页实测 ~23K tokens 约
+    22% 窗口，100+ 页记录会逼近质量退化区），超限时宁可带标记 drop 也不
+    静默截断（防 LLM 把缺失当正常，产生"内容不存在"类幻觉 finding）。
+    """
+
+    def _pages(self, n, op_len, findings=None):
+        return [
+            {
+                "page": i,
+                "page_info": {"title": f"记录页 {i}",
+                              "production_date": "2026-01-01",
+                              "batch_no": "B20260001"},
+                "steps": [{
+                    "step_no": 1,
+                    "operation": "操" * op_len,
+                    "start_time": "08:00",
+                    "end_time": "09:00",
+                    "operator": "张健",
+                    "reviewer": "周华",
+                    "parameters": [{"name": "温度", "value": "25", "unit": "℃"}],
+                    "measurements": [{"time": "08:30", "values": {
+                        "实测流速": {"actual": "0.97"},
+                        "实测压力": {"actual": "0.15"},
+                        "实测温度": {"actual": "25.0"},
+                        "实测pH": {"actual": "7.2"},
+                        "实测浊度": {"actual": "1.1"},
+                    }}],
+                    "signatures": [{"role": "operator", "name": "张健",
+                                    "sign_time": "2026-01-01 09:00"}],
+                }],
+                "findings": findings or [],
+                "event_year_groups": {},
+            }
+            for i in range(1, n + 1)
+        ]
+
+    def test_short_summary_within_cap(self):
+        from core.rules.llm_checks import _build_summary, _SUMMARY_MAX_CHARS
+        text = _build_summary(self._pages(2, 30))
+        assert len(text) <= _SUMMARY_MAX_CHARS
+        assert "内容过长已截断" not in text
+        assert "B20260001" in text
+
+    def test_oversized_compresses_fields_to_fit(self):
+        from core.rules.llm_checks import (_build_summary, _summary_lines,
+                                           _SUMMARY_MAX_CHARS)
+        pages = self._pages(400, 700)
+        # 前置：正常宽度（op 60）构建确实超限，压缩测试才有意义
+        assert len("\n".join(_summary_lines(pages, op_len=60, meas_cols=4,
+                                            findings_n=5))) > _SUMMARY_MAX_CHARS
+        text = _build_summary(pages)
+        assert len(text) <= _SUMMARY_MAX_CHARS
+        # 第一级字段压缩（operation 60→24）后应放得下，无需逐行截断
+        assert "内容过长已截断" not in text
+        assert "操" * 24 in text
+
+    def test_line_truncate_with_explicit_marker(self):
+        from core.rules.llm_checks import _build_summary, _SUMMARY_MAX_CHARS
+        pages = self._pages(5000, 700)
+        text = _build_summary(pages)
+        assert len(text) <= _SUMMARY_MAX_CHARS + 200
+        assert "内容过长已截断" in text
+        # 截断标记显式告知 LLM 输入不完整（防缺失当正常的幻觉）
+        assert "未注入" in text
+
+    def test_compression_reduces_sizes(self):
+        from core.rules.llm_checks import _summary_lines, _OP_LEN_COMPRESSED
+        full = _summary_lines(self._pages(1, 200), op_len=60, meas_cols=4,
+                              findings_n=5)
+        comp = _summary_lines(self._pages(1, 200), op_len=_OP_LEN_COMPRESSED,
+                              meas_cols=2, findings_n=2)
+        assert len("\n".join(comp)) < len("\n".join(full))
+        assert any("... " in ln or ln.endswith("...") for ln in comp
+                   if ln.strip().startswith("@"))
+
+    def test_summary_max_chars_derivation(self):
+        """窗口→摘要预算推导：35% 窗口 × 1.6 字符/token；非法输入回退默认。"""
+        from core.rules.llm_checks import _summary_max_chars
+        assert _summary_max_chars(128_000) == int(128_000 * 0.35 * 1.6)
+        assert _summary_max_chars(32_000) == int(32_000 * 0.35 * 1.6)
+        assert _summary_max_chars(None) == int(128_000 * 0.35 * 1.6)
+        assert _summary_max_chars(0) == int(128_000 * 0.35 * 1.6)
+        assert _summary_max_chars(-5) == int(128_000 * 0.35 * 1.6)
+        assert _summary_max_chars("bogus") == int(128_000 * 0.35 * 1.6)
+        assert _summary_max_chars(10_000) == 8_000  # floor 兜底，避免小窗饿死
+
+    def test_small_window_triggers_line_truncate_sooner(self):
+        """同一 400 页输入：32K 窗口 → 显式截断；默认窗口 → 仅字段压缩。"""
+        from core.rules.llm_checks import (
+            _build_summary, _summary_max_chars, _SUMMARY_MAX_CHARS)
+        pages = self._pages(400, 700)
+        cap32 = _summary_max_chars(32_000)
+        assert cap32 < _SUMMARY_MAX_CHARS
+        text = _build_summary(pages, context_window=32_000)
+        assert len(text) <= cap32 + 200
+        assert "内容过长已截断" in text
+        assert "内容过长已截断" not in _build_summary(pages)
+
+
+class TestQueueFindingsAreNotCollapsedByDedupKey:
+    """0-42（**已修**，2026-10-15）：同一参数在不同时间点必须产出**可区分**的 finding。
+
+    为什么锁这条（R90 第三十四批）：写库去重键是 UNIQUE
+    ``idx_findings_dedup(job_id, source, page, type, description)``，而
+    ``core/rules/llm_checks.py`` 的三个产出分支（cap/逐参数、``in_spec=False``、
+    ``in_spec=None``）用的是**裸 dict + 不含 ``time``/``step_no`` 的 f-string**
+    ⇒ ``kind='cell'`` 的多时间点条目描述**逐字相同** ⇒ ``INSERT OR IGNORE`` **静默丢弃**。
+
+    实测（``devlogs/_verify/r91f_reproduce_422.py``，只读 DB + 离线重放）：
+    全库 7 个 job 的「参数数量过多（N）」行数**均** < N，丢 **64–77 条（13–17%）**；
+    该 51 页 job 重放得 400 条队列 → 去重后 337（丢 63 = 15.75%）。
+    对照：规则层自身的 cell 判定走 ``make_oos_finding``（``_where_phrase`` 把时间点
+    清单写进描述）⇒ **不丢**（同输入实测 2 条描述互异）。
+
+    修复：三个分支的描述统一走 ``_where_tag(q)``，把 ``步骤N`` / ``时间`` 编进
+    ``第{p}页`` 之后；两者都没有时返回空串 ⇒ 旧文案**逐字节不变**。
+    """
+
+    _REASON = "参数数量过多（2），超出自动判定上限，需人工确认"
+
+    @staticmethod
+    def _two_timepoints():
+        """同一页、同一参数、同一取值，**只有时间点不同**（真实批记录常态）。"""
+        return [
+            {"page": 8, "step_no": 3, "name": "总进_进口压力", "time": "10:38",
+             "spec": "", "actual": "3.6", "unit": "bar", "kind": "cell"},
+            {"page": 8, "step_no": 3, "name": "总进_进口压力", "time": "11:34",
+             "spec": "", "actual": "3.6", "unit": "bar", "kind": "cell"},
+        ]
+
+    def test_per_param_flag_keeps_time_points_distinct(self):
+        from core.rules.llm_checks import _flag_llm_queue_for_review
+
+        findings = _flag_llm_queue_for_review(
+            self._two_timepoints(), reason=self._REASON)
+        assert len(findings) == 2
+        assert len({f["description"] for f in findings}) == 2, (
+            "两个时间点产出了**逐字相同**的 description ⇒ 写库时会被 UNIQUE "
+            "idx_findings_dedup 静默合并（0-42）"
+        )
+
+    @pytest.mark.asyncio
+    async def test_llm_judged_oos_keeps_time_points_distinct(self):
+        """``in_spec=False``（**真实越界**）分支用同一个有损模板 ⇒ 真 OOS 也可能被合并。"""
+        from core.rules.llm_checks import _llm_fallback_check
+
+        client = MagicMock()
+        client.chat_json = AsyncMock(return_value=[
+            {"index": 1, "in_spec": False, "reason": "超上限"},
+            {"index": 2, "in_spec": False, "reason": "超上限"},
+        ])
+        with patch("core.rules.llm_checks.get_llm_client", return_value=client):
+            findings = await _llm_fallback_check(self._two_timepoints(), job_id="t")
+        assert len(findings) == 2
+        assert len({f["description"] for f in findings}) == 2
+
+    def test_rule_layer_counterexample_keeps_time_points_distinct(self):
+        """**正对照**（现在就绿）：规则层 cell 判定把时间点写进描述 ⇒ 不撞车。
+
+        没有这条，"让 LLM 路径复用规则层构造点"是否真能修好就没有现场证据；
+        同时它也证明缺陷**不是** UNIQUE 索引本身的锅，而是**产出侧**的有损描述。
+        """
+        from core.rules.finding_aggregate import (
+            make_oos_finding, KIND_CELL, CAUSE_HARD)
+
+        a = make_oos_finding(
+            page=8, type_="param_out_of_spec", severity="warning", kind=KIND_CELL,
+            subject="总进_进口压力", cause=CAUSE_HARD, desc_value="3.6",
+            raw_value="3.6", unit="bar", spec="", where="10:38")
+        b = make_oos_finding(
+            page=8, type_="param_out_of_spec", severity="warning", kind=KIND_CELL,
+            subject="总进_进口压力", cause=CAUSE_HARD, desc_value="3.6",
+            raw_value="3.6", unit="bar", spec="", where="11:34")
+        assert a["description"] != b["description"]
+        assert "10:38" in a["description"] and "11:34" in b["description"]
+
+    def test_without_time_the_text_is_byte_identical_to_legacy(self):
+        """没有 time / step_no 时，描述必须与**修复前逐字节一致**。
+
+        为什么单独钉：``_where_tag`` 一旦退化成返回 "（步骤None）" 这类垃圾，
+        **所有既有 job** 的描述都会变 —— 而那是用户可见文本 + 报告正文。
+        修复只允许"给有时间点的条目补上时间"，不允许改动其余文案。
+        """
+        from core.rules.llm_checks import _flag_llm_queue_for_review
+
+        q = {"page": 8, "name": "总进_进口压力", "time": "", "spec": "3-5",
+             "actual": "3.6", "unit": "bar", "kind": "param"}
+        [f] = _flag_llm_queue_for_review([q], reason="R")
+        assert f["description"] == (
+            "第8页 参数 总进_进口压力=3.6bar 规格 3-5 无法自动判定（R），需人工确认")
+
+    def test_step_no_alone_also_disambiguates(self):
+        """只有 step_no、没有 time 时也必须能区分（同一参数在不同工序步各测一次）。"""
+        from core.rules.llm_checks import _flag_llm_queue_for_review
+
+        base = {"page": 8, "name": "pH", "time": "", "spec": "6-8",
+                "actual": "7.2", "unit": "", "kind": "cell"}
+        fs = _flag_llm_queue_for_review(
+            [{**base, "step_no": 3}, {**base, "step_no": 4}], reason="R")
+        assert len(fs) == 2
+        assert len({f["description"] for f in fs}) == 2

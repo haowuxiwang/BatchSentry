@@ -1,0 +1,3412 @@
+# TODO —— 活的待办清单
+
+> **复核戳：Round 128（2026-10-28）** ← `tests/unit/test_todo_freshness.py` 机检读这一行；
+> 该戳**不得落后于 `CHANGELOG.md` 的最新 Round**。
+>
+> **状态（R66 复核，2026-09-30）——本文件分两层，别混读**：
+> - **§0 = R66 实核过的当前 backlog**（每条挂证据，可信）。
+> - **§0.1 = R66 对 §A 及以下的核销台账**（**22 条**经证据核实已完成，就地翻 `[x]`；含后续批次自 §0.1.3 移入的 `#146`/`#144`/`#145`/`#169`，以及 `B4`+`B5-2`、`C4`+`#169` 这两对**同缺陷双登记**）。
+> - **R68 第八批（2026-10-08）**：核销的是 **§0 表内的 0-8**（LLM 凭据可用、`llm_pipeline` 首次被真实覆盖）—— 它属**当前 backlog**，故**就地改状态**，**不进 §0.1 台账**（台账按定义只记 §A 及以下，不变式 E 的 1:1 因此不受影响）。
+> - **R69 第九批（2026-10-08）**：核销 **§0 表内的 0-9** —— 但核销方式特殊：该条**前提被否证**（"产品无墙钟上界"是错的，产物**有**界 = 看门狗停滞阈值），真缺陷是**阈值真值源漂移**，已修；另开 **0-10** 记录一个**未修**的残余。同样**不进 §0.1 台账**。
+> - **R70 第十批（2026-10-08）**：核销 **§0 表内的 0-7**（交叉引用解析护栏）。同样**不进 §0.1 台账**。
+> - **R71 第十一批（2026-10-08）**：核销 **§F9 的 #165** —— 方式同样是**前提否证**（「2 个死键」是错的：那 3 个非规范键是**前置富集键**，富集在归一**之前**跑，实测真能产出依据/引用）；真缺口是**这条顺序不变式无人守**，已加护栏。它属 §A 及以下 ⇒ **进 §0.1 台账**（不变式 E 的 1:1 同步 +1）。
+>   另记 **0-11**：门禁首轮 10/11（冻结冒烟就绪超时）经三轮对照判为**环境抖动**，真缺口是失败消息**不可归因**，已修 fixture（带 `alive`/`exit_code`/耗时）。
+> - **R72 第十二批（2026-10-08）**：核销 **§C 的 C4 + §F9 的 #169**（同一件事的两处登记）——
+>   `kb_prompt_inject` 此前是**装饰开关**（`config.py` 支持、注入代码也活着，但 `_STATIC_FIELDS` 白名单漏了
+>   ⇒ POST **静默丢弃**、GET 不暴露、UI 无控件），已**接通**（白名单 + `SettingsUpdate` 声明 + GET 暴露 + 知识库分区复选框）；
+>   顺带把白名单外字段由**静默** `continue` 改为随响应 `dropped` **回显**。属 §A 及以下 ⇒ **进 §0.1 台账**（不变式 E 的 1:1 同步 +2）。
+> - **R73 第十三批（2026-10-08）**：核销 **§0 表内的 0-12**（本轮**新发现**：冻结冒烟的 OCR 就绪真值
+>   **只看 env** ⇒ 覆盖清单低报 + 一次真实的 **fail-open**）。已修：就绪真值改取**应用自报**
+>   （`GET /api/settings` 的 `ocr.{paddle,mineru}.configured`），并新增 `ocr_ready_self_report` 断言。
+>   属**当前 backlog** ⇒ **就地记 §0 表**，**不进 §0.1 台账**（台账按定义只记 §A 及以下）。
+> - **R74 第十四批（2026-10-08）**：核销 **§0 表内的 0-13**（本轮**新发现**：LLM 归因的 `ok` 分支
+>   **越过证据**断言"产品缺陷" —— 实测同一份报告的另一行写着上游 **504** 网关页）。
+>   已修：`ok` 文案只陈述证到了什么 + 点名盲区（极小请求 ≠ 真实长请求）+ 给出下一步判据，
+>   并保留条件式归因。属**当前 backlog** ⇒ **就地记 §0 表**，**不进 §0.1 台账**。
+> - **R75 第十五批（2026-10-08）**：核销 **§0 表内的 0-14**（本轮**新发现**：第十四批的修正
+>   **只做了 1/4** —— 同一条归因结论写在 4 处，3 处残留与实现**相反**，其中
+>   `docs/PROJECT_PITFALLS.md` 是**纪律文档**）。已修 6 处 + 新增**残留措辞机检**
+>   `tests/unit/test_attribution_single_source.py`（遍历全部被跟踪文本文件；断言/引述/数据三分；
+>   整文件豁免只给 append-only 的 `CHANGELOG.md`，并配「豁免须仍被需要」的反腐检查）。
+>   属**当前 backlog** ⇒ **就地记 §0 表**，**不进 §0.1 台账**。
+> - **R76 第十六批（2026-10-09）**：核销 **§A 的 A3**（**前提否证**：仓库里**早就有**
+>   第 2 份真实批记录 `试用批记录.pdf` ⇒「只有一份」是错的，且它把一件**可做**的事
+>   挂在「等用户」）与 **§B6 的 B6-1**（用第 2 份记录做泛化验证 —— **跑通**：`review`、
+>   **51 条** findings、`paddle`、220s）。两者都属 **§A 及以下** ⇒ **进 §0.1 台账**
+>   （不变式 E 的 1:1 同步 **+2**）。对比报告 → `docs/B6-1_GENERALIZATION_REPORT.md`；
+>   **未发现过拟合的正向证据**，但第 2 份**无人工标注** ⇒ **召回不可测**，
+>   故**不宣称「泛化通过」**。另记 **0-15**（本轮**新发现**：流水线**非确定** ——
+>   同输入 / 同产物 / 同后端两次跑 **41 vs 51** 条 ⇒ 单次计数不得当回归判据）。
+> - **R77 第十七批（2026-10-09）**：补上 **B1 的 driver 侧对偶** —— `e2e_run.py` 此前
+>   **零处**引用 `llm_audit`（终态绿**不蕴含** LLM 跑通：产品在 LLM 失败时按设计降级）。
+>   已加纯函数 `llm_audit_verdict` + `fetch_llm_audit`，在**共享 `run_upload` 内**接入
+>   （所有轮次自动继承），取不到端点**一律 fail-closed**（与开关无关）；开关走单一真值
+>   `tests/e2e_coverage.REQUIRE_LLM_ENV`。护栏 `tests/unit/test_e2e_llm_audit_assert.py`
+>   （14 条）；变异 `devlogs/_verify/r76_llm_audit_mutation.py` ⇒ **8/8 CAUGHT** + 负控绿。
+>   属**当前 backlog** ⇒ **就地记 §0 表（新增 0-16）**，**不进 §0.1 台账**。
+>   同批另做 **0-15 的结构性一半**：全仓唯一“基线计数”（`FINDING_GROUND_TRUTH.json::real_baselines`，784 条 = 历史版本 + `mineru`）此前**无任何可比性披露**，而文件自称“金标”；已加 `criterion: false` + 每条目 `provenance` / `runs` / `observed_total_range`，并加 **AST 机检「判据路径不得引用 `real_baselines`」**（变异 7/7）。同样**就地记 §0 表**（0-15 改“进行中”），**不进 §0.1 台账**。
+> - **R78 第十八批（2026-10-09）**：修一个**验证脚本**层缺陷 —— `devlogs/_verify/r77_e2e_llm_audit_live.py::_creds()` 从 `%TEMP%/pbc_e2e_appdata/PBC/config.json` 读「真凭据」，**但那正是 driver 自己会覆写的文件**（`POST /api/settings` 落盘）⇒ r77 的**负控**把 `BAD_KEY` 留在真凭据位（两个后果都静默：重跑 A 正控 `401` 被读成产品缺陷；`assert sf_key in (real_sf, BAD_KEY)` 退化成**恒真**）。已加**污染金丝雀** + **只还原被污染字段**的 snapshot/restore；自测 + 变异 **4/4 CAUGHT**。属**当前 backlog** ⇒ **就地记 §0 表（新增 0-17）**，**不进 §0.1 台账**。同批在**产物**上跑了 **7 轮** e2e（`pdf,img,mineru,rot,robust,cancel,dual`，`REQUIRE_LLM=1`）以确认新判据不误伤任何轮次 —— **首跑即暴露一处误伤**（复合轮 `robust` 的 `llm_*` 在子字典里，判据只看顶层 ⇒ 误报「判据没接上」）；已修（**下钻一层** + `all_pass` 取子轮**逻辑与**，任一路零成功即判红）+ 负控自测 ⇒ **重判 7/7 全部达成**（新增 **0-20**）。**门禁**在 `8644242` 上 **11/11 PASS**。
+> - **R79 第十九批（2026-10-09）**：核销 **§0 表内的 0-19**（`innerHTML` 转义纪律**机检**）。**定位**：前端 R63/R65 拆模块后 `innerHTML` 达 **46 处**（38 个赋值点），**逐个依赖 `esc()` 纪律却无任何机检** —— 新加一处 `el.innerHTML = untrusted` 不会被拦下。**修法**：新增 `tests/unit/test_innerhtml_escaping.py`（**6 条**）—— 判据**三层且逐层显式**（A 纯字面量 / B 含已知转义器 `esc(` 或 `escapeHtml(` / C 受审计渲染器**裸调用**且**白名单函数确存在**），未自动通过者必须在 `_AUDITED` **显式登记**（file + 语句唯一子串 + 理由，**恰好命中 1 处**，陈旧/歧义都判红）；扫描**必须过 tokenizer**（跟踪 `'`/`"`/反引号/`//`/`/* */`，且模板字面量 `${}` **内部是代码** —— 否则注释会被当成站点、或漏看 `${}` 里的 `esc()`）；另有**站点数下限**防空转。**变异** `devlogs/_verify/r78_innerhtml_mutation.py` ⇒ **10/10 达成（8 正向 CAUGHT + 2 阴性对照绿）**，并逐例核对**红在目标断言**（非清理期噪声）。⚠️ **边界**：这是**静态纪律机检**，证明「每个站点要么显式转义、要么显式登记」，**不**证明渲染结果无注入（46 处**未逐处**判转义**充分性**）。属**当前 backlog** ⇒ **就地记 §0 表**，**不进 §0.1 台账**。
+> - **R80 第二十批（2026-10-09）**：对抗性 recon 落到两条**实测**缺陷。① **Electron fuses 停在默认值** —— `package.json` 没有 `build.electronFuses`，`app-builder-lib` 直接早退 ⇒ `RunAsNode` / `EnableNodeOptionsEnvironmentVariable` / `EnableNodeCliInspectArguments` **三个全 ON**。实锤：`ELECTRON_RUN_AS_NODE=1 BatchSentry.exe --version` 打印 **`v24.21.0`（Node 版本）**而非 Electron；宿主注入的 `NODE_OPTIONS` 被产物接收（Electron 报 `Most NODE_OPTIONs are not supported in packaged apps`）。已加 `build.electronFuses`（三个 `false`）+ **重建** ⇒ 新产物 fuse wire 三项 OFF（`count=9` 不变、第 9 位未动），行为对照：改造前 `v24.21.0` → 改造后以 Electron 启动。② **上传文件名可以是 Windows 保留设备名** —— `NUL.pdf` 写盘「成功」却不落文件 ⇒ 误导性 400；`COM1.pdf` 的 `open` 直接抛 ⇒ 误导性 500。已改为入口**点名拒绝**（400 + 原因 + 回显文件名）。属**当前 backlog** ⇒ **就地记 §0 表（新增 0-21 / 0-22）**，**不进 §0.1 台账**。
+> - **R80 产物级验证（2026-10-09，Round 76 收尾）**：重建后对**内嵌产物**（`dist-electron/win-unpacked/resources/pbc-server/pbc-server.exe`，与 `dist/pbc-server` **同 sha256** `3680e12e2e0b`）复跑 **7 轮** e2e（`pdf,img,mineru,rot,robust,cancel,dual`；`PBC_E2E_REQUIRE_LLM=1`；模型 `deepseek-ai/DeepSeek-V3.2`）⇒ **7/7 全部达成**、`llm_failed` 全 0（`pdf 8/8`、`img 2/2`、`mineru 7/7`、`rot 5/5`、`robust 4/4（复合）`、`dual 7/7`；`cancel` 按设计豁免）。证据 `devlogs/_verify/r78_e2e_postbuild.json` + `devlogs/r78_e2e_postbuild.log`。门禁在 `fdf44fa` 上 **11/11 PASS**（`4045 passed, 0 failed, coverage 95.09%`；报告 `devlogs/gate_report_20261009_130140.json`）。
+> - **R81 第二十一批（2026-10-09）**：补**产物层入口拒绝**覆盖 —— 此前 `devlogs/_verify/smoke_packaged_server.py` 只打 `/health`，所有入口守卫（R80 的保留设备名 + 既有的扩展名 / magic bytes / 过小 / 路径剥离 / 本机请求）**只在 `ASGITransport`（进程内、源码树）层**被验过 ⇒ **单测绿 ≠ 产物绿**（冻结会改变 multipart 解析、异常文案编码、状态码传播、`frozenset` 常量行为）。新增**已提交**驱动 `tests/e2e_rejections.py`（刻意放 `tests/` 而非 `devlogs/` —— 后者被 gitignore，证据会随磁盘消失）⇒ 起真产物打 **26 例** HTTP 矩阵（拒绝矩阵 15 / **敌意文件名 8** / **去重-force 3**），**26/26 达成** —— 含 **5 例阴性对照**（`null.pdf`/`console.pdf`/`com10.pdf`/`com0.pdf`/`auxiliary.pdf` 必须 **200**，证明设备名守卫**没有**写成前缀匹配而误伤）、**敌意文件名安全不变式**（`../../` / `..\..\` / `C:\Windows\` / `/etc/` / UNC / `..%2f..%2f` / `....//` / 盘符相对 ⇒ 内容合法即须 **200** 且回显名**不含** `/` `\` `:`）、**去重 / `force`**（同内容第 2 次 **409**、`force=1` **200**），以及「**任何用例不得 5xx**」。**可重跑**：连跑两次均 26/26（payload 唯一性由 `uuid4` nonce **构造保证**，不依赖 `fitz` 随机 `/ID`）。属**当前 backlog** ⇒ **就地记 §0 表（新增 0-23）**，**不进 §0.1 台账**。
+> - **R82 第二十二批（2026-10-09）**：对抗性审查发现一条**未被测试锁住的载荷顺序** —— `create_job` 的保留设备名守卫依赖「**先** `Path(...).name` 剥离、**后**判保留名」：若顺序反了，`../../NUL.pdf` 的 stem 是 `../../NUL`（∉ 集合）⇒ **绕过守卫** ⇒ 仍写到 `NUL` 设备（0 字节静默丢失、用户看到误导性的 400）。而 R80 的 24 例真值表**只喂裸名** ⇒ 顺序反了它**全绿**。**当前实现是正确的**（真产物实测 **9/9**，`devlogs/_verify/r82_prefixed_reserved_probe.py`）—— 本批做的是**把不变式钉住**：① 单测新增 `TestEndpointStripsBeforeChecking`（6 例带前缀设备名 ⇒ 400 + 点名 + 回显**剥离后**名；2 例带前缀阴性对照 ⇒ 200）；② 产物级 e2e 矩阵 26 → **34 例**；③ 变异 **3/3 CAUGHT**（`devlogs/_verify/r82_mutation.py`）—— 关键点是**三条变异下旧用例保持绿** ⇒ 新用例是**唯一**判别力来源。属**当前 backlog** ⇒ **就地记 §0 表（新增 0-24）**。
+> - **R83 第二十三批（2026-10-09）**：对抗性审查扫 `innerHTML` 转义链，发现 **`esc` 转义器在 3 个页面 bundle 里各有一份独立实现**（`findings-map.js` / `settings-state.js` / `upload-jobs.js`），而**没有任何机检保证三份一致** —— 且 `findings-map.js` 的注释写「esc 曾有 6 份副本，**收敛到这里**」，读者会以为已单一真值（**实际还有 3 份**，属 Trap 59 现场）。三份并存是**结构性**的（`templates/*.html` 已核：三个页面**互不加载**对方脚本，仓里没有公共基座），所以本批**不**做合并（合并要新增公共脚本 + 改 3 个模板的 `<script>`，会引入新的加载语义风险），而是**把「三份必须等价」机检锁住** + **修正那句误导注释**。新增 `tests/unit/test_esc_single_source.py`（**6 条**）：① 副本集合**恰好**等于登记（新增/消失都红）；② 每份替换链**逐项按序**等于规范 5 对（`&` 最先）；③ 三份互相等价；④ 反空转（链长 5 + 提取器非空）；⑤ 转义器产出实体 **⊆** 解码器可解实体；⑥ 解码器 `&amp;` 必须**最后**（顺序陷阱，源码有实测注释）。变异 **4/4 CAUGHT**（`devlogs/_verify/r83_mutation.py`）。另附三条**阴性结论**（已读源码/实测，无缺陷）：`Content-Disposition` 不可注入（Starlette `quote()` + `Path().name`）；`showToast`/`confirmDialog` 用 `textContent`；「用户输入 → 文件系统路径」面（`safe_name` / `job_id` / `page_num` / `pdf_path`）无穿越。⚠️ 因改了**入包源**（`static/findings-map.js`）⇒ **必须重建产物**。属**当前 backlog** ⇒ **就地记 §0 表（新增 0-25）**。
+> - **R84 第二十四批（2026-10-09）**：对抗性审查发现**报告缓存 key 未覆盖全部渲染输入** ——
+>   `api/report.py` 的 `cache_key` 旧形态只覆盖 findings 派生字段与豁免**规模**，而
+>   `_generate_markdown` 还消费 `total_pages` / `empty_pages` / `unanalyzed_pages` /
+>   `filename`。这些能在 findings **不变**时改变（如 `retry` 后重分析某页：
+>   `unanalyzed_pages` 1→0、findings 仍 0）⇒ 报告**静默返回过期内容**（GMP 场景下
+>   携带过期的覆盖声明），与已修的 **P1-A** 同源。**修法**：key 改为**渲染输入的内容摘要**。
+>   护栏 3 条 + 变异 **4/4 CAUGHT**。属**当前 backlog** ⇒ **就地记 §0 表（新增 0-26）**。
+> - **R85 第二十五批（2026-10-10）**：解决 **0-15（+24% 非确定性）** 并落地 **0-27**。
+>   **定位**：全仓**唯一**随机源是 LLM 采样 —— 页面分析（`core/page_analyzer.py` 2 处）
+>   与跨页语义检查（`core/rules/llm_checks.py` 2 处）都传 `temperature=0.1`。其余
+>   疑似源经核查**不成立**：OCR 客户端**不发** `temperature`/`seed`（服务端固定）；
+>   `datetime.now()` 只注入“今天日期”（同日恒定）；`rule_time`/`year_vote` 的年份上界
+>   是**跨年**敏感（设计如此），**不解释**同日 41 vs 51。**修法**：单一真值
+>   `llm.client.DETERMINISTIC_TEMPERATURE = 0.0`（greedy 解码），四处调用点改用它；
+>   **不**引入 `seed`（网关可能拒绝 ⇒ 徒增一条 400 分支）。**并发额度**：
+>   `api/jobs._MAX_CONCURRENT_JOBS` 默认 **3 → 5**（支持 5 文件并发；env 仍可覆盖），
+>   并更正原注释“~2GB”的**错误归因**（实测单 job ≈ 102MB）。**护栏**
+>   `tests/unit/test_llm_determinism.py`（4 条）+ `test_upload_quota_contract.py::
+>   TestDefaultQuotaSupportsFiveConcurrentReviews`（2 断言）；**变异**
+>   `devlogs/_verify/r85_mutation.py` ⇒ **5/5 CAUGHT**。属**当前 backlog** ⇒
+>   **就地记 §0 表（0-15 核销 + 新增 0-27 / 0-28）**，**不进 §0.1 台账**。
+>   **另（0-28）**：`logging_config._NOISY_THIRD_PARTY_LOGGERS`（#145 的逐库降噪名单）
+>   漏掉实测刷屏的两个库 ⇒ 有效级别仍是 `DEBUG`（继承 root），#145 的目标未真正达成：
+>   `aiosqlite`（历史累计 **8,116 行**，每条 SQL 一行 DEBUG）与 `chardet`（当天
+>   `pharma.log` **613 行 = 100%**，`chardet.charsetprober` 逐候选编码打印置信度）。
+>   已把两者补入名单；护栏 `tests/unit/test_logging_config.py::TestThirdPartyNoiseSuppression`
+>   （3 条）+ 变异 M6–M9 CAUGHT（累计 **9/9**）。
+>   **另（0-29 / 0-30）**：① **受控重放实测** —— 本上游 `temperature=0.0` **仍**有
+>   运行间方差（page4 n=6：`0.0→[2,2,3,2,2,2]` / `0.1→[3,2,3,2,2,2]`，spread 均 1）
+>   ⇒ 单次计数**不得**当判据，须 N 次重复跑给区间。② **入口拒绝矩阵有静默前置条件**
+>   （产物未配 LLM provider ⇒ 每个上传 400 ⇒ 矩阵零判别力，表面 13/34）⇒ 已加
+>   **前置 fail-fast** 并做正/负控双向验证。
+> - **R87 第二十七批（2026-10-10）**：承 R86 的分发/UX 评估，修两条**可被用户/维护者直接读到**的缺陷。
+>   ① **`MAX_CONCURRENT_JOBS` 3 → 5 的清扫只做了 1/5** —— R85 只扫了 `README.md` + 一个测试
+>   docstring，全库残留 **7 处「默认 3」**（含 `CLAUDE.md` 这个 agent 指令文件、`static/upload.js`
+>   这个入包源）；且默认值变化**蕴含**了「选 5 份 ⇒ 第 4、5 份必然吃 409」变成**假命题** ⇒ 改为
+>   与默认值无关的表述。另删 `core/procpool.py` 里已被实测否证的 ~2GB 分母。
+>   ② **settings 页「测试连接」窄屏不可达** —— 唯一入口在 `hidden md:flex` 的桌面侧栏里，
+>   <768px 完全无入口（`ui_e2e.py` 在**桌面视口**下点得到 ⇒ 对既有 e2e **不可见**）。已加
+>   `md:hidden` 移动入口 + 两入口共用同一实现 + 结果滚动到可视区；重构由机检保证**旧逻辑零丢失**。
+>   另修 `test_todo_freshness` 的**静默失效**（R86 标题误用 `R86` 而非 `Round 82` ⇒ 新鲜度检查
+>   只认 `Round NN`，戳落后 1 轮却没被发现），并新增**不变式 H** 钉住标题形态。
+>   护栏 `tests/unit/test_concurrency_default_claims.py`（9 条，变异 **7/7 CAUGHT**）+
+>   `tests/unit/test_settings_mobile_test_conn.py`（5 条，变异 **5/5 CAUGHT**）。
+>   另**复核 0-34**：R86 的延后判断**正确**（改 `electron/main.js` 会让 asar 一致性单测变红，见条目）。
+>   属**当前 backlog** ⇒ **就地记 §0 表（新增 0-35 / 0-36）**，**不进 §0.1 台账**。
+> - **R88 第二十八批（2026-10-10）**：修**上一轮我自己踩到**的**报文低报**缺陷 ——
+>   `artifact_freshness` 报「**8 个**源文件与清单不符」却只列 **5** 个（`scripts/bundle_manifest.py`
+>   的 `diverged_src[:5]`）⇒ 读者据此以为失效面是 5 个。**"数量"与"清单"矛盾时读者信清单**，
+>   而该报文的唯一作用就是给出"要重建哪些文件" ⇒ 藏项即**无法据以行动**；门禁 `problems[:4]` 同类。
+>   修法：`_fmt_paths()`（≤上限 20 全列；>上限**明说**"另有 M 个未显示，共 K 个"）+ 门禁侧同类标记。
+>   护栏 3+1 条（含端到端 **6 个失配源**的反向用例 —— 旧 `[:5]` 会吞掉第 6 个起）+ 变异
+>   `devlogs/_verify/r88a_mutation_underreport.py` ⇒ **3/3 CAUGHT**。只改 `scripts/**`+`tests/**`
+>   （**均不入包**）⇒ **不扩大**失效面。属当前 backlog ⇒ 就地记 §0 表（新增 **0-37**）。
+> - **R89 第二十九批（2026-10-10）**：**安全维度扫描 + 命令执行面静态护栏**。应用包内
+>   `shell=True` / `os.system` / `os.popen` / 裸 `eval` / `exec` **一处都没有**；3 处 f-string SQL
+>   均非注入面（int 常量 + 模块内字面量元组）；文件服务端点的路径穿越防御**一致**；
+>   `LocalGuardMiddleware` 覆盖每个 http 请求 ⇒ `review.py` 的 POST 无需逐端点守卫。
+>   顺带实测：**3 个应用源带 BOM** ⇒ AST 工具必须 `utf-8-sig`。已加护栏
+>   `tests/unit/test_no_dangerous_exec.py`（含反空转）+ 变异 **3 CAUGHT + 1 负控 OK**。
+>   ⚠️ 只拦语法可见调用 ⇒ **不是安全证明**（见 `docs/PROJECT_PITFALLS.md` §六十五）。
+> - **R90 第三十批（2026-10-10）**：**重建产物 + 核销 0-34**（`electron/main.js` 启动等待注释）。
+>   0-34 的前提在 R89 之后**被实测破除** —— 三份产物（`app.asar` + 两个 `pbc-server.exe`）
+>   的 `os.rename` 往返**全部成功** ⇒ 宿主**未**持有它们 ⇒ 「与 Electron 重建同批」的条件成立。
+>   第 13 行注释由 `(up to 30s)` 改为 `(bounded by READY_TIMEOUT_MS)`（**引用常量名**，不再复述数值）。
+>   ⚠️ 该改动**必然**让 `test_bundle_manifest.py::TestAsarReader::test_real_asar_matches_source_for_electron_main`
+>   变红**直到 asar 重建**（`docs/PROJECT_PITFALLS.md` §六十三）⇒ 本轮按「先提交 → 重建 → 全量跑」顺序执行。
+>   属**当前 backlog** ⇒ **就地记 §0 表（0-34 核销）**，**不进 §0.1 台账**。
+>   另记 **0-38**（本轮**新发现**：截断型解析失败的 fix-hint 重试链**无产**、可挂住单页 ~21 分钟；**并发本身正常**，3 条 FAIL 同根因）—— 登记为**未修**（属行为决策 + 需重建）。
+> - **R92 第三十五批（Round 87，2026-10-14）**：**0-33 后端 OCR 前置门**（与 LLM 门对称，位点 = `api/jobs/upload.py` 的 LLM 门之后、并发额度之前）+ **0-38 截断治理**（行为决策：`finish_reason == "length"` ⇒ **跳过** fix-hint 重试、fail-closed）+ **0-43**（`core/ocr_client.py` / `core/page_analyzer.py` 的 23 个 U+FFFD 替换字符，仅注释/docstring）。三者都改**入包源** ⇒ 与产物重建同批（`electron/main.js` 未动 ⇒ 不触发 §六十三）。护栏：`tests/integration/test_upload_ocr_guard.py`（4 条）+ `tests/unit/test_llm_finish_reason.py`（44 条）；变异 `devlogs/_verify/mutation_r92_038_finish_reason.py` ⇒ **11/11 CAUGHT**。属**当前 backlog** ⇒ **就地记 §0 表（0-33 / 0-38 核销 + 新增 0-43）**，**不进 §0.1 台账**。
+> - **§A 及以下 = Round 59（2026-09-23）的快照**，**已做过一轮核销，但未逐条复核**。
+>   核销过的条目带 **`—— **R66 已核销**（证据见 §0.1）`** 尾注；
+>   **其余仍标 `[ ]` 的，按"未复核"对待，不要当成当前事实。**
+>
+> ⚠️ **本轮核销暴露的核心问题：清单里的"未做"有一半已经做完了。** 典型：
+> `B10-1`（**P1 安全**：守卫晚于请求体解析）实际已在 `main.py` 用**纯 ASGI 中间件**
+> 修掉并有 17 条护栏；`B10-2`/`B11-7`（**P1 依赖漏洞**）四个包**都已升到安全版**；
+> `B11-8` Electron 已从 33.4.11 升到 **43.7.4**。⇒ **不核销就按清单开工，会重复劳动。**
+>
+> ⚠️ **本文件此前自称"唯一且最新"是错的**，已在 R66 更正：它停在 Round 59 而
+> `CHANGELOG.md` 已到 Round 65，且当时仍含**指向前端模块的行号锚点**
+> （R63/R65 拆前端模块后**已失效**，指不到任何东西）。
+> ✅ **R66 已清掉全部 16 个**（`devlogs/_verify/r66_strip_frontend_anchors.py`，
+> 替换为模块级指路；**93 个 Python 锚点未动** —— 那些文件没拆、行号仍有效）。
+> 护栏 `tests/unit/test_todo_freshness.py::TestNoDeadFrontendAnchors` 防复发。
+>
+> ⚠️ **本文件里的"数字"分两类，别混**：① **易变计数**（如未推送提交数、用例数）
+> —— 一律给**命令**，不给数字；② **可机检的不变量**（如核销条数 == 台账行数）
+> —— 由护栏强制。写死一个会变的数，就是 F1/F2 那类腐坏的起点。
+>
+> **怎么用**：开工先读 §0；完成一项就地把 `[ ]` 改 `[x]` 并填**证据**（提交号 / 日志路径 / 数字），
+> **不要另开 TODO 文档**。历史计划（`PLAN.md`、`docs/PLAN_v1.1_EXECUTION.md`、
+> `docs/ROADMAP_v1.1.md`）是**存档**，不再更新。
+>
+> 纪律（见 `CLAUDE.md`「Repo hygiene & release discipline」）：**先定位 → 再解决 → 最后测试**；
+> 结论必须挂证据；**不升版号的边界** = 改动是否进入 PyInstaller 产物。
+
+## 0. R66 实核的当前 backlog（2026-09-30，逐条挂证据）
+
+> 以下每条都在 R66 当场核过（命令 / 产物路径写在括号里）。**§A 以下不在此列，属未复核。**
+
+| # | 事项 | 优先级 | 阻塞 / 依赖 | 验收判据（可机检） | 本轮证据 |
+|---|---|---|---|---|---|
+| **0-1** | 推送本地未推送提交到 `origin/main` | **P1** | **用户决策** —— 推送是对外发布，agent 不擅自做 | `git rev-list --left-right --count origin/main...HEAD` ⇒ `0	0` | R66 复核时 `0	9`（HEAD `dd33330`）；**该数每提交 +1，是快照、不追求实时** —— 取当前值请跑左侧命令 |
+| **0-2** | Electron 应用层 e2e 在**真实终端**复跑 | **P1** | 需**非沙箱**终端（本 agent 环境做不到） | `tests/e2e_unpacked.py` 两跑均 `health` 非 `null` 且 `exitCode == 0` | **R68 第六批复测（4 次）**：1 次 `/health` 就绪（9.44s）后在渲染层崩、3 次**在 health 之前**就崩（5.15/5.15/5.27s）⇒ 沙箱内**不稳定**；4 次均 `exitCode=2147483651`（`0x80000003`）、`renderer_count=0`、窗口数恒 0（`devlogs/e2e_unpacked_20261008_085800.json`）。⚠️ 唯一到达 D3 的那次暴露了**驱动自身**的假红（见 0-8 尾注） |
+| **0-3** | 逐条复核 §A 及以下的未复核项 | **P2 → 进行中** | 无（纯复核工作） | 每条要么 `[x]` + 证据，要么移入"已确认仍开放"并注明为何仍未做 | **R66/R67 已核销 19 条**（见 §0.1，其中 `#146`/`#144` 为**第四批**、`#145` 为**第六批**、`B4`+`B5-2` 为**第七批**同缺陷双登记；**R72 第十二批又核销 `#169`/`C4`**；**R76 第十六批核销 `A3`（前提否证）+ `B6-1`（泛化验证完成）**）；统计 `[ ]` **86 → 62**、`[x]` **76 → 100**。**剩余 62 条未逐条复核** |
+| **0-4** | 跨页总览增强（后端 `status` 过滤 / 关键词搜索） | P3 | 无 | 后端支持 `status` 查询参数；前端可筛选且空态文案正确 | R65 backlog（可选） |
+| **0-5** | 上传批次并发提交 | P3 | 后端配额 3 | 单例进度条拆为每文件一条后，3 路并发且不撞配额 | **不建议先做**：当前串行不撞配额，无实测收益 |
+| **0-6** | 把「失败性质」提升为 **job 级列 `error_kind`**（替代「每个调用点都得记得传 `config_error`」） | P2 | 无；建议在 `#144` 结案后单独做 | `jobs` 增列 + 迁移；`error_kind` 由异常类型在**写入处**统一判定，调用点无需传参；`#127`/`#144` 的行为护栏**不改动**即仍绿 | R66 第五批：`#144` 逐点修法已结案，但**结构性遗漏仍开放**（见 `#144` 条目尾注） |
+| **0-7** | 给 `docs/TODO.md` 的 `§N 的 M-K` 形式**交叉引用加解析护栏** | P3 | **✅ 已完成（R70 第十批核销）** | 新护栏枚举全部交叉引用并断言每条都解析到**真实条目**；先用一条**阴性对照**（引用一个不存在的行）证明检测器不空转 | **R70（2026-10-08）：达成。** `test_todo_freshness.py::TestCrossReferencesResolve`（4 条）：解析出 **11 条** `见 <id>` 引用 / **102 个**已声明条目，断言每条引用都解析到真实条目；`§N 的 <id>` 还要求条目**声明在 §N 内**（章节区间由标题派生，`§0` = `[38,182)`）。**阴性对照**：引用一个不存在的条目（`0-99`）或非数字章节（`§B`）时必须报警。⚠️ **核销时本行曾被自己的护栏判红** —— 初稿复述了被禁形态（`见` + 一个不存在的 id），而它本身就是悬空引用 ⇒ 说明文字**不得复述被禁形态**（与 `test_todo_freshness.py` 里前端行号锚点那条同一约定）。⚠️ **变异当场抓出首版缺陷**：章节号原只认数字 ⇒ `见 §B 的 X` **一条都匹配不到、被静默跳过**（M2 MISSED，根因是**变异无效**而非断言弱）⇒ 改为 **fail-closed**（看不懂的章节号一律判红）。变异 `devlogs/_verify/mutate_r70_todo_xref_guard.py` ⇒ **4/4 CAUGHT**（引用侧 / 章节形态侧 / 声明侧 / 章节归属侧）+ 负控绿 + 还原干净。 |
+| **0-8** | 轮换已失效的 LLM 凭据后复跑 e2e，才能真覆盖 LLM 链路 | **P1** | **✅ 已完成（R68 第八批核销）** | `PBC_E2E_LLM_KEY=<新 key>` 跑 `tests/e2e_frozen.py` ⇒ 覆盖清单 `llm_pipeline=covered`（`llm_audit` 里有 `success=1` 的调用） | **R68 第八批（2026-10-08）：达成。** 先**单独探测外部那一半**：`GET /v1/models` 与 `POST /v1/chat/completions` 双双 **HTTP 200**（`devlogs/_verify/r70_probe_siliconflow.json`）⇒ 凭据**可用**。`tests/e2e_frozen.py`（`--require-llm`）跑出 **28/28 全绿、`E2E_RC=0`、`covered=4 skipped=0 failed=0`**，`llm_audit_success success=3/3（失败 0 次）`⇒ `llm_pipeline` **首次被真实覆盖**（`devlogs/e2e_coverage_20261008-140638.json`、`devlogs/_verify/_r70_e2e_frozen_run4.log`）。⚠️ 仅 `deepseek-ai/DeepSeek-V3.2` 可用；`Qwen/Qwen3.5-35B-A3B` 在产物内挂起（见 0-9）。前序更正见 `CHANGELOG.md`（401 `30014` 被拒 → 402 `30001` 欠费 → 本轮可用）。
+| **0-9** | ~~给单次 LLM 调用加**墙钟上界**~~ —— **前提否证**：产物**已有**上界（看门狗停滞阈值），真缺陷是**阈值真值源漂移** | **P2** | **✅ 已完成（R69 第九批核销：前提否证 + 真缺陷已修）** | 看门狗 `analyzing` 阈值与其**真实调用点**保持一致（机检 + 变异） | **R69（2026-10-08）—— 先更正初版结论**：第八批把这条记成「产品**没有**墙钟上界」—— **是错的**。产物**有**界：`core/watchdog.py` 的 `analyzing` 停滞阈值 = `1800 + 480×页`（封顶 10800s；e2e 那个 1 页件 **2280s**）。e2e 的 930s 只是**冒烟预算**（`poll_timeout_for_pages(1) 630 + 300`），**故意低于**看门狗阈值 ⇒ 慢模型在 e2e 显红、而产品仍在自己预算内 —— 这是**预算错配**，不是缺上界。**真缺陷**：`_PER_PAGE_S["analyzing"]` 与其护栏 `test_analyzing_base_covers_single_llm_call` **都读 `LLMAdapter.chat` 的签名默认值 180**，而调用点 `core/page_analyzer.py` 早已把 `timeout` **覆盖**为 `_PAGE_TIMEOUT=480`（Round 3）⇒ 断言退化成 `180 >= 180` 的**恒真式**，真实关系 `180 >= 480` 早已为假却无人发现。**修法**：每页增量改 `480`；护栏改从**调用点真值源**推导（`_PAGE_TIMEOUT × (SDK DEFAULT_MAX_RETRIES + 1)`）；另加**静态护栏**锁死「调用点必须传 `_PAGE_TIMEOUT` 而非字面量」（防真值源再次被架空）。变异 `devlogs/_verify/mutate_r69_watchdog_llm_budget.py` ⇒ **3/3 CAUGHT**（含"真值源上移"与"调用点写死"两个方向）+ 负控绿。**重建 + 复跑**：`core/watchdog.py` 入包 ⇒ 重建两份产物后门禁 **11/11 PASS**（`3932 passed`、coverage `95.08%`）；产物级 e2e `frozen --model deepseek-ai/DeepSeek-V3.2 --require-llm` ⇒ **`E2E_RC=0`、`covered=4 skipped=0 failed=0`**、`llm_audit success=3/3`，`ocr_backend_used=paddle`（= 本轮配置后端，**无 failover**）⇒ 新归因分支的**一致路径**首次在产物上被目击（`devlogs/e2e_coverage_20261008-143941.json`）。 |
+| **0-10** | 看门狗 `analyzing` 阈值**未覆盖 fix-hint 重试链**的叠加静默 | P3 | **✅ 已完成（R122）** —— 结论：**不抬阈值，加心跳**（一页最多 6 次 `chat_json`，心跳原先只在整页结束写 ⇒ 6 段静默被累加成一段，上界 8640s；抬到 8640 等于让真挂死的 job 等 2.4 小时） | 落一条结论：覆盖 or **显式豁免 + 写明理由** | **R122 修法**：`chat_json` 每次**发起调用前**打点（`on_call_start` → `core.activity_clock`，**进程内不落库** —— 多页并发共用一条 aiosqlite 连接，随时 `commit()` 会提交别的页写到一半的事务）。合法静默退回单次调用上界 `_SDK_ATTEMPTS_PER_CALL(3) × _PAGE_TIMEOUT(480)` = 1440s，基准 1800→**2040s**（= 上界 + 600 余量）；界面 `stall_report` 走同一口径，否则会在 LLM 正常重试时劝用户取消一个正在工作的任务。护栏 `test_r122_llm_silence_heartbeat.py` **15 条**，变异 **11/11 CAUGHT**（含 stage2 接线与 `analyze_page` 转发两处管道型）。**历史定位（R69）**：`llm/client.py::chat_json` 的 JSON 解析修复链最多**再发 2 次**调用；若 call1 成功但解析失败、随后两次均超时，静默可达 `3 × (480×3) = 4320s` > 1 页阈值 2280s ⇒ **理论上可能误判停滞**。概率极低（需上游在 call1 之后彻底失联），且**该情形下"恢复"本身就是期望行为** ⇒ 倾向**显式豁免 + 写明理由**，而非抬高阈值。 **R90 第三十批（2026-10-10）前提修正**：0-10 写「需上游在 call1 之后**彻底失联**」—— 实测触发面**更宽**：**输出打满 `max_tokens`** 即可触发（与上游失联**无关**），且**可复现**（见 **0-38**）⇒ 「概率极低」的前提**部分被否证**。 |
+| **0-11** | 冻结冒烟（`test_frozen_smoke`）的就绪失败**不可当场归因**；30s 期限在满载下会抖动 | P3 | 无 | 失败消息能区分「进程已死」与「进程活着但没就绪」 | **R71 第十一批（2026-10-08）**：门禁实测**同一份逐字节一致的产物**三轮 —— R69 `test_health_ok` **4.039s 通过**、R70 **4.666s 通过**、R71 首轮 **33.157s 超时**（30s 期限用尽 ⇒ 8 条 error、门禁 10/11）。隔离复跑 **8 passed / 20.25s**、整轮重跑 **11/11 / 3939 passed** ⇒ 判为**环境抖动**，**不是**回归（本批未改任何入包字节，`artifact_freshness` 逐字节一致）。**真缺口 = 可诊断性**：旧消息只打服务端日志，而该日志为空 ⇒ **无法区分**「进程已死」与「进程活着但没就绪」（根因完全不同）。**已修**（`tests/integration/test_frozen_smoke.py`）：失败消息带上 `after Ns` / `alive=` / `exit_code=`（`rc` 在 `stop_server` **之前**取）；验证脚本 `devlogs/_verify/verify_r71_frozen_smoke_diag.py` 用「立刻退出的 stub exe」逼出该分支 ⇒ 实测消息 `after 5.4s (alive=False, exit_code=0)`，且**还原字节一致**。⚠️ **未做**：**不**加重试（会掩盖真回归）、**不**抬高 30s 期限（抖动根因未定位 —— `alive` 字段正是为下一次复现准备的）。 |
+| **0-12** | 冻结冒烟的 OCR **就绪真值只看 env**、忽略应用已有配置 ⇒ 覆盖清单**低报**（跑过 OCR 却记 skipped）+ 真实 `error` 被吞成「预期降级」**不记 FAIL**（**fail-open**） | **P2** | **✅ 已完成（R73 第十三批核销）** | 就绪真值取自**应用自报**；`error` 且应用已配 ⇒ 必须记 FAIL（不得只打印 `[SKIP]`） | **R73 第十三批（2026-10-08）：达成。** **定位**：e2e appdata 固定复用 ⇒ 上轮凭据残留，而 `OCR_CONFIGURED = bool(_paddle or _mineru)` 只认 env；实测未注入 OCR env 时流水线仍到 `review`（`ocr_backend_used=paddle`、`llm_audit success=3/3`），清单却记 `[skipped] ocr_pipeline`。**修法**：`tests/e2e_proc.py` 新增纯函数 `ocr_ready_from_settings()`（读 `ocr.{paddle,mineru}.configured`，非真布尔 `True` 一律 fail-closed）；`tests/e2e_frozen.py` 就绪真值改由它派生 + 新增 `ocr_ready_self_report` 断言 + 修正 `ocr_config` 的 reason。**护栏**：`test_e2e_proc_helper.py::TestOcrReadyFromSettings`（**8 条**）+ `test_e2e_frozen_derives_ocr_ready_from_app_not_env`（接线，源码扫描）。**变异** `devlogs/_verify/mutate_r72_ocr_ready_truth.py` ⇒ **7/7 CAUGHT** + 负控绿 + 还原 sha256 一致。**行为对照**（`devlogs/_verify/r72_ocr_ready_failopen_probe.py`）：成功路径 `[skipped]`→`[covered]`；error 路径 `[SKIP] pipeline_terminal`（不记 FAIL）→ `FAIL pipeline_terminal` + `[failed ] ocr_pipeline`。**未重建**（`tests/` 不入包，`artifact_freshness` 不受影响）。 |
+| **0-13** | LLM 归因的 `ok` 分支**越过证据**断言「产品缺陷」：探针只证"凭据 + 额度可用"，却据此结论"产品缺陷"，隐含"探针极小请求 ≡ 真实长请求"这一未声明且已为假的前提 | **P2** | **✅ 已完成（R74 第十四批核销）** | `ok` 文案只陈述证到了什么（排除 401/402）+ 点名盲区 + 给出下一步判据，且保留条件式归因 | **R74 第十四批（2026-10-08）：达成。** **定位**：产物级 e2e 两次 `status=error`，报告**自相矛盾** —— 归因写"故此处失败是**产品缺陷**"，而同一行 `error_message` 与 `llm_call_audit.error` 是上游 ALB 的 `<title>504 Gateway Time-out</title>` **HTML 页**（`page_analysis`，~3127 prompt tokens，成功时 77s）。`ok` 的判据是"免费 + 计费端点双双 200"，而计费段是 `max_tokens=1` 的**极小请求** ⇒ 看不到长请求的网关超时。**修法**：`tests/e2e_proc.py` 的 `ok` 分支改为"凭据有效、额度可用 ⇒ 排除 401/402 类环境问题" + 点名盲区（附实测样本）+ "先看 `llm_call_audit.error` 是否 JSON" + 条件式"…⇒ 才是产品缺陷"。**护栏**：`test_llm_failure_attribution.py::test_ok_text_does_not_overclaim_from_a_tiny_probe`。**变异** `devlogs/_verify/mutate_r72_ok_attribution_scope.py` ⇒ **5/5 CAUGHT** + 负控绿 + 还原 sha256 一致。**产物实测**：强制 `error` 场景下新文案原样打印。**未重建**（`tests/` 不入包）。 |
+| **0-14** | 第十四批的修正**只做了 1/4**：同一条归因结论写在 4 处，残留 3 处与实现**相反**（含**纪律文档** `docs/PROJECT_PITFALLS.md`）⇒ 违反本项目自己的「同一语义写两处必然漂移」 | **P2** | **✅ 已完成（R75 第十五批核销）** | 被禁措辞在**全部被跟踪文本文件**里零命中；豁免只给 append-only 历史，且须「仍被需要」 | **R75 第十五批（2026-10-08）：达成。** **定位**：沿同一条结论 grep 全部落点 ⇒ 6 处残留（`tests/e2e_proc.py` 3 处 / `tests/e2e_frozen.py` 1 处 / `docs/PROJECT_PITFALLS.md` 1 处 / `tests/unit/test_llm_failure_attribution.py` 1 处）。**修法**：六处一律改为「必要条件，非充分条件」表述或直接指向唯一实现；新增机检 `tests/unit/test_attribution_single_source.py`（**6 条**：全库扫描 + 扫描覆盖 + 判据非空转的正负对照 + 豁免反腐 + `ok` 文案有界性 ×2）。**护栏首跑即抓出 2 处人工清单漏掉的引述行**（`docs/TODO.md` 的 0-13 行与 `test_llm_failure_attribution.py` 的 docstring）⇒ 非空转现场证据。**变异** `devlogs/_verify/mutate_r71_attribution_single_source.py` ⇒ **10/10 CAUGHT**（3 处活文件退回旧断言 / `ok` 文案退回无条件 / 抹掉「必要条件」/ 抽掉 CHANGELOG 豁免 / 扩展名表部分与全部塌缩 / 关掉同行豁免 / 豁免表加死条目）+ 阴性对照绿 + 还原逐文件 sha256 一致。**自审修掉护栏自身 fail-open**：初版在扫描范围塌缩时会 `pytest.skip`（把「范围塌缩」误当「git 不可用」）⇒ 改为 `git ls-files` 为空才 skip、扩展名表匹配不到任何文件**一律 FAIL**（变异 M7b 专压这条分支）。**未重建**（`tests/`、`docs/` 均不在 `BUNDLE_SOURCES` 内，`artifact_freshness` 不受影响）。 |
+| **0-15** | 流水线**非确定**：同输入 / 同产物 / 同后端 / 同模型，两次跑 findings 数差 **+24%**（41 vs 51），且**类型集合也不同** ⇒ 单次计数**不得**当回归判据 | **P2 → 进行中（客户端随机源已消除；上游残余方差实测存在）** | 无 | 对照类结论必须带重复次数；或把非确定度量化（多次跑给出区间） | **R76 定位**：`试用批记录.pdf` 两次跑 —— `387a9abc`（日志）41 条 vs `012e351f-1ea`（DB 快照）51 条；`equipment_state` / `year_contradiction` 只在第 2 次出现。证据 → `docs/B6-1_GENERALIZATION_REPORT.md` §2/§6。**R77 第十七批（结构性一半已完成）**：① **定位** —— 全仓唯一“基线计数”是 `docs/FINDING_GROUND_TRUTH.json::real_baselines`（784 条，**历史版本 + `mineru`**），而它**没有任何代码消费者**（唯一判据是合成语料的 F1）；但文件自称“金标”、块自称“回归对照” ⇒ 照 784“修回归”会白干。② **修法** —— 该块加 `criterion: false` + `criterion_note`；每条目加 `provenance`（测量环境）+ `comparable_to_current` + `runs` + `observed_total_range`；新增第 2 条（试用批记录，`runs: 2` / 区间 **41–51**）作**非确定的现场证据**。③ **护栏** `tests/unit/test_eval_findings.py::TestRealBaselineContract`（**6 条**，含 **AST 机检「判据路径不得引用 `real_baselines`」** + 防空转）；**变异** `devlogs/_verify/r77_eval_baseline_mutation.py` ⇒ **7/7 CAUGHT** + 负控绿。⚠️ **剩余**：「对照类结论必须带重复次数」目前只对 `real_baselines` 机检，**尚未**成为通用护栏（报告 §2 那类对照仍是人工披露）。**R85 第二十五批（2026-10-10）：已修。** **定位** —— 全仓唯一随机源是 LLM 采样（`core/page_analyzer.py` 2 处 + `core/rules/llm_checks.py` 2 处均为 `temperature=0.1`）；OCR 客户端**不发**温度/seed（服务端固定）、`datetime.now()` 只注入“今天”（同日恒定）⇒ 均**不**解释同日 41 vs 51。**修法** —— 单一真值 `llm.client.DETERMINISTIC_TEMPERATURE = 0.0`（greedy）。**护栏** `tests/unit/test_llm_determinism.py`（**4 条**：常量 + 两处**行为**断言 + 源码扫描“判定产出模块不得再出现裸 temperature 数字”）；**变异** `devlogs/_verify/r85_mutation.py` ⇒ **5/5 CAUGHT**。⚠️ **剩余**：0.0 消除的是**客户端采样**这一已知随机源；**服务端**残余方差（批处理 / MoE 路由 / 浮点非结合）**未测** ⇒ **不宣称“非确定性已消除”**；“对照类结论必须带重复次数”仍未通用机检。 | **R85 第二十五批（2026-10-10）受控重放实测 —— 更新上一条"服务端残余方差未测"**：在本上游（SiliconFlow / `deepseek-ai/DeepSeek-V3.2`）以**同一** (system, user) 重放：page 4（n=6）`0.0 → [2,2,3,2,2,2]`、`0.1 → [3,2,3,2,2,2]`（**两者 spread 均 1 = 50%**）；page 2（n=3）`0.1 → [3,3,4]`、`0.0 → [3,4,3]`（均 spread 1）。⇒ **`temperature=0.0` 不足以获得可复现计数**，残余方差来自上游。**判据因此加强**：单次 findings 计数**不得**当回归判据；要数字须 N 次重复跑给区间（见 **0-29**）。证据 `devlogs/_verify/r85_temp_probe.py` → `_r85_probe5.out` / `_r85_probe6.out`。 |
+| **0-16** | e2e driver 只断言终态、**不校验 LLM 是否真跑通**（`e2e_run.py` 全文零处引用 `llm_audit`） | **P2** | **✅ 已完成（R77 第十七批核销）** | 每轮取产品自己的 `GET /api/jobs/{job_id}/llm_audit` 的 `entries`；`require_llm` 置真时“无成功调用”⇒ FAIL；端点取不到**一律 fail-closed**（与开关无关） | **R77 第十七批（2026-10-09）：达成。** **定位**：`e2e_run.py` 全文零处 `llm_audit`，而 `tests/e2e_frozen.py` 早已用它当权威判据（B11-11 第一次翻车就是这种假绿 —— 终态绿**不蕴含** LLM 跑通，产品失败时按设计降级）。**修法**：新增纯函数 `llm_audit_verdict(entries, require_llm)` + `fetch_llm_audit(c, job_id)`；在**共享 `run_upload` 内**接入（⇒ 所有轮次自动继承），`llm_ok` 参与 `ok` 判定；主结果字典带 `llm_calls/llm_ok/llm_failed/llm_note`。开关复用 `tests.e2e_coverage.REQUIRE_LLM_ENV`（**不写字面量**）。**护栏** `tests/unit/test_e2e_llm_audit_assert.py`（**14 条**：语义 6 + 结构 4 + 单一真值 3 + 防空转 1）。**变异** `devlogs/_verify/r76_llm_audit_mutation.py` ⇒ **8/8 CAUGHT** + 阴性对照绿（临时树 + 独立子进程，只认 `rc==1`）。**真实 job 两跑**（`devlogs/_verify/r77_e2e_llm_audit_live.py`；产物 `dist/pbc-server/pbc-server.exe`；模型 `deepseek-ai/DeepSeek-V3.2`；`PBC_E2E_REQUIRE_LLM=1`）：**正控** `091249fd-040`（6 页）`status=review` / `llm_audit success=7/7（失败 0 次）-> OK` / `ALL ROUNDS PASSED`；**负控**（SF key 换成明显无效串）`903598cd-d0f` `status=error` / `0/5` 成功 / note 点名 `401 code 30014 Token is invalid.` / `FAILED rounds: ['pdf']` ⇒ **判据在真实 job 上确实会响**。⚠️ **边界**：负控走的是 **401 ⇒ 硬 `error`** 路径；**「零成功 + 终态仍绿」**（**402 欠费** ⇒ 产品按设计降级到 `review`，即 B11-11 那种假绿）**未在真实 job 上复现**（402 无法伪造），该分支只在**单测 / 变异**层被覆盖。**未重建**（`e2e_run.py` 与 `tests/` 均不在 `BUNDLE_SOURCES` 内 ⇒ `artifact_freshness` 不受影响）。 |
+| **0-17** | 验证 harness 的「真凭据」来源是 **SUT 自己会覆写的文件**（`config.json`）⇒ 负控把无效 key 留在真凭据位；且 `assert x in (good, bad)` 在 `good == bad` 时**恒真**（放过它要抓的污染） | **P2** | **✅ 已完成（R78 第十八批）** | harness 的「已知 good」引用必须来自 SUT **写不到**的来源；否则 snapshot+restore（**只还原被污染字段**）+ **起跑金丝雀** | **R78 第十八批（2026-10-09）：达成。** **定位**：r77 的 `_creds()` 读 `config.json`，而 driver 每次 `POST /api/settings` 都落盘该文件 ⇒ 负控的 `BAD_KEY` （`sk-negative-control-invalid-0000000000000000`，44 字符）留在了「真凭据」位；精确比对 `config["SILICONFLOW_API_KEY"] == BAD_KEY` ⇒ **True**。**影响面**：r77 的**存档证据仍有效**（A 正控当时用的是真 key，日志 `success=7/7`），**但脚本原先不可重跑**。**修法**：① 数据面 —— 真 key 字节还原进 `config.json`（`count==1`），直连探针 `GET /v1/models` ⇒ **200**；② 脚本面 —— 污染金丝雀（起跑即响）+ `_snapshot_cfg`/`_restore_cfg`（只还原 SF key 那一处，保留 driver 合法的OCR 后端切换）。**测试** `devlogs/_verify/r78_harness_selftest.py`（金丝雀 + 外科式还原 + 幂等）；**变异** `r78_harness_mutation.py` ⇒ **4/4 CAUGHT** + 阴性对照绿；`--verify-only` 重判 r77 存档 ⇒ 仍「全部达成」。教训另记 技能 `verification-integrity` **Trap 92** 与 `docs/PROJECT_PITFALLS.md` §四十六。 |
+| **0-18** | 审计追踪**可被删除**：删 job 时 `api/jobs/actions.py:277-278` **DELETE** `audit_log`/`llm_call_audit`，只留一条 `_system job_deleted` **摘要**行 ⇒ **21 CFR 11.10(e)**「record changes shall not obscure previously recorded information」且「audit trail shall be **retained** at least as long as the subject records」**不满足** | **P1** | 无（需**产品语义决策**） | 二选一：① 软删除（`jobs` 行保留 + `deleted_at`）；② 删除前把该 job 的 `audit_log`/`llm_call_audit` **归档**到独立表。无论哪种，**被删记录自身的轨迹都不得销毁** | **R78 第十八批（2026-10-09）定位（未修）**：证据与判读见 `docs/ENTERPRISE_READINESS_2026-10-09.md` §0 **G2** / §1 **(e)**；行号可复核。 |
+| **0-19** | `innerHTML` **46 处**逐个依赖 `esc()` 纪律、**无**机检；`docs/RELEASE_READINESS_PLAN.md` §SEC-6 曾误记「零命中」（**与实测相反**） | **P2** | **✅ 已完成（R79 第十九批）** | 加护栏：`static/**/*.js` 里每个 `innerHTML = <expr>` 必须是空串 / 常量模板 / 含已知转义器调用 | **R78 第十八批（2026-10-09）定位；R79 第十九批（2026-10-09）达成。** 实测 `\|safe` **0 处** / `Markup(` **4 处** / `innerHTML` **46 处**（前端 R63/R65 **拆模块后**才出现）；**文档漂移已更正** + 事实绑定护栏 `tests/unit/test_doc_release_plan_sec6_claim.py`。**核销**：新增 `tests/unit/test_innerhtml_escaping.py`（**6 条**）—— 三层显式判据（纯字面量 / 含 `esc(` 或 `escapeHtml(` / 受审计渲染器且白名单函数**确存在**）+ 未自动通过者**显式登记**（语句唯一子串**恰好命中 1 处**，陈旧/歧义判红）+ tokenizer（注释/字符串/模板 `${}`）+ **站点数下限**防空转；**变异** `devlogs/_verify/r78_innerhtml_mutation.py` ⇒ **10/10 达成（8 正向 CAUGHT + 2 阴性对照绿）**，逐例核对**红在目标断言**。⚠️ **边界**：静态纪律机检，**不**证明渲染结果无注入（46 处**未逐处**判转义**充分性**）。 |
+| **0-20** | 多轮 e2e 判据**误伤「复合轮」**：`robust` 包了 `o6`/`o1` 两个 `run_upload`，`llm_*` 留在**子字典**里，判据只看顶层 ⇒ 把**已通过**的轮次误报成「缺 llm_calls」（首跑 6/7，唯一「未达成」即此，**非产品缺陷**） | **P3** | **✅ 已完成（R78 第十八批）** | 判据必须认得**轮次形态**：扁平轮看顶层；复合轮**下钻一层**取子轮聚合，且 `all_pass` 取子轮**逻辑与**（求和会掩盖某路零成功） | **R78 第十八批（2026-10-09）：达成。** **定位**：`devlogs/_verify/r78_e2e_multiround.py` 首跑 6/7 —— `robust` 顶层无 `llm_calls`（`run_robust` 只把 `llm_*` 写进 `o6`/`o1`）。**修法**：新增 `_llm_audit()`（`kind ∈ {flat,composite,none}`）+ `all_pass`；`_judge` 改判 `all_pass`。**负控自测** `devlogs/_verify/r78_judge_composite_selftest.py`（**13 检查**：真存档 ⇒ 全部达成；`o6` 零成功 ⇒ 判红；扁平轮缺 `llm_*` ⇒ 判红；子轮全无 `llm_*` ⇒ 判红；`cancel` 带 `llm_*` ⇒ 判红豁免过期；三态判别非空转）。**重判**（`--verify-only`，从存档日志）⇒ **7/7 全部达成**：`pdf 7/7`、`img 3/3`、`mineru 9/9`、`rot 5/5`、`robust 4/4（复合）`、`dual 8/8`；`cancel` 按设计豁免。**重打包后**对**内嵌产物**（`dist-electron/win-unpacked/resources/pbc-server/pbc-server.exe`，与 `dist/pbc-server` 同 sha256 `bf8f50cf6af4`）复跑同 7 轮 ⇒ 再次 **7/7**（`pdf 7/7`、`img 2/2`、`mineru 7/7`、`rot 5/5`、`robust 4/4`、`dual 7/7`；证据 `devlogs/_verify/r78_e2e_postbuild.json`）。 |
+| **0-21** | Electron **fuses 停在默认值**：`build.electronFuses` 未配置 ⇒ `RunAsNode` / `EnableNodeOptionsEnvironmentVariable` / `EnableNodeCliInspectArguments` **三个开着**，产物可被环境变量降级成纯 Node、并接收 `NODE_OPTIONS` | **P2** | **✅ 已完成（R80 第二十批）** | `package.json` 显式 `electronFuses` 三个 `false`；**产物** fuse wire 三项 OFF 且不碰启动语义位（机检读**真二进制**） | **R80 第二十批（2026-10-09）：达成。** **定位**（`devlogs/_verify/r80_electron_fuses.py` 复读产物 wire）：三个 fuse 均为 ON。**后果实测**：`ELECTRON_RUN_AS_NODE=1 BatchSentry.exe --version` ⇒ **`v24.21.0`**（Node 版本，产物被降级成纯 Node）；`NODE_OPTIONS` 被产物接收 ⇒ Electron 打印 `Most NODE_OPTIONs are not supported in packaged apps`。**修法**：`package.json` 加 `build.electronFuses{runAsNode:false, enableNodeOptionsEnvironmentVariable:false, enableNodeCliInspectArguments:false}` + **重建**（PyInstaller → manifest → electron-builder → PROVENANCE）。**护栏** `tests/unit/test_electron_fuses.py`（**6 条**，含读真产物 wire 逐位断言 + 合成伪二进制正负对照防空转）。**变异** `devlogs/_verify/r80_mutation.py` F1–F5 ⇒ **全 CAUGHT**。⚠️ **边界**：另三个 fuse（`enableEmbeddedAsarIntegrityValidation` / `onlyLoadAppFromAsar` / `grantFileProtocolExtraPrivileges`）改**启动语义**，本环境**无法**验证 Electron 能否启动 ⇒ **刻意未改**，登记于 `docs/ENTERPRISE_READINESS_2026-10-09.md` §4。 |
+| **0-22** | 上传文件名是 **Windows 保留设备名**时入口**不点名**：`NUL.pdf` / `CON.pdf` 写盘「成功」却不落文件 ⇒ 用户看到误导性的 400「不是有效的 PDF」；`COM1.pdf` / `AUX.pdf` / `LPT1.pdf` 的 `open` 直接抛 ⇒ 误导性的 500 | **P2** | **✅ 已完成（R80 第二十批）** | 入口对保留设备名（`CON`/`PRN`/`AUX`/`NUL`/`COM1-9`/`LPT1-9`）返回 **400 + 点名原因 + 回显文件名**；且拒绝发生在**建目录/写盘之前** | **R80 第二十批（2026-10-09）：达成。** **定位**（`devlogs/_verify/r80_nul_probe.py` 实测）：`NUL.pdf` 0 字节不落文件、`COM1.pdf` 抛 `FileNotFoundError`；对照 `null.pdf` 落 1100 字节（判别力）。⚠️ **不是路径穿越**：`Path(...).name` 已剥分隔符、`job_id` 服务端生成 ⇒ 落盘路径**不可**由客户端控制；本护栏**不**声称发现穿越漏洞。**修法**：`api/jobs/upload.py` 加 `_is_reserved_device_name` + 入口守卫（**不**静默改名 —— 那会让界面显示的 filename 与用户实际选的文件不一致）。**护栏** `tests/unit/test_upload_reserved_names.py`（**4 组**：24 条真值表 12 真 + 12 假阴性对照 + 防空转 + 端点 400 点名 + **拒绝先于写盘** + 正常名阴性对照）。**变异** `devlogs/_verify/r80_mutation.py` U1–U5 ⇒ **全 CAUGHT**。 |
+| **0-23** | **入口拒绝路径在产物层零覆盖**：`smoke_packaged_server.py` 只打 `/health`；保留设备名 / 扩展名 / magic bytes / 过小 / 路径剥离 / 本机请求守卫**全部**只在 `ASGITransport`（进程内、源码树）层被验过 ⇒ 冻结后 multipart 解析、异常文案编码、状态码传播、`frozenset` 常量都可能变而无人发现 | **P2** | **✅ 已完成（R81 第二十一批）** | 起**真产物**用真 HTTP 打 26 例矩阵（三组），**含 5 例阴性对照**（`null.pdf` / `console.pdf` / `com10.pdf` / `com0.pdf` / `auxiliary.pdf` 必须 **200**，证明守卫未写成前缀匹配而误伤）；**敌意文件名**只断言安全不变式（回显名不含 `/` `\` `:`）；**任何用例不得 5xx**；判据落 JSON | **R81 第二十一批（2026-10-09）：达成。** 新增**已提交**驱动 `tests/e2e_rejections.py`：起 `dist/pbc-server/pbc-server.exe`（与 electron-builder 内嵌那份**同 sha256**）⇒ **26/26 达成**（拒绝矩阵 15 + 敌意文件名 8 + 去重/force 3）—— 保留设备名 5 例（`NUL.pdf` / `CON.pdf` / `COM1.pdf` / `LPT1.pdf` / `NUL .pdf`）**400 + 点名回显**；阴性对照 5 例 **200**；`evil.exe` 400 扩展名；`fake.pdf` 400 magic；`tiny.pdf` 400 过小；外来 `Origin` **403** / 本机 `Origin` **200**；敌意文件名 8 例（`../../` / `..\..\` / `C:\Windows\` / `/etc/` / UNC / `..%2f..%2f` / `....//` / 盘符相对）⇒ **200 且回显名不含分隔符**（实测 `%2f` **不**被解码 ⇒ **不存在双重解码**这条绕过）；去重 3 例（首次 200 / 同内容 409 / `force=1` 200）。每个被接受用例**立刻 cancel**（1 页件 ⇒ 不烧 LLM 额度）。证据 `devlogs/e2e_rejections.json`。**可重跑**：连跑两次均 26/26。⚠️ **边界**：矩阵是**枚举**而非穷举 —— 只覆盖上述三组，**不**证明「没有其他绕过」；**未**覆盖超大文件（会真的占盘）。 |
+| **0-24** | **载荷顺序未被测试锁住**：保留设备名守卫依赖「先 `Path(...).name` 剥离、后判保留名」，但 24 例真值表**只喂裸名** ⇒ 顺序反了它**全绿**（`../../NUL.pdf` 的 stem 是 `../../NUL` ⇒ 绕过 ⇒ 写 `NUL` 设备 ⇒ 0 字节静默丢失） | **P2** | **✅ 已完成（R82 第二十二批）** | 单测 `TestEndpointStripsBeforeChecking` + 产物级 e2e **34 例** + 变异 **3/3**（旧用例保持绿 ⇒ 新用例是唯一判别力） | **R82 第二十二批（2026-10-09）：达成。** **当前实现正确**（真产物 **9/9**，`devlogs/_verify/r82_prefixed_reserved_probe.py`）—— 本批**不是**修 bug，是**把载荷不变式钉住**。① 单测 6 例带前缀设备名（`../../NUL.pdf` / `..\..\NUL.pdf` / `C:\dir\NUL.pdf` / `/tmp/COM1.pdf` / UNC / `a/b/c/../AUX.pdf`）⇒ **400 + 点名 + 回显剥离后名**；2 例带前缀阴性对照（`../../null.pdf` / `/tmp/com10.pdf`）⇒ **200**（否则「凡带斜杠就拒」也能过）。② 产物级 e2e **34/34**（连跑两次）。③ 变异 **3/3 CAUGHT**（M1 判原始名 / M2 不剥离 / M3 守卫过宽）。⚠️ **边界**：真值表仍是**枚举**；Windows 上标数字变体（`COM¹`）仍未覆盖。 |
+| **0-25** | **`esc` 转义原语在 3 个页面 bundle 里各有一份**（`findings-map.js` / `settings-state.js` / `upload-jobs.js`），**无一致性机检**；且 `findings-map.js` 注释称「已收敛」⇒ **假保证**（实际 6→3） | **P2** | **✅ 已完成（R83 第二十三批）** | 机检锁「三份等价 + 副本集合登记 + 解码器镜像」；**真单一真值**（合并为公共脚本）登记为**待决策**（需改 3 个模板的 `<script>`，会改加载语义） | **R83 第二十三批（2026-10-09）：达成。** 新增 `tests/unit/test_esc_single_source.py`（**6 条**）⇒ 变异 **4/4 CAUGHT**（E1 弱化一份 / E2 另一份漂移 / E3 副本改名 / E4 解码器 `&amp;` 不再最后）；`static/findings-map.js` 注释改为**如实**陈述（3 份 + 为什么 + 指向机检与 0-25）。⚠️ **边界**：锁的是**文本等价**（纯字面量替换链 ⇒ 链同即行为同）；跨 bundle 的真单一真值**未做**。 |
+| **0-26** | **报告缓存 key 未覆盖全部渲染输入**：`api/report.py` 的 `cache_key` 旧形态 = `(job_id, len(findings), last_id, status_hash, len(exemptions))`，**不含** `total_pages` / `empty_pages` / `unanalyzed_pages` / `filename` ⇒ 这些在 findings 不变时改变（`retry` 后重分析）会让 `report.md` 静默返回**过期**内容 | **P2** | **✅ 已完成（R84 第二十四批）** | key 必须覆盖**恰好传给渲染器的全部输入**（改为内容摘要）；护栏逐输入判别力 + 变异 4/4 | **R84 第二十四批（2026-10-09）：达成。** 定位：首写**失败测试**即复现（日志 `Report.md cache hit (findings=0)`）。修法：`_render_input_digest()` = 对 (job 渲染字段, findings, exemptions, total_pages, empty_pages, unanalyzed_pages, review_stats) 取 SHA-256。护栏 `tests/integration/test_report_cache_coverage.py`（3 条）。变异 `devlogs/_verify/r83c_mutation.py` ⇒ **4/4 CAUGHT**。⚠️ M4 首版删单处 `total_pages` **MISSED** ⇒ 该输入被 `job["total_pages"]` 与裸值**冗余覆盖**，属变异无效（非测试失效），已改两处同删。 |
+| **0-27** | **并发额度默认 3 不满足「5 个文件并发审核」**：`api/jobs._MAX_CONCURRENT_JOBS` 默认 3，第 4 个并发任务起 **409 硬拒绝**（**不排队**） | **P2** | **✅ 已完成（R85 第二十五批）** | 默认 ≥ 5（env 可覆盖）；且**兜底分支**（env 值非法时走的那条）也必须 ≥ 5 | **R85 第二十五批（2026-10-10）：达成。** 定位：`api/jobs/__init__.py` 两处默认值均为 3。修法：`os.getenv("MAX_CONCURRENT_JOBS", "5")` + 兜底 `_MAX_CONCURRENT_JOBS = 5`；顺带更正原注释的“~2GB”**错误归因**（实测单 job ≈ 102MB，见 MEMORY-DETAIL §7）。护栏 `tests/unit/test_upload_quota_contract.py::TestDefaultQuotaSupportsFiveConcurrentReviews`（默认 ≥ 5 + 兜底 ≥ 5）。变异 **M4/M5 CAUGHT**。⚠️ **未测**：5 个 job 同时跑对上游（SiliconFlow / OCR）的**实际速率影响**与端到端时延 —— 本批只保证**准入**不再拒第 4/5 个。**R85 实测（产物级）**：5 文件并发 + UI **7/7**（`r85_five_concurrency.py`：UI `/`+`app.css`+`/api/jobs` 200 / 并发 5 全 200（0.2s） / 第 6 份 **409** / 5 job 均入 `ocr_running`）⇒ **准入 + 起跑已证**；**R85 实测（5 路端到端，`devlogs/_verify/r85_five_e2e.py`）**：**9/9 达成** —— 5/5 准入且 5 个**互异** job_id；第 6 份 **409** 且理由是**配额**（响应「已有 5 个任务在处理中，上限为 5」，**非**内容去重的 409）；**并发峰值 = 5**（同时非终态 ⇒ **真并发**，非串行）；5/5 到 `review` 终态、**0 error**；存储层按 job 隔离（findings 逐 job `[1,1,1,18,25]`，合计 46 = 端点合计 46）；**总墙钟 715s < 各 job 之和 1260s**（并行收益 1.76×）；无残留非终态 job。⚠️ 5 个文件为**小样本**（1–6 页），**非** 51 页大记录 ⇒ **大记录 ×5 的上游速率影响仍未测**。 **R85 第二十五批（2026-10-10）****槽位回收实测（产物级，`devlogs/_verify/r85h_slot_recycle.py`）**：**6/6 达成** —— 占满 5 后第 6 份 **409 配额**（同轮**负控**）；`POST /api/jobs/{id}/cancel` 后该 job 进 `cancelled`（DB 同值）；**其余 4/4 仍在跑**时重传第 6 份 **200** 且为**新互异** job_id ⇒ 额度**动态回收**（不必等全部跑完）。**永久护栏** `tests/unit/test_upload_quota_contract.py::TestQuotaSlotIsReleasedWhenAJobReachesTerminal`（自带**同轮负控**：终态化前必须 409，否则无判别力）；**变异** `devlogs/_verify/r85i_quota_recycle_mutation.py` ⇒ **3/3**（M0 负控绿；M1「计数含终态」/ M2「只计非活跃」**均 CAUGHT**）。⚠️ 仍**未测**：51 页大记录 ×5 的上游速率影响。 **R85 第二十五批（2026-10-10）****大记录 ×5 实测**（产物级 `devlogs/_verify/r85k_bigfive_e2e.py`；事后核验 `r85k_verify_bigfive.py`）：**6/6 达成** —— 5 份 **51 页 / 138MB** **真记录**并发提交 **5×200**（上传各 8–9s）；**并发峰值 = 5**；**5/5 全部 51 页分析完**、**0 error**、全部到 `review`；**总墙钟 2579s（≈43min，预算 3600s 内）**。⚠️ **1 次 cross-page LLM 调用超时**（上游抖动，**非缺陷**）⇒ 产品**按设计降级并披露**（该 job 带一条 `completeness`「跨页 LLM 语义检查不可用…需人工复核」finding，DB 已证）⇒ 判据应是「**失败必须披露**」而非「永不失败」（首版判据 ⑥ 写错，已修）。 |
+| **0-28** | **第三方日志噪声抑制名单不完整**：`logging_config._NOISY_THIRD_PARTY_LOGGERS`（#145）漏掉 `aiosqlite`（历史 8,116 行）与 `chardet`（当天 `pharma.log` 100%）⇒ 有效级别仍 `DEBUG`（继承 root）⇒ #145「把自家 DEBUG 挤出去」未达成 | **P3** | **✅ 已完成（R85 第二十五批）** | 名单必须覆盖**实测刷屏者**（按 logger 名计数审计）；且「在名单里」≠「已生效」（须**行为**断言读 `getEffectiveLevel()`） | **R85 第二十五批（2026-10-10）：达成。** 定位：`logs/pharma.log` 17,406 行中 92% 是 DEBUG；`aiosqlite` 8,116 行、`chardet` 613 行（**当天全部**）；实测 `getEffectiveLevel()` = DEBUG，而名单内各库 = WARNING。修法：两者补入名单。护栏 `tests/unit/test_logging_config.py::TestThirdPartyNoiseSuppression`（3 条：名单完整性 + `setup_logging` **行为**断言 + 子 logger `chardet.charsetprober` 继承）。变异 M6–M9 ⇒ CAUGHT（累计 **9/9**）。⚠️ 行为断言**须先清 NOTSET**（logger 是全局单例）否则 M8 漏检。 |
+| **0-29** | **上游残余方差 ⇒ 单次 findings 计数不可复现**（`temperature=0.0` 仍变）：受控重放 page4 n=6 `0.0→[2,2,3,2,2,2]` / `0.1→[3,2,3,2,2,2]`（spread 均 1）；page2 n=3 两者均 spread 1 ⇒ 单次计数不得当判据，也无法充当"判定质量数字" | **P2** | **开放（R85 第二十五批登记）** | 对照 / 质量类结论必须带**重复次数**与**区间**（N 次重复跑 → min/max/中位）；并披露上游方差**不可**由客户端消除 | **R85 第二十五批（2026-10-10）登记。** 证据 `devlogs/_verify/_r85_probe5.out`（n=3）/ `_r85_probe6.out`（page 4，n=6）；方法 = 捕获真代码构造的 (system, user) 后受控重放（`r85_temp_probe.py`）。⚠️ 样本小（每格 n=3–6，2 页）⇒ 只证明"**存在**方差"，**未**给出量级 / 分布；`temperature=0.0` 是否被网关原样透传**未验证**。与 **G3（判定质量无可信数字）**同源：拿到人工标注集前，唯一诚实表达是"区间"而非单点。 **R85 第二十五批（2026-10-10）量级实测（n=8 × 3 页 × 2 温度）**：`temperature=0.0` 下 **3/3 页**非复现（spread=1，rel **33.3%–50%**），单页**绝对**摆幅上界 **= 1 条**（计数 2–4 ⇒ rel% 偏大是**分母小**）；类型集合亦变（page 2 @0.0 的 8 次含 **4 种** type set）。**反证温度非主因**：0.1 的方差**不高于** 0.0（page 36 @0.1 **8/8 恒定**）⇒ 方差源于**上游**，调温度**消不掉**。脚本 `devlogs/_verify/r85_temp_probe_stats.py`（数字**全脚本算出**）/ 日志 `r85_temp_probe_run2.log`。⚠️ 样本小（3 页 / 1 个 51 页 job）⇒ 仅该**量级**，**不**外推全库；网关是否原样透传 `0.0` **仍未验证**。 **R85 第二十五批（2026-10-10）规模化佐证**：**同一份** 51 页记录**并发跑 5 次**（`r85k_bigfive_e2e.py`）⇒ findings 逐 job **199/203/204/217/220**（**同一输入**！spread **21**，rel **≈10.6%**，均值 208.6）⇒ 在**真实规模**上再次印证「单次计数不可复现」；类型集合亦不同。⚠️ 该量级仍**未**成为通用机检。 |
+| **0-30** | **产物级入口拒绝矩阵有静默前置条件**：产物未配置真实 LLM provider 时 `api/jobs/upload.py` 对**每个**上传返回 400 ⇒ 矩阵"期望 400"用例**全部假绿**、阳性用例全红 ⇒ 表面 **13/34** 却**零判别力** | **P3** | **✅ 已完成（R85 第二十五批）** | e2e 驱动必须有**前置条件 fail-fast**（+ 可执行的修复指令）；且新增守卫**正/负控都要验** | **R85 第二十五批（2026-10-10）：达成。** 定位：`%TEMP%/pbc_e2e_appdata/PBC/config.json` 缺失 ⇒ 日志 `Upload rejected: no LLM provider configured`。修法：`tests/e2e_rejections.py` 加 `_llm_provider_configured()` 前置判定（读 `GET /api/settings` 的 **`llm.providers[].configured`**），未满足即 rc=2 + 打印 seed 路径。**双向验证**：正控（有 config）⇒ rc=0 / **34/34**；负控（隐藏 config）⇒ rc=2 + 明确提示。⚠️ 首版按**顶层** `providers` 取值 ⇒ 恒判 False（把"配置齐全"也拦下）—— **只有正控能抓到**，已修。 |
+| **0-31** | **降噪量测口径易误读 + 库内残留「per-param 旧噪声」**：`data/pharma.db` 有 **2,669** 条 `超出自动判定上限` 的**逐参数** completeness（20 个 job）；`scripts/eval_noise_reduction.py` 在旧 job 上重放报 **-24.8%**，易被读成「当前线上降噪幅度」 | **P3** | **✅ 已完成（R85 第二十五批·核查后判定「非缺陷」）** | ① 判定「残留噪声是历史遗留还是现网缺陷」必须**用当前产物跑一遍**取证，不得只看旧库；② 量测脚本输出必须自带**口径披露**（写入期已降噪 ⇒ 重放增量≈0 属预期） | **R85 第二十五批（2026-10-10）核查。** 取证：当前产物 e2e 库（`%TEMP%/pbc_e2e_appdata/PBC/data.db`）该形态 **0 条**；当前 `core/rules/llm_checks.py:109-118` 队列超限分支已 `aggregate=True`（单条汇总，`tests/unit/test_cross_page_llm.py::test_queue_too_large_aggregates_single_finding` 锁定）⇒ **旧库的 2,669 条是写入期降噪之前的遗留，当前无此缺陷**。修法：给 `scripts/eval_noise_reduction.py` 加**输出级口径披露**（按 `ocr_text` 是否以 `aggregated ` 开头判 pre/post-降噪）。⚠️ 该脚本**不入包**、**不计覆盖率** ⇒ 无需重建产物。 |
+| **0-32** | **硬崩溃恢复缺产物级验证**：`recover_stuck_jobs` 只有单测（lifespan 那几条还是 **mock 的日志分支**），**从未**在真产物上验证「跑到一半被 `taskkill /F` ⇒ 重启后收敛 + 审计 + 额度释放」 | **P2** | **✅ 已完成（R85 第二十五批）** | 崩溃后：① 卡死 job 必须收敛为**终态**；② 必须留 `stuck_recovery` **审计**；③ **额度必须释放**（否则用户被永久锁死） | **R85 第二十五批（2026-10-10）实测（产物级 `devlogs/_verify/r85m_crash_recovery.py`）**：**5/5 达成** —— 杀前 5/5 **非终态**且**已开工**（`ocr_running`）；`taskkill /T /F` 后进程确死；重启 ⇒ 5/5 收敛为 `error`；`stuck_recovery` 审计 **+5**；重启后新上传 **200** ⇒ **额度未泄漏**。 |
+| **0-33** | **上传页对 OCR 缺口只有信息性横幅、无前置门**：`main.py::index` 的 `needs_setup` 只看 LLM，`api/jobs/upload.py:159` 的 400 前置门也只判 LLM ⇒ OCR 未配置时上传被**接受**，用户白传大文件（实测样本 **138MB / 51 页**）后在 **Stage 1** 失败 | **P2** | **✅ 已完成（R92 第三十五批：信息性横幅 + 后端前置门 + e2e 前置 fail-closed）** | 与 LLM 对称的前置门是**语义变更** ⇒ 必须重验产物级入口矩阵 `tests/e2e_rejections.py`（**34 例**）的 seed 与期望（seed 需含 OCR，否则「期望 200」用例会变红） | **R86 第二十六批（2026-10-10）**：已加 `core/pipeline/ocr_support.ocr_chain_configured()`（**单一来源**，复用 `remote_backend_configured` / `is_backend_available`）+ `main.py::index` 下发 `ocr_setup_needed` + `templates/upload.html` 第二横幅；护栏 `tests/integration/test_main_routes.py::TestIndexOcrGuidance`（**双向**）+ 变异 **4/4 CAUGHT**（`devlogs/_verify/r86d_mutation.py`）。**未做**：后端前置门（400 仍只对 LLM）⇒ 忽略横幅的用户仍会白传。 **R86 第二十六批（2026-10-10）定位完成（仍未实现）**：变更集 = ① `api/jobs/upload.py` 在**全部输入校验之后**加 OCR 门 —— **顺序是硬不变量**：放前面会让 15 条"期望 400 且断言具体文案"的用例（`dev_*` / `ext_exe` / `magic_bad` / `too_small` / `origin_foreign` / `pfx_dev_*`）改报 OCR 错误而**全红**；② `tests/e2e_rejections.py` 加与 `_llm_provider_configured` **对称**的 `_ocr_configured` 前置 + fail-closed；③ **必须**先 seed OCR 凭据到 `{APPDATA}/PBC/config.json`，否则 8 条 MATRIX「期望 200」+ 8 条 HOSTILE + 3 条 dedup = **19 条**会因 400 而全红（矩阵规模 **34** = MATRIX 23 + HOSTILE 8 + dedup 3，已用 AST 复核，非目测）；④ 为门本身补一条用例：需在运行中临时清空 OCR 配置再恢复（或退化为 TestClient 级）。⚠️ **本轮不实现**：产物级复验（需重建 + seed 凭据）在当前状态下**做不了**，而"改了语义却不复验"违反本项目纪律。 **R90 收尾（2026-10-13）补全信息（仍未实现）**：① **矩阵规模已按源码复核** = MATRIX **23** + HOSTILE **8** + dedup **3** = **34**（`tests/e2e_rejections.py:77-111` / `114-123` / `304-328`）；其中「期望 200」**19** 条 = 8 MATRIX 阴性（5 `ctl_*` + `origin_local` + 2 `pfx_ctl_*`）+ 8 HOSTILE + 3 dedup；「期望 400 且断言具体文案」**15** 条 = 5 `dev_*` + `ext_exe` + `magic_bad` + `too_small` + `origin_foreign` + 6 `pfx_dev_*`。② **`api/jobs/upload.py` 现行校验顺序（行号）**：L119 本机请求(403) → L122-131 扩展名(400) → L133-142 保留设备名(400) → **L152-163 LLM 门(400)** → L165-182 并发(409) → L184+ 写盘/大小(400) → L243-270 magic(400) → L272-274 空(400) → L276+ 页数结构(400) ⇒ OCR 门**与 LLM 门并列**（L164 附近）是唯一既 fail-fast 又不越位的位点；**前提是 e2e 必须 seed OCR 凭据**，否则 19 条「期望 200」全红、15 条具体 400 文案被顶掉。③ **`_ocr_configured` 的判定源已核实**：`GET /api/settings` 返回 `ocr.paddle.configured` / `ocr.mineru.configured`（`api/settings/read.py:107-127`）。④ **口径差异（须写明）**：上传门真值源 `ocr_chain_configured()` = `bool(api_url and token)`（paddle/mineru）**或** docling 可用（**宽松**）；而 `/api/settings` 的 `configured` = `config._is_real_key`（**严格**，滤占位值）⇒ 用后者做前置**偏保守**（可能多报「未配置」⇒ fail-closed，可接受）；另 `/api/settings` **不暴露 docling 可用性**（冻结产物不含 docling ⇒ 实际不触发）。⑤ **e2e appdata 现状（实测）**：`%TEMP%/pbc_e2e_appdata/PBC/config.json` **已含** `PADDLE_OCR_TOKEN`(len=40) + `PADDLE_OCR_API_URL` + `MINERU_TOKEN`(len=51) + `OCR_BACKEND=mineru` —— 是多轮 e2e 的**副产物**、**非机制保证**（清临时目录/换机即失效）⇒ ② 的 fail-closed 前置仍必需。⑥ **R86 横幅已复核在位**：`main.py:594-597` 计算 `ocr_setup_needed`、L608 下发；`templates/upload.html:84` 第二横幅。 **R92 第三十五批（2026-10-14）已实现**：① 门插在 **LLM 门之后**（`api/jobs/upload.py`），真值源复用**单一来源** `core/pipeline/ocr_support.ocr_chain_configured()`；② `tests/conftest.py::test_db` 与 LLM key **同源**注入 mock OCR 凭据（~20 个 `client` fixture 全派生自它 ⇒ 一处修好整个爆炸半径）；③ `tests/e2e_proc.ocr_ready_from_settings` 补 `paddle.api_url` 判据 —— 原实现只读 `configured`，**比门更宽松**（危险方向），收紧后本判定成为门的**充分条件**；④ `tests/e2e_rejections.py` 加与 `_llm_provider_configured` **对称**的 `_ocr_configured` 前置 + fail-closed；⑤ `tests/e2e_frozen.py` 上传步按 `OCR_CONFIGURED` **分支断言**（未就绪 ⇒ 期望 400 + 断言文案含 OCR，且不得伪造 job_id）。护栏 `tests/integration/test_upload_ocr_guard.py` （拒绝 / 允许 / **LLM 门先于 OCR 门** / LLM 已配时 OCR 门生效）。⚠️ 新增护栏**已过变异**（`mutation_r92_038_finish_reason.py` 的 M1–M11 含门序与门本身的判别力）。 |
+
+| **0-34** | **`electron/main.js` 文件头注释的启动等待上限仍是旧值 30s**：第 13 行写 `poll /health until ready (up to 30s)`，而第 48 行 `READY_TIMEOUT_MS = 180_000`、报错文案也写 `within 180s` | P3 | **✅ 已完成（R90 第三十批）** | 注释与常量一致（或注释改为**引用常量名**、不再复述数值 —— 复述数值必然漂移） | **R86 第二十六批（2026-10-10）定位**：同一数值散在 3 处，2 处（代码 + 报错文案）已是 180s，注释残留 30s。**本轮刻意不改**：`electron/main.js` 是**入包源**（`D_ASAR`）⇒ 改它会让产物失效面再 +1 个文件，而用户侧收益为零（注释不面向用户）⇒ 与 `PORTABLE_README.txt` 的 180 秒纠偏**一并**在下次重建时处理。 **R87 第二十七批（2026-10-10）复核：R86 的延后判断是对的，理由比它写的更硬 —— 仍未结**：
+本轮曾按「两份产物本就因同一 3 个文件失败（`devlogs/gate_report_20261010_144520.json`）⇒ 延长清单零边际成本」
+改掉第 13 行，**全量测试当场判红**：`tests/unit/test_bundle_manifest.py::TestAsarReader::test_real_asar_matches_source_for_electron_main`
+把 `app.asar` 里的 `electron/main.js` **逐字节**对比源码 ⇒ **改源码必然让它红**，直到 Electron 产物重建
+（实测 `1 failed, 4101 passed, 4 skipped`）。已**回退**该改动 ⇒ 本条**保持开放**。⚠️ 因此这条**只能**与
+Electron 产物重建**同批**做，不能提前。另记：`180s` 仍**复述在 3 处**（`electron/main.js` 的 L47 / L262 / L278，
+其中 L278 是**面向用户**的报错文案）—— 当前值与常量一致；**重建时**建议一并改为**引用常量名**，
+否则再调 `READY_TIMEOUT_MS` 时这 3 处会一起漂移。 **R90 第三十批（2026-10-10）核销**：前提破除（三份产物 `os.rename` 往返成功 = 无宿主锁）⇒ 改 L13 为 `(bounded by READY_TIMEOUT_MS)` + **重建**（PyInstaller → manifest → electron-builder → PROVENANCE）⇒ `TestAsarReader` 由红转绿（全量数字见 `CHANGELOG.md` Round 86）。⚠️ **只改 L13**：L45 / L239 是**历史叙述**（引用已删除的旧行为 `not ready after 60 checks`），非活规格；L278 是**面向用户**的报错文案且当前值与常量一致，本轮不动。 |
+| **0-35** | **一次参数变更的「清扫」只做了 1/5**：R85 把 `MAX_CONCURRENT_JOBS` 默认 3 → 5，只扫了 `README.md` 与 `tests/unit/test_upload_quota_contract.py` 的 docstring；全库仍残留 **7 处「默认 3」**（`CLAUDE.md` ×2、`static/upload.js`、`core/procpool.py`、`api/jobs/listings.py`、3 个测试 docstring），且**蕴含**了「选 5 份 ⇒ 第 4、5 份必然吃 409」变成**假命题** | **P2** | **✅ 已完成（R87 第二十七批）** | 活文件集合内不得再出现与代码不一致的默认值；由默认值**派生**的序数/条数不得写进文档 | **R87 第二十七批（2026-10-10）**：10 处一次扫净（`devlogs/_verify/r87a_concurrency_sweep.py`）+ 2 处歧义形态改写为显式（`r87b_reword_claims.py`）；护栏 `tests/unit/test_concurrency_default_claims.py`（**9 条**，默认值从 `api/jobs/__init__.py` **重算**，含反空转与「`=N` 只留给覆盖示例」约定）；变异 `devlogs/_verify/r87c_mutation.py` ⇒ **7/7 CAUGHT**。⚠️ 改到**入包源** `static/upload.js` ⇒ 产物失效面 +1（重建时一并处理）。 |
+| **0-36** | **settings 页「测试连接」在窄屏完全不可达**：唯一入口 `#test-conn-btn` 在 `<nav class="settings-nav hidden md:flex …">` 内，窄屏侧栏整体 `hidden`，而 `.settings-nav-mobile` 只有 5 个 section 锚点 ⇒ <768px 用户**无法**检测 OCR/LLM 连通性 | **P2** | **✅ 已完成（R87 第二十七批）** | 功能性入口在**窄屏**也必须可达；「元素存在」≠「元素可达」（e2e 只在桌面视口跑 ⇒ 缺陷不可见） | **R87 第二十七批（2026-10-10）**：加 `md:hidden` 的 `#test-conn-btn-mobile`（`templates/settings.html`）+ 抽出具名 `runConnectionTests(btn, scrollToMessage)` 供两入口**共用**（`static/settings.js`）+ 移动入口触发后把结果滚动到可视区；重构由 `devlogs/_verify/r87e_refactor_lossless.py` 机检**旧逻辑零丢失**（64→64 行，集合差空）；护栏 `tests/unit/test_settings_mobile_test_conn.py`（**5 条**）；变异 `devlogs/_verify/r87f_mutation_mobile.py` ⇒ **5/5 CAUGHT**。⚠️ **未在真机窄屏做浏览器级复验**（本环境无 GUI）⇒ 只宣称「入口存在 + 共用同一实现 + 有窄屏可见性机检」，**不宣称「移动端已可用」**。 |
+| **0-37** | **诊断报文低报**：`artifact_freshness` 报「8 个源文件与清单不符」却只列 **5** 个（`scripts/bundle_manifest.py` 的 `diverged_src[:5]`）；门禁 `release_gate.py` 的 `problems[:4]` 同类 ⇒ 读者**无法据以行动**（得再跑一次工具才能拿到全部路径） | **P2** | **✅ 已完成（R88 第二十八批）** | 报文的「数量」与「清单」**不得互相矛盾**；任何截断必须**显式声明**余量（低报即缺陷） | **R88 第二十八批（2026-10-10）**：`scripts/bundle_manifest.py` 新增 `_fmt_paths()`（≤上限 20 全列；>上限列前 N 并**明说**「另有 M 个未显示，共 K 个」），**5 处**报文改用它；`scripts/release_gate.py` 的 `problems[:4]` / `blocked[:2]` 补「另有 N 项未显示」。护栏 `tests/unit/test_bundle_manifest.py::TestProblemReportDoesNotUnderReport`（**3 条**）+ `tests/unit/test_release_gate.py::TestArtifactFreshness::test_truncated_problem_list_declares_the_remainder`（**1 条**）；变异 `devlogs/_verify/r88a_mutation_underreport.py` ⇒ **3/3 CAUGHT**。实测报文现**列全 8 个**。只改 `scripts/**` + `tests/**`（**均不入包**）⇒ **不扩大**失效面。 **同轮清扫**：按同形态全扫 `scripts/**` 又找出 **6 处**同类（`release_gate.py` 4+1、`golden_gate.py` 2、`seed_kb.py` 2、`clean_dist.py` 1）⇒ 抽出**唯一实现** `scripts/report_fmt.py::fmt_list`（`sep` 可选），各脚本按文件位置互导；护栏 `tests/unit/test_report_fmt.py`（含**只有一处实现**的静态扫描）+ `test_check_worktree_clean_declares_truncated_remainder`；变异 `devlogs/_verify/r88d_mutation_shared_fmt.py` ⇒ **3/3 CAUGHT**。 |
+| **0-38** | **截断型 JSON 解析失败的 fix-hint 重试链（无产 + 可长时间挂住 job）**：`e2e_test.pdf` 的 page 2 **稳定**触发 LLM 输出**打满** `_PAGE_MAX_TOKENS=8000` ⇒ `_parse_json`（含 `_repair_truncated_json`）失败 ⇒ `chat_json` 的 fix-hint 重试**再发一次**（**仍**打满 8000）⇒ 单页实测 **373.7s + 903.2s ≈ 21 分钟**；最坏 ~3×1440s = **4320s**（= 0-10 的算术，本轮首次拿到**实测现场**）。`finish_reason` 由 SDK 提供但 `ChatResult` **未采集** ⇒ 产品**无法**区分「截断」与「格式错」；fix-hint 文案亦**不含**「精简/截断」提示 ⇒ 对截断型失败**无产** | **P2** | **✅ 已实现（R92 第三十五批：跳过重试 + fail-closed）** | `finish_reason == "length"` 时**不**走 fix-hint 重试（或改「输出精简」提示）；单页最坏耗时 4320s → 1440s | **R90 第三十批（2026-10-10）定位（未修）**：证据① 多轮 e2e `dual` 轮 page2 `latency=424.3s` + `JSON parse failed`（`devlogs/_verify/r90_e2e_multiround.log`）；证据② 5 路并发 job `f5271c35-70d`（`%TEMP%/pbc_e2e_appdata/PBC/logs/pipeline.log`）：page2 `latency=373.7s` → `parse failed (attempt 1)` → fix_hint `latency=903.2s` → `parse failed (attempt 2)`，**两次 `completion` 均 = 8000**（= `max_tokens`）⇒ **可复现**。**同轮 3 条 FAIL 的单一根因** = 该 job 未在驱动 **1500s** 预算内到终态 ⇒ ① `all_five_reached_terminal`；② `per_job_isolation_storage`（驱动对**非终态** job 的 API 计数取 0、而 DB 仍含其**部分写入** ⇒ 23 vs 21 —— **驱动口径**，非产品缺陷）；③ `no_leftover_nonterminal`（`cancelling`）。⚠️ **并发本身正常**：5/5 准入、峰值重叠 = **5**、`error` 终态 = **0**、并行收益成立（1501s < 2263s）。**R90 第三十二批（2026-10-13）更正**：原记的「前导文本 ⇒ 整条跳过截断恢复 ⇒ parse_error」**不成立** —— 纯函数实测（`devlogs/_verify/r90m_038_parse_probe.py` / `r90n_038_repair_contract.py`）显示真机制是「带前导文本 ⇒ 跳过恢复循环 ⇒ 紧接的双定界符 `find`/`rfind` 块扫描抓到**内层**已闭合的 `{...}`/`[...]` ⇒ **把片段当整页结果返回**」（静默数据丢失：无异常、无重试、`_truncated_recovered` 不置位）；只有「无前导文本 + 尾部裸词」才真走 parse_error。⇒ 已按 **0-40** 修复；`_repair_truncated_json` 本体**未动**。 **R92 第三十五批（2026-10-14）已实现（行为决策：跳过重试 + fail-closed）**：① `ChatResult` += `finish_reason`（归一化）+ `raw_finish_reason`（原始枚举），两套协议枚举不同（openai `length` / anthropic `max_tokens`）⇒ 收敛到 `llm/adapters/base.normalize_finish_reason`（**唯一**判定入口；`""` = 未报 ≠ stop；未知协议/枚举 ⇒ `other`，**不**猜成 length）；② `llm/client.py` 的 `chat()` 退化为**薄包装**，重试/退避/审计/结构化降级收进新的 `_chat_result()`（**一个循环、两个消费者**）⇒ 让 `chat_json` 能拿到 `finish_reason` 而**不**另起一份循环；③ `chat_json` 在 `finish_reason == "length"` 时**不发** fix-hint（同 prompt + 同 max_tokens 必然再次打满），且「截断**且已解析**」单独告警 `content may be incomplete`（不得与「有重试待跳过」混进同一条文案 —— 那一支根本没有待跳过的重试）；④ 留痕 `llm_call_audit.finish_reason`（`db/schema.sql` 单一声明处 + `SCHEMA_VERSION 12→13` + `_migrate_v13`）。护栏 `tests/unit/test_llm_finish_reason.py`（归一化表**钉字面量** / 适配器取字段 / 单一真值静态扫描 / 跳重试 + **反向对照**（`stop`/`other`/**未报** 仍重试 3 次）/ `chat()` 仍返回 `str` / 审计落库 / v13 迁移）；变异 ⇒ **11/11 CAUGHT**。⚠️ **未验**：未在真实上游复现「截断 ⇒ 只发 1 次」（需可用凭据）；`chat()` 非 JSON 路径**不**检查截断（现有调用方只有健康/设置探测，不消费正文）。 |
+| **0-39** | **打包图标管线**全程未接线，且资产被忽略清单**静默吃掉**：`electron/main.js` 找 `electron/icon.ico`（**不存在**），而 electron-builder 默认找根 `build/icon.ico`（**不存在**，且根 `build/` 是 PyInstaller workpath、会被 `--clean` 清掉 ⇒ 默认位置**不可用**，正确落点是 `directories.buildResources`）；唯一在盘的是 `electron/build/icon.ico` = **190 B / 16x16 / 1-bpp DIB 占位**（< electron-builder 的 256x256 下限） ⇒ 产物 `BatchSentry.exe` 用 **Electron 默认图标**。更糟的是 `.gitignore` 的 **未锚定** `build/` 把 `electron/build/` 一并吃掉 ⇒ 该资产**从未进过版本控制**（`git log -- electron/build/` 为空），而失败是**静默**的（构建成功、产物齐备，只是图标是默认的） | **P3** | **需真实资产**（≥256x256 多尺寸 `.ico`；本项目**无**任何 logo/favicon 可派生 ⇒ 属产品决策，须用户提供或明确授权生成占位） | `package.json` 声明 `directories.buildResources` + `win.icon`；`electron/main.js` 指向**同一文件**；该文件存在、ICO 头含 ≥256x256 条目、且**不被** `.gitignore` 忽略；机检 `tests/unit/test_distribution_parity.py::TestPackagingIconIsWired`（含正负对照证明不空转） | **R90 收尾（2026-10-13）定位（未修）**：① 三层证据 —— `git ls-files electron/` 只有 `main.js`；`git check-ignore -v electron/build/icon.ico` ⇒ `.gitignore:7:build/`；ICO 目录头实测 `count=1 / w=16 / h=16 / bpp=1 / payload=168 B`（= 真实 16x16 1-bpp BMP-in-ICO，非推断）。② 全树 `build` 目录**只有两个**（`./build` workpath、`./electron/build`）⇒ 已把 `.gitignore` 的 `build/` **锚定**为 `/build/`（真缺陷，已修），并把 `electron/build/` 改为**显式**忽略（附退出条件）。③ **未做**：真实图标资产（**无来源**，全库唯一候选是 `htmlcov/favicon_32_*.png`，属 coverage 产物）；`win.icon` 接线（**不能**先接 —— 16x16 会让 electron-builder 直接报错，把构建从「静默降级」变成「硬失败」）。 |
+| **0-40** | **`_parse_json` 载荷定位会返回内层片段（静默数据丢失）；`_repair_truncated_json` 返回契约违例 3 例**：旧实现（`if not text.startswith(("{","[")):` 分支 + 双定界符 `find`/`rfind` 块扫描）在「前导文本 + 截断」时把**内层**已闭合的数组/对象当整页结果返回（实测：前导中文 + `{"findings": [{"id": 1, "level": "P1"}], "note": "abc` ⇒ 返回内层数组 `[{"id":1,"level":"P1"}]`；`前言 {"outer": {"inner": 1}, "cut": "xy` ⇒ 返回内层对象 `{"id":1}` 同形片段）—— **无异常、无重试** ⇒ 静默数据丢失；另 `_repair_truncated_json` 有 3 例返回**非合法 JSON**（R3/R4 裸词、R5 冒号后；根因 L681 `out = out[:j+1]` 会切掉已消费的 `"`） | **P2** | 无 | 载荷起点 = 第一个 `{`/`[`；`json.JSONDecoder().raw_decode` 取**一个**完整值（完整 JSON + 前后文字行为与旧实现等价）；失败走**唯一实现** `_recover_truncated_payload`（只试匹配的那一对定界符、**不再 rfind**）；仍失败 ⇒ `_parse_error`（fail-closed）；护栏 `tests/unit/test_llm_client.py::TestParseJson` 6 条 | **R90 第三十二批（2026-10-13）修复**：取证 `devlogs/_verify/r90m_038_parse_probe.py`（6 例）+ `r90n_038_repair_contract.py`（8+4 例）；修复 `r90o_fix_parse_payload.py`（幂等）；变异 `r90p_mutation_parse_payload.py`（S1 还原旧实现 ⇒ **4 条红**；S2 `rfind` 扫描 ⇒ 3 条红；S3 去尾随文字容错 ⇒ 1 条红；S4/S5 负控全绿；`drift=none`）。既有护栏只断言 `isinstance(result, (dict, list))` ⇒ 片段与整体都能过（**弱到不可能红**）。本批已**重建产物**（入包源变更）：门禁 **11/11 PASS**（4135 passed / coverage 95.1%）；便携版 zip 实物 e2e `E2E_RC=0`（29 passed / 0 failed / `llm_audit 3/3`；`findings count=3` 属 **0-15 非确定性**，不作回归判据）。**消费侧已复核**（R90 第三十二批实测 `r90u`/`r90v`；**更正初稿推演**「若按 list 遍历 ⇒ 无 finding 的成功页，比 parse_error 更糟」—— **该推演不成立**）：片段缺 `page_info`/`steps` ⇒ `_validate_page_result` **必然**失败 ⇒ 多一次 LLM 调用 ⇒ 重试仍失败才 `_schema_warn`；`[]` ⇒ `_parse_error`；**唯一静默** = 构造性「恰好含 `page_info`+`steps` 的片段」（返回值键与正常页**无法区分**）⇒ 已加护栏 `tests/unit/test_page_analyzer.py::TestFragmentNeverSilentlyPersisted`（含防空转对照；变异：`REQUIRED_PAGE_FIELDS` 改空集 ⇒ 恰好 2 条红）；修复后 6 输入端到端**零静默**。⚠️ **仍未验**：`raw_digest` 已丢弃原始响应 ⇒ **未**在真实 `chat_json`/流水线复现（0-38 的「改重试语义」行为决策**仍未做**） |
+| **0-41** | **参数自动判定被「参数数量过多」整体吞没（静默降级）**：`core/rules/llm_checks.py:109-118` 在 `len(llm_queue) > _LLM_FALLBACK_BATCH_MAX(=50)` 时**不调 LLM**、改为 flag 人工复核 ⇒ 该页/该 job 的**全部**待判定参数一次性降级，**无 `param_out_of_spec` 产出**；实测 job `670672f3-d0f`（丝裂霉素 51 页）有 **356** 条该 reason 的 findings（分布在**页 5–47**），其 **page 6** 正是 `用户标注.png` 的标注页 ⇒ 该页 **0 条 `param_out_of_spec`**，且**实测值 `6.88` 在全 job findings 中命中 0 次** | **P2** | **✅ 已完成（2026-10-21）** —— 选「**分批**」：`_judge_one_batch` 逐批判定 + 两道闸门（批数上限 8 / 墙钟预算 600s） | 超限时**不得**让整页参数一起失去判定；要么分批（≤50/次）跑完，要么把「该页参数未判定」作为**独立、可检索**的状态暴露给复核页（而非混进 `completeness` 噪音） | **R90 第三十三批（2026-10-13）定位（未修）**：证据 `devlogs/_verify/r91b_161_real_sample_evidence.py`（只读 DB，可复跑）。**已归因**（R90 第三十四批）：reason 内嵌计数 **422** vs 带该 reason 的 findings **356**（差 **66**）是 **UNIQUE 去重吃掉的** —— 见 **0-42**。证据：① 全库 **7 个 job** 的该 reason 行数**均** < N（丢 **64–77 条 = 13–17%**）；② 离线重放该 job （`devlogs/_verify/r91f_reproduce_422.py`）得队列 **400** → 去重后 **337**（丢 **63 = 15.75%**），落在同一区间；③ 重放 400 与当时 422 差 22 = **规则层自 2026-08-19 漂移**（重放 63 与 DB 66 差 3 同源）⇒ 精确到个位不可复现，**机制已证实**。⚠️ **同源旧行为已部分改善**：`_flag_llm_queue_for_review(aggregate=True)`（`llm_checks.py:57`）把超限队列合并为**单条**汇总 finding（此前逐参数各一条 ⇒ 407 参数 = 407 条噪音），故「噪音淹没」已缓解；但**「参数根本没被判定」这一覆盖缺口仍在**。 **✅ 已完成（2026-10-21，选「分批」）**：`_llm_fallback_check` 改为按 `_LLM_FALLBACK_BATCH_MAX`(50) 切块、逐批调用新的 `_judge_one_batch`；单批异常/解析失败**只**降级该批（不连坐）；两道闸门 —— `_LLM_FALLBACK_MAX_BATCHES`(8 ⇒ 400 参数，正好覆盖真实最大样本) 与 `_LLM_FALLBACK_BUDGET_S`(600s，防「批数×单批最坏」相乘) —— 越界批次**显式**降级（每批一条汇总 finding，reason 写明总数/已用时长）。真实样本 job `670672f3-d0f`（51 页 / 400 参数）从「**0 次调用** + 1 条降级」变为「8 次调用 + 400 条逐项判定」。护栏 `tests/unit/test_llm_fallback_batching.py`（11 条，含「不重不漏」计数与 3 条反向对照）+ 改写 `test_queue_over_limit_is_batched_not_abandoned`；变异 **4/4**（还原旧行为 / 摘批数闸门 / 摘预算闸门 / 取消切块），每条后 sha256 逐字节还原。⚠️ **首版变异只 3/4** —— M4（批大小 50→1000）**漏网**，因为用例队列长度 `_LLM_FALLBACK_BATCH_MAX + 10` **跟着常量走**；补「批大小 ≤ 50」「60 参数必须 ≥ 2 批」两条**绝对**断言后才抓住。⚠️ **未验**：8 次调用在真实上游的耗时/限流**未实测**；600s 与 8 批是**最坏情况闸门**，不是实测出来的最优值。 |
+| **0-42** | **finding 描述模板未编码 `time`/`step_no` ⇒ UNIQUE 索引静默丢弃 finding（含 `param_out_of_spec`）**：`core/rules/llm_checks.py` 的三个产出分支（cap/逐参数 L84-87、`in_spec=False` L162-165、`in_spec=None` L175-178）都用**裸 dict + 不含 `time`/`step_no` 的 f-string**，而写库去重键是 UNIQUE `idx_findings_dedup(job_id, source, page, type, description)` ⇒ `kind='cell'` 的**多时间点**条目描述**逐字相同** ⇒ `INSERT OR IGNORE` **静默合并**。实测：全库 **7 个 job** 丢 **64–77 条（13–17%）**；该 51 页 job 重放 **400 → 337**（丢 63）；重复组里 **28/32 是「模板有损」**（成员在 `time`/`step_no` 上不同 = 本是**不同测量**），仅 4 组是真重复 | **P1**（静默数据丢失；且 `in_spec=False` 分支同模板 ⇒ 真实 OOS 可能被合并） | **✅ 已完成（2026-10-15）** —— 选「把 `time`/`step_no` 编进描述」：不动去重键、不动存量行（无 time 时文案逐字节不变） | 任何进 findings 的 description 必须**唯一编码**其区分字段；或让 LLM 路径复用规则层唯一构造点 `make_oos_finding`（`where` 走 `_where_phrase`）⇒ **单一真值** | **R90 第三十四批（2026-10-13）定位；2026-10-15 已修**：修复 = 新增 `_where_tag(q)`，把 `步骤N`/`时间` 编进 `第{p}页` 之后（三个产出分支统一调用），两者都没有时返回**空串** ⇒ 旧文案**逐字节不变**；原 2 条 xfail 转绿，另加 2 条（无 time 时文案不变 / 只有 `step_no` 也能区分）；变异 **4/4**（关标签 / 只丢 time / 只丢 step_no / 无字段仍拼垃圾标签），每条后 sha256 逐字节还原；`test_cross_page_llm` 96 passed、连带 8 个模块 409 passed。原始定位记录：证据 `devlogs/_verify/r91f_reproduce_422.py`（只读 DB + 离线重放，可复跑）。**对照**：规则层 cell 判定走 `make_oos_finding`，同输入产出 **2 条互异**描述（`在 10:38 时` / `在 11:34 时`）⇒ **不丢**；缺陷在**产出侧**，不是 UNIQUE 索引本身。护栏（`xfail(strict=True)` 显式登记 + 陈旧检测）`tests/unit/test_cross_page_llm.py::TestQueueFindingsAreNotCollapsedByDedupKey`（2 条 xfail + 1 条规则层正对照）。⚠️ **未验**：`llm_fallback` 源的**真实 OOS 丢失未直接观测**（全库该 source 仅 7 条，本 job 的 fallback 被 **0-41** 的 fail-closed 拦掉）⇒ 63 条是**条件暴露**（若 LLM 全判越界），**不是**已发生的丢失。 |
+| **0-43** | **源码里残留 23 个 U+FFFD 替换字符**：`core/ocr_client.py`（**19**）+ `core/page_analyzer.py`（**4**）。文件本身是**合法 UTF-8** —— 损坏是**真码点**，形态恒为「U+FFFD + ASCII `?`」替掉一个汉字（早期编码往返的化石），全在注释/docstring，不影响行为，但污染 grep 与阅读（搜不到、看起来像乱码） | **P4**（纯卫生） | **✅ 已完成（R92 第三十五批）** | 注释/docstring 不得含 U+FFFD；改动只碰注释，`py_compile` 通过 | **R92 第三十五批（2026-10-14）修复**：按 git 历史原文逐处还原（`devlogs/_verify/r92a_fix_fffd.py`，幂等）；`ocr_client.py` 23423→23417 B、`page_analyzer.py` 55602→55599 B，**字节级**确认 U+FFFD 计数 23→0。⚠️ **未做**：全库 U+FFFD 全树扫描（本轮只修这两处**已定位**的文件）⇒ 其余文件是否还有同类码点**未验**。 |
+
+| **0-44** | **`retry` 从 `review` 全量删除 findings（含已裁决）**：`api/jobs/actions.py:91-101` 在 `job["status"] == "review"` 时执行 `DELETE FROM findings WHERE job_id = ?`，**无 `status` 过滤** ⇒ `confirmed`/`rejected`/`corrected` 连同 `reviewer_note`/`reviewed_at`/`corrected_text` 一并消失；`analysis_reset` 审计的 `detail` 是**固定文案**（不含条数、不含状态分布）⇒ 事后不可重建；`audit_log.finding_id` 无外键 ⇒ 悬挂。同仓反例：`core/pipeline/stage3.py:166-170` 对**同一语义**删的是 `source IN ('llm_cross','llm_fallback','user_rule') AND status='pending'`（**保留已裁决**）—— 同一个问题两处两个答案，**无机检锁定口径** | **P2** | **✅ 已完成（2026-10-15）** —— 选 **B**（全量归档后重来，UX 不变） | 重跑后 `SELECT count(*) FROM findings WHERE job_id=? AND status<>'pending'` 不减少（选 B 则归档表有等量行）；`analysis_reset` 的 detail 含条数与状态分布；护栏用例 + 变异（去掉归档 INSERT ⇒ 红） | **对抗审查 F1**（`docs/ADVERSARIAL_REVIEW_2026-10-19.md`）。内存库实测：`stage3` 口径剩 `['pending','confirmed','rejected']`、`retry` 口径剩 `[]`。开发库快照 `confirmed=2` ⇒ 路径可达但**未观测到实际丢失**。**✅ 已完成（2026-10-15，方案 B）**：`db/schema.sql` + `db/client.py` 加 `findings_archive`（`SCHEMA_VERSION 13 → 14`，`_migrate_v14`，**迁移体不含 DDL**：表结构只在 `schema.sql` 一处声明，另有 `test_ddl_is_declared_only_in_schema_sql` 机检）；`retry_job` 的 review 分支改为「统计状态分布 → 归档 → 删除 → 审计带条数与分布」；前端重跑确认框补「已确认/驳回的记录会先归档留存，复核页不再显示」。护栏 `tests/integration/test_retry_archives_findings.py`（8 条：归档逐字段 / live 清空 / 审计可重建 / 0 条反向对照 / 建表 2 条 / 幂等 1 条 / 单一声明处 1 条）；变异 **6/6**（`mutate_f1.py`：关掉归档 / 审计退回固定文案 / 只归档不删 / 摘掉 v14 注册；`mutate_f1b.py`：`schema.sql` 表名改掉 / DDL 复制回迁移体）。⚠️ **未做**：`stage3` 与 `retry` 的清理仍**两份实现**（语义本就不同，合并是第二个决策，两处已加互相指路注释）；`findings_archive` **无读取界面**；归档与删除的原子性只靠隐式事务（`retry_job` 整体仍未进 `db_lock`） |
+| **0-45** | **「所有 DB 写走 `db_lock`」在 121 处未落实**：`api/`+`core/`+`db/` 共 64 个 `.py` 里，裸 `execute`/`executemany`/`commit`/`executescript` 共 **116** 处 / **34** 个函数（`db/client.py` 建库迁移占 **54**，运行期 **62**；SQL 取不到另 **3** 处单列。**F2 落地时是 121 / 67，F1 的归档 INSERT +1**）。最密位点：`engine._run_pipeline_impl` 10、`stage1._run_stage1_full` 7、~~`actions.retry_job` 6~~（0-55 已收，见下）、`self_heal._rotation_heal` 5、`state._transition_status_unlocked` 5 | **P3** | 无（**机检已落地**）；收敛须逐单元做，`retry_job` 那 5 处与 **0-44** 是同一处，应合并修 | `python scripts/scan_unlocked_db_writes.py` 的 `unlocked raw DB writes` **单调下降**，每次下降同批重生成基线（`--write-baseline`，**别用 `>` 重定向**：Windows 会把换行变 CRLF）；`tests/unit/test_db_write_lock_discipline.py` 保持绿 | **2026-10-15 护栏落地。** 扫描器重构为**单点实现**（`collect()` 供护栏导入，不复制 AST 遍历）；基线 `tests/unit/db_write_lock_baseline.json`（100 键 / 合计 116 / 另 3 个 unknown）；15 条护栏（判定谓词 9 + 反空转 2 + 棘轮 1 + 基线形态 3）；变异 **6/6**（新增裸写 / 扫描器失明 / 谓词退化 / 真加锁 / 篡改基线 / 嵌套 def 继承锁作用域），每条后 sha256 逐字节还原。**M6 是自查出的工具自身缺陷**：扫描器原先在函数边界不重置锁作用域 ⇒ `async with db_lock:` 体内**定义**的嵌套函数里的裸写被当成已保护（静默漏报）；修前后计数都是 121 ⇒ 只能靠用例钉住。⚠️ **基线是债务快照，不是「已审计安全」**；**116 处未修**（**0-55（2026-10-21）已收掉 `actions.retry_job` 的 6 处**：「清 error_message → 归档 → 删除 → 清 structured_json → 审计 → commit」整体进 `async with db_lock`；**不能**把 `transition_status` 一起包进去（它自取锁、`db_lock` 非重入 ⇒ 自锁死）；锁内审计只能用裸 INSERT（`_audit_log` 同样自取锁）。实测 **122 → 116**、键 **106 → 100**、`retry_job` 计数 **6 → 0**；变异 **1/1**（把 `async with db_lock:` 换成 `if True:` ⇒ 扫描器回到 122、棘轮用例变红，`devlogs/_verify/mutate_055.py`），每条后 sha256 逐字节还原，护栏只保证「不新增」。⚠️ 扫描器是**语法层**判定，且**看不见跨函数**的持锁约定（`_transition_status_unlocked` 属此类：调用方已持锁） |
+| **0-46** | **页豁免 `exemption` 有两个独立写者，自愈重建 JSON 时不搬运**：`page_cache.ocr_diagnostics` 是**一个 JSON blob**，`set_page_exemption` 与 `_self_heal_diag` 都写它；后者**重建** dict ⇒ 顶层 `exemption` 消失 ⇒ 报告侧（唯一读者读顶层）看不到该页豁免 ⇒ 门禁 2 被绕过 | **P3** | **✅ 已完成（2026-10-15）** | 设豁免 → 该页自愈 → 报告仍列出该页；**撤销的豁免不得从历史里复活** | `_self_heal_diag` 显式搬运 `prior["exemption"]`（**只搬一层、不递归** —— 递归会让已撤销的豁免复活）；`set_page_exemption` 的读-改-写整体进 `db_lock`（审计仍用裸 INSERT：`_audit_log` 自取锁且非重入）。护栏 `tests/unit/test_self_heal_preserves_exemption.py`（7 条，含 3 条反向对照）+ `tests/integration/test_page_exemption_atomicity.py` + 端到端 `tests/integration/test_exemption_survives_self_heal.py`；变异 ⇒ **3 红** |
+| **0-47** | **`update_finding` 的 `old_status` 锁外读**：`api/review.py` 先 `SELECT ... status`（**锁外**）再 `async with db_lock:` 写 ⇒ 两个并发请求都读到 `pending`，审计写成**两条相同**的 `pending → confirmed` | **P3** | **✅ 已完成（2026-10-15）** | 并发两条 `confirmed` ⇒ 审计必须是「一条 `pending → confirmed` + 一条 `confirmed → confirmed`」，且不得出现两条同源迁移 | `SELECT` 移进 `db_lock`。护栏 `tests/integration/test_finding_update_audit_race.py`（确定性闸门 + 反空断言）；**修复前实测** `['status: pending → confirmed', 'status: pending → confirmed']`，**修复后** `['status: pending → confirmed', 'status: confirmed → confirmed']`。⚠️ **不要**用 `UPDATE ... RETURNING status`（本机 sqlite 3.45.1 返回**更新后**的值，拿不到 old_status） |
+| **0-48** | **签名栏「姓名 + 日期」缺哪一半没有确定性判据**（用户 2026-10-26 第 12 条裁定的**后半句**）：`core/signature_date_need.py` 只答了"要不要日期"（用于抑制无据断言），"这一格缺了哪一半"此前只有 LLM 在报 ⇒ 不可回归、不确定。实测两份真实语料 `signatures[]` 里「有日期、无姓名」**12 条**、「有姓名、无日期」**106 条** | **P2** | **✅ 已完成（R119）** —— 只判**行内「栏名：值」**；靠表格列位对齐的签名格一律弃权（真实语料列错位常见，p13 有「取样者 | 2025年01月21日07时34分」） | 有日期无姓名 ⇒ `info`（姓名识别不可靠，见 **0-63**）；有姓名无日期且**栏名含"日期"** ⇒ `warning`；「检验日期」「生产日期」不得命中 | `core/signature_pairing.py`（纯标准库，不 import `core.rules.*`，避免与 `core.rules` 成环）+ `stage3` 把早就 SELECT 出来的 `raw_html` 带进 `page_structures` + `_normalize_pages` 保留 + `_check_completeness` 调用。真实语料命中 **10 条**，逐条回原文核对全部有对应空格（p29/p30/p31/p32 `QC 批准/日期` 与 `复核人`、p12 `负责人`、p9 两处、p4 中控QA 只签名）；**弃权 2 类**：p2「王2025.01.30」（姓名只认到姓，单字也算有痕迹）、p13 日期格。护栏 `tests/unit/test_r119_signature_pairing.py` 19 条 + `test_r119_stage3_plumbing.py` 3 条 + 变异 **6/6 CAUGHT**（含两条管道型：规则层不调用 / 归一化丢字段）；**真实数据端到端** `devlogs/_verify/r119_stage3_e2e.py`（两个真实 job 的 page_cache 副本 喂真实 stage3）落库 **10 条**，与规则层直接命中的 10 条逐条一致。⚠️ `scripts/replay_rules.py` 只喂 structured_json ⇒ 用它验本判据会得到"0 命中"的**假结论**。⚠️ **未验**：无标注集 ⇒ 精度**无可信数字**；"姓名只认到姓"的残缺形态未单独成判据；与既有跨源去重的关系已用用例钉住（不是推演）：LLM 报成 `completeness` ⇒ **已被抑制**；报成 `signature_time_anomaly` ⇒ **仍各出一条**（`rule_covered` 用精确类型，不并族 —— 并族会吞掉独立观察到的「姓名不符」，属漏报） |
+| **0-62** | **首次打开 35.9s 里的 14.1s 是「进程创建 + 杀软扫描」段，本批未动** | **P3** | 需减小 one-dir 载荷（`pymupdf` 36M / PIL 13M 全量）或改分发形态（安装包 + Defender 排除说明） | 全新安装后首次 `/health` 就绪 ≤ 10s；同一台账分段 `[spawn] → [boot]` ≤ 3s | **R95 实测**（`backend-boot.log` 2026-10-22 那次，用户手工测试）：14.1s 进程创建 / 1.9s uvicorn / **19.4s `import main`** / 0.5s lifespan = **35.9s**；同产物缓存热 **2.7s**。**19.4s 段已修**（`openai` 延迟导入：导入事件 1340 → 665、累计 2.91s → 1.13s，护栏 `test_startup_import_cost.py` 6 条、变异 4/4）；14.1s 段**未修**（属载荷与防护策略，不是代码缺陷） |
+| **0-63** | **PaddleOCR-VL 对连笔手写姓名系统性漏识别（日期/印刷体正常）** | **P2** | 需换/补 OCR 后端或加手写专项；本批只做归因 | p6 / p8 的 `raw_html` 里签名槽不再出现 `___` 或空值；或报告能把这类页标成"OCR 疑漏"而不是"记录缺失" | **R95 取证**：p6 原文 `执行人/日期：`、`检查人/日期：` 两格为空，页图 `devlogs/_verify/_sy_pages/p06_sign.png` 两格均有手写 `…2025.05.20`；p8 原文 `转移人/日期：___ 2025.06.03`（日期读到、名字成下划线），页图 `p08_bottom.png` 名字清晰。⇒ 与 A7/A10 完全对应；全 10 页"标签在、值空"的槽位共 **5 处**（p1×1、p6×2、p8×2）。**本批只改归因**（"未识别到…（如原页已签，属 OCR 漏识别）"）+ `_blank_slots` 报空槽，**未修 OCR** |
+| **0-64** | **文档级缺失被逐页重复报告**（`缺少生产日期` 在 p5 / p10 各一条） | **P3** | **✅ 已完成（R121）** —— 不需要新定义"判定域"：复用 CR-10 已有的 `document_fact_kind` 分类器，缺的不是判据而是**那一层看不见已落库的行** | 同一文档级缺陷在复核页只出现 **1 条**（或明确标注"全份记录共 N 页均无此字段"） | **R95 实测**：10 页 `raw_html` **没有任何一页**含"生产日期"字段（`grep 生产日期` = 0/10）⇒ 缺陷为真；但 `findings` 里 `1590 p5` 与 `1595 p10` 各报一条同义条目。属 A9 同族（重复）但在**文档级**。**R121 修复**：根因不是没有聚合逻辑，而是 `reduce_document_level_facts` 只跑在 Stage 3 的**内存** findings 上，`llm_page` 在 Stage 2 就落库、不在那个列表里 ⇒ 两条谁也收不到。新增 `core/finding_noise.plan_document_level_collapse`（纯函数，复用 CR-10 分类器）+ `stage3._collapse_persisted_document_facts`（执行计划：改保留行 → 删多余行 → 落审计）。**刻意只合并跨页**：同页重复是另一个缺陷（A9 之前的历史数据，实测 17 组 `llm_page`+`llm_cross` 全在 2026-08/09），合并会把它的症状掩盖掉。**已裁决行与规则层行不动**（前者是复核结论，后者已有阈值治理）。护栏 `tests/unit/test_r121_doc_level_collapse.py` 13 条（含**管道层**一条：真跑 `_run_stage3_cross_analysis` 后查库 —— 变异 M5 实测证明只测 helper 抓不住"没接线"）+ 变异 **6/6 CAUGHT**；真实数据（库**副本**）实测 `4cffb358` 8 条 → 7 条、p5/p10 收敛为 1 条且其它 job 行数不变。⚠️ **未覆盖**：`所有签名均无日期，无法进行签名时间逻辑检查。`（p40/p48，51 页 job）不含"生产日期"字样 ⇒ 分类器不认，仍是 2 条。要覆盖它得引入"逐页同一结论"这一**更一般**的机制（合并后文案口径也要重新定义），而实测只有 1 例 ⇒ 不据此扩词表 |
+| **0-65** | **公开 GitHub 仓库（`haowuxiwang/BatchSentry`，`private: false`）含第三方真实批记录标识与员工姓名**：批号 `50008219` / `50008119` / `50340607` / `51240503`、记录号 `H5-MPD-90038-R04`、产品「康泰普利片 10 mg」、企业「华康药业 / HUAKANG」、员工姓名 `周雅` / `吴伟胜`（⚠️ 上述均为 R127 **脱敏后的占位形态**，真实值只存在本地 gitignored 映射表） | **P0** | **用户决策**：① 脱敏重写（会削弱 `CROSS_REVIEW` 里"批号 OCR 读错 1 位"这类证据链）② 转私有仓库 ③ 两者都做 | 被跟踪文件对上述模式 **0 命中**（当前非 0）；且 git **历史**的处置口径由用户确认（改写历史 or 接受已公开） | **R127 实测（公开快照 `c70a620`，2026-10-14）**：`docs/ADVERSARIAL_AUDIT.md` / `docs/TODO.md` / `tests/unit/test_rule_gmp.py` / `tests/unit/test_llm_finding_guard.py` 含 `周雅` / `吴伟胜`；`CHANGELOG.md` / `docs/TODO.md` / `docs/B6-1_GENERALIZATION_REPORT.md` / `.gitignore` / `tests/e2e_frozen.py` 含批号与产品名。**未推送的本地更严重**：`docs/CROSS_REVIEW_2026-10-22.md` **13 处**含 `王小雨` / `卫丹丹` / `赵阿巧` / `蒋俊`，`core/rules/llm_finding_guard.py`、`core/signature_date_need.py` 含 `郑旭` / `吴伟胜` ⇒ **下一次 push 就会把它们送上去**。⚠️ **R127 处置（2026-10-28）：已选 ①脱敏重写并执行。** `scripts/scrub_pii.py`（映射源 `devlogs/_verify/pii_map.json`，**gitignored** —— 其左列就是真值，不能入库）+ **保结构替换**：批号只换前 3 位（后 5 位 `08219` 保留）⇒「OCR 读错 1 位」证据仍成立（`50008219` vs `50808219` 仍只差 1 位）；姓名只换姓 ⇒ 近形对（`王小雨`/`王涛雨`）仍成立。实测 **27 文件 / 356 处**，改后 `--check` 残留 **0**。`.gitignore` 里三个**真实文件名**已改为根锚通配 `/*.pdf` `/*.png`（`.gitignore` 本身被跟踪 ⇒ 列真名等于再泄一次；已验证 `git ls-files` 根级 pdf/png = 0，无假排除）。⚠️ **仍未处置**：**git 历史**（`c70a620` 及更早）无法脱敏 —— 删文件抹不掉历史 ⇒ 改写历史 + force push / 转私有 / 接受已公开，由用户裁定（2026-10-28 用户选「仅准备清洗脚本」，暂不重写、暂不转私有）。**⚠️ 2026-10-28 晚改判：用户选 A —— 删除 GitHub 仓库，用当前已脱敏工作树重建后重新推送**（不重写历史、不做 force push；代价是丢 stars/issues，且已有 fork/缓存仍可能留存旧内容）。重建前自检口径：`scrub_pii.py --check` 0 命中 + `git ls-files` 根级 pdf/png = 0 + 本机历史不含测试材料。R128 15:19 已备 `scripts/purge_pii_history.py`：dry-run 将 28/28 条映射全部纳入（`devlogs/purge_pii_dryrun_r128.log`，日志不含真值），`--apply` 只在 scratch clone 重写并自检、不 push；执行前需 `pip install git-filter-repo`**；仓库当前仍是 `private: false` |
+| **0-66** | **真实 LLM 密钥在公开仓库的 git 历史里**（`sk-vprn…`，自 `81964a3` 起；`tests/unit/test_no_committed_secrets.py` 的 docstring 自述这是"真实事故"） | **P0** | 用户到 SiliconFlow 轮换（`MEMORY.md` §0 记旧 key 402→401、新 key 实测 200 ⇒ **很可能已轮换**，需用户确认**时间点**） | 轮换时间早于公开时间即可结案；仓库侧只保留夹具形态（拼接构造，已有护栏） | **R127 实测**：`git merge-base --is-ancestor 81964a3 c70a620` ⇒ **真**（该提交确在公开历史上）。删文件**不能**抹掉历史 ⇒ 唯一处置是轮换。⚠️ **未验证**：轮换是否发生在泄露被发现之前。R128 清洗脚本 `scripts/purge_pii_history.py` 也会替换该 key 文本，但**轮换仍是唯一可靠处置**。**2026-10-28 晚用户确认：旧 key 已轮换并失效** ⇒ 本项按"已处置"结案（轮换具体时间点待补） |
+| **0-67** | **PyMuPDF 是 AGPL-3.0 / Artifex 商业双许可，且是硬运行时依赖、被冻进产物** ⇒ 以 Apache-2.0 分发**含它的冻结 exe** 不成立 | **P0** | **✅ 已落地（2026-10-28）：用户选 ③（整体 AGPL-3.0-only）**，理由是"最小最快闭环 + 不改依赖"。`LICENSE`（AGPL 官方原文，sha256 登记）/`NOTICE`/`package.json`/`package-lock.json` 四处同步；`tests/unit/test_license_consistency.py` 14 passed（含正文哈希、SPDX 一致性、NOTICE 双向声明）。护栏 `license_scan` 仍**不接门禁**（恒红风险） | 三选一落地：① 仓库内有商业许可凭据 ② 依赖树无 AGPL 且产物级 e2e 全绿 ③ 产品整体改 AGPL 并披露后果 | **R127 实测**：`importlib.metadata` 的 `License` = `Dual Licensed - GNU AFFERO GPL 3.0 or Artifex Commercial Lic`；`import fitz` 出现在 `api/jobs/page_image.py` / `api/jobs/upload.py` / `core/ocr_client.py` / `core/mineru_client.py` / `core/pipeline/ocr_support.py` / `core/pipeline/self_heal.py` **6 处入包源码**。⚠️ **此前为何漏**：`docs/ROADMAP_v1.1.md` §7.2 认真评估过 docling / MinerU / Marker 的 AGPL，但评估的是**可选对照引擎**；**真正入包的 PyMuPDF 从未进入评估**。`docs/DEPENDENCY_AUDIT.json` 只有 CVE 字段 ⇒ 许可合规**全链路无检查点**。分析见 `docs/LICENSE_AND_DEPENDENCY_AUDIT.md` §6。**R128 收尾实测**（`scripts/license_scan.py`，扫描域 = PyInstaller `PYZ-00.toc` 的 import 闭包，**不是** `site-packages`）：真正冻进 `pbc-server.exe` 的是 **90 个发行版**（≠ `requirements.txt` 的 14 个直接依赖，≠ pip-audit 的 43 个条目 ⇒ 三条口径差 2–6 倍）。按族：`AGPL=1`（**只有 PyMuPDF**）/ `LGPL=1`（`chardet`）/ `MPL=1`（`certifi` —— 弱 copyleft，**上一版分类器会把它算成 permissive**）/ `permissive=87`。⚠️ 90 个里**只有 7 个**没有结构化许可字段，其中 6 个自由文本是 `MIT`/`BSD-3-Clause`，**唯一的 copyleft 就是 PyMuPDF** ⇒ 只读 `License-Expression`+`Classifier` 的分类器**恰好漏掉最该抓的那一个**（已用用例钉住）。另有 **4 个未解析模块**：`win32con`/`win32evtlogutil`/`winerror`（= **pywin32**，实测 `License: PSF`，宽松）+ `sitecustomize`（见 0-71）—— `packages_distributions()` 对 pywin32 **没有 top-level 映射**，这是"映射失效"，**不等于没有依赖** |
+| **0-68** | **许可合规与数据泄漏都没有机检**：`scripts/release_gate.py` 的 10 项里既无 license 扫描，也无"被跟踪文件是否含真实批号 / 姓名"的扫描 | **P1** | **部分完成（R128）**：`no_pii_in_tracked_files` 已落地并接线 + 变异 **8/8 CAUGHT**（脚本 `devlogs/_verify/r128_gate_pii_mutation.py`；8 个正变异 + 1 个阴性对照，**R128 收尾复跑实测** `8/8 CAUGHT，0 MISSED，阴性对照越权 0`，三份被改文件收尾 sha256 全 OK）；`license_scan` **工具已完成（R128 收尾）但故意不接门禁** | 门禁新增 `no_pii_in_tracked_files`（已完成）；`license_scan` 的接线**被 0-67 阻塞** —— 0-67 未定案前接成 FAIL 会得到一个**恒红**的检查（PITFALLS §三十一：恒红的门禁与恒真的判据一样零判别力），接成 WARN 则**没有执行点**（本轮已清掉 3 处同类 fail-open）⇒ **要么定案后接 FAIL，要么先不接**，没有第三种 | **R127 定位**：`docs/DEPENDENCY_AUDIT.json` 顶层键 = `schema / generated_at / source / requirements_sha256 / locked / packages_with_vulns / totals` ⇒ **无 license 字段**。现有 `test_no_committed_secrets.py` 只认 `sk-` 形态，其 docstring 已如实声明"不要因为本文件全绿就认为仓库里没有任何密钥"。**R128 落地**：检查分两段 —— ① **结构段**（永远可判）：`.gitignore` 不得出现"具体 + 非 ASCII"文件名；② **字面量段**：`scrub_pii.py --check`，本机无映射表 ⇒ **WARN 不 PASS**（映射表故意不入库）。⚠️ **上线即抓到一条手工脱敏漏掉的真实泄漏**：`.gitignore:170` 写着 一份**含联系人 PII 的申报材料文档名**（该行注释自述）⇒ 已改根锚通配 `/*.docx`。**这个漏网正是"手工清单不可靠、必须机检"的实证**。⚠️ 结构段的代价是**明确漏报 ASCII 命名的真实文件**（已写进 `suspicious_ignored_filenames` 的 docstring） |
+| **0-69** | **代码里 SiliconFlow 的默认模型与用户裁定冲突**：`config.py:561` 的默认值是 `deepseek-ai/DeepSeek-V4-Pro`，而用户 2026-10-21 明确"**只允许** `deepseek-ai/DeepSeek-V3.2`，改模型/换提供方前必须先问" | **P1** | **已修复（2026-10-28，用户明确"只能用 V3.2"）**：`config.py` 默认值与 `.env.example` 已改为 `deepseek-ai/DeepSeek-V3.2` | 产物在**不设** `SILICONFLOW_MODEL` 环境变量时，`GET /api/settings` 返回的 `model` 等于用户裁定的那个 id | **R128 实测**：`tests/e2e_frozen.py` 对现有 `dist/pbc-server/pbc-server.exe` 跑出 `settings_llm_model_matches: model=deepseek-ai/DeepSeek-V4-Pro` ⇒ **产物实际用的就是 V4-Pro**。`config.json` 里写的是 V3.2，但 `grep -rn 'config\.json' --include='*.py'` **零命中** ⇒ 应用**根本不读** `config.json`（它只是本地凭据中转，被 ad-hoc 脚本读），所以 `config.py` 的默认值是唯一来源。⚠️ **未验证**：V4-Pro 是否为 SiliconFlow 现存模型 id（同次 e2e 的 `llm_audit_success=1/2` 有 1 次失败，**归因不明**，可能是模型名无效、也可能是瞬时错误 —— 不得据以断言）。**R128 追加证据**：同日 09:13 那次 e2e 用**同一默认模型**拿到 `success=1/2`（成功过）⇒ **模型 id 有效**；10:56 复跑变成 `402 / code=30001 余额不足`（免费端点仍 200）⇒ LLM 链路**当前无法验证**，属**环境**（充值后复跑），**非产品缺陷**。⚠️ **R128 15:04 修复后**：重建产物 + 独立 APPDATA 探针实测 `model=deepseek-ai/DeepSeek-V3.2`（`devlogs/verify_default_model_r128.log`），产物级 e2e 3/3 PASS（`devlogs/e2e_artifact_r128_rebuilt.log`）；上文"V4-Pro"为**修复前**证据。这是"决定记在记忆里、代码没跟着改"的又一例（同 §12「已核销清单不能当证据」） |
+| **0-70** | **`release-archive/` 里的旧包与今日构建同名同版本，`clean_dist.py` 完全不看它** ⇒ "该发哪一个"仍有歧义 | **P2** | **方案 ② 已完成（R128 收尾）**：`clean_dist.py` 现在对 `release-archive/*.zip` 做**只读**体检（`archive_inventory` / `read_archive_provenance`，不解包、不删除、不改名）；**方案 ① 仍待用户裁定**（每次构建递增版本号 —— 那是发布流程决定） | 二选一落地：① 每次构建递增版本号（字符串本身可区分）② `clean_dist.py` 把 `release-archive/*.zip` 一并体检，读包内 `PROVENANCE.txt` 的 `git_head` 与 HEAD 比对并给出落后提交数 | **R128 实测**：`release-archive/BatchSentry-Portable-1.2.1-20261013.zip`（205 MB，908 条目）包内 `PROVENANCE.txt` = `git_head: a225fb8` / `built_at: 2026-10-13 17:11:47` / `version: 1.2.1`；今日重建产物 `dist-electron/win-unpacked/PROVENANCE.txt` = `git_head: 188609a` / `version: 1.2.1` ⇒ **版本号一字不差、代码差 70 个提交**（`git rev-list --count a225fb8..HEAD` = 70；⚠️ 这个数**随时间增长**，实测会给出当前值 —— R128 收尾实跑已是 **74**）。`scripts/clean_dist.py:112` 只取 `root.iterdir()` 里 `name.startswith("dist")` 的目录 ⇒ **归档 zip 不在体检范围内**（这就是方案 ② 要补的洞）。**R128 收尾实跑**（`python scripts/clean_dist.py`，dry-run）已输出：`214.9 MB | version 1.2.1 | git_head a225fb8 | built_at 2026-10-13 17:11:47 | 落后 HEAD 74 个提交`，并点名**「同版本不同码」**。用例 8 条、变异 **4/4 CAUGHT**（含"`--apply` 动了归档"这一越权方向；⚠️ 该变异首版 **MISSED** —— 因为用例把 `to_recycle_bin` mock 掉了，正是被断言的副作用被拆掉，改成走真函数后才抓住）。⚠️ **这不是新问题**：`docs/TODO.md` 早已记过同一危险（"当版本号恰好一致时，连人眼扫一眼版本号都失效"）⇒ **1.1.9 时记过一次，1.2.1 复发** |
+| **0-71** | **构建不密闭：产物里冻进了 agent harness 的 `sitecustomize.py`（safe-delete shim，来自 `D:\workbuddyinter\WorkBuddyAI\...\cli\vendor\shim\`）** | **P3** | 构建时 `--exclude-module sitecustomize`（或构建期清空 `PYTHONPATH`）。**本轮不改**：改构建脚本会让 `artifact_freshness` 立刻变红 ⇒ 必须重出 205 MB 产物，而 LLM 链路当前 402 ⇒ 重建后**无法完整验证**（宁可留一个"已证实无害"的已知项，也不留一个没验过的新产物） | 重出的 `PYZ-00.toc` 里 `sitecustomize` **0 命中**；且 `dist-electron/win-unpacked/PROVENANCE.txt` 的 `git_head` == HEAD | **R128 收尾实测**：`license_scan` 的"未解析"桶点名 `sitecustomize`，其 TOC 路径 = `…\WorkBuddyAI\resources\app.asar.unpacked\cli\vendor\shim\sitecustomize.py`（内容自述为 safe-delete shim）。⚠️ **先做了实验再定性**：临时打一个 `--onefile` 探针，冻结后 `"sitecustomize" in sys.modules` = **False**、`os.remove.__module__` = `nt` ⇒ **冻结应用不执行它**（PyInstaller 不跑 `site.execsitecustomize()`）⇒ 这是**死重量**（外来代码被打进产物、跨机器构建不可比），**不是**"生产的删除被重定向到回收站"。**未做**：它在包里是否影响 `license_scan` 的许可证归属（它无发行版元数据 ⇒ 计入"未解析"，已如实报出） |
+| **0-72** | **OCR 手写数字误读把"越界"读成"合规"（假阴性）**：51 页语料 p6「中和后 pH」原图手写 **1.88**（规格 6.8~7.0），PaddleOCR-VL 输出 **6.88** ⇒ 规则层 R3 判"在范围内"，**不产生任何 finding**；真实值则是明显越界 | **P0**（合规结论方向性错误，不是噪声） | **未修**。根因同 0-63（手写识别），但后果更重：0-63 是"缺值→提示人工"，这里是"错值→给出**错误的通过**"。需要 ① 关键数值字段的手写复核标记（OCR 置信度/来源分层），或 ② 第二 OCR 后端交叉比对（`OCR_DUAL_COMPARE` 接上时对**数值**逐字符 diff，不一致即降级为"需人工核对"） | 同一页在 `findings` 里出现"中和后 pH 需要人工核对"（或直接报越界），而不是静默通过 | **R129 交叉对比实测（2026-10-28）**：`试用批记录.pdf`(10 页)/`丝裂霉素提取批记录.pdf`(51 页) 各跑一次 PaddleOCR-VL（token 为本轮用户提供），再对 p6 做**视觉复核**（`devlogs/_verify/p06_mid.png`，裁切右栏）。同页 8 个字段中 **7 个一致**（接收开始/结束时间、接收体积、磷酸用量、签名姓名×2、批号主体），**1 个冲突**：pH `1.88`(视觉+用户标注) vs `6.88`(OCR) —— 单字符差异，恰好把越界变成合格。其余 OCR 瑕疵：磷酸批号 2 行连写后尾段被粘连、`m³` 记为 `m 3`、页脚注被识别成乱码（噪声 13/23 的同类）。⚠️ 取证产物（页图/OCR 全文）只落 `devlogs/_verify/`（gitignored），**未入库** |
+> 用法：完成一条就把 `[ ]`/状态改掉并补证据列。**0-1 / 0-2 是用户动作，agent 不代做。**
+
+## 0.1 R66 核销台账（§A 及以下，2026-09-30）
+
+> **方法**：从 §A 起抽取全部 `[ ]` 条目（脚本 `devlogs/_verify/todo_unchecked.json`），
+> 先筛出**自带"已修/已完成/不成立"类标记**的 16 条 —— 这些才是"可能已完成却仍显示未做"的
+> 高危面；再**逐条去代码/产物里取证据**（不看条目自述，自述不是证据）。
+> 结论：**15 条证实已完成 ⇒ 就地翻 `[x]`**；**1 条（`#163`）只部分完成 ⇒ 保持 `[ ]` 并加注**。
+> 其余 70 条**无解决类标记**，抽查其中 12 条（`#144`/`#145`/`#146`/`#147`/`#148`/`#163①`/
+> `#165`/`#168`/`#169`/`B2-9`/`B3-3`/`B4-2`/`B7-2`）**均确认仍开放**，故保留 `[ ]`。
+> ⚠️ 其中 **`#146`（`8d5848d`）与 `#144`（`172957c`）已在 R66 第四批修复**、**`#145`（`acd25ed`）已在 R68 第六批修复** ——
+> 抽查时它们**确为开放**，本批才结案 ⇒ 已移出 §0.1.3、并入 §0.1.1。
+> **这不是"抽查错了"，是先后顺序。**
+> 同理 **`B2-9` 已在 R125 修复**、**`B3-3` 已在 R126 修复** ⇒ 均已移入 §0.1.1
+> （R66 抽查时它们确为开放）。
+
+### 0.1.1 已核销（26 条）
+
+| 条目 | 优先级 | 证据（R66 实测） |
+|---|---|---|
+| **B10-1** 守卫晚于请求体解析 | **P1 安全** | `main.py:318-420` **纯 ASGI 中间件**（`add_middleware` LIFO ⇒ **最后注册=最先执行**）：① Host/Origin 不读 body 即判 ② 流式体积上限 ③ 非法/负 `Content-Length` 一律拒（对应 `CVE-2026-53540`）。护栏 `tests/unit/test_local_guard_middleware.py` ⇒ **17 passed** |
+| **B10-2** 依赖漏洞 | **P1** | `requirements.txt` 实测：`python-multipart==0.0.31`（原 0.0.21）、`Pillow==12.3.0`（原 10.1.0）、`requests==2.33.0`、`python-dotenv==1.2.2` |
+| **B10-3** Electron EOL | P2 | `package.json` ⇒ `"electron": "43.7.4"`（原 33.4.11）；门禁 `runtime_eol` 报在支持线 `[41,42,43]` 内 |
+| **B10-4** 门禁加"依赖漏洞 + EOL"两项 | **P1** | `release_gate.py::run_all()` 实为 **11 项**，含 `dependency_vulns` 与 `runtime_eol`（本轮 F1 就是这条脱节） |
+| **B11-7** 升级 4 个依赖 | **P1** | 同 B10-2；门禁 `dependency_vulns` ⇒ **0 条公告**（快照 6 天前，扫描 43 条目） |
+| **B11-8** Electron 升到受支持线 | P2 | 同 B10-3 |
+| **B11-9** 残壳收敛 + 产物唯一性 | P2 | 根目录由 **4 个 `dist*`** 收敛为 **2 个**（`dist/`、`dist-electron/`）；门禁 `dist_variants` ⇒ **1 份完整产物**、`artifact_freshness` ⇒ **2 份产物与源码逐字节一致** |
+| **B11-17** 删零消费依赖 `docx` | P2 | `package.json` ⇒ `"dependencies": {}`（已无 `docx`） |
+| **B11-18** Pillow 12 弃用 + 机检 | P2 | `core/pipeline/self_heal.py:190` 用 `get_flattened_data()`；护栏 `tests/unit/test_pillow_api_compat.py`（16 KB） |
+| **#167** KB 缺护栏 | P2 | `tests/unit/test_kb_multisource.py::test_type_queries_covers_every_rule_type` 存在：断言 `TYPE_QUERIES ⊇ CANONICAL_TYPES \ 开放桶`，且含**非空转下限** `>= 19` |
+| **#166** 2 个规范类型无词表 | P2 | 同上护栏**显式**把 `user_rule`/`uncategorized` 列为开放桶并写明理由 ⇒ **设计如此，不是缺口**（实测 `TYPE_QUERIES` 21 键、`CANONICAL_TYPES` 21 项） |
+| **#162** TODO 内远端值自相矛盾 | P2 | 已修；且"每轮只改一处更新行"已升级为**机检** `tests/unit/test_todo_freshness.py`（复核戳不得落后于 CHANGELOG 的 Round） |
+| **A4** 硅基流动 402 阻塞 | P1（阻塞） | 阻塞已解除（2026-09-18，条目内已记）；**其解锁的"含真实 findings 的多轮 e2e"是另一件事**，见 B1 |
+| **#146** 页级失败原因未脱敏 | P2 | **R66 第四批**修：`stage2.py` 新增 `_sanitize_error_text()` = `redact_urls(_mask_secrets(text))[:200]`，**两个出口都**改走它（截断在脱敏之后）。护栏 `test_config_error_visibility.py::TestPageLevelErrorTextIsSanitized`（4 条），变异 `mutation_page_error_sanitize.py` ⇒ **5/5** |
+| **#144** 分片路径不传 `config_error` | P2 | **R66 第四批**修（`172957c`）：分片路径建共享 `config_error` dict、两处 `_analyze_one` 都传、`gather` 后补记被闸门跳过的页、配置级故障下跳过自愈。护栏 `test_pipeline.py::TestConfigErrorVisibility::test_sliced_path_escalates_config_error`（行为级 + 防空转）+ `TestSlicedPathSharesConfigErrorContract`（5 条），变异 `mutation_144_sliced_config_error.py` ⇒ **5/5** |
+| **#145** 批记录正文进日志 / 持久化载荷 | P2 | **R68 第六批**修（`acd25ed`）：`llm/client.py` 新增 `raw_digest()`（`len` + `sha256[:12]`），**3 个日志出口 + `_raw` 载荷全部**改走它；`logging_config.py` **逐库**把第三方降到 WARNING（**root 仍留 DEBUG** —— 抬高 root 会把自家 DEBUG 一起丢掉）+ 新增 `PBC_LOG_LEVEL`（非法值不静默）；`core/page_analyzer.py` 删掉**零消费者**的 `_parse_error_payload`（2000 字模型正文，却被 `api/review.get_page_data` **整份回给浏览器**）、两处 `str(result)[:500]` 收口；`electron/main.js` 的 `backend-boot.log` 加 2 MB 上限 + 轮转。护栏 `tests/unit/test_log_privacy.py`（**26 条**），变异 `devlogs/_verify/mutation_145_log_privacy.py` ⇒ **9/9** |
+| **B4** 巡检器「启动即回收 + 存活信号无空窗」（缺陷 #125） | P2 | **R68 第七批**修（`2c820d9`）：`core/watchdog.py::watchdog_loop` 循环体由「先睡一个周期再首扫」改为「先扫后睡」⇒ 启动即首扫，`last_scan_at` 从第一秒起持续推进；顺带修掉「等待期间被取消也照记 `total_scans`」。护栏 `tests/unit/test_watchdog.py::TestStartupFirstScan`（1 条判别性行为用例 + 1 条 AST 结构钉），变异 `devlogs/_verify/mutation_r69_watchdog_firstscan.py` ⇒ **7/7**（M2「假修复：形状对但跳过首扫」只被行为用例抓住 ⇒ 结构钉**只钉形状**，边界有意保留）。**产物级**：`tests/e2e_frozen.py` 的 `watchdog_invariants` 预算由 `interval + 30`（对 B4 **不判别** —— 旧实现同样绿）改为 `interval * 0.8`，并新增静态护栏 `tests/unit/test_e2e_round_budget.py::test_frozen_smoke_watchdog_liveness_budget_discriminates_scan_first`，变异 `devlogs/_verify/mutation_r69_frozen_watchdog_budget.py` ⇒ **5/5**；重建产物上实跑得 `first_scan@t+0.0s (interval=60s)`（`devlogs/_verify/_r69_e2e_frozen2.log`） |
+| **B5-2** `#125` 巡检首扫空窗 | P2 | **与 `B4` 同缺陷、同一次修复**（两处登记同一缺陷 #125，故一并核销）；证据同上 |
+| **B4-1** SSE 断点续传与心跳 | P3 | 条目自述两项**均不成立**、残余已拆出为 `B2-11`，且明写"**本条无需再做**" |
+| **#165** `TYPE_QUERIES`/`GMP_BASIS_MAP` 的 3 个非规范键 | P2 | **R71 第十一批**：**前提否证** —— 它们**不是死键**，而是 LLM 自由枚举的**前置富集键**（富集先于归一：`stage2.py` 442/453→465、`stage3.py` 132/144→191/203）。实测 raw `batch_logic` ⇒ `gmp_basis` 非空 + `kb_refs=4`。**真缺口**：这条顺序不变式此前**无人守** ⇒ 新增 `test_type_sync.py::TestRawEnumEnrichmentContract`（3 条：非规范键集棘轮 + 按集合的源码级顺序不变式 + 正负对照），变异 `devlogs/_verify/mutate_r71_raw_enum_enrichment.py` ⇒ **3/3 CAUGHT** + 负控绿 + 还原字节一致 |
+| **#169** `kb_prompt_inject` 开关不可达 | P2 | **R72 第十二批（2026-10-08）**修：`_STATIC_FIELDS` 补 `kb_prompt_inject → KB_PROMPT_INJECT`、`SettingsUpdate` 声明 `Optional[bool]`、`read.py` 的 GET 暴露 `kb.prompt_inject`、`templates/settings.html` 知识库分区加复选框（`static/settings-ocr.js` 读 GET / 写 POST，失败回滚）。护栏 `tests/unit/test_settings_write_whitelist.py`（**7 条**，含「`SettingsUpdate` 声明的每个字段都必须可达」的**类级**护栏 + 防空转）+ `test_settings_js.py::TestKbInjectToggle`（3 条行为用例）+ `test_api_settings.py`（GET 暴露 / POST→GET→落盘往返 / 未知字段回显）。变异 `devlogs/_verify/mutate_r72_c4_kb_prompt_inject.py` ⇒ **7/7 CAUGHT** + 负控绿 + 还原字节一致 |
+| **C4** provider 静默改写 + `kb_prompt_inject` 不可达 | P2 | **R72 第十二批（2026-10-08）**：**两半分别结案**。①「provider 静默改写」**已由 B4-4 关闭** —— `config._resolve_active_provider` 是**唯一决策点**（**显式选择绝不改写**，只回传 `applied=false` 的告知），事实经 `GET /api/settings` 的 `llm.auto_activated` 回传前端（护栏 `test_api_settings.py::TestGetSettings::test_llm_exposes_auto_activated_notice`）；写入侧对**未注册** provider 直接 **400**（护栏 `test_api_settings_write_coverage.py::test_unregistered_llm_provider_rejected`）。残余仅 `llm/client.py` 的**防御性**兜底（记 WARNING，非用户可见的静默改写）。②「`kb_prompt_inject` 不可达」**本轮修**（证据见 `#169` 行） |
+| **A3** 「目前只有一份真实批记录」 | P2 | **R76（2026-10-09）前提否证**：仓库根 `试用批记录.pdf`（10 页扫描件；华康药业 康泰普利片 10mg / 批号 50008219 / 记录号 H5-MPD-90038-R04）**一直就在**，且**同一份文件**的 §B6-1 早已点名要用它 ⇒ 前提错、且把**可做**的事挂在「等用户」。实测已跑通，见下一行 |
+| **B2-9** 审计写失败静默 + 自述无停滞清单 | P3×2 | **R125**：`state.record_audit_failure()`（`logger.error` + 进程内计数，**不重试** —— 重试可能双写审计行）；两个审计写入点共用一个计数；`watchdog.runtime_report()` 给出 `currently_stalled`（复用 `find_stalled_jobs`，limit 20 + 显式 total/truncated），库读不出来时降级为 `None` + `currently_stalled_error`（`[]` ≠ `None`）。护栏 `test_r125_audit_and_stall_visibility.py`（12 条），变异 `r125_mutate.py` ⇒ **10/10 CAUGHT** |
+| **B3-3** `RuleSpec.severity` 声明与实现漂移且无人消费 | P3 | **R126**：**删字段**（走条目给的 ②）—— 严重度是**发射结果**的属性，注册表里的声明是第二处真值且**没有校验点**；B1-9 之后同一 type 可发两种严重度（R1b：真倒序 critical / 仅重叠 warning），单一字段本就不够表达。护栏 `test_rule_severity_single_truth.py`（9 条：字段集合 / 构造形态 / 发射词表 / 行为实证），变异 `r126_mutate.py` ⇒ **6/6 CAUGHT** |
+| **B6-1** 第 2 份真实批记录泛化验证 | P2 | **R76（2026-10-09）**：报告 `docs/B6-1_GENERALIZATION_REPORT.md`；第 2 份 `review` / **51 条** / `paddle` / 220s，第 1 份**同版本**基线 **208 条** / 1287s；**无过拟合正向证据**，但**无标注 ⇒ 召回不可测**；快照 `devlogs/_verify/_e2e_appdata_b6_both.db`（SQLite backup API） |
+
+### 0.1.2 只部分完成（保持 `[ ]`，已就地加注）
+
+| 条目 | 已做 | 仍未做 |
+|---|---|---|
+| **#163②** `rule_doc.py` 注释称 R8 是 `low_confidence` | ✅ 实测该处注释已不存在；现存 `_check_low_confidence_params` 是**另一条规则**，非误标 | — （故未翻 `[x]`：同一条目的 ① 仍未做，见下一行） |
+| **#163①** | ② 已修 | `core/kb/retriever.py:5` 注释仍写 "at **29K chars** of corpus"，与当前语料规模不符 |
+
+### 0.1.3 抽查确认"仍开放"（**2 条**保留 `[ ]`）
+
+> 原抽查 12 条；其中 **`#146`、`#144` 已在 R66 第四批修复**、**`#145` 已在 R68 第六批修复** ⇒ 已移入 §0.1.1，故本节剩 **9 条**；**`#165` 已在 R71 第十一批核销（前提否证）**、**`#169` 已在 R72 第十二批核销** ⇒ 本节剩 **7 条**；**`#147`/`#148` 已在 R123 修复**、**`#168` 已在 R124 修复**、**`B2-9` 已在 R125 修复**、**`B3-3` 已在 R126 修复** ⇒ 本节剩 **2 条**。
+
+| 条目 | R66 实测证据 |
+|---|---|
+| **B4-2** `feishu_app_secret` 明文 | `config.py:430` 仍从 `config.json` 直读明文 |
+| **B7-2** ruff 既存欠账 | 实测 `ruff check .` ⇒ **105 errors**（与条目记的 105 **一致**） |
+
+> ⚠️ **本节只覆盖"有可判据"的条目**。`B2-11`（聚合流 DB 异常期是否 yield 帧）
+> **本轮只读到注释、未构造 DB 异常实测** ⇒ **不作判定**，保持 `[ ]`。
+
+
+> 上一轮更新记录（**历史，非当前戳**）：2026-09-23（Round 59：**制定《分发就绪计划》** —— 把"能不能分发"从**判断**
+> 变成 **6 条可机检的门槛（D1–D6）**，按安全/性能/功能三维拆成 **B11-1 … B11-16**；
+> **判据与做法** → `docs/RELEASE_READINESS_PLAN.md`（本文件只放可勾选条目）。
+> ⚠️ **本轮复核出两处与上一轮记录不同的事实**：
+> ① 磁盘上现有 **4 个 `dist*`** = 1 个完整产物（`-160111`，384 MB）+ **2 个残壳**
+> （`dist-electron/`、`-153526`，各 275 MB，缺内嵌后端，`HUSK.md` 具名持有者
+> **`WorkBuddy(pid=16832)`**）⇒ **今天真正的分发判据已从"有没有产物"变成"怕发错哪一份"**；
+> ② `dist_variants` 门禁的判据是"`dist-*` 个数 **> 3** 才 WARN" ⇒ **当前恰好 3 个 ⇒ 不报警**，
+> 而它数的是**目录个数**、不是**可分发产物的份数** ⇒ 最危险的状态落在阈值内侧（→ B11-3）。
+> **最小分发路径 = B11-1 → B11-7 → B11-2 → 一次重建 → B11-11**（其中重建需用户退出宿主、
+> LLM 真验需可用凭据，两者都是**外部依赖**而非工程量））·
+> Round 58：**第五轮对抗性审查** —— 首次审"**供应链与守卫时序**"：
+> 新发现 **B10-1**（守卫晚于体解析 ⇒ 跨站可触发 CPU 型 DoS：实测 16 MB **10.26 s**、
+> 且返回 **422 而非 403** ⇒ 守卫**完全没被走到**）｜**B10-2**（`pip-audit` 首扫
+> **50 条公告 / 26 条 CVE**：`python-multipart` 7 条、`Pillow` 17 条，**两者都在
+> 不可信输入路径上**）｜**B10-3**（产物内 Electron 33 **EOL 17 个月**、
+> Chromium 130 vs 稳定线 M156）。**判定：不建议分发**。
+> 同时复核性能面**无日常问题**（正常上传 54–104 MB/s、读端点中位 2–7 ms、
+> 整树 RSS 699 MB）、精度**无可外推的 P/R**（唯一 1.0 来自合成集）。
+> 报告 → `docs/ADVERSARIAL_AUDIT.md` **§17**；陷阱 → PITFALLS **§三十九**）·
+> Round 45：**B1-9 规则层时序假阳性修复** —— 视觉复核 p48 定位到
+> `_check_time_reversal_cross_page` 把**区间重叠**当成**倒序**并按 `time_reversal` 给
+> `critical`；原图上是**不同设备的两道并行清洗**（D2101/D2102 箱体 03:12→03:36 与
+> 烘盘/盘罩/勺子 03:34→04:12），且两处时刻都是**手写**填写。已改为：真倒序
+> （`curr.start < prev.start`）⇒ critical、仅重叠 ⇒ warning；**手写或日期靠
+> `production_date` 推定 ⇒ 一律封顶 warning**（与 B1-6 的 L4 同源）。真实 51 页回放
+> p48 `critical → warning`；新增护栏 33 例 + 变异验证 4 方向全红。同时**更正上一轮的一处
+> 误读**（原写"两处手写日期 15日 vs 25日"，实测两者都是 25 日）。新增 **B3-3**
+> （`RuleSpec.severity` 声明与实现漂移且无人消费）。
+> Round 43：**第三轮对抗性审查** —— 五路只读审查（前端 / 后端 /
+> 配置与协议 / 流式与规则 / 文档与知识库）+ **视觉直读原页交叉比对**（核 5 页坐实 4 条假
+> critical）+ 产物实测。**判定：无 P0，v1.1.9 可作基线**；新增 **P1×1 / P2×7 / P3×9**，
+> 其中 **P1 = provider 被启动逻辑自动改写并持久化**（上一轮列为"未复核"，本轮确证）。
+> 同时**纠正 2 条已过时的登记**（`B4-1` 的 `id:` 帧其实早已存在；`#155` 对复核页不适用）。
+> 报告 → `docs/ADVERSARIAL_AUDIT.md` **§15**）·
+> Round 42：**产物级端到端测试（#149 闭环）** ——
+> 用 `e2e_run.py`（**仓库根**）驱动 **Electron 内嵌的那份 exe**（`win-unpacked/resources/
+> pbc-server/pbc-server.exe`），跑 **7 个轮次全部 PASS**（`pdf` / `img` / `cancel` /
+> **`real` 51 页真实批记录** / `rot` / `robust`×2），driver 报 `ALL ROUNDS PASSED` + `exit=0`。
+> **独立核验**（不采信自述）：findings **直查库**与 driver 逐条一致（real **293 条** /
+> 14 类 / `gmp_basis` **293/293**）、SSE 帧数吻合（real 507）、`ocr_backend_used` 全为
+> `paddle`（**无 failover 掩盖**）、真实 `%APPDATA%/PBC` **未被污染**；
+> 且 `win-unpacked` 内嵌 exe 与 `dist/` 那份 **sha256 完全相同** ⇒ 不存在「测 A 发 B」。
+> **判定：功能面可分发**。同时用**多模态直读原图**核实出 **3 类 LLM 层假阳性**
+> （日期判据方向反 / 串位幻觉造出图上不存在的值 / 非数值与日期形态输入无防线）
+> + 1 条日志口径缺陷（`measurements=0` 恒为 0）⇒ 已登记 B1-4 / B1-5 / B2-6）·
+> Round 41：**基线冻结 + 密钥卫生实测复核** ——
+> 判定 v1.1.9 可分发；**全历史密钥扫描**得 3 把 `sk-` 值，逐把对两家厂商**实测**，
+> **全部 `401 invalid`**（K1/`5d855143`、K2/`838c00a7`、K3/`2608ecd2`）⇒ 泄露面已关闭；
+> 当前生效 key（`%APPDATA%` 配置，`c11aa513`）**从未入库**；**产物与 `app.asar`
+> 二进制实测 0 命中**；打 tag **v1.1.9**；修正 `CHANGELOG` 顶部过期的
+> 「可分发版本 = 1.1.8」；补 `DEPLOYMENT.md` 的「暴露面登记」+「证据边界」）·
+> Round 40：第二轮对抗性审查（基线 = v1.1.9） —— 复核上一轮 8 项指控；多模态直读第 8 页
+> 确认「OCR 把 `4.6` 读成 `46`」并验证当前版本已有一等对策；新增 6 条发现；
+> **判定：无 P0 阻塞**；产出 **v1.2.0 迭代清单**（见文末）·
+> 审查报告 → `docs/ADVERSARIAL_AUDIT.md`）·
+> 可分发版本 **v1.1.9**（11 条缺陷已修、产物已重建、**已打 tag**）·
+> 远端 `1ee2c17`（Round 39/40 均已推送）·
+> **A1 已解除**（用户已手工收敛产物目录）
+
+---
+
+## A. 需要**用户**动作（我做不到，已在等）
+
+- [x] ~~**A1（阻塞收敛）完全退出 WorkBuddy 宿主，然后在普通终端跑收敛脚本。**~~
+      ✅ **2026-09-18 已解除**（用户手工完成）：全部 `dist-electron*` 已清空，
+      现存仅 `dist/`（backend，107 MB）。`python scripts/clean_dist.py` dry-run 输出
+      **「待清理: (无)」**，目录数 == 1 ⇒ 仓库卫生回到约定状态。
+      ⚠️ **新约定（用户明确要求）**：仓库根**只能有一个 `dist-electron*`** ——
+      下次构建应从零一次成型，直接写**标准路径 `dist-electron/`**；若自愈到时间戳目录
+      **必须当轮归位**，不得留着过夜；每次构建后跑一次 dry-run 自证。
+      ⚠️ 注意反面影响：**Electron 产物已不存在** ⇒ 重建时 `tests_coverage` 的
+      `test_distribution_parity` 在 Electron 打包完成**之前**必然 skip/红，
+      这属预期（先后端产物 → 再 Electron 打包 → 再跑门禁）。
+- [x] ~~**A2 轮换已泄漏的 LLM 凭据（必须厂商侧操作）。**~~
+      ✅ **2026-09-18（Round 41）实测复核：泄露面已关闭，无需再动作。**
+      全历史扫描（`git grep -o -E "sk-[A-Za-z0-9]{32,}"` 覆盖全部 249 个提交）得**唯一 3 把**，
+      逐把对 **SiliconFlow 与 DeepSeek 两家**实测 `POST /v1/chat/completions`：
+
+      | 代号 | 历史出处 | sha8 | 实测 |
+      |---|---|---|---|
+      | K1 | `tests/e2e_frozen.py`·`e2e_manual.py`·`e2e_quick.py`（自 `81964a3`） | `5d855143` | **401** `{"code":30014,"message":"Token is invalid."}` |
+      | K2 | `tests/unit/test_config.py`（早期 5 个提交） | `838c00a7` | **401**（两家中均拒） |
+      | K3 | `spike_test.py`（`8651e3e` 初始骨架） | `2608ecd2` | **401**（两家中均拒） |
+
+      ⇒ 已公开暴露的 3 把**全部被上游吊销**（"主动吊销"与"自然过期"之别未验证，
+      但**可利用性已归零**）。⚠️ 前提事实：本仓库是 **public**，所以这 3 把等同于已公开。
+      ✅ **当前生效 key 从未入库**：`%APPDATA%/PBC/config.json` 的 `SILICONFLOW_API_KEY`
+      （`c11aa513`，实测 **HTTP 200 可用**）**不在**上述 3 把中。
+      ⚠️ **遗留但无安全影响**：仓库根 `config.json` 仍存 K1（它是**开发模式的生效配置**，
+      见 `config.py:_config_path()`）⇒ 开发模式 / 走仓库配置的 e2e 会拿到一把**死 key**，
+      表现为 `30014` 假红。已登记为 **B4-3**。
+      `config.json.bak_pre_key_rotation` 保留不动（被 `%TEMP%/pbc_127_accept.py` 用来复现 #127 触发条件）。
+- [x] **A3 提供第 2 份真实批记录 PDF 用于泛化验证（缺陷 #126）。** —— **R76 已核销**（证据见 §0.1）
+      ✅ **R76（2026-10-09）前提否证：第 2 份记录早就在仓库里，不需要用户动作。**
+      `试用批记录.pdf`（2.9 MB / **10 页**扫描件，`.gitignore:132` 忽略）是一份真实的
+      GMP 批生产记录 —— 首页实测：华康药业（HUAKANG）**康泰普利片 10mg**
+      （Kangtaipril Tablets）、批号 **50008219**、批记录编号 **H5-MPD-90038-R04**、
+      批量 **960,000 片**、版本 04，带手写签名与日期（2025.06.03）。
+      与第 1 份（丝裂霉素，发酵工艺）是**不同产品 / 不同工艺 / 不同版式**。
+      ⚠️ 本条原写"目前**只有一份**"是**错的**，且与**同一份文件**的 **§B6-1**
+      （早已点名要用它）、以及 `.workbuddy/memory/2026-09-17.md:55`
+      （"第 2 份真实批记录，泛化样本"）**自相矛盾** ⇒ 一件**可做**的事被误挂成
+      "等用户"。实测已跑通，证据与对比见 **§B6-1**。
+- [x] **A4（阻塞"需真实 findings 的多轮 e2e"）硅基流动账户余额不足（402）—— 2026-09-18 已解除。** —— **R66 已核销**（证据见 §0.1）
+      > **✅ 2026-09-18 复核：key 已恢复可用。** 实测 `POST /v1/chat/completions`
+      > `model=deepseek-ai/DeepSeek-V3.2` → **HTTP 200**，正常返回内容（usage 18 tokens）。
+      > ⚠️ 但**仓库内的 `config.json` 里那把 key 仍是失效的旧 key**
+      > （`sk-vprn...` → `30014 Token is invalid`）。**真正生效的是
+      > `%APPDATA%/PBC/config.json` 里的另一把**（`sk-vhxq...`，2026-09-17 10:55 更新）。
+      > ⇒ 用仓库 `config.json` 做任何自检都会**假红**；自检脚本应显式读 `%APPDATA%/PBC/config.json`。
+      > **本条阻塞已解除，多轮 e2e 现在可以跑**（尚未跑，见 F11 开工顺序）。
+      > ① 旧证据（2026-09-17，保留以说明"驱动拒绝假绿是正确的"）：
+      实测（v1.1.8 产物，`e2e_run.py --rounds pdf,img`）——驱动**自检**就报出来了：
+      ```
+      test_provider -> 200 {"ok":false,"provider":"siliconflow",
+        "reason":"...APIStatusError: Error code: 402 -
+         {'code': 30001, 'message': 'Sorry, your account balance is insufficient'}"}
+      ```
+      时间线（同一天，同一 key）：
+      `14:36–14:42 冻结冒烟 findings=3`（**LLM 当时可用**）→ `14:43–14:44 #127 验收`
+      （用**失效凭据**故意触发失败路径，消耗 0）→ `14:56–15:02 多轮 e2e` **402**。
+      **后果**：两轮 OCR 均成功（`backend=paddle`，6 页 / 1 页），但 Stage 2 无法调用
+      LLM ⇒ 0 findings ⇒ 驱动的**内容断言 FAIL**。
+      ⚠️ **这两条 FAIL 是正确行为**：驱动不能把"0 findings"记作成功（否则就是"假绿"）；
+      同时**产品侧行为正确** —— 终态如实报 `error`（SSE `ocr → analyze → done:error`），
+      未伪装成绿点或 `partial_review`，这正是 #127/#131 的**实战确认**。
+      **处置**：充值，或在 `%APPDATA%/PBC/config.json` 换成有额度的提供方/密钥，然后重跑：
+      ```
+      python %TEMP%/pbc_run_artifact_e2e.py <产物>\win-unpacked\resources\pbc-server\pbc-server.exe \
+             e2e_run.py --rounds pdf,img
+      ```
+      注：本地目前**只配了 `siliconflow` 一家**（`DEEPSEEK_API_KEY` 等键不存在）⇒ 没有可直接
+      切换的备选供应方。
+
+## B. 高优先（可做，且不依赖 A）
+
+- [ ] **B1 让 e2e 驱动也覆盖"LLM 路径坏了"（本轮发现的口子）。**
+      冻结冒烟已能报出"凭据失效"（Round 31 修好），但**多轮驱动**（`e2e_run.py` 的
+      `pdf/img/real/rot…`）仍没有"断言 LLM 真的被调用过且成功"的判别。做法参考
+      `tests/e2e_frozen.py::settings_llm_provider_matches_key`：
+      配置后先断言"活动提供方 == 密钥所属且 `configured=True`"，再断言产物里
+      `pages_analyzed > 0`。**验收**：故意用失效 key 跑一轮，必须 **FAIL** 且原因指向 LLM。
+- [ ] **B2 CI 增加"冻结产物" job，让 A 组护栏真的跑起来（缺陷 #106）。**
+      现在 CI 只在源码上跑；`tests/unit/test_distribution_parity.py` 这类"产物内一致性"
+      在 CI 上被跳过。**验收**：CI 日志里能看到该 job 的 junit，且**不是 0 用例**。
+- [ ] **B3 视觉交叉对比做成常规检查（缺陷 #110）。**
+      已有 `docs/VISUAL_CROSSCHECK.md` 与 M8 结论（独立复现"46 → 4.6"丢小数点），
+      但仍是**一次性**脚本。**验收**：有单测/脚本能对指定 job 输出"模型视觉 vs OCR 抽取"
+      的一致性数字，并写进 job 报告。⚠️ 记住**多模态不能当降噪手段**（第 9 页三方
+      72/72 逐格一致，替代净损坐标/互证/成本 ≈4.2×）⇒ 只宜作**第四读**。
+- [x] **B4 巡检器"启动即回收 + 存活信号无空窗"（缺陷 #125）。** —— **R66 已核销**（证据见 §0.1）
+      现状：看门狗**先睡一个周期再首扫** ⇒ 重启后有一段无保护窗口。
+      **验收**：进程启动后立刻完成一次巡检，且 `GET /api/health/watchdog` 的
+      `last_scan_at` 从第一秒起就持续推进（不留空窗）。
+      → **R68 第七批已修**：`core/watchdog.py::watchdog_loop` 循环体改为**先扫后睡**
+      （`recover_stalled_jobs()` 在**任何等待之前**）⇒ 启动即首扫，`last_scan_at`
+      第一秒起就置位并持续推进。顺带修掉一处更隐蔽的计数缺陷：旧写法把
+      `finally`（`total_scans += 1` / `last_scan_at` 写入）放在等待**之后**，
+      等待期间被取消会把"没扫过的轮次"记成扫描 —— 现在等待在扫描之后，取消不计。
+      护栏 `tests/unit/test_watchdog.py::TestStartupFirstScan`（1 条判别性行为用例
+      + 1 条 AST 结构钉），变异 `devlogs/_verify/mutation_r69_watchdog_firstscan.py`
+      ⇒ **7/7**（其中 M2「假修复：形状对但跳过首扫」证明结构钉**只钉形状**、
+      真正判官是行为用例 —— 这条边界是**有意保留**的，不是漏网）。
+      → **产物级覆盖（同批补齐）**：跑 e2e 时发现 `tests/e2e_frozen.py` 的
+      `watchdog_invariants` 用 `interval + 30` 等 `last_scan_at` —— 旧实现要到
+      t≈interval 才写它 ⇒ **新旧同样绿，这条断言对 B4 是瞎的**（其旁注释
+      「循环是先等一个 interval 再扫」在修复后更与代码矛盾）。故改为
+      `interval * 0.8`（严格小于 interval ⇒ 旧实现必然超时），并把标签从写死的
+      `scanned@t+60s` 改成**实测** `first_scan@t+<elapsed>s`；新增静态护栏
+      `test_e2e_round_budget.py::test_frozen_smoke_watchdog_liveness_budget_discriminates_scan_first`
+      （含系数必须 **< 1** 的上界，防 `interval * 1.2` 这类假绿），变异
+      `devlogs/_verify/mutation_r69_frozen_watchdog_budget.py` ⇒ **5/5**。
+      重建产物上实跑：`first_scan@t+0.0s (interval=60s)` ⇒ **产物级确认**。
+
+## C. 技术债 / 已知缺口（明确记录，不假装已解决）
+
+- [ ] **C1 无真实标注集 ⇒ 无可信 P/R。**
+      `docs/FINDING_GROUND_TRUTH.json` 是**合成件**，结果**不可外推**。
+      任何"精确率 0.9x"的说法都必须标注其出处是合成集。
+- [ ] **C2 上传页数上限 200 是**线性外推未实跑**（`config.UPLOAD_LIMITS` 硬 200 / 软 80）。
+      51 页已实跑；200 页的耗时/内存是推算值。**验收**：真跑一次 ≥120 页的样本并记录。
+- [ ] **C3 知识库有 2 个死键 + 2 个类型无词表**（KB 与 finding 类型的覆盖面不一致）。
+      `tests/unit/test_kb_multisource.py` 已锁住"条目数不低于下限"，但**不检查键的有效性**。
+- [x] **C4 provider 静默改写 + `kb_prompt_inject` 不可达。** —— **R72 第十二批（2026-10-08）已核销**（证据见 §0.1）
+      `api/settings/write.py` 有"GLM 实际跑 deepseek"的静默回退（已有注释警示）；
+      `kb_prompt_inject` 的开关路径**当前不可达**，需要么接通要么删掉，别留着当装饰。
+      **两半分别结案**：①「provider 静默改写」已由 **B4-4** 关闭 —— 启动期改写由
+      `config._resolve_active_provider` **单点决策**（**显式选择绝不改写**，只回传 `applied=false` 的告知），
+      事实经 `GET /api/settings` 的 `llm.auto_activated` 回传前端；写入侧对**未注册** provider 直接 **400**。
+      残余仅 `llm/client.py` 的**防御性**兜底（记 WARNING，非用户可见的静默改写）。
+      ②「`kb_prompt_inject` 不可达」**本批接通**（证据见 `#169` 行）。
+- [ ] **C5 旋转探测的重试不区分拥塞/瞬态（#120 残留）。**
+      已修"拥塞不消耗角度预算"，但**40s 内仍会耗尽全部角度**的情形未闭环。
+      ⚠️ 定位时注意：**字段缺失 ≠ 路径未走**（`self_heal.py` 里 upgrade 页探测失败
+      **故意不动诊断**）⇒ **只有日志能区分"没跑"和"跑了但失败"**。
+
+## D1. Round 32 已完成 —— 存档，勿重复做
+
+- [x] **修 #132（失败页被前端静默丢弃）**：`jobs.failed_pages` 是 SQLite TEXT 列（存 JSON），
+      JSON 接口**原样透传** ⇒ 响应是字符串 `"[2, 1]"` ⇒ 前端 `Array.isArray()` 静默退化成
+      `[]` ⇒ **失败页数与页码在任务列表里永不显示**；而复核页（SSR 自行 `json.loads`）却
+      正常 ⇒ 同一字段两张页面不一致，用户只会读成"这次没有失败页"，#127 的前端渲染形同虚设。
+      修法：`status.py` 新增 `_parse_failed_pages` 并接入 `GET /{id}` 与 SSE **两个**入口；
+      `main.py` 复用**同一**解析器（单一真值源）；降级**不伪造 `[]`**（无失败页 → `None`，
+      非法值 → `None` 并记 warning，否则"数据损坏"与"真的无异常"在界面上不可区分）。
+- [x] **护栏（含变异验证）**：6 例纯函数单测（断言**类型**而非取值）+ 1 例接口级
+      （断言**运行时返回数组**）+ 1 例产物级运行时断言 `failed_pages_type`。把两个入口分别
+      临时改回"原样透传"，新护栏**当场变红**（GET `实得 '[2, 1]'`；SSE `实得 ['[2]', '[2]']`），
+      还原后 149 passed ⇒ **实测能失败**，不是"两分支都判 PASS"。
+- [x] **修正两条"锁死错契约"的旧断言**：`test_api_jobs_coverage.py` 里写死的
+      `'"failed_pages": "[2]"'`（断言序列化字符 ⇒ 把缺陷本身固化成契约）改为**解析 SSE 的
+      `data:` 帧后断言结构**；`test_config_error_visibility.py` 补上前端类型预期
+      （`Array.isArray(job.failed_pages)`）。
+- [x] **升版 1.1.8 并重建产物**：改动落 `api/jobs/status.py` 与 `main.py`，**都进 PyInstaller
+      产物** ⇒ 4 处版本真值同步 + PyInstaller（6m30s）+ electron-builder（1m34s；因标准目录
+      被锁而自愈到 `dist-electron-out-20260917-142437`）。
+- [x] **产物验证**：asar 内版本 1.1.8 == 源码；`BatchSentry.exe` 188.8 MB；内嵌
+      `pbc-server.exe` 20.3 MB；`extraResources` 与 `dist/pbc-server` **811 文件 / 112.2 MB
+      逐一致**；备用目录已按约定写 `PROVENANCE.txt`。
+- [x] **文档**：`CLAUDE.md` 新增 Round 32 + 更新 `Current phase`；`CHANGELOG.md` 新增
+      `[1.1.8]`；`docs/PROJECT_PITFALLS.md` 新增 **§二十一**（字符串探针会给出**错误的否定**——
+      PYZ 是压缩的；同文件并行 `Edit` 会互相覆盖，回执不可信）。
+
+## D2. Round 31 已完成（存档，勿重复做）
+
+- [x] D1 e2e 夹具的"假绿"两处（空白样例 + 提供方与密钥错配）→ 提交 `417d3ee`；
+      实测冒烟 **21/0**，`provider=siliconflow`、`findings=4`、`report 7049 B`。
+- [x] D2 `clean_dist` 认锁探测 **10m52s（未完成）→ 11.5s** → 提交 `f1c5457`；
+      `tests/unit/test_clean_dist.py` 20 例。
+- [x] D3 仓库卫生机检（生成物禁止入库 + 变体可见化 + 落点三处联动）→ `101acb5` / `80d5bcd`；
+      `tests/unit/test_repo_hygiene.py` 34 例。
+- [x] D4 `test_page_analyzer.py` 文档字符串无效转义告警（全量刷屏的根因）→ 改 `r"""`。
+- [x] D5 文档校正：`CLAUDE.md` 补 Round 31、**修正 Round 30 里被证伪的"20/0"** 与
+      5 处轮次错标；`PITFALLS` 新增 §十九 / §二十。
+
+---
+
+## E. 当前地面真值（可复核，来自本轮实测）
+
+| 项 | 数值 | 证据 |
+|---|---|---|
+| 全量单测+集成 | **2635 passed / 0 failed**（= 上轮 2629 + 本轮 6 例新用例） | 门禁 `tests_coverage` / `devlogs/gate_junit_20260917_160451.xml` |
+| 覆盖率 | **95.5%**（门禁 95%） | `devlogs/gate_report_20260917_162936.json` |
+| 打包信号 | **OVERALL pass（8 PASS / 0 FAIL / 0 WARN）**，在**最终提交 `7b3dd52`** 上复跑 | `devlogs/gate_report_20260917_162936.json` |
+| ⚠️ 本机门禁耗时波动 | 同一套测试两次实测 **3m25s vs 24m48s**（6.7×）。排查结论：**非死锁** —— 进程存活且在推进（20 秒内新建 117 个测试目录 ≈ 5.9 个/秒）、CPU 100%、`read_count` 1131 万次小读；判定为**本机环境波动**（重负载用例段被拖长），非产品缺陷 | 进程采样（psutil）+ `pytest-316` 临时目录计数 |
+| 版本真值 | 4 处一致 = **1.1.8**（`test_version_consistency` 4 passed） | `tests/unit/test_version_consistency.py` |
+| 产物（v1.1.8） | asar 内版本 = 1.1.8 == 源码；入口 188.8 MB；内嵌后端 20.3 MB；`extraResources` 与 `dist/pbc-server` **811 文件 / 112.2 MB 逐一致** | `%TEMP%/pbc_verify_artifact.py` |
+| 冻结冒烟（v1.1.8 产物） | **22 passed / 0 failed**（`health: v1.1.8`、`provider=siliconflow`、`pipeline_terminal=review`、`findings=3`、`report 4531 B`） | `%TEMP%/pbc_e2e_frozen_118.log` |
+| #127/#131 验收（v1.1.8 产物，**失效凭据**复现触发） | **7 passed / 0 failed**；含 **`failed_pages_type: type=list value=[2, 1]`**（#132 修复在产物内的**判别性**证据）、`terminal_is_error`、`reason_visible 201 字`、`pages_analyzed=0` | `%TEMP%/pbc_127_accept_v118.log` |
+| 多轮产物 e2e（`pdf,img`） | **2026-09-17 FAIL（外部阻塞：402）→ 2026-09-18 阻塞已解除**（key 恢复 HTTP 200，但**用 `%APPDATA%/PBC/config.json` 那把**）。**尚未重跑** | `%TEMP%/pbc_e2e_rounds_118.log`；详见 **A4** |
+| 关键配置真值（2026-09-18 复核） | `LLM_PROVIDER=siliconflow`、模型 `deepseek-ai/DeepSeek-V3.2`、`OCR_BACKEND=mineru`；**密钥源 = `%APPDATA%/PBC/config.json`（`sk-vhxq…`）**，仓库 `config.json` 里是**失效旧 key**（`sk-vprn…`） | 两文件直读 + 各一次 HTTP 探测 |
+| 目录锁持有者（Round 33 实测） | **WorkBuddy.exe（宿主进程）pid 16220 / 14048**；**只锁 `*.asar`**（同目录 exe 全 FREE）；**不是安全软件** | Restart Manager `RmGetList`；复现实验与证据链见 `docs/PROJECT_PITFALLS.md` §二十二 |
+| 产物目录 | `dist-electron-out-20260917-142437`（标准路径被锁 ⇒ 已按约定写 `PROVENANCE.txt`，其 `unblock` 段已更正） | 见 A1 |
+| 远端 | `e4f5b81`（已推送，`HEAD == origin/main`，worktree 干净） | `git rev-parse HEAD` / `origin/main` |
+| **视觉第四读可行性（2026-09-18 定点实测）** | 7 个 VLM 直读 `test1.jpg`，只问上一轮 OCR 读错的 13 字段：**5 个模型 12/13**（`GLM-4.5V`/`Qwen3-VL-32B-Instruct` 各 3 次重现均 12/12/12），`Qwen3-Omni-30B-A3B` 仅 5/13（不可用）；**中文姓名 7 个模型全错**（无人读对"眭"） | `scripts/probe_vlm_fields.py`；`%TEMP%/vlm_probe_result.json` |
+| 产物接口行为（Round 34 实测，**唯一可信判据**） | `/health` → `{"status":"ok","version":"1.1.8"}`；`/api/jobs/{id}` → `failed_pages=[1] type=list`（#132 在产物内**行为验证通过**）；`/api/jobs` 字段集 = `created_at, filename, finished_at, id, ocr_progress, status, total_pages`（**无 failed_pages / error_message / stall**） | `%TEMP%/pbc_probe_out.log` |
+| 产物内容 vs 源码 | `static/*.js` + `templates/*.html` 构建快照与工作树**哈希一致**；后端 `.py` 在 PYZ 内（松散文件里找不到属**预期**，字符串探测不可信） | sha256 逐文件比对 |
+
+---
+
+## F. v1.1.9 迭代计划（Round 34 对抗性审查产出，2026-09-17）
+
+> **结论先行**：**v1.1.8 主体可用，可作为基线。** 产物完整、`extraResources` 与
+> `dist/pbc-server` 811 文件逐字节一致、`/health` 正常、`#132` 的修复经**行为验证**
+> 确在产物内、且产物**不陈旧**（exe 建于改动之后）。
+> 但它带着 **2 个 P0 级前端缺陷**，两者同属一类：**"GMP 假阴性表面"** ——
+> 出错的状态在界面上看起来像成功。**建议 P0+P1 修完再对外分发；内部基线可直接用。**
+>
+> 编号沿用全局缺陷序号，本轮从 **#133** 起。
+
+### F1. 前端（P0 是"错误态伪装成功"）
+
+- [x] **#133【P0】复核页页头状态点硬编码绿色。** ✅ **2026-09-18 已修（`177a6d9`）**
+      修法：抽出共享件 `static/status.js`（照 `eta.js` 既有先例），SSR 侧加
+      `core/zh_map.py:status_dot_class` —— 二者**逐值等价由机检锁定**
+      （`tests/unit/test_status_js.py`，12 例）。`upload.js` / `review.js` 均改为
+      委托共享件（顺带收敛 #139 的状态映射重复）。模板改为
+      `{{ status_dot_class }}`，`review.js` 的 SSE 显式更新 `#status-dot` 的 class。
+      **验证**：端到端（真起 ASGI）`partial_review→bg-warning`、
+      `review→bg-success`、`error→bg-destructive`；**负例验证**——把
+      `bg-success` 写回模板 ⇒ 护栏立刻变红（不是空护栏）。
+- [x] **#134【P0】列表页冷加载看不到失败页与失败原因。** ✅ **2026-09-18 已修（`177a6d9`）**
+      修法：`listings.py` 投影 `failed_pages`（复用 `_parse_failed_pages`，避免
+      TEXT 透传成字符串被前端 `Array.isArray` 静默丢弃）与 `error_message`；
+      `buildRowFromSnapshot` 透传 `failed_pages`；摘要行抽成 `buildMetaLine`
+      供**静态与实时两条路径共用**，结构上杜绝再次漂移。
+      **验证**：端到端列表返回 `failed_pages=[2, 1]` 且 `type=list`、
+      `error_message` 可见；**负例验证**——还原旧 SELECT ⇒ 3 条用例必红。
+      ⚠️ 注意 `None`（"未能给出清单"）与 `[]`（"确认零失败页"）在 GMP 语义下
+      **不同**，接口刻意保留该区分（`api/jobs/status.py:_parse_failed_pages` 的注释），
+      前端用 `Array.isArray` 容错 —— **不要**为了"接口好看"把它们归一。
+- [x] **#172【P1】列表端点还差 5 个"行字段"—— #134 只修了它点名的那两列。** ✅ **2026-09-18 已修**
+      **由 #171 契约机检发现**（正是它该干的活）：`static/upload.js` 的
+      `renderJobRow` 是**冷加载唯一的行构建器**，共消费 **13** 个字段，
+      而 `/api/jobs` 只给了 **9** 个。缺 `ocr_backend_used` / `ocr_backend_display` /
+      `pages_analyzed` / `phase` / `self_heal_progress`。
+      其中 `ocr_backend_used` 影响最实：失败时 `ocrTagEl` 被隐藏，而该标签的用途
+      正是"failover/自愈后留痕，GMP 追溯可见" ⇒ **老任务（超出 SSE 的 10 分钟
+      推送窗口，永远收不到快照）永不显示它**，界面呈现为"这份记录没用过 OCR"。
+      **修法**：SELECT 加 `ocr_backend_used`；其余 4 个**一律复用
+      `api/jobs/status.py` 的既有派生函数**（`_count_analyzed_pages` / `_derive_phase` /
+      `_ocr_backend_display` / `_parse_self_heal_progress` / `_parse_cross_progress`），
+      **不新写第二套口径**。
+      **实测成本**（20 job × 51 页 ≈ 1020 行结构化数据）：逐 job 调用 **5.3 ms**，
+      与"一条分组查询"的 **4.5 ms** 仅差 **1.2×** —— 瓶颈是 `structured_json` 的
+      读取量而非往返次数 ⇒ 复用单 job 口径函数即可，不值得为 0.8 ms 引入第二套判据。
+- [x] **#173【P1】`page_ocr_empty` 漏在 JS 桥接对象里 ⇒ OCR 空页被显示成"本页无问题"。** ✅ **2026-09-18 已修**
+      **由 #171 契约机检发现**。`page_ocr_empty` 一直在 Jinja 上下文里
+      （`main.py:679` 已注入，模板 314/573 行据此 SSR 渲染），却**漏在
+      `window.__PBC__` 里** ⇒ `review.js` 读到 `undefined` ⇒
+      `currentPageFlags.ocrEmpty` **恒为 false** ⇒ 首屏兜底
+      （`applyInitialPageLevelUI` → `emptyFindingsNote`）把该页的 SSR 文案
+      "本页无 OCR 内容"**覆盖成"本页无问题"** —— 恰好是 #136 要消灭的 GMP 假阴性。
+      ⚠️ **这是上一轮 #136 修复的残留**：模板分支改对了，但 JS 兜底又把它改回去。
+      ⚠️ 这类缺陷**不可能**被"抓取页面 HTML 断言文案"的用例发现 —— 拿到的是 SSR
+      渲染结果，而覆盖发生在浏览器里 JS 执行之后。契约必须落在**数据通道**上。
+      **修法**：模板补 `page_ocr_empty: {{ page_ocr_empty | tojson }}`。
+      **验证**：`test_ocr_empty_page_bridges_the_flag_to_js` 断言**真实响应**里出现
+      `page_ocr_empty: true`；`TestSsrBridgeContract` 锁"消费集 ⊆ 注入集"。
+      **负例验证**——从 `__PBC__` 去掉该键 ⇒ 两条用例立红。
+- [x] **#135【P1】复核页首屏 parse-error 横幅只有通用文案。** ✅ **2026-09-18 已修**
+      修法：`main.py` 从 `structured_json` 提取 `_error` 注入 SSR 上下文
+      （`page_parse_error_reason`），`review.js` 新增 `applyInitialPageLevelUI()`
+      在 `DOMContentLoaded` 调用 —— 复用**同一个** `updatePageLevelUI`
+      （不另写一套文案，避免与 AJAX 路径漂移）。
+      **验证**：`test_first_paint_shows_specific_reason` 断言首屏 HTML 里能读到
+      `401 Token is invalid` 这类**具体**原因；**负例验证**——移除模板注入 ⇒ 该用例红。
+- [x] **#136【P1】失败页仍显示"本页无问题"。** ✅ **2026-09-18 已修**
+      修法：空态文案抽成 `emptyFindingsNote()`（JS **单一副本**），按
+      「分析失败 / 空页 / 确实无问题」三分支；模板同步按 `page_parse_error` /
+      `page_ocr_empty` 分支。判据读**当前页**标记 `currentPageFlags`
+      （由 `updatePageLevelUI` 每次刷新写入）—— **不能用** `ctx`（首屏注入，翻页后过期）。
+      **验证**：`test_failed_page_does_not_say_no_issues` 断言失败页**不含**"本页无问题"
+      且含"不代表本页无问题"；`test_clean_page_still_says_no_issues` 是**对照组**
+      （防"为修缺陷把三种空态全改告警"→ 告警疲劳也是假阴性）；
+      **负例验证**——把失败页分支退回 ⇒ 该用例红。
+- [ ] **#137【P2】上传页完全不渲染 stall。** 后端已在 SSE 快照提供（`api/jobs/status.py:200`），
+      `static/upload.js` **0 处引用** ⇒ 停滞任务在列表上无任何提示。
+- [ ] **#138【P2】设置页协议切换无默认值联动，且可能静默改协议。**
+      `settings.js` 无 `_protocol` 的 change 监听（默认值只在**新增** provider 时填，
+      `:1634-1659`）；渲染只判 `prov.protocol === "anthropic"`（`:118,152`）**无兜底** ——
+      后端返回空/未知协议时浏览器自动选第一个 option（openai）⇒ 保存可能**静默把 anthropic 改成 openai**。
+      另：`testProvider` 无 loading/禁用可并发重复请求；底部"测试连接"不采集未保存值，与单行行为不一致。
+- [ ] **#139【P3】前端重复实现漂移。** `esc()` **6 份**副本
+      （`upload.js`、`review.js`、`settings.js`）；状态→中文 **4 份**
+      （`upload.js`、`review.js`、`review.html:16`、`core/zh_map.py:34`）。
+      另：`upload.js` 使用 `errCount` 早于其声明（`:516`）；`hover:bg-destructive/5`
+      （`:838,1111`）在 `app.css` 里不存在；`review.js` 的 `e.id` 未 `Number()`。
+
+### F2. 后端（失败原因链路 / 并发）
+
+- [x] **#140【P1】外部取消只终止父 task，派生子任务继续跑 LLM 并写库。** ✅ **2026-09-18 已修**
+      修法：新增 `locks.ChildTasks`（`spawn` 登记 + `cancel_all`/`drain` 级联），
+      `run_pipeline` 的 **`finally` 首要动作**就是 `children.drain(cancel=True)`
+      —— 顺序不可颠倒（子任务会写库，会把刚收敛的终态再改回去）。
+      `stage2._run_stage2_analysis`（含早停/取消分支）与分片路径的
+      `analysis_tasks` / `heal_tasks` 全部改经 `children.spawn`（原先裸 `create_task`）。
+      默认参数 `children=None` 时内部自建 → 保持旧调用方/测试可用。
+      **验证**：`test_cancelling_pipeline_cascades_to_child_page_tasks` 断言
+      "父被取消后子任务**真的停了**"（行为级，不是"代码里调了 cancel"）；
+      另断言注册表与 per-job 锁都干净；**负例验证**——移除 `drain` ⇒ 该用例红。
+- [x] **#141【P1】任务注册表按 job_id 单值覆盖 ⇒ 持锁孤儿失去引用 ⇒ 重试被永久挂死。**
+      ✅ **2026-09-18 已修**
+      修法：`_pipeline_tasks` 改 `dict[str, set[Task]]`（**累积**而非覆盖），
+      新增 `register_pipeline_task` / `unregister_pipeline_task`（幂等，
+      只摘自己、不删整个键）/ `live_tasks_for`；`_terminate_pipeline_task`
+      取消**该 job 全部**未完成 task；`main.py` 关闭端点同步改为双层遍历。
+      ⇒ 取消持锁真凶后它走 `CancelledError` 分支**释放锁**，等待者随之取到锁并
+      因 `status=cancelled` 干净退出 —— 死结解开。
+      **验证**：`test_holder_and_waiter_both_cancelled` 用真实 per-job 锁复现
+      "持锁者 + 子任务 + 等待者"三者共存，断言三者全被取消**且锁已释放**；
+      `test_single_value_registry_would_lose_the_holder` 反向固化"单值 dict 会丢掉真凶"；
+      **负例验证**——把 `_terminate_pipeline_task` 改回只取消第一个 ⇒
+      `assert task_holder.done()` 当场红（"持锁真凶必须被取消"）。
+- [x] **#142【P1】`pending` + 无注册 task = 无终态黑洞；两处"先写 pending 后 launch"不在 try 内。**
+      ✅ **2026-09-18 已修**
+      修法：新增 `api/jobs/__init__.py:mark_launch_failed()`（条件 UPDATE
+      `WHERE status='pending'` + 审计 `launch_failed`，**在 db_lock 之外**写审计避免
+      不可重入死锁）；`upload.py` 与 `actions.py` 两处 launch 均包 try/except，
+      失败即转 `error` 并返回 500（把黑洞变成可见、可重试的失败）。
+      **验证**：`test_retry_launch_failure_marks_error_not_pending`（真调接口 + 断言
+      不停在 `pending`、有 `error_message`、留审计）；
+      `test_mark_launch_failed_is_noop_when_status_moved_on`（并发不误伤）；
+      `test_launch_call_sites_are_wrapped_in_try`（**AST 静态机检**两处调用点都在 try 里，
+      防将来新增第三个调用点又忘包 —— 那正是本缺陷的成因）；
+      **负例验证**——还原裸 launch ⇒ 行为用例与机检**双双变红**。
+      ⚠️ 机检读源码用 `utf-8-sig`（`actions.py` 带 BOM，普通 utf-8 解出 `U+FEFF`
+      会让 `ast.parse` 崩）。
+- [x] **#143【P2】"不可重试"判据是整段错误串的子串匹配 ⇒ 误判为配置级 + 误导文案。**
+      ✅ **2026-09-18 已修**。**定位（真机实测，不是读代码推的）**：用真实 SDK 异常
+      对象跑 8 个场景 → **3 例误判**：
+      ① `openai.RateLimitError`(429, `"Rate limit reached … Limit 40000"`) 命中裸 `"400"`
+      ⇒ 判成配置级 ⇒ Stage 2 **整份早停** + 提示"请检查 API Key"（用户遇到的只是
+      一次可自愈的限流）；
+      ② `ValueError("invalid literal for int() …")`、③ `KeyError("invalid key …")`
+      命中裸 `"invalid"` ⇒ 本地代码缺陷被报成凭据故障。
+      **修法**：判据抽成唯一入口 `is_config_error(exc)`，**结构化优先** ——
+      先取 `exc.status_code`（取不到再退 `exc.response.status_code`），
+      有状态码时**文本判据一行都不参与**（`{400,401,403}` 为配置级，其余一律可重试）；
+      拿不到状态码才走文本兜底，且词表加 `\b` 词边界、裸 `"invalid"` 换成具体短语
+      （`invalid api key` / `invalid token` …）；另加一条类型规则：
+      **本地编程错误（`ValueError`/`KeyError`/`TypeError`/…）永不算配置级**。
+      **测试**：新增 12 例（**含 401/400 对照组**，防"为修误报一刀切成可重试"，
+      那会让 #127 的假阴性回归）；**两轮变异验证**（摘掉结构化判定 → 3 例红；
+      词表退回裸状态码 → 2 例红）；同一探针复测 **8/8 正确（原 5/8）**。
+      ⚠️ **登记一条实测副产物**（见 #174）：`anthropic`/`openai` SDK **自带**
+      `max_retries`，与我们的重试循环**相乘**。
+- [x] **#144【P2】分片路径未传 `config_error` ⇒ #127 的 job 级首因在 `OCR_SLICES>1` 下失效。** —— **R66 已核销**（证据见 §0.1）
+      `engine.py` 两处 `_analyze_one` **无 `config_error=` 实参**，
+      而 `stage2.py` 的 `_run_stage2_analysis` 是**唯一**传参点 ⇒ `stage2.py` 的
+      `escalate` 恒 `False` ⇒ 403/401 的具体原因只落在页级 `_error`，
+      `jobs.error_message` 只剩通用句（甚至为 NULL）。
+      **修法**：分片路径建 `config_error: dict` 并传给两处 `_analyze_one`。
+      → **R66 第四批已修（`172957c`）**：分片路径建共享 `config_error` dict、
+      两处调用点都传、`gather` 后**补记被闸门跳过的页**、配置级故障下**跳过自愈**。
+      护栏 `tests/unit/test_pipeline.py::TestConfigErrorVisibility::`
+      `test_sliced_path_escalates_config_error`（**行为级**，真跑分片分支，含防空转）
+      + `test_config_error_visibility.py::TestSlicedPathSharesConfigErrorContract`（5 条），
+      变异 `devlogs/_verify/mutation_144_sliced_config_error.py` ⇒ **5/5**。
+      ⚠️ **条目里"更稳的做法"（把失败性质提升为 job 级列 `error_kind`）本轮未做** ——
+      它消除的是"每个调用点都得记得传"的**结构性**遗漏，比本次的逐点修法更彻底。
+      仍开放，见 §0 的 0-6。
+- [x] **#145【P2】日志：root 永远 DEBUG + 第三方 INFO/DEBUG 全量落盘 + 原始 LLM 输出写日志。** —— **R66 已核销**（证据见 §0.1）
+      `logging_config.py:119,141` 把 root 与 file handler 都钉在 DEBUG；`level` 参数**只作用于 console**，
+      无 `PBC_LOG_LEVEL`；第三库（httpx/httpcore/openai）DEBUG 经 root 全进 `pharma.log`（10MB 很快滚完）。
+      `llm/client.py:361-365,393-397,477` 把**原始模型输出前 200 字**写日志（含批记录正文）。
+      Electron 侧 `electron/main.js:59-61` 的 `backend-boot.log` **无大小上限**。
+      **修法**：显式 `setLevel(WARNING)` 给第三方 logger；抽 `PBC_LOG_LEVEL` 供 file handler 用；
+      raw 只记长度/摘要哈希；`backend-boot.log` 加轮转。
+      → **R68 第六批已修（`acd25ed`）**：四点全部落地。⚠️ 两处**比条目所述更严重**的实测：
+      ① 条目里的行号**已漂移** —— 真实泄漏点是 `llm/client.py` **L417/L453/L536**
+      （非 361/393/477），且 **L536 那处原本连 `_mask_secrets` 都没有**；
+      ② `core/page_analyzer.py` 的 `_parse_error_payload`（**2000 字模型正文**）
+      **零消费者**，却写进 `page_cache.structured_json` 并被 `api/review.get_page_data`
+      **整份回给浏览器** ⇒ 条目**低估了**问题面（"只修你最先找到的那一处 = 没修"）。
+      护栏 `tests/unit/test_log_privacy.py`（**26 条**），变异
+      `devlogs/_verify/mutation_145_log_privacy.py` ⇒ **9/9**（含一条**假修复**变异：
+      把 root 抬到 WARNING 而非逐库降级）。详见报告 §12。
+- [x] **#146【P2】页级失败原因未脱敏，直达复核 UI（job 级已脱敏，口径不一致）。** —— **R66 已核销**（证据见 §0.1）
+      `stage2.py:61-66` 的 `"_error": str(exc)[:200]` 未过 `_mask_secrets`/`redact_urls`；
+      而 job 级 `engine.py:366-370` 做了两层脱敏。该字段经 `review.js` 直接上屏，
+      并随报告/DB 长期留存。**修法**：改为 `redact_urls(_mask_secrets(str(exc)))[:200]`。
+      → **R66 第四批已修（`8d5848d`）**：新增 `_sanitize_error_text()` =
+      `redact_urls(_mask_secrets(text))[:200]`，**页级与任务级两个出口都**改走它。
+      ⚠️ 顺序有意：**截断必须在脱敏之后**，否则会漏出 key 残片。护栏
+      `tests/unit/test_config_error_visibility.py::TestPageLevelErrorTextIsSanitized`（4 条），
+      变异 `devlogs/_verify/mutation_page_error_sanitize.py` ⇒ **5/5**（基线绿）。
+      详见 `docs/ADVERSARIAL_REVIEW_2026-09-30.md` §11.1。
+- [x] **#147【P2】重试不清 `failed_pages` / 阶段耗时 ⇒ 重跑期间 UI 展示上一轮失败页。**
+      **R123 已修。** `core/pipeline/engine.py::reset_run_state()` 成为**单点**：
+      清 `failed_pages` + `stage1/2/3_ms`（+ 原 `error_message` / `finished_at` /
+      `ocr_progress`），返回旧值供审计；`retry_job`（锁内裸 INSERT 写
+      `retry_reset`）与 `_run_pipeline_impl`（写 `pipeline_reset`）都调它。
+      helper **不自己 commit**（事务边界归调用方，retry 要与归档/删除同一次提交）。
+      护栏 `tests/integration/test_r123_failure_state_reset.py`（19 条，含一条
+      管道型：`_run_pipeline_impl` 必须真的调 helper），变异 **15/15 CAUGHT**。
+      ⚠️ 原文（已修前）：`actions.py:85-88`（只清 `error_message`/`finished_at`）、
+      `engine.py:165-169`（只清三列），而 `failed_pages` 要到 `stage3.py:328-339` 才覆盖。
+- [x] **#148【P3】报告不携带失败信息（GMP 导出件）。**
+      **R123 已修。** `report.json` 的 `job` 块新增 `pages_analyzed`（口径复用
+      `api/jobs/status._count_analyzed_pages`，排除 `_parse_error` 占位页）/
+      `failed_pages`（NULL **不**伪造成 `[]`）/ `error_message`；`report.md` 头部
+      新增「任务状态 / 分析失败页 / 失败原因」，「页面覆盖」行并入失败页计数，
+      零 findings 分支在有失败页时**不再**输出"无需人工复核"，有 findings 时
+      汇总声明"本报告不覆盖第 N 页"；缓存摘要补 `error_message` + 解析后的
+      `failed_pages`（同一输入不进摘要两次 —— M12 第一版就是这么 MISSED 的）。
+      ⚠️ 原文（已修前）：`api/report.py` 的 `job` 块只有 status/页数/耗时；
+      MD 报告只有"页面覆盖"计数，而失败页**两个计数器都不覆盖**。
+- [ ] **#149【P3】其余后端小项。** ① `core/health.py:48-49` OCR 探测异常**未走** `_mask_secrets`
+      （与 LLM 分支 `:133` 不对称）；② `db/schema.sql:6` 的 `status` **无 CHECK 约束**，
+      3 处直写 UPDATE 绕过状态机（`state.py:198-204`、`watchdog.py:375-381`、`engine.py:339-344`）；
+      ③ `/api/health/watchdog` 的 `stall_limits_s` 只是**基准值**（未叠加 `per_page_s × 页数` 与 `cap_s`），
+      名字易被现场误读为"最终阈值"，建议补 `effective_limit_s_example`。
+
+### F3. 接口一致性（DX）
+
+- [ ] **#150【P2】健康探针路径不一致。** 主探针在 `/health`，子探针在 `/api/health/watchdog`
+      与 `/api/health/downstream` —— **`/api/health` 本身不存在（404）**。
+      我自己写的探针就踩了这个 404（并因 `stdout=PIPE` 未排空而二次死锁）。
+      **修法**：`/api/health` 加一个别名（或统一到 `/api/health`）；并在 `README`/`DEPLOYMENT`
+      的排障段写清三个探针的确切路径与各自含义。
+
+### F4. LLM provider 兼容（结论：实现完整，缺实测）
+
+- [x] **实现层面已完整**（本轮核验）：协议白名单（`api/settings/write.py:320-324`）、
+      设置页 select（`static/settings.js`）、两个适配器
+      （`llm/adapters/openai_adapter.py` / `anthropic_adapter.py`）、
+      依赖精确锁定（`requirements.txt` 的 `anthropic==0.109.2`，本机 `find_spec` 已装）。
+      Anthropic 的四处协议差异（`x-api-key`、`anthropic-version`、顶层 `system`、
+      `content[0].text` / `input_tokens`）都处理了；`response_format` 在 anthropic 侧
+      **显式忽略**并说明由 prompt + 客户端修复链承担 —— 合理。
+- [ ] **#151【P2】anthropic 协议的「厂商真机」从未被实测。** 本机只配了
+      `siliconflow` / `deepseek`（两者 `protocol=openai`）⇒ 该分支原先**零运行证据**。
+      ✅ **2026-09-18 已补上"协议层"的运行证据**：新增
+      `tests/integration/test_anthropic_protocol_live.py` —— 起一个忠实于
+      Anthropic Messages API 的**本地协议桩**，让**真实** `AnthropicAdapter` +
+      `LLMClient` 走**真实 socket**（不是 mock 掉 SDK 调用），逐项验证：
+      `x-api-key` 头（且**不得**出现 `Authorization`）、`anthropic-version`、
+      `system` 是**顶层字段**（不在 messages 里）、响应取 `content[].text` 拼接、
+      `input_tokens`/`output_tokens` → prompt/completion/total、`response_format`
+      被忽略（不透传）；失败侧验证 401 → `LLMConfigError` 且**不重试**、
+      429/500 → 可重试。7 例；变异验证（用量字段退化成 openai 字段名 ⇒ 红）。
+      ⚠️ **仍未完成的验收**：与 `api.anthropic.com`（或任一真实 anthropic 协议
+      服务）的实际连通 + 一轮真实分析 —— 那需要真实 key 与出网。
+      **本条目保持未勾**，不得用协议桩冒充厂商实测。
+- [ ] **#174【P2】两层重试相乘：SDK 自带 `max_retries` × 我们的重试循环。**
+      **实测**（Round 39，`tests/integration/test_anthropic_protocol_live.py` 的协议桩）：
+      `LLMClient.chat(retries=2)` 打一个持续返回 429 的桩，桩收到 **6 个请求**
+      —— 因为 anthropic SDK 默认 `max_retries=2`（每次 `create` 最多 3 次尝试），
+      两层相乘。openai SDK 同样是默认重试。
+      **为什么值得修**：① 单页 LLM 的**最坏耗时没有单一真值** —— `client.py` 里
+      "单页最长 240s" 的注释只算了我们这一层；② 看门狗阈值是**派生量**，
+      派生依据若少算一层，静默上界就会被低估（本项目已因同类问题翻过车）；
+      ③ 重试策略有两处真值，改一处不生效。
+      **修法（择一，需先定案）**：SDK 侧 `max_retries=0`，让**我们的循环成为唯一
+      重试权威**；或反之（SDK 重试、我们只做分级）。⚠️ 若选前者，必须同步复核
+      `client.py` 里 timeout 分支"跳过客户端重试"的理由是否还成立。
+      ⚠️ 本条**不在本轮修**（会改变时延行为，须与 e2e 超时预算一同复核），
+      且现有用例刻意只断言 `>= 2`、不锁精确次数 —— 免得把未定案的实现细节固化成契约。
+- [ ] **#152【P3】未覆盖其它主流协议。** 现仅 openai / anthropic 两种；
+      Gemini（`generateContent`）、Azure OpenAI（`api-key` 头 + `api-version` 查询参数）、
+      Bedrock 均不支持。**按需**再评估，不预先实现。
+
+### F5. 流式输出（对比市面主流）
+
+- [ ] **#153【P2】缺"断点续传"。** 聚合流 `/api/jobs/live` 只发无名 `data:` 帧，
+      **无 `event:`、无 `id:`** ⇒ 断线重连后客户端无法用 `Last-Event-ID` 增量补齐
+      （主流 SSE 做法：命名事件 + `id:` + 服务端保留短期事件缓冲）。
+- [ ] **#154【P2】缺心跳注释帧。** 无 `:keepalive`（主流做法是每 15–30s 发一行注释帧）
+      防中间代理按空闲超时断连。本机直连风险低，**一旦经反向代理/网关部署就会暴露**。
+- [ ] **#155【P3】`done` 命名事件可能被静默忽略（范围已收窄）**。单任务流
+      `/api/jobs/{id}/stream` 会发 `event: done`（`api/jobs/status.py:422`）。
+      ✅ **2026-09-20 复核：`review.js` 已有 `es.addEventListener("done", …)`**
+      ⇒ **复核页不受影响**（原登记的"会漏"对复核页不成立）；
+      隐患**仅剩 `upload.js`**（它只监听 `es.onmessage`，`:488`），
+      而 `upload.js` 当前**并未使用该端点** —— **一旦改用就会漏**。
+      动作：给 `upload.js` 补 `addEventListener("done", ...)`（或改用该端点之前先补）。
+- [x] **已做对的部分**（勿重复改）：`requirements.txt` 把 `starlette>=0.47` 的理由写清楚了
+      （更早版本会把 SSE 帧缓冲到 ~64KB ⇒ 进度看似冻结后一次性涌出）；
+      `review.js` 主动 `close()` + 手动指数退避 2/4/8s + 10s 兜底轮询；
+      `EventSource` 原生自动重连 + 后端 `retry:` 帧双保险。
+
+### F6. 规则集（主体合理，缺口具体）
+
+- [ ] **#156【P2】多个规范类型没有确定性规则。** 22 条规则覆盖 **17 / 21** 类
+      （✅ **2026-09-20 实测更正，原写 16/21**。实测方法：从 `core/rules/*.py` 提取
+      `"type": "<x>"` 字面量与 `CANONICAL_TYPES`（21 类）取交 ⇒ **17**；
+      规则注册表 22 条 = R1a/R1b/R2/R4/R5/R9a/R10/R6/R7/R8/R9/R8b/R-M1/R-M2/R3/R11–R17）。
+      **真正"应补未补"的只有 `ocr_noise` 与 `signature_mismatch`**；
+      `user_rule` / `uncategorized` 无规则属**设计如此**（前者靠用户规则、后者仅 LLM）
+      ⇒ **不要为凑数给它们硬加规则**。
+      其中 `ocr_noise` 缺失最值得补 —— 与我们刚实测到的**数字误读**直接相关（见 F7）。
+- [ ] **#157【P2】R12 自检自核只做页内 step 粒度。** `core/rules/rule_gmp.py:213-235`
+      比对"同一 step 内 `操作人 == 复核人`"，**无跨页/跨工序**的同人复核判定
+      ⇒ "独立复核"失效在跨页情形下漏检。
+- [ ] **#158【P3】阈值风险复核（逐条实测，别凭注释改）。**
+      ① R3 `_EDGE_MARGIN = 0.10`（`rule_spec.py:202,222`）把相对偏差 ≤10% 一律降 info；
+      ② `_decimal_loss_factor` 允许 10×/100× 缩放（`parsing.py:558-608`）⇒ 可能放过真实 10 倍超差；
+      ③ R4 `year < 2000`（`rule_time.py:283`）会误报合法引用的旧年份（稳定性/历史物料）；
+      ④ R7 编辑距离 ≤1 吸收（`rule_doc.py:226-235`）⇒ 若真实混批差异恰为 1 位，可能被当"OCR 变体"吃掉；
+      ⑤ R10 缺号在 `len(missing)*2 > len(nums)` 时降 info（`rule_time.py:518`）。
+- [x] **设计上做对的部分**（勿重复改）：`spec_guard.py` 用**同一个解析器**复核 LLM 自报的
+      `param_out_of_spec`，合规即抑制并留痕 —— 这是"LLM 提议、确定性复核"的正确形态；
+      三色按 **source** 分层（`finding_quality.py:197-213`）且**未知非空来源保守归 `llm`**；
+      `rule_coverage()` 提供 `pass` 层（"系统校验通过"不来自单条 finding）。
+
+### F7. 精确性与准确性（本轮**最有价值**的发现）
+
+> **结论：当前精度瓶颈在 OCR，不在规则。** 我用视觉能力直接读原始扫描页
+> （`test1.jpg`，真实批记录），与库里的 OCR 文本**逐格比对**，同一页上就有 4 类系统性错误：
+
+| 位置 | 视觉真值 | OCR 读出 | 会被哪条规则放大 |
+|---|---|---|---|
+| 干燥温度行（规格 50-60 °C） | `50 52 54 54 … 55 58` | `50 **32 34 34 35 36** 55 58` | **R3 → 5 条假阳性超差** |
+| 收率公式分母 | `30.0 kg` | `**930.0**` | R11 物料平衡：21.5/30.0=71.67% ✓，21.5/930=2.3% ✗ |
+| 记录者姓名 | `眭东鹏` | `薛东鹏` / `薛杰鹏` | R5 / R9 / R12 签名比对假阳性 |
+| 时间 | `02:03` / `06:12` | `02:23` / `05:12` | R1 / R5 时序假阳性 |
+
+- [ ] **#159【P0，但依赖外部】建立在**数值单元格**上的"视觉第四读"。**
+      这不是要重做多模态替换（`docs/VISUAL_CROSSCHECK.md` 已定案：多模态**不能当降噪手段**，
+      第 9 页三方 72/72 逐格一致、替代净损坐标/互证/成本 ≈4.2×），而是**定向互证**：
+      只对 **数字 / 时间 / 姓名** 三类单元格，让视觉模型复核 OCR 抽取结果，
+      **不一致时降级为"待人工核对"而非直接采信任一方**。
+      这与 **B3** 的既有结论完全吻合，但本轮给出了**具体的触发条件与真实反例**。
+      **验收**：对 `test1.jpg` 这一页，能给出"温度行 5 个单元格 OCR 与视觉不一致"的显式输出。
+
+      > **2026-09-18 补充实测（LLM 恢复后立刻做的定点验证，把本项的"待定"变成"已定"）：**
+      > 用 `scripts/probe_vlm_fields.py` 把 `test1.jpg` 交给 7 个候选 VLM，只问上一轮
+      > OCR 读错的 13 个字段（含那 4 类系统性误读），与**人工视觉真值**逐格比对：
+      >
+      > | 模型 | 正确/13 | 3 次重现 | 耗时 |
+      > |---|---|---|---|
+      > | `zai-org/GLM-4.5V` | **12** | 12/12/12 | ~8s |
+      > | `Qwen/Qwen3-VL-32B-Instruct` | **12** | 12/12/12 | ~8s |
+      > | `Qwen/Qwen3-VL-32B-Thinking` | **12** | — | ~9s |
+      > | `Qwen/Qwen3-VL-30B-A3B-Thinking` | **12** | — | ~7s |
+      > | `Qwen/Qwen3-VL-8B-Instruct` | **12** | — | ~11s |
+      > | `Qwen/Qwen3-VL-30B-A3B-Instruct` | 11（温度54→55） | — | ~10s |
+      > | `Qwen/Qwen3-VL-8B-Thinking` | 10（04:10→09:10、06:12→09:12） | — | ~11s |
+      > | `Qwen/Qwen3-Omni-30B-A3B-Instruct` | **5**（整行错位，不可用） | — | ~3s |
+      >
+      > **关键结论（三条，都推翻或收紧了旧假设）：**
+      > 1. **VLM 直读像素确实能读对 OCR 读错的东西**：上一轮 OCR 把温度读成
+      >    `32/34/34/35/36`、投料量读成 `930.0`、时间读成 `02:23/05:12`，
+      >    而 5 个模型**全部读对**了这些。⇒ 视觉第四读**技术可行**，#159 有落地依据。
+      > 2. **但成本优势不存在**：`Qwen3-VL-8B`（12/13、10.8s）与 `32B`（12/13、7.7s）
+      >    **准确率相同、8B 还更慢**（排队效应）。⇒ 没有"小模型够用"的省钱空间，
+      >    选型应按**可得性与稳定性**而非参数量。
+      > 3. **13 个字段里唯一稳定读不出的是中文人名**：7 个模型给出
+      >    `胖东鹏/胖东朋朋/胖乐鹏/薛东鹏/周小英` —— **没有一个读对"眭"**。
+      >    ⇒ **#160 的降级范围应把"姓名"排除出"可由视觉互证裁决"的类别**，
+      >    姓名只能走"标记待人工核对"，不能指望任一模型拍板。这是本轮新增的硬约束。
+      >
+      > ⚠️ 另有一条**非阻塞但必须登记**的发现：`Qwen/Qwen2.5-*` 系列（共 7 个，
+      > 含 Pro/LoRA 变体）**不是 VLM**，API 直接返回
+      > `20041 The model is not a VLM`。设置页若允许用户凭列表任选，会给出运行时才爆的错。
+      >
+      > ⚠️ **工程缺口**：产品链路目前**根本喂不进图像**——`llm/client.py:143`
+      > 的 `user_content` 是 `str`，`llm/adapters/openai_adapter.py:49` 直接
+      > `{"role":"user","content": user_content}`。要做视觉第四读，必须先扩这条签名
+      > （涉及两个 adapter + 审计表）。**这是 #159 的真实工作量所在，不是调提示词。**
+
+      > **2026-09-18（Round 39）落地进度 —— 签名已扩、原型已跑通，但未接入 pipeline：**
+      >
+      > ✅ **adapter 多模态签名已扩**（本项原先点名的"真实工作量"）：
+      > `user_content: str` → `str | list[str | ImagePart]`，涉及 `base.py` /
+      > `openai_adapter.py` / `anthropic_adapter.py` / `client.py`。协议差异**留在
+      > adapter 里**（OpenAI 出 `image_url` data-URL；Anthropic 出 `image` +
+      > `source.base64`）—— 把协议细节留给调用方，等于要求每个调用点各学一遍两套
+      > 协议。**纯文本路径的请求体字节级不变**（有护栏锁定：不为支持多模态而把
+      > 每一次普通调用都改成 parts 列表）。另修掉一个连带调用点：`chat_json` 的
+      > fix-hint 重试原做 `user_content + "…"` 字符串拼接，list 形态下会 TypeError
+      > ⇒ 改走 `append_text_part`（有护栏，且**变异模拟该形态果真报出**
+      > `can only concatenate list (not "str") to list`）。
+      >
+      > ✅ **原型 `core/vision_crosscheck.py` 已实现并跑通真实调用**：
+      > 只对**数值 / 时间**两类单元格互证，三态 `agree` / `disagree` / `unreadable`；
+      > **不一致一律降级为「待人工核对」，不采信任一方**（OCR 会读错，VLM 也会 ——
+      > 实测最多 12/13）；**中文姓名不由视觉裁决**（依 Round 35 实测硬约束），
+      > 即使模型答得与 OCR 一致也**不确认**（防"猜中即静默通过"）。
+      > 真实验收（`scripts/vision_crosscheck_demo.py`，走产品代码路径）：
+      > `Qwen/Qwen3-VL-32B-Instruct` 对 `test1.jpg` 温度行 **7.3s** 返回
+      > 「6 格中 **5 格** OCR 与视觉不一致」——序号 2–6 的 OCR `32/34/34/35/36`
+      > vs 视觉 `52/54/54/55/56`，而序号 1 两侧同为 `50`（反例，说明不是"全判不一致"）；
+      > 视觉读数与人工真值（52/54/54）**逐格吻合**。
+      >
+      > ⛔ **仍未做（故本项不勾）**：接入 job 流程（触发条件、"待人工核对"在前端的
+      > 呈现）、**审计表记录**（把页图送给第三方模型是 GMP 需要留痕的事实）、
+      > 以及 #160 的"不确定性 → 规则结论降级"联动。这些是独立的一步。
+      > 现状定位：**原型**，不写库、不改状态、不影响任何既有流程。
+
+- [ ] **#160【P1】把 OCR 不确定性与规则结论绑定。**
+      现有 `extraction_uncertain`（`finding_noise.py:219-223`）只在 `kind=time` 且**该页有 OCR 告警**时降级。
+      应扩到"数值单元格 OCR 低置信 / 与视觉互证不一致" ⇒ 对应规则 finding 降级为 info + 标注原因。
+- [ ] **#161【P1】用真实标注样本替换合成 ground truth（缓解 C1）。**
+      `docs/FINDING_GROUND_TRUTH.json` 是**合成件**，结论不可外推。
+      我们现在有了**第一份真实标注**：`用户标注.png` 圈出 `▲pH 为 6.8~7.0`（规格）
+      与 `中和后 pH 6.88`（记录值）—— 应作为**首个真实样本**登记，并在报告里
+      **区分"合成集口径"与"真实样本口径"**，不再混用。
+      ⚠️ 诚实登记：该样本的"应为 OOS 还是合规"**尚需与业务方确认**（6.88 落在 6.8~7.0 内），
+      不得自行假定结论。
+      **R90 第三十三批（2026-10-13）部分完成 —— 保持 `[ ]`**：① **已做** —— 首个真实样本已登记进 `real_samples`（`criterion:false` / `truth_declared:false` / `label:null` / `intent_confirmed:false`），报告已**分离**「合成集口径 / 真实样本口径」（`eval_findings.py` 新增独立小节 + 机检 `evaluate()` 返回不含真实样本内容）；定位 = job `670672f3-d0f`（丝裂霉素，51 页）**page 6**（R76 记录 + `devlogs/_verify/r91b_161_real_sample_evidence.py` 只读复核）。② **未做（故不勾）** —— **标签仍缺**：该行「应为 OOS 还是合规」**待业务方确认**；**单一样本**不足以替代合成集（P/R 仍无真实口径数字）；**像素级绑定未完成**（两份 PDF 均纯扫描件 ⇒ 全页模板匹配 51 页 >11 min 未收敛，已放弃，页码靠 DB 内容复核）。③ 顺带定位 **0-41**（该页参数被「参数数量过多」整体吞没）。
+
+### F8. 文档（大体及时，有几处自相矛盾）
+
+- [x] **#162【P2】`docs/TODO.md` 内的远端值自相矛盾**（已在本次一并修正：统一为 `09e6623`）。 —— **R66 已核销**（证据见 §0.1）
+      建立习惯：**每轮收尾时只改一处"最后更新"行**，避免头部与 E 表各写一份。
+- [ ] **#163【P3】陈旧注释与口径漂移。** —— **R66 部分核销**：② 已修（该注释已不存在）；① 「29K chars」仍开（实测语料已远大于此）
+      ① `core/kb/retriever.py:5` 写 "29K chars"，实际语料约 **59.4K**；
+      ② `core/rules/rule_doc.py:11` 注释称 "R8 low_confidence"，但 R8 实为 `completeness` 低置信度参数。
+- [ ] **#164【P3】文档体量治理。** `docs/` 下 12+ 个 `.md`（含 `NOISE_REDUCTION_TODO.md`、
+      `ROADMAP_v1.1.md`、`PLAN_v1.1_EXECUTION.md` 等存档件）。存档件**不再更新**的约定已写进
+      `docs/TODO.md` 头部，但缺**机检**。**验收**：加一条"存档文件不得含 `[ ]` 未完成项"的护栏。
+
+### F9. 知识库（结构完整，4 个键级缺口 + 1 处浪费）
+
+- [x] **#165【P2】`TYPE_QUERIES` 2 个死键。** —— **R71 已核销**（证据见 §0.1）
+      ⚠️ **原判据是错的**：`batch_logic` / `low_confidence`（以及 `GMP_BASIS_MAP`
+      的 `time_anomaly`）**不是死键** —— 富集在**类型归一之前**执行
+      （`stage2.py`：`attach_gmp_basis`→`attach_kb_refs`→`_norm`；`stage3.py` 同序），
+      故 LLM 直出的**原始** type 会被它们接住。实测 raw `batch_logic` ⇒
+      `gmp_basis` 非空 + `kb_refs=4`。归一**之后**才落到规范类型
+      （`batch_logic`→`batch_inconsistency` 关键词兜底、`time_anomaly`→
+      `signature_time_anomaly` 显式同义词、`low_confidence`→`uncategorized`
+      —— 后者是**策略使然**，见 `finding_quality` 模块 docstring
+      「无法归一的落到 uncategorized（而非混入 completeness…）」）。
+      **真缺口**：这条「富集先于归一」的顺序不变式**此前无人守** —— 把归一上提
+      会让这 3 类 finding **静默**失去依据/引用，而既有用例仍全绿
+      （它们直接以 raw type 调富集函数）。已加
+      `tests/unit/test_type_sync.py::TestRawEnumEnrichmentContract`（3 条），
+      变异 `devlogs/_verify/mutate_r71_raw_enum_enrichment.py` ⇒ **3/3 CAUGHT**。
+- [x] **#166【P2】2 个规范类型无词表。** `user_rule` / `uncategorized` 无 `TYPE_QUERIES` 条目 —— **R66 已核销**（证据见 §0.1）
+      ⇒ `query_for` 退化为泛词 `["批记录","记录"]`（`retriever.py:200-202`），检索质量形同随机。
+- [x] **#167【P2】缺护栏。** 加一条断言 **`TYPE_QUERIES.keys() ⊆ CANONICAL_TYPES`** —— **R66 已核销**（证据见 §0.1）
+      且**每个 `CANONICAL_TYPES` 都有词表**的机检 —— `docs/TODO.md:101` 已自认"不检查键的有效性"，
+      这正是 F1 那两个 P0 的同款缝（**护栏通过但接线是断的**）。
+- [x] **#168【P2】每页 KB 检索跑了两次。** —— **R124 已修**。
+      **定位加深**：这不只是"多跑一次 BM25"。两段检索的**门槛不同**（注入 `>= 40`、
+      审计 `>= 64`）⇒ 40–63 字的页**注入了 prompt、审计却记 `kb_used=None`** ——
+      审计与"实际发给模型的东西"不符（GMP 追溯里最怕的那类）。
+      **修法**：删掉第二段，`kb_refs_used` / `_kb_version` 只保留**一个来源**
+      （`_kb_version` 显式初始化为 `""`，不再依赖条件表达式的求值顺序）。
+      护栏 `tests/unit/test_page_analyzer.py::TestKbRetrievalRunsExactlyOnce`
+      （4 条：调用次数 / 40–63 档"注入了就必须留痕" / 门槛以下不注入 /
+      **AST 单调用点**），变异 `devlogs/_verify/r124_mutate.py` ⇒ **4/4 CAUGHT**。
+      ⚠️ 原文（已修前）：`core/page_analyzer.py:489-508` 为构造 prompt 检索一次，
+      `:560-571` **又检索一次**（仅用于 `kb_used` 审计留痕），第二次 `kb_block` 还覆盖第一次。
+- [x] **#169【P2】`kb_prompt_inject` 设置开关不可达（C4 的具体化）。** —— **R72 第十二批（2026-10-08）已核销**（证据见 §0.1）
+      **注入代码是活的**（`page_analyzer.py:490/561` 真实调用，默认 `True`），
+      **但开关是死的**：`api/settings/write.py:37-64` 的 `_STATIC_FIELDS` 不含它，
+      未知字段在 `:315-316`（`prov_name is None`）**静默丢弃**，read 接口与 UI 也无此控件。
+      ⇒ 只能靠 env/config.json 切换。**修法**：接通或删除，别留着当装饰。
+      **本批选择「接通」**（注入能力是真的，删掉是净损失）：白名单补映射 + `SettingsUpdate` 声明 +
+      GET 暴露 `kb.prompt_inject` + 知识库分区复选框（`static/settings-ocr.js` 读 GET / 写 POST，失败回滚）；
+      并把 `prov_name is None` 分支由**静默** `continue` 改为记入 `dropped`（随响应 `dropped` + message 回显）。
+      **未采纳**审计原文的"未知字段应报错"：`SettingsUpdate` 是 `extra="allow"`，报错会让
+      "前端先加字段、后端还没认"的过渡期**整批**保存失败；回显达到同一目的而无破坏性耦合（有意偏离，已写明）。
+      ⚠️ **变异当场抓出首版护栏的弱断言**：`test_reads_payload_and_posts_on_toggle` 原用 payload `false`，
+      与假 DOM 的默认值**不可区分** ⇒ M5（摘掉 `load()` 里的 `syncKbInjectToggle()` 调用）**MISSED**；
+      改为 payload `true`（异于默认）后才真正咬住 —— 又一例「用例存在 ≠ 断言有效」。
+- [ ] **#170【P3】主源 `gmp2010`（313/441 条）缺 `license` 且 `raw/` 下没有对应 md**
+      （5 个 md 覆盖其余 5 源）⇒ 主源**无法从仓库复现**，只能经 Word COM 重建。
+
+### F10. 工程实践（一条通用护栏，能一次性堵住上面那类缝）
+
+- [x] **#171【P1】"前端消费的字段必须在它实际的数据源里存在"的契约机检。** ✅ **2026-09-18 已建**
+      这是本轮**反复出现的缺陷模式**：`test_config_error_visibility.py:198` 只断言
+      `"job.failed_pages" in js`（**字符串存在**），而 `listings.py:46` **根本不返回该字段**
+      ⇒ 护栏全绿、缺陷照旧（P0 #134 与 #133 都从这条缝漏过）。
+      **做法**（`tests/integration/test_frontend_field_contract.py`，15 例）：
+      字段集**不手写**，而是从 `upload.js` 的行构建函数体里**派生**
+      （`renderJobRow` / `buildMetaLine` → `job.*`；`buildRowFromSnapshot` /
+      `updateJobRowLive` → `d.*`），再对**三个真实数据源**
+      （`GET /api/jobs`、`GET /api/jobs/{id}`、SSE 快照 `_get_job_progress`）
+      核对**存在性 + 类型 + 取值**，并**跨来源比对**类型与取值一致性
+      （"同一字段在详情与列表行为不一致"正是 #132/#134 的成因）。
+      另有 `TestSsrBridgeContract` 把 `window.__PBC__` 也当作数据源，
+      锁"review.js 的 `ctx.*` 消费集 ⊆ 桥接注入集"。
+      **自扩展**：前端新增消费一个字段，护栏立刻要求对应端点提供它。
+      **验收（变异验证，逐条实测）**：
+      | 注入的缺陷 | 护栏反应 |
+      |---|---|
+      | SELECT 去掉 `ocr_backend_used` | 存在性红 + **跨来源一致性也红**（列表 None / 详情 str） |
+      | `failed_pages` 改回字符串透传 | **三条**用例红（类型 / 一致性 / 定点 list 断言） |
+      | `listings.py` 内联 `json.loads` | 结构侧红 |
+      | `__PBC__` 去掉 `page_ocr_empty` | 两条红 |
+      ⚠️ **变异验证当场揪出护栏自身的漏洞**：第一版用
+      `assert "json.loads" not in src` 查"第二套口径"，而变异写成 `_j.loads(...)`
+      （只差别名字符串）**就溜过去了** —— 已改为走 **AST** 认调用形态
+      （`ast.Attribute.attr == "loads"` 或 `Name.id == "loads"`），别名/import 方式都挡得住。
+      ⇒ **护栏必须做变异验证**：写完就绿的空护栏比没有护栏更危险。
+      **产出**：见 #172（列表缺 5 个行字段）与 #173（`page_ocr_empty` 漏桥接）
+      —— **两条都是本护栏发现的真实缺陷**，这正是它存在的意义。
+
+- [ ] **#175【P2】`test_todo_freshness` 的不变式 B 自 R103 起**静默失效**：标题形态漂移，护栏看不见。**
+      **R128 收尾（2026-10-28）：验收条件已达成，编号体系决策仍待定** ——
+      新增"**只减不增的棘轮**"`TestChangelogHeadingForm::test_no_new_heading_uses_the_short_r_form`：
+      历史 24 条进白名单（`_LEGACY_SHORT_FORM_ROUNDS`），**任何新增的 `—— RNN` 标题立刻红**。
+      **实测纠正了本条原记的数字**：不是 20 条、也不是 22 条，是 **24 条**、**两种形态**：
+      ① **22 条**无 `Round`（`### …（2026-10-27）—— R126 / TODO B3-3`）；
+      ② **2 条**两种形态**互相矛盾**：`### …（Round 90 第四十五批，2026-10-23）—— R102 首批`
+      ⇒ B 看见的是 **90**，真实轮次 101/102 —— 这才是"`max` 停在 90"的直接成因，
+      比 ① 更隐蔽（它看起来"有 Round"）。`max` 现为 **128**（R128 标题回到规范形态）。
+      变异 `devlogs/_verify/r128_175_ratchet_mutation.py` ⇒ **3/3 CAUGHT**（注入 `—— R999` /
+      检测器恒空 / 删掉规范形态例外）；两条阴性对照保持绿，其中**关键一条**是
+      "把一条历史标题改规范 ⇒ 必须仍绿"（棘轮只减不增，不得惩罚改进）。
+      **仍未定案（属编号体系决策，agent 不改）**：这 24 条要不要回改成 `Round NN`
+      —— 需先明确 `R<NN>` 与 `Round NN` 是否同一套计数（MEMORY「两套编号不得换算」）。
+      白名单在回改过程中会自动缩小，不需要人工维护。
+      **原始记录**（2026-10-27，R125 收尾核对时发现）：`_changelog_max_round()` 对**全文件**取
+      `Round\s*(\d+)` 的 max ⇒ **90**；最后一条带 `Round` 的标题是 `Round 90 第四十五批`，
+      它对应的是 **R102（2026-10-23）**。自 **R103** 起 **20 条** `###` 标题只写 `—— RNN`、
+      **不含** `Round` 记号 ⇒ 不参与 max；而不变式 H 的两条用例只检查**含「第M批」的标题**
+      （`_HEADING_BATCH_RE`）⇒ 这 20 条**一条都不进检查**。结果：`docs/TODO.md` 的复核戳
+      停在 `Round 90（2026-10-22）`，**落后 22 轮而机检全绿**。
+      **为什么是 P2**：这就是本文件自己记下的教训 ——"**护栏的解析形态就是它的攻击面**"，
+      而它这次没被自己的教训保护住。失效之后，"每轮收尾必须复核 TODO"这条纪律**没有任何
+      强制点**（B 是它唯一的强制点）。
+      **修法（需先定案，属编号体系决策，不在本轮改）**：① 标题统一回到 `Round NN 第M批`
+      （要回改 20 条历史标题）；② 或把 `_ROUND_RE` 扩到 `R(\d+)` 并同步改 H 的判定集
+      —— 但那会把两套编号混进**同一个** max 比较，与 MEMORY「两套编号无固定偏移、不得换算」
+      冲突，须先明确哪一套是当前体系。
+      **验收**：注入一条 `—— R999` 标题 ⇒ 不变式 B 必须红（当前全绿）。
+
+---
+
+### F11. 下一轮开工顺序（建议）
+
+1. ~~**先修 2 个 P0（#133 / #134）**~~ ✅ **2026-09-18 已完成（`177a6d9`）** ——
+   两条都做了负例验证；全量 2651 passed。**下一步转 2。**
+2. ~~**同步修 P1 的错误可见性（#135 / #136）与后端并发（#140 / #141 / #142）**~~
+   ✅ **2026-09-18 已完成（见本轮提交）** —— 5 条全部修完，每条都做了**负例验证**；
+   全量 **2658 passed / 3 skipped**（较上轮 2651 +7 = 2 级联取消护栏 + 3 launch 失败护栏
+   + 4 失败页渲染护栏，其中 2 条合并计数）。**下一步转 3。**
+3. ~~**加 #171 契约机检** —— 先补护栏，再改代码，避免修完又漂。~~
+   ✅ **2026-09-18 已完成** —— 契约从 JS 函数体**派生**（不手写）+ 三个真实数据源断言 +
+   跨来源一致性；`window.__PBC__` 也纳入契约。**护栏建成即发现两条真实缺陷**：
+   **#172**（列表端点还差 5 个行字段，`ocr_backend_used` 导致老任务永久丢失 OCR 追溯标签）
+   与 **#173**（`page_ocr_empty` 漏桥接 ⇒ OCR 空页被显示成"本页无问题"，是上一轮 #136 的残留）。
+   三条都已修 + 五轮**变异验证**（含"变异揪出护栏自身字符串匹配漏洞 → 改走 AST"）。
+   **下一步转 4。**
+4. ~~**#143 负例测试** —— 它现在会把 429/本地错误误报成"请检查 API Key"，误导排障。~~
+   ✅ **2026-09-18 已完成** —— **先定位**：用真实 SDK 异常对象跑 8 个场景，
+   实测 **3 例误判**（真实 `429 … Limit 40000` 命中裸 `"400"`、本地
+   `ValueError("invalid literal …")` / `KeyError("invalid key …")` 命中裸 `"invalid"`），
+   其中 429 那条会让 Stage 2 **整份早停**并提示"请检查 API Key"。
+   **再解决**：判据改「结构化优先（`status_code`，含 `response.status_code` 回退）
+   + 词边界文本兜底」，并明确"本地编程错误类型永不算配置级"。
+   **最后测试**：新增 12 例（含 401/400 对照组，防"一刀切改成可重试"）；
+   两轮**变异验证**（摘掉结构化判定 ⇒ 3 例红；词表退回裸状态码 ⇒ 2 例红）；
+   复测同一探针 **8/8 正确（原 5/8）**。**下一步转 5。**
+5. ~~外部解阻后再做 **#151（anthropic 实测）** 与 **#159（视觉第四读原型）**。~~
+   ✅ **2026-09-18 已完成**（A4 已解阻）：
+   - **#151**：本机无 anthropic key ⇒ 起**忠实于 Messages API 的本地协议桩**，
+     让真实 `AnthropicAdapter` + `LLMClient` 走**真实 socket** 往返，
+     逐项验证四处协议差异 + 401/429/500 分级（7 例）。⚠️ 桩 ≠ 厂商真机，
+     "与 api.anthropic.com 实际连通"仍未验证，条目**保持未勾**（见 F4 的 #151）。
+   - **#159**：先扩 adapter 多模态签名（`user_content: str` →
+     `str | list[str | ImagePart]`，**纯文本路径字节级不变**），再写
+     `core/vision_crosscheck.py` 定向互证原型。**真实验收达标**：对 `test1.jpg`
+     温度行给出显式输出「6 格中 **5 格** OCR 与视觉不一致」（序号 1 两侧同为 50，
+     作反例），视觉读数与人工真值逐格吻合。
+     ⚠️ **原型未接入 pipeline**（不写审计表、不改 job 流程）—— 接入是 #160 的活。
+   **下一步转 6。**
+6. **收尾：先重建产物 → 再跑门禁 → 推送到干净的 worktree**（`tests_coverage` 含分发一致性，
+   升版未重建必然变红，那是**正确信号**）。见 F11 之后的状态行。
+
+> ✅ **产物已重建**（2026-09-18，v1.1.9）⇒ #133–#142 + #172/#173 + #143 共 **11 条**
+> 已进入可分发产物。构建顺序严格照第 6 步：**Tailwind → PyInstaller → electron-builder
+> → 产物核验 → 门禁 → 推送**。
+>
+> **实证（全部实测，非推断）**：
+> - Tailwind exit 0 → PyInstaller exit 0（`dist/pbc-server/pbc-server.exe` 20.3 MB）
+>   → electron-builder exit 0（19s，**日志无任何 download 行** = 命中缓存）。
+> - 冻结点烟：`/health` → `{"status":"ok","version":"1.1.9"}`；**Electron 资源里那份 exe
+>   也实跑过**（不只验字节一致）—— 起服 3.1s，`/api/health/watchdog` 回传 `ocr_running: 4200`
+>   （符合阈值不变式），隔离库 `total_jobs: 0`。
+> - 目录唯一性：`clean_dist.py` dry-run → **待清理:(无)**、`dist-electron` 状态「完整」版本 1.1.9；
+>   **未产生**多余的 `dist-electron/resources/`（`ls dist-electron/` 仅 `builder-debug.yml` + `win-unpacked/`）。
+> - `asar_version()` **子进程读** = `1.1.9`（绝不用宿主读取 —— 那会锁死 asar，是目录堆积的复发机制）。
+> - `test_distribution_parity.py` **13 passed / 0 skipped**（无产物时其中 3 条会 skip）。
+> - 门禁六项 **OVERALL: pass（pass=8 fail=0 warn=0 skip=0）**，覆盖 **95.24%**，
+>   报告 `devlogs/gate_report_20260918_112932.json`。
+> - ⚠️ **新认知（省下下次 10 分钟排查）**：**用例数会随「产物是否存在」变化** ——
+>   junit 审计副本实测 `tests=2713 failures=0 errors=0 skipped=0`（产物就位）；
+>   同一提交在产物被清空时是 `2710 passed / 3 skipped`。**collect 数恒为 2713**。
+>   看到 2713 vs 2710 的差异**不是回归**，先看 `dist-electron/` 在不在。
+> - ⚠️ **踩坑记录（探针问题，非产物缺陷）**：产物冒烟必须传 **`PORT`**（`server.py` 读它，
+>   默认 58765），**不是** `APP_PORT`（那是 `config.py` 的值）；隔离数据目录要**覆盖 `APPDATA`**
+>   （`config.py:41`），**不是** `PBC_APPDATA`。写错变量名的后果很隐蔽：服务照常启动，
+>   但监听在 58765（探针在 8123 上等 60s 超时），且**读写真实 `%APPDATA%\PBC`**。
+>   （本次误用后已核验：`data.db` 与 `data.db-wal` mtime 未变，仅 `data.db-shm` 被触碰，无数据损失。）
+>
+> ⚠️ **外部阻塞**：
+> ~~**A1**（`dist-electron` 被宿主进程持句柄）~~ ✅ **2026-09-18 已解除**（用户手工收敛）。
+> ~~**A4**（SiliconFlow 余额）~~ ✅ **2026-09-18 已解除**（key 恢复 200），
+> 多轮 e2e 与真实 VLM 调用均已跑通。
+> **仅剩**：anthropic 的**厂商真机**连通性（需真实 key 与出网），见 #151。
+>
+> ✅ **第 6 步已闭环并推送**（2026-09-18）：`8f80a58..90e86a3  main -> main`
+> （经代理 `127.0.0.1:7897`；同刻直连 `Recv failure: Connection was reset`）。
+> 推送的两个提交：`361c8fd`（#143/#151/#159 + 升版）、`90e86a3`（本轮实证文档）。
+> **F11 第 1–6 步全部完成。**
+>
+> **下一轮候选**：#127（全局性故障被降级为页面级失败 → 界面绿点假阴性，**仍未修**，
+> 需升版重建）、#174（两层重试相乘）、#125（巡检首扫空窗）、#126（第 2 份真实批记录泛化）、
+> #151（anthropic 真机）、#159 接入 pipeline（= #160）。
+
+---
+
+## v1.2.0 迭代清单（Round 40 对抗性审查产出 · 基线 v1.1.9）
+
+> 依据：`docs/ADVERSARIAL_AUDIT.md` 的「第二轮对抗性审查（Round 40）」。
+> **判定：v1.1.9 无 P0 阻塞，可作为分发基线。** 以下为下一版迭代项。
+> 纪律：每条都要求**先定位 → 再解决 → 最后测试（含变异验证）**；改了进入产物的东西 ⇒ **必须升版 + 重建产物**。
+
+### B0 基线冻结（先做，代价低）
+
+- [x] **B0-1 给 v1.1.9 打 tag 并写分发说明** —— ✅ **2026-09-18 完成**
+      （附注 tag `v1.1.9` → `1ee2c17`，与现有 4 个 tag 同为 annotated；tag 正文含
+      代码面 / 实测证据 / 密钥卫生 / **证据边界** 四段）。
+      证据：版本四处一致（`main.py` / `package.json` / `package-lock.json` 两处 /
+      `PORTABLE_README.txt`）、`dist-electron` 唯一且 dry-run 报「待清理: (无) · 完整 · 1.1.9」、
+      asar 子进程读 = 1.1.9、内嵌 exe 实跑 `/health` 通过、门禁 8 项全绿（95.24%）。
+      动作：`git push origin v1.1.9`（随本轮分支提交一并推）。
+      ⏳ **仍待用户决策**：`v1.1.3`–`v1.1.8` 的 retro-tag **未创建**（现有 tag 只到 `v1.1.2`）。
+      候选锚点已用 `git log -S 'APP_VERSION = "1.1.x"'` 定位（确定性、非猜测）：
+      v1.1.3→`e6b9fce`、v1.1.4→`cad2544`、v1.1.5→`c48bdca`、v1.1.6→`5b9f534`、
+      v1.1.7→`cc55eeb`、v1.1.8→`36569ae`。
+      ⚠️ 但"首次出现的提交"≠"发布时刻的 tip"（其后可能仍有属于该版本的提交）⇒
+      **retro-tag 是对发布历史的公开声明，不由我单方面决定**，请用户确认口径后再补。
+
+- [x] **B0-2 记录"分发基线"的诚实边界** —— ✅ **2026-09-18 完成**
+      在 `DEPLOYMENT.md` 新增「**本分发基线（v1.1.9）的证据边界**」小节，紧邻
+      「分发前检查清单」，分两栏：**已在本机实测**（产物结构 / 版本四处 / 内嵌 exe 实跑 /
+      门禁 95.24% / 产物二进制无密钥）与**未验证（不得当作已通过）**
+      （无他机验证、未在 v1.1.9 产物上重跑 51 页全链路、Anthropic 真机未连通、
+      无标注集故 P/R 无可信数字、200 页上限仅线性外推）。
+      验收达成：新接手的人只看 `DEPLOYMENT.md` 就能知道哪些结论未被验证。
+      ⚠️ **Round 42 更新**：其中「未在 v1.1.9 产物上重跑 51 页全链路」一条**已于本轮消除**
+      （见 B0-3），`DEPLOYMENT.md` 的「未验证」栏已同步收敛。
+
+- [x] **B0-3 `#149` 产物级端到端测试**（唯一未验的执行项）—— ✅ **2026-09-18 完成**
+      被测对象：`dist-electron/win-unpacked/resources/pbc-server/pbc-server.exe`
+      （sha256 `cfe28a30…`，20 340 967 B）—— **即用户双击运行时内嵌的那一份**。
+      驱动：`e2e_run.py`（**仓库根**；`PBC_E2E_EXE` 指向上述 exe；driver 自行以
+      `APPDATA=%TEMP%/pbc_e2e_appdata` + `PORT=58799` 隔离）。
+      **结果：7 个轮次全过、`ALL ROUNDS PASSED`、exit=0**：
+
+      | 轮次 | 终态 | 耗时 | 页 | findings | 类型 | gmp_basis |
+      |---|---|---|---|---|---|---|
+      | `pdf` | review | 285s | 6 | 27 | 7 | 27/27 |
+      | `img` | review | 120s | 1 | 17 | 4 | 17/17 |
+      | `cancel` | cancelled | 9s | — | 0 | — | — |
+      | **`real`** | **review** | **1049s** | **51** | **293** | **14** | **293/293** |
+      | `rot` | review | 100s | 4 | 16 | 3 | 16/16 |
+      | `robust` o6（小字号低 DPI） | review | 213s | 1 | 1 | 1 | 1/1 |
+      | `robust` o1（小框） | review | 33s | 1 | 1 | 1 | 1/1 |
+
+      **独立核验（不采信 driver 自述）**：
+      - findings **直查隔离库** 与 driver 逐条一致（27/17/0/**293**/16/1/1）；
+        real 轮 **缺 `gmp_basis` 的条数为 0**（证明 293/293 有依据）。
+      - SSE 帧数吻合（143 / 61 / 5 / **507** / 51 / 107 / 18），phase 链均为
+        `ocr → analyze → cross → done`（cancel 为 `ocr → idle → done`）。
+      - `ocr_backend_used` **全部 `paddle`**、`backend_mismatch=null`
+        ⇒ 无「Paddle 失败静默 failover 到 MinerU」的掩盖。
+      - `error_message=null`、`failed_pages=null`、7 个 job 全部 `terminal=True`。
+      - 审计留痕：`audit_log=89` / `llm_call_audit=71` / `finding_suppressions=15`。
+        rot 轮的旋转自愈**有审计**：`action=stage1_rotation_recovered,
+        recovered_pages={2: 90, 3: 90}`，且 `rot_lost=[]`（内容未丢失）。
+      - **污染核查**：真实 `%APPDATA%/PBC/data.db` mtime 仍为 **09-16 10:12**
+        （`-wal` 09-16 11:06）⇒ 本轮 e2e **未写入真实库**。
+      - **字节一致**：`win-unpacked` 内嵌 exe 与 `dist/pbc-server/pbc-server.exe`
+        **sha256 完全相同** ⇒ 分发件 = 构建产物。
+      - robust 契约满足：`o6_page1_signal=true`、`integrity=incomplete`、
+        `reasons=["小字号（4.0pt < 6pt）叠加低 DPI（72.0 < 150），识别风险高，需人工复核"]`
+        ⇒「不可无损修复页不得静默标记成功」成立。
+
+      ⚠️ **测试保真度留白（如实标注）**：driver 在 `e2e_run.py:308` **硬编码**
+      `siliconflow_model = "Qwen/Qwen2.5-72B-Instruct"`，而生效生产配置是
+      `SILICONFLOW_MODEL = deepseek-ai/DeepSeek-V3.2` —— 两者均走 OpenAI adapter、
+      协议一致，故链路验证有效，但**「生产模型」这一具体路径本轮未覆盖**
+      （已登记 B5-4）。
+
+### B1 精度与准确性（用户最关心，优先级最高）
+
+- [x] **B1-1 同根因 finding 聚合**（✅ **2026-09-21 Round 53 已修**）
+  现象：单个 OCR 误读会在每个时间点各产 1 条 finding。旧版实测 `4.6→46` 生成 **9 条**
+  （7 warning + 2 critical）；当前版本 severity 已正确降级为 info，但**条数不变**。
+  证据：`core/rules/rule_spec.py:228` 逐值判定，全链路无聚合层；旧 job `0c5cfb00` 实测
+  p8 命中 9 条、全 job **442 条**。
+  **定位（Round 53，`devlogs/_verify/probe_b11.py`，两个真实语料）**：
+  - job `6f80145a-47f`：p8 `进料压力` 在 7 个时间点均为 `46bar` ⇒ R3 产出 **7 条**；
+  - job `0c5cfb00-897`（= 442 条那个 job，51 页缓存齐全）：R3 38 条、其中
+    **p8 进料_压力 ×7** + **p33 D2101/D2102_真空度 各 ×8** ⇒ 三组共 23 条同根因副本。
+  - ⚠️ **关键定位结论**：不能用描述文本反推聚合键 —— 粗口径（page+type+前 60 字）
+    在该语料上给出"12 组可合并"，其中**多数是假合并**（如"缺少 QA 签名"与
+    "缺少复核人签名"是**不同根因**，合并会丢信息）。
+  **处置**：新增 `core/rules/finding_aggregate.py`（**单一构造点 + 派生键**）：
+  - `rule_spec._judge_param/_judge_cell` 的 4 个发射口统一走 `make_oos_finding`，
+    同时挂上**不落库**的派生字段 `_agg_parts`（结构化部件）/`_agg_key`（分组键）；
+  - 键含 page/type/kind/主语/**根因**/取值/单位/规格/提示语 ⇒ **取值或根因不同者不会被并**；
+    位置（时间点）是变化维度，**故意不进键**；
+  - `_grade_out_of_spec` = 判级**唯一**实现（返回 `severity/hint/cause`），
+    `_severity_for_out_of_spec` 保留为 2 元组兼容包装（无第二份判级逻辑）；
+  - 文案由 `render_description` **唯一**构造（聚合时只改"位置短语"，
+    **不做文本裁剪/拼接**）⇒ 单条文案与原实现**逐字节相同**（真实库实测 **7/7 一致**）；
+  - 合并后 severity 取组内**最高**；`ocr_text` 拼接全部成员明细（留痕）；
+    `aggregate_by_root_cause` 返回**明细行**（组键/成员数/成员原文/severity 分布），
+    主入口写 `logger.info` 台账。
+  **实测（两个真实语料 × 官方重放路径，非单测）**：
+  `devlogs/_verify/replay_b11.py`（复用 `scripts/replay_rules.py` 的 `load_job` /
+  `run_rule_layer`，即**生产同一条 `analyze_cross_page` 链路**，LLM 两条支路置空），
+  同输入、**仅切聚合开关**：
+  - job `6f80145a-47f`（`devlogs/_replay/data.db`）：**493 → 487**（−6），1 组（p8 ×7）；
+  - job `0c5cfb00-897`（真实库，51 页）：**426 → 406**（**−20**），3 组：
+    p8 `进料_压力` ×7、p33 `D2101_真空度` ×8、p33 `D2102_真空度` ×8；
+    severity 分布 `warning 198→184 / info 212→206 / critical 16→16`（**critical 零变化**）；
+  - 单条等价性：`devlogs/_verify/verify_b11.py` 对照生产库 p8 的 7 条，
+    description/ocr_text/severity **7/7 逐字节一致**。
+  - ⚠️ **如实标注口径**：剩余 406 条里 R6 completeness / R9 handwritten / R1b 等
+    **不是**同根因副本（各不相同的独立问题），聚合**不应**动它们 —— 故原始验收口径
+    "442 条 → 显著下降"**不可直接套用**（442 条含 llm_page/llm_cross 与旧构建产出）。
+    本条**可证伪**的效果量是"**同一列在每个时间点各一条**"这一类的 **23 → 3**。
+  护栏：`tests/unit/test_finding_aggregate.py`（22 例：单条字节不变 / 真的合并 /
+  **不误并**（取值·根因·页·种类·提示语五个反向对照）/ 留痕 / 派生键覆盖率）
+  + `tests/unit/test_cross_page_entry_coverage.py::TestEntryPointAggregationWiring`
+  （2 例，专防"机制写好但入口没接"的假绿）。
+  变异验证：`devlogs/_verify/mutate_b11.py` **12/12 CAUGHT**（含"聚合键漏字段"4 条、
+  "机制失效"4 条、"留痕失真"2 条、"入口不接线"1 条、"覆盖率护栏"1 条）。
+  ⚠️ 变异过程中发现并修正**两处真实缺陷**：① 单值参数的"共 N 处"从位置列表推会
+  **恒为 0**（措辞永不出现）⇒ 改用成员数；② "不同根因不合并"的**首版用例钉不住**
+  `cause` 字段（靠 suffix 差异侥幸通过）⇒ 改用 `printed` vs `hard` 这一对
+  （提示语**都是空串**，唯一能拦住合并的只有 cause）。
+  全量回归：`2997 passed / 0 failed`（Round 52 基线 2881 ⇒ 新增用例随产物）。
+
+- [ ] **B1-2 把 `core/vision_crosscheck.py` 接入 pipeline**（= #159 剩余 / #160）
+  现状：原型已跑通（`test1.jpg` 真实 VLM 调用，输出显式不一致清单），**未接入**。
+  动作：① 触发条件（只对**数值/时间**单元格，且该页存在可疑值时）；② 前端「待人工核对」呈现；
+  ③ 写审计表（可追溯）；④ 保证**姓名永不由视觉裁决**、**空回答 ≠ 一致**。
+  验收：端到端跑一次真实页面，界面上能看到「OCR 46 / 视觉 4.6 → 待人工核对」；
+  变异验证：把"空回答当一致"改回 ⇒ 护栏变红。
+  ⚠️ 成本已知（≈4.2×），**只做定向互证，不要全页替代**（见 `docs/VISUAL_CROSSCHECK.md`）。
+
+- [ ] **B1-3 R4：建立真实标注集（精度度量的前提）**
+  现状：**没有可信 P/R**；`docs/FINDING_GROUND_TRUTH.json` 是合成件，不可外推。
+  动作：用「丝裂霉素提取批记录.pdf」+「试用批记录.pdf」人工标注**逐页**真值
+  （至少：本页有哪些真实偏差、哪些是噪声），标注过程与判据写进文档。
+  验收：能算出**可复现**的 P/R 与"每条 finding 的人工判定"；此后所有"提准"改动都必须挂 R4 数字。
+  备注：**这是 B1-1/B1-2 效果的唯一可信裁判**，建议与它们并行推进。
+
+- [x] **B1-4 LLM 的"日期 vs 当前日期"判据方向不稳定（P1，Round 42 实测新发现）**
+  现象：同一次 51 页真实运行内，LLM 对同一类比较给出**互相矛盾**的结论，且把
+  **当前日期误当成生产日期**。全部来源为 `source='llm_page'` / `'llm_cross'`（**不是规则**）。
+  证据（real 轮 job `6f80145a`，均 `severity=critical`）：
+
+  | 页 | LLM 断言 | 用视觉读原图核实的结果 |
+  |---|---|---|
+  | p2 | 「车间负责人审核日期 2025.01.30 **晚于**当前日期 2026.09.18」 | `p02.jpg`：该处手写**就是 `2025.01.30`** ⇒ 日期读对，**比较方向反了** |
+  | p38 | 「复核者/操作者签名时间 **2027.01.17 早于**生产日期 2025年01月20日」 | 2027 明显**晚于** 2025 ⇒ 方向反 |
+  | p49 | 「审核人签名日期 2025.02.24 **早于**当前年份 2026.09.18」 | 过去日期**本是记录常态**，不该判 critical |
+  | p38 | 「生产日期 2025年01月20日与当前年份 2026年09月18日**不符**」 | `p38.jpg`：生产日期确为 `2025年01月20日`；二者不等是**必然**，非异常 |
+  | p28 | 「记录的日期 2015-01-23 与**生产日期 2026-09-18** 矛盾」 | 与 p38 自述互斥 ⇒ **同一次运行内自相矛盾**（把当前日期当生产日期） |
+
+  动作：① 把"日期语义"从 LLM 自由裁量改为**规则化判据**（给定 today、生产日期、
+  各签名日期，用确定性比较得出结论，LLM 只负责**抽取值**）；
+  ② 对"生产日期"这类**基准值**改为跨页**单源确定**（一次解析、全页复用），禁止各页各解一次。
+  验收：构造上表 5 个场景 ⇒ **0 条 critical 假阳性**；变异验证：把基准值改回"每页各解"
+  ⇒ 立刻重现 p28/p38 互斥。
+  ✅ **Round 43（2026-09-20）二次确证**（独立读原图 + 直查隔离库）：
+  - **方向反**：p2 原件该处手写为 **2025.09.30**（年份 2025），LLM 判「**晚于**当前 2026.09.18」；
+  - **基准各页各解**（本轮最刺眼的一条）：p2 原图上「开始生产日期 **2025.01.20**」清晰可读，
+    p38 的 finding 引用为「生产日期 **2025年01月20日**」（**正确**），
+    而 **p28** 的 finding 却写成「与**生产日期 2026-09-18** 矛盾」（把**当前日期**当生产日期）
+    ⇒ **同一次运行内同一基准值被解出两个答案**。
+
+  **✅ Round 48（2026-09-20）修复记录**
+
+  **定位（离线回放，`devlogs/_replay/probe_b14.py`，job `6f80145a`）**——比 Round 43 的
+  单点确证更进一步，把**全文档**的基准分布拿下来了：
+  - `page_info.production_date` 在 **51 页里有 23 种取值**；
+  - 其中 **`2026-09-18`（= prompt 注入的当前日期）占了 7 页**（p8/p10/p19/p39/p41/p45/p46）
+    ⇒ 基准值不是"偶尔读错"，而是**被当前日期系统性污染**；
+  - ⚠️ **多数值本身是错的**（`2026-09-18` 7 页）⇒ **不能靠多数投票取真值**；
+    且候选里 `2025-01-25`(7 页) 比 `2025-01-20`(6 页) 还多，批号后缀 `-04/-05/-06/-07`
+    表明该 51 页是**多子批复合体** ⇒ **本就没有唯一真值**。
+  - 旧实现只收掉 1 条（p2，因为它**方向恰好反了**）：**方向对的 22 条全部漏网**。
+
+  **处置（`core/rules/llm_finding_guard.py`，两条判据都只否定可证伪的前提、绝不猜真值）**：
+
+  | # | 判据 | 可证伪依据 | 落点 |
+  |---|---|---|---|
+  | ① | 比较的**参照物是「当前日期/当前年份」**⇒ 该比较不构成异常（**方向无关**） | 过去日期早于现在本是记录常态 | `_check_current_date_reference` |
+  | ② | 引用的「生产日期 X」而 X 恰是**文档级单源**解出的当前日期 ⇒ 前提不成立 | 同一次运行内自述互斥 | `_check_production_date_premise` + `_document_current_dates` |
+
+  - **① 的反向控制（不可省）**：记录内日期**晚于**自述当前日期 ⇒ 真未来日期 ⇒ **保留**。
+  - **② 的"单源"= `_document_current_dates` 在入口处解析一次、全页复用**（禁止各页各解
+    —— 那正是缺陷本身）。**只做否定、不做选择**：不尝试判定"真生产日期"，因为数据不支持
+    （见上）。引用值与**本页**抽取不一致 ⇒ 降级（弱证据）。
+  - **语义搬家（B3-4 同族）**：① 的语义**整体移出** `_check_declared_order`（它现在只管
+    "两侧都是记录内日期 ⇒ 方向错则降级"）。旧实现把"参照物是墙钟"和"方向反"两个独立
+    判据挤在一处，**必然**漏掉方向对的条目 —— 这是本缺陷的机制性根因，不只是漏了几个 case。
+
+  **验收（`devlogs/_replay/verify_b14.py`，真实数据）**：
+  - 落库 LLM 行 156 条：抑制 23 / 降级 22 / 保留 87；处置后 severity = `{warning:117, info:9}`。
+  - **TODO 表格 5 场景逐条处置全部符合预期（5/5）**：p2 抑制、p38（2027）降级且线索保留、
+    p49 抑制、p38（"不符"）抑制、p28 抑制。
+  - ⚠️ **验收条款「0 条 critical 假阳性」是空断言**：L4 对 LLM 源**无条件**封顶
+    ⇒ 任何输入都不会有 critical，该条无判别力。故本轮验收改以"**5 场景逐条处置**"
+    为准，并把这一事实写进模块 docstring，避免后人再拿"0 critical"当通过依据。
+  - **变异验证（`devlogs/_replay/mutate_b14.py`）4/4 通过**（每处变异只打红对应断言，
+    逐字节还原自校验通过）：删未来日期反向控制 ⇒ 红；① 退化为只认方向词 ⇒ 红；
+    单源池永不收集 ⇒ 红；参照物解析要求"年+月"（丢纯年份）⇒ 红。
+  - **跨页单源的两条成对用例**：单独喂 p28 ⇒ 判不了（fail-open，只降级）；
+    与 p38 的"当前年份 2026年09月18日"一起喂 ⇒ p28 被抑制。这条对
+    `test_p28_suppressed_when_current_date_declared_elsewhere` 钉住了"单源"不变式。
+  - 单测：`tests/unit/test_llm_finding_guard.py` 新增 `TestL3DateSemanticsB14`（9 条）。
+
+  **登记的新问题（本轮暴露，未修）**：
+  - **`year_vote` 的输入被污染的基准反喂**：`year_vote.date_strings()` 把
+    `page_info.production_date` 当**证据源**，于是错误基准会"投自己一票"。
+    实测年份层级仍侥幸正确（2025 得 36 页 vs 2026 得 8 页），但机制上是**依赖巧合**。
+  - **无字面量的"当前年份"类条目仍 fail-open 留存**（p1×4「签名年份与当前年份不符」、
+    p36「记录发放年份 > 当前年份+1」）—— 文案没给年份，无墙钟则无法证伪。属**已知留白**。
+  - **p32「生产日期 2025.01.25 为未来日期」**：等价于"与当前日期比较"但**没有**参照物字面量
+    ⇒ ① 接不住。"未来日期"这个措辞本身值得单独收权（见 B2 段）。
+
+- [x] **B1-5 LLM 对"非法形态输入"无防线 + 跨页串位（P1，Round 42 实测新发现）**
+  现象 A（**非数值当超差**）：`param_out_of_spec` 的"实际值"是 `'A'` 或一个日期字符串时，
+  LLM 仍判 `critical`「不符合规格范围」，**不质疑输入合法性**。
+  证据：p17 `llm_page`×2 + `llm_cross`×2（**同一根因重复 4 条**）——
+  「13:18 时 P3 (MPa) 的实际值为 `'A'`」「F3 累计流量 (L) 的实际值为 `'2025.01.21'`」。
+  视觉核实（`p17.jpg`）：附表 6 的 `P3` 列**四行全是 `0`**、`F3` 列为 0/854/1708/2578；
+  表格**下方**的手写签名日期 `2025.01.21` 被**串进了 F3 列**。
+  ⇒ 链条 = OCR 误读（`0`→`A`）+ 列串行 → **LLM 照单全收并升格为 critical**。
+
+  现象 B（**串位 + 幻觉出图上不存在的值**）：p38 `llm_cross`
+  「清洗罐搅拌**结束时间 18:30 早于**清洗罐搅拌**开始时间 19:15**」。
+  视觉核实（`p38.jpg`）：该页「清洗罐搅拌」实为 **开始 19:04 / 结束 19:41**（顺序正常）；
+  LLM 用的是同页**另一行「退出循环」**的时间（开始 18:20 / 结束 19:15），并把 18:20 读成 18:30。
+  ⇒ **跨行串位**（把 A 行的时间配到 B 行的字段上）。
+
+  动作：① 在页级/跨页 LLM **之前**加一道**形态闸门**：`actual` 若不含任何数字、
+  或匹配日期形态（`\d{4}[-./]\d{1,2}`），则**不得**判 `param_out_of_spec`，
+  改判"待人工核对"并保留 OCR 原文；② 时间倒序判据必须校验**两个时间来自同一行/同一字段组**
+  （LLM 需回填 `source_row`/`field`，无法回填则降级为 warning）。
+  验收：把 p17/p38 的两段输入喂进去 ⇒ 产出 **0 条 critical**（转为"待人工核对"）；
+  变异验证：摘掉形态闸门 ⇒ p17 的 `'A'` 重新变成 critical。
+  ⚠️ 本条与 B1-2（`vision_crosscheck`）天然互补：视觉读到的 `0` vs OCR 的 `A`
+  正是"待人工核对"的触发条件。
+
+  **🔴 Round 43（2026-09-20）扩充：又核实出 3 个新形态**（同一"LLM 自由取值 + 自由判定"根因）
+
+  | 形态 | 页 | 系统给的 critical | 读原图核实的结果 |
+  |---|---|---|---|
+  | **D 跨字段串位** | p6 | 「接收结束时间 **13:6** 早于接收开始时间 09:00」 | 该行三格为 开始 `09:00` / 结束 **`09:52`** / 体积 **`13.6 m³`** ⇒ 顺序**正常**；LLM 把**体积**串成了**结束时间** |
+  | **E 布尔项勾选读反 + 类型错配** | p39 | 「步骤 6/7 … 参数值为**否**，不符合规格范围」 | 序号 6/7 的**是/否框全部勾的是「是」**；且类型塞进了 `param_out_of_spec`（**数值超差**类型，不适用于是/否项） |
+  | **F 凭空数字** | p6 | 「操作者签名日期 **18222** 无法识别」 | 该页签名只有「周雅」「吴伟胜」，**图上不存在 `18222`** |
+
+  ⇒ 形态 E 还暴露一个**类型体系**问题：是/否类检查项**没有对应的 finding 类型**，
+  只能硬塞进数值类型。建议一并评估 `CANONICAL_TYPES` 是否需补「检查项未通过（布尔）」，
+  但**改动面大（前端三色/知识库词表/门禁都要跟），必须先出方案再动**。
+
+  **✅ Round 48（2026-09-20）处置记录 —— 本轮不新增判据，只做"验证 + 补齐变异证明"**
+
+  逐形态复核（离线回放 `devlogs/_replay/replay.py` + `verify_b14.py`，真实 51 页）：
+
+  | 形态 | 页 | 现状（有真实数据证据） |
+  |---|---|---|
+  | **A 非数值当超差** | p17×2 | ✅ **已修**：L1-value-shape 抑制（`'A'` 非数值 / 日期串入数值列） |
+  | **D 跨字段串位** | p6 | ✅ **已修**：L3-time-reversal 同源重算（structured 实为 09:00→09:52）抑制 |
+  | **E 布尔勾选读反 + 类型错配** | p39、p46 | ✅ **已修**：L1-value-shape 抑制（`否` 为勾选形态，不构成数值超差） |
+  | **F 凭空数字** | p6「18222」 | ✅ **已修**：L1' 推测性表述 + L2 溯源降至 info |
+  | **B 跨行串位（时间）** | p38 | ⚠️ **降级保留，未达"有据抑制"** —— 见下 |
+
+  **现象 B 为什么本轮修不动（定位结论）**：TODO 原拟的修法是"LLM 回填 `source_row`/`field`，
+  判据校验两个时间来自**同一行/同一字段组**"。实测 p38 的 `structured.steps`
+  **start/end 全为空串**（只有 3 段长文本工序），raw 原文里也**不存在** 19:04/19:41
+  ⇒ 该页**没有可用的行级证据**去证伪 LLM 的 18:30/19:15。
+  "按工序名定位"同样不可行：p38 的 step `operation` 是段落文本，与文案里的
+  「清洗罐搅拌」对不上。⇒ 现状（判不了 ⇒ 降级为 warning）**已是该数据下的最优处置**；
+  要升级为"有据抑制"**必须改 prompt + LLM 输出 schema**（让 LLM 回填行号/字段名），
+  **改动面与风险等同一次协议变更 ⇒ 转 P2**（见新增条目 **B1-13**）。
+
+  **变异验证（`devlogs/_replay/mutate_b15.py`）5/5 通过**（逐字节还原自校验通过）：
+  摘"非数值"闸门 ⇒ p17 红；摘"布尔"闸门 ⇒ p39 红；摘"日期形态"闸门 ⇒ p17（日期）红；
+  三态退化（`None`→`False`）⇒ p43 红；`structured` 缺失时退化 ⇒ p46 红。
+  ⚠️ 首次运行时两条预期写错（把**并列分支**当成同一变异的目标）：布尔分支与"非数值"
+  分支并列且在前、`structured` 缺失走的是**早返回** ⇒ 已拆成 5 个定向变异。
+
+  ⚠️ **原验收的变异条款已过时**：「摘掉形态闸门 ⇒ p17 的 `'A'` **重新变成 critical**」
+  —— L4 对 LLM 源**无条件**封顶，去掉闸门只会变成 **warning**（不再被抑制），
+  不可能再是 critical。已按**真实可观察信号**（"该条是否仍出现在抑制清单里"）重写。
+
+- [x] **B1-6 【主路径】把"取值"与"判据"从 LLM 手里收回到规则层**（P1，**Round 44 已落地**）
+  动机（本轮最重要的判断）：B1-4 / B1-5 的**五类形态**（日期方向反、列串位、
+  跨字段串位、布尔勾选读反、凭空数字）**根因只有一个** —— LLM 同时做了两件它不该
+  单独做的事：**自己从 OCR 文本里挑值** + **自己下判定**。故"再调提示词"是治标。
+  动作：链路拆成 **① LLM 只做结构化抽取**（输出值 + `source_row` / `field` 溯源）
+  → **② 确定性代码做判定**（数值比较 / 超差 / 时序 / 跨页一致性）；
+  **LLM 输出的 `severity` 不再直接采信**，由规则层按同一套判据重算。
+  验收：把本轮 p2 / p6 / p17 / p39 四页的输入喂进去 ⇒ **0 条假 critical**
+  （全部转"待人工核对"或直接不报）；**变异验证**：把判定改回"直接采信 LLM severity"
+  ⇒ 立刻重现这 4 条。
+  ⇒ 本条是 B1-4 / B1-5 的**共同上游**，建议**先于**它们动手（否则修完仍会被新形态绕过）。
+  **✅ Round 44 实施记录**：
+  - 新模块 `core/rules/llm_finding_guard.py` —— 四层复核，纯函数/零 LLM 调用/零 IO：
+    **L1 值形态**（`param_out_of_spec` 声明的实测值须为数值形态；布尔值/日期值/
+    非数值 ⇒ 强证据**抑制**；数值但查无此值 ⇒ 弱证据**降级**，漏检代价高于误报）；
+    **L2 溯源**（文案长数字须能在 OCR 原文定位，复用 `page_analyzer._value_grounded`
+    同源实现）；**L3 判据重算**（`time_reversal` 用 `parsing._parse_time_interval`/
+    `_interval_after` 重算；`suspicious_date`/`signature_time_anomaly` 核对话里声明的
+    先后方向）；**L4 severity 封顶**（LLM 独断的 critical 一律降 warning 待人工核对）。
+    另含 **L1' 推测性表述**判据（「无法识别」不是异常结论 —— v4 prompt 已明令禁止，
+    LLM 仍输出，见 B1-8）。
+  - 接入两条落库路径：`stage2.py`（`llm_page`，单页）与 `stage3.py`
+    （`llm_cross`/`llm_fallback`，跨页）。抑制走 `finding_suppressions` 台账
+    （复用 `spec_guard.suppression_rows` **唯一构造点**，带非空 reason + evidence，
+    可回退、可抽检）；降级理由追加到 description（GMP：结论变更须可解释）。
+  - 护栏：`tests/unit/test_llm_finding_guard.py` **20 用例**（样本全部取自真实页形态）
+    + `tests/unit/test_pipeline.py::test_llm_guard_suppresses_unfounded_cross_finding`
+    链路级 1 例。**变异验证 3 个方向全部变红**（复核器短路 ⇒ 12 failed；
+    去"评价词非实测值"过滤 ⇒ 1 failed；去 L4 封顶 ⇒ 4 failed）。
+  - **真实数据回放**（Round 42 的 51 页 real 轮隔离库，`devlogs/_replay/`）：
+    152 条 LLM findings（spec_guard 后 132）⇒ 抑制 26 / 降级 42。
+    **critical 49 → 0**；4 条目标假 critical（p2 方向反 / p6 跨字段串位 /
+    p17 列串位 ×2 / p39 类型错配）全部抑制，p6「18222」凭空数字降级。
+  - **反向断言（真阳性不误杀）**：rule 层 6 条 critical **原样保留**（不受复核）；
+    并修掉三处自身误杀（p9 评价词被当实测值、p22「时间重复」被倒序判据否定、
+    p26 弱证据误为强证据）。
+  - ⚠️ **收权后 critical 只剩规则层 6 条，其中 p48 经视觉复核为假阳性 ⇒ 见 B1-9**；
+    p1 批号条待核 ⇒ 见 B1-10。
+
+- [x] **B1-7 规则层基准"随运行时刻漂移" ⇒ finding 不可复现**（✅ **2026-09-21 Round 53 已修**）
+  现象：`core/rules/rule_time.py` 原用 `current_year = datetime.now().year` 当基准
+  ⇒ **同一份 PDF 在不同年份重分析会得到不同结论**。
+  ⚠️ 注意：**判据方向本身是对的**（记录里出现未来日期确实可疑），问题是**基准未固化**。
+  **解决**（`core/rules/rule_time.py`，三处单一实现点、纯函数）：
+  * `record_production_year(pages)` —— 从记录里**多数票**取生产年份（平票取小年）；
+  * `_baseline_year(pages, override)` —— 优先级 **显式入参 > 记录年 > 当前年**，
+    回退当前年时返回 `year_inferred=True`，**在 finding 文案里注明**
+    （「基准年取当前年份（记录中未解析出生产年份）」）；
+  * `_suspicion_reason(year, ceiling, now_ceiling)` —— 四条语义分流：
+    「早于 2000」/「晚于 {ceiling}」/「晚于当前年份+1…（按运行时刻判断）」/`None`。
+  * `_check_suspicious_dates(pages, analysis_year=None)` —— 新增显式 `analysis_year` 入参。
+  ⚠️ **保留"绝对未来"判据（防静默削弱）**：固化基准后，若记录**整体**落在未来，
+  仍须判出，且**如实声明**该判据依赖运行时刻 —— 否则"固化基准"会把真信号一起吃掉。
+  这是 Round 53 踩过的坑：初版让"记录内生产年"当基准，导致记录自身 production_date
+  设成未来年的回归用例**变绿**（检测被削弱）；修法是把两条语义**拆开**
+  （相对基准年 vs 绝对"当前年+1"），并补 `TestAbsoluteFutureIsStillCaught` 防再退化。
+  护栏：`tests/unit/test_suspicious_date_baseline.py`（17 例）——记录生产年/基准优先级/
+  **决定性（两个不同系统时间 ⇒ findings 一致）**/回退注明/**绝对未来仍捕获**/显式 override。
+  变异验证 **8/8 CAUGHT**（`devlogs/_verify/mutate_b17.py`；M8 首次锚点缩进写错、
+  脚本安全中止并还原，修正后全过）。
+
+- [x] **B1-8 推测性表述被当作异常结论**（P2，Round 44 发现并随 B1-6 修）
+  现象：LLM 把「识别不出」写成 finding —— 实测 p6「操作者签名日期 18222 无法识别」
+  被判 critical（原文里那些数字是 OCR 粘连产物）。而 v4 prompt 的「完整性检查规范」
+  **已明令禁止**输出「无法准确识别」「可能缺失」「疑似遗漏」等表述。
+  ⇒ **提示词约束不住，必须代码收权**（这正是 B1-6 的论证）。
+  动作（**已完成**）：`llm_finding_guard._check_speculative` 命中推测词即降级
+  （保留为人工核对线索，不给确定性语气）。
+  验收：`TestL1Speculative::test_p6_unreadable_is_not_an_anomaly_conclusion`。
+
+- [x] **B1-9 规则层把"区间重叠"当成"倒序"并给 critical**（P1，Round 44 发现 / Round 45 修复）
+  现象：**收权后仅存的 6 条 critical 里，p48 经直读原页确认是假阳性** ——
+  规则层报「工序4 开始(03:34) 早于 工序3 结束(03:36)」，但原图上：
+  ① 序号 3 与序号 4 是**不同设备的两道清洗工序**（D2101/D2102 真空干燥箱
+  03:12→03:36 vs 烘盘/盘罩/勺子 03:34→04:12），**并行重叠属正常**；
+  ② ⚠️ **2026-09-20 更正**：原登记写「两处手写日期不同（15日 vs 25日）」，
+  实测**是误读** —— 该页 `handwritten` 字段原值为 `25日03时12分` 与
+  `25日03时34分`，**两处都是 25 日**。真正站住的是①与③。
+  ③ 更根本：这**违反项目自身的约定** —— v3/v4 prompt 明确要求「手写体字段
+  （操作人签名/手填数值/手写日期）应标记 confidence=low，**规则不直接判定**」，
+  规则层却对手写时刻给了 critical。
+  **根因**：`_check_time_reversal_cross_page` 的判据是
+  `curr.start < prev.end` —— 这只是**区间重叠**，而"倒序"的语义应是
+  `curr.start < prev.start`（编号与开始时刻矛盾）。判据用错 + 严重度给满。
+  动作（**已完成**，Round 45）：
+  ① 判据分级：真倒序（`curr.start < prev.start`）⇒ critical；
+  仅重叠 ⇒ **warning**，文案明说"两工序时间重叠（若为不同设备/物料的并行操作
+  则属正常，请核对）"；
+  ② 证据封顶：所依据的时刻**为手写填写**、或**字面量缺日期成分**（比较所用
+  日期系由该页 `production_date` 推定）⇒ **一律封顶 warning** 并在文案注明理由
+  （与 B1-6 的 L4 同源：不确定来源不给最高严重度）；
+  ③ 同源封顶一并施加到 R1a（页内倒序）；**未新增类型**（保持 `time_reversal`，
+  避免牵动 `CANONICAL_TYPES`/`TYPE_QUERIES`/前端 zh_map 多处同步）。
+  验收（**已实测**）：
+  - 真实 51 页回放：p48 那条 `critical → warning`，文案含"重叠"+"手写"说明；
+    全语料 R1b 只此 1 条，无其他变化（未弱化检测）；
+  - 反向断言：真倒序（p9/p10 用例）**仍为 critical**；
+  - 新增护栏 `tests/unit/test_time_reversal_evidence.py`（33 例）；
+  - 变异验证 4 方向全红（重叠打回 critical / 去 R1b 封顶 / 复现粘连 bug /
+    去 R1a 封顶）。
+  ⚠️ **实现期踩到的坑（已固化为回归用例）**：`_time_is_handwritten` 最初先
+  `lit.replace(" ", "")` 再匹配 `(?<!\d)(\d{1,2})[:时](\d{2})` ⇒
+  `2025-09-25 03:36` 去空白后粘成 `2025-09-2503:36`，日期的末位数字把
+  `(?<!\d)` 触发掉 ⇒ **整条手写封顶静默失效**。必须在原字面量上匹配。
+  ⚠️ 与 B1-6 的关系：B1-6 只管 LLM 层；**规则层的假阳性是另一条独立战线**。
+
+- [x] **B1-10 跨页批号把 OCR 变体当成不同批号**（✅ **2026-09-21 Round 53 已修**）
+  **定位（真值来自 `devlogs/_replay/data.db` 的 job `6f80145a-47f`，46 页有批号）**：
+  库里那条 critical 写的是「检测到 **5 组**不同批号」而日志明写 **`0 voted`** —— 即
+  旧 R2 投票**一次都没触发**。逐核心串核对后，5 组里 4 组是同一批号 `1127011N250101`
+  的 OCR 写法：
+  | 页面 | 原始读数 | 归一化 | 噪声来源（**已渲染原页核验**） |
+  |---|---|---|---|
+  | p1/p2/p24… | `1127011N 250101` | `1127011N250101` | 空格分隔 |
+  | p22 | `1127011N ^4 250101 -07` | `1127011N4250101-07` | 原页 `N` 后的**角标**被读成数字 `4` |
+  | p5 | `11270111/250101-02` | `11270111250101-02` | `N `被读成 `1/`（N→1 单字符） |
+  | p13 | `1127011/250101-05` | `1127011250101-05` | `N `整段丢失 |
+  | p3/p4…（**14 页**） | `112701` | `112701` | LLM 只抽出前缀，**尾段被丢掉** |
+  | p43 | `1127011N` | `1127011N` | 表格把批号切成两格（`产品批号：1127011N` / `250101-06`），LLM 只取第一格 |
+
+  **根因（两条，互相叠加）**：
+  ① **旧归并按「核心串长度」降序用前缀包含互相吸收** ⇒ 噪声最重的串
+  `1127011N4250101` 成了 host，把 14 页干净的截断读法 `112701` 挂在它名下 ——
+  组标签**本身就是 OCR 噪声**（复核员看到的是 `1127011N4250101(第3,4,7…)`）；
+  ② 投票以「**精确核心串**」为单位计页数：最大核心串 `1127011N250101` 只占
+  27/46=**58.7%** < `_BATCH_VOTE_MIN_SHARE`(0.6) ⇒ 结构上本属同一批号的 14 页
+  截断读法把票数劈开 ⇒ **投票不决定性 ⇒ 一条都不吸收**。
+  ⇒ 旧实现**在真实数据上判据失效**（R2 文档记的"5 组 → 2 组"是在另一 job
+  `0c5cfb00-897` 上测的，抽取行为变化后即回归）。
+
+  **改法（`core/rules/parsing.py` + `rule_doc.py`，对称、无顺序依赖）**：
+  新增批号**身份分解** `parse_batch_key(base) -> (prefix, date6)` —— 取末尾**整段**
+  数字的后 6 位、且须是合法 YYMMDD（月 1–12/日 1–31）才算日期段（先扫整段数字才能
+  吃掉 `^4` 角标）。相配的 `batch_keys_compatible(a, b, allow_edit_distance=)`：
+  * **双方有日期段 ⇒ 日期段必须完全相等**（独立佐证）且前缀相等/互为前缀；
+  * **一方无日期段**（尾段被丢）⇒ 无日期方须是**有日期方前缀的前缀**（反向不成立）；
+  * **双方都无日期段** ⇒ 只认前缀包含，**从不认编辑距离**（保护 `B202201`/`B202202`）。
+  归并分两档：**Tier 1 结构档**（前缀包含/尾段截断，关系可判定）+
+  **Tier 2 弱证据档**（单字符近邻 `N`↔`1`）；两档都过**同一个投票闸**，
+  不决定性 ⇒ **一条都不吸收**（fail-open 保持）。锚点改按**页数**选（不再按长度）。
+  被归并的**完整别名表**写进 `ocr_text` 的 `merged_aliases=`（描述里列前 3 个）。
+
+  **实测（隔离库回放，同 job 同数据）**：**5 组 → 2 组**；19 个原始读法、17 个被归并、
+  其中 5 个按结构证据并入基准；基准组标签由噪声串 `1127011N4250101` 纠正为
+  `1127011N250101`（45 页）。
+  **存活的那 1 组是 p50 —— 不是变体**：渲染原页可见 `清场批号：1127011N'` + 蓝字
+  `241203`，**整页无 `250101`** ⇒ 是真实的另一个值（清场记录引用他批），
+  日期段不同 ⇒ 归一化**永不**合并它，critical 保留且带页号。
+  ⚠️ **验收口径已按原图核验修正**：原文"同批号变体不产出 critical"改为
+  「**同批号 OCR 变体不再产出独立组**（真实值差异仍报 critical）」。理由见上：
+  `241203` 是印在纸上的真值，把它并掉才是漏检。
+
+  **护栏**：新增 `tests/unit/test_batch_variant_identity.py`（30 例）——`parse_batch_key`
+  参数化（含角标/截断/非法月日）、兼容关系**对称性（含结构档单独钉）**、
+  p1 原 finding 的 5 个读数 ⇒ **无 finding**、**真实 51 页 46 读法内联回放**
+  （2 组 / 别名留痕 / 反证"仅归一化仍剩 >2 核心串"）+ fail-open 4 例。
+  **变异验证 9/9 CAUGHT**（`devlogs/_verify/mutate_b110.py` → `mutate_b110.log`）：
+  日期闸失效 / 前缀包含单向 / 无日期段误用编辑距离 / 去掉投票闸 / 锚点改按长度 /
+  去掉残串最小长度 / Tier1 混入弱证据 / 去掉 YYMMDD 合法性 / 去掉别名留痕。
+  ⚠️ 顺带更正：`test_vote_absorption_is_disclosed` 的措辞契约随描述改写更新
+  （断言从固定句改为「已归并 N 个」+ 点名校验，**更严**）。
+  ➡ **遗留（另立条目 B1-14）**：p50 的 `清场批号` 与 `产品批号` 混在同一个
+  `page_info.batch_no` 字段里 —— 治本是**字段级溯源**，不是放宽归一。
+
+- [x] **B1-11 【P1】收权复核把「判不了」当成「判据确凿」**（**Round 46 对抗性审查发现并当日修复**）
+  现象：**同一个工程错误在两条 L3 路径上各犯一次** —— 判据把"**无从判定**"与
+  "**确证不成立**"混为一谈，破坏了 B1-6 自己的原则「只对**逻辑不成立**的用抑制」：
+  - `_check_declared_order`：LLM 的**方向词**写反 ⇒ **抑制整条**。但"方向词错"
+    ≠ "整条结论不成立"。实测 p38「签名时间 **2027**.01.17 早于 生产日期 2025年01月20日」
+    抑制后，该页**再无任何条目提及「2027」这个未来日期**（规则层亦无兜底）；
+    p27 更极端（两侧相差 **10 年**，属年份误读线索），只因同页**碰巧**另有
+    `year_contradiction` 才没丢。
+  - `_recompute_time_reversal`：返 `bool`，把"该页工序**一个都解析不出**"归入 `False`
+    ⇒ 当成"判据确凿地无倒序"而抑制。实测 **8 条 L3 抑制里 6 条**该页可解析样本 = 0，
+    其中 **p43×4 / p46×1 的文案明写「开始时间晚于结束时间」**（真倒序形态）。
+  修复（**按证据强度分档：强证据才抑制，弱证据只降级**）：
+  ① `_check_declared_order` 改返回 `(抑制理由, 降级理由)` —— 参照物含"当前日期/
+     当前年份"⇒ 抑制（该比较本身无意义，B1-4 型）；两侧**都是记录内日期** ⇒ **降级**
+     （错的只是表述，日期对本身仍需人工核对）。新增 `_CURRENT_REF_RE`，**不引墙钟**
+     （避开 B1-7）、**不引新阈值常量**（避开"两份阈值表漂移"这一高发坑）。
+  ② `_recompute_time_reversal` 改**三态** `bool | None`：有样本且确无倒序 ⇒ 抑制；
+     确有倒序 ⇒ 保留；**无样本 ⇒ `None` ⇒ 降级**（fail-open）。
+  实测（51 页真实隔离库回放 `6f80145a`）：抑制 **26 → 13**、降级 42 → 55，
+  **critical 保持 0**；仍被抑制的 13 条逐条皆强证据
+  （p2×2 / p6×2 / p17×4 / p24 / p39×2 / p46×2）。
+  ⚠️ **代价（有意取舍）**：p38 的串位幻觉条目也转为降级 —— 该页 0/3 可解析，
+  规则层**确实判不了**；按"漏检代价 > 误报代价"宁留 warning 噪声，换 p43/p46 的真倒序不被吞。
+  护栏 20 → **23** 例（含**改写 p38 期望值并在 docstring 写明理由**）；变异验证 3 方向全红。
+  详见 `docs/ADVERSARIAL_AUDIT.md` §16。
+
+- [x] **B1-12 布尔/勾选类的处置档位由「措辞是否撞上词表」决定**（✅ **2026-09-21 Round 53 已修**）
+  **① 定位（先读原页 —— 已完成，渲染 `丝裂霉素提取批记录.pdf` p39/p45/p46）**：
+
+  | 页 | 原页真值 | LLM 主张 | 结论 |
+  |---|---|---|---|
+  | p39 | 三行均 **`√ 是 / □ 否`** | `参数值为否，不符合规格范围` | **读反** ⇒ 假阳性 |
+  | p45 | **`√ 是 / □ 否`** | `勾选了否，不符合操作指导` | **读反** ⇒ 假阳性 |
+  | p46 | 工序 5/6 全部 **`√ 是 / □ 否`** | `清洗过程是否无异常参数值为否` | **读反** ⇒ 假阳性 |
+
+  ⇒ **三页真值都是「是」，三处"否"主张全是 LLM 读反**，本就该得到**同一种**处置。
+  ⚠️ **旧记载的根因不准（本轮实测更正）**：p45 的 fail-open **不是** `_NOT_A_VALUE`
+  里"不符合操作指导"造成的 —— `_NOT_A_VALUE` 是拿**取到的值**去比，而 p45 文案里
+  **根本没有 `值` 字**，`_BARE_VALUE_RE`（只认「…值为 X」/引号）压根匹配不上
+  ⇒ 取不到值 ⇒ fail-open。真因是**取值器只认一种措辞**。
+
+  **② 解决**：`core/rules/llm_finding_guard.py` 新增**统一类型闸门**
+  `_declared_boolean_literal(f)` + `_BOOLEAN_CLAIM_RE` —— 判据是"文案断言了勾选
+  **结果**"这一**性质**，与用哪个动词（`值为` / `勾选了` / `标记为` / `选中了`）无关；
+  且在 `_check_spec_value_shape` 里**先于"取值"判定**（否则档位又由措辞决定）。
+  * 负向预查 `(?![一-龥])` 排除**疑问词「是否」本身** —— 否则「记录中勾选是否正确」
+    这类**评价勾选动作**的文案会被误判成布尔主张；
+   * 文案抽成**单一实现点** `_boolean_type_mismatch_reason`（`_layer_of` 靠
+    「勾选/布尔形态」子串归层 ⇒ 该子串是**契约**，不得改）。
+  **实测**：p39/p45/p46 三条 ⇒ **kept=0 / downgraded=0 / suppressed=3**，
+  层号全为 `L1-value-shape`、**理由逐字相同**（修前 p45 是"仅降级"）。
+  **护栏**：新增 `tests/unit/test_boolean_gate_uniform.py`（21 例）——三措辞同处置、
+  `是` 与 `否` 同处置（证明是**类型**闸门而非"找否"闸门）、7 种措辞识别、
+  **5 例防误伤**（疑问词/评价词/字母值/非 spec 类型）。
+  **变异验证 5/5 CAUGHT**（`devlogs/_verify/mutate_b112.py`）：旁路统一闸门 /
+  去掉疑问词负向预查 / 去掉 spec 类型限定 / 破坏 `_layer_of` 契约子串 /
+  只认「否」。
+  ➡ **遗留（另立条目 B1-15）**：**规则层**（R8 `_check_check_consistency`）也在这
+  三页报了「勾选为“否”」的 warning —— 它读的是 `checks[].selected`，同样不可靠。
+
+- [ ] **B1-15 规则层 R8「勾选为否」warning 在 p39/p45/p46 全是假阳性**（P2，Round 53 从 B1-12 拆出）
+      🔸 **第一档（☐ 内部矛盾）✅ 2026-09-21 完成**（−5 条假阳性 warning）；
+      **第二档（`否`+`√`/`☑`）未闭环**，与 B1-14 一次性定 schema；派生 **B1-17**。
+  现象（B1-12 原页核验时发现）：B1-12 修的是 **LLM 层**（`llm_finding_guard`）的布尔
+  处置；但**规则层** `_check_check_consistency`（R8）也在这三页产出了 warning：
+  * p39 ×6：`检查项「器具排放是否整齐」勾选为“否”（√）` 等；
+  * p46 ×1：`检查项「清洗过程是否无异常」勾选为“否”（√）`；
+  * p45 ×1：`检查项「是否将柱内甲醇压干」勾选为“否”（☐）`。
+  **原页核验（已渲染）**：三页的「是」框才是有 √ 的那个 ⇒ 这 8 条 warning **全部是
+  假阳性**（`checks[].selected` 被 LLM 读反）。
+  证据链（结构化里可直接看到）：
+  * p45 `selected='否'` 而 `marker='☐'`（**空框**）——**自相矛盾**：一个"被选中"的
+    选项不可能配一个空框。这一条**可从记录内部证明**，属**可确定性修复**。
+  * p39/p46 `selected='否'` 配 `marker='√'` —— 记录**内部自洽**，只有原图能证伪
+    ⇒ 这一档**判不了**（与 B1-14 的字段溯源同属"输入里没有可用锚点"）。
+  动作：① **先修可确定的那一档**：`selected` 有值而 `marker` 是**空框字形**
+    （`☐ □ ◻ ○ ◯`）⇒ 判据内部矛盾 ⇒ 不发射（或降为 info 并注明"勾选标记与选项
+    不一致，请人工核对原页"）——**注意不得**把"marker 缺失"也算进来（缺失是不知道，
+    不是矛盾，须 fail-open）；
+  ② 第二档（`否`+`√`）需**抽取层**改进（LLM 把勾选标记与选项配对错位），
+    与 B1-14 的字段/列溯源**同源**，建议合并评估（B1-13 的 `source_row` 方案已于
+    Round 53 评估否决 —— 见 `docs/B1-13_ROW_TRACEABILITY_ASSESSMENT.md`）。
+  验收：构造 `selected='否', marker='☐'` ⇒ 不产出 warning；构造 `selected='否',
+  marker='√'` ⇒ 仍产出（fail-open）；构造 `selected='否', marker=''` ⇒ 仍产出。
+  变异验证：把"空框字形"判据去掉 ⇒ 第一条红。
+
+  ---
+  **① 第一档：已完成**（2026-09-21，`core/rules/rule_doc.py` + `tests/unit/test_cross_page_llm.py`）。
+  新增 `_EMPTY_BOX_GLYPHS = frozenset("☐□◻○◯")` 与 `_is_empty_box_only(marker)`
+  （**整串都是空框**才算矛盾：`√☐` 混合、含勾号、空白、缺失一律 False ⇒ fail-open）；
+  `selected=='否'` 且内部矛盾时**降为 info** 并如实改写文案
+  （「勾选标记与选项不一致……该选项不可信，请对照 PDF 原页人工核对」），
+  **不再断言**"需确认是否已启动偏差处理"。选"降为 info"而非"静默丢弃"的理由：
+  矛盾本身仍值得人看一眼，丢弃等于把"记录有问题"这条信息也一起丢了。
+
+  **实测（真实 51 页回放，`devlogs/_verify/verify_b115_replay.py`，before = 把新判据换成
+  `lambda m: False`，逐位等价）**：
+  **总数 487 → 487，critical 38 → 38**；**warning 295 → 290（−5）、info 154 → 159（+5）**
+  —— 即**消掉 5 条假阳性 warning**，换成 5 条**如实**的 info。
+  ⚠️ **真实语料比本条登记时知道的更多**：原条目只记了 p45 ×1（来自 B1-12 的原页核验），
+  回放实测是 **5 条**：p9 / p14 / p24 ×2 / p45（全部 `marker='☐'`）。
+  ⇒ 说明"只按人工抽查到的那一例去估影响面"会**低估 5 倍**；这类判据必须以**全语料回放**收口。
+  变异验证 **6/6 CAUGHT**（`devlogs/_verify/mutate_b115.py`）：M1/M6 降级分支两个方向
+  （`if False` / `if True`）、M2 去掉"缺失=不知道"兜底（违反 fail-open）、
+  M3/M4 字形集过宽（把 √ 当空框）/过窄（只认 ☐）、M5 把判据作用域从「否」扩到「是」。
+
+  **② 第二档：仍未闭环**（`否` + `√` / `☑` ⇒ 记录内部自洽，只有原图能证伪）。
+  第一档落地后，真实语料里**仍存的**「否」类 warning 共 **11 条**：
+  p39 ×7（`√`）、p46 ×1（`√`）、p51 ×3（`☑`）。
+  ⇒ 与 B1-14 的字段/列溯源**同源**（都需要抽取层给出"这个值出自哪个位置/哪个字段"），
+  须与 B1-14 **一次性定 schema**（避免两次改 prompt 版本 + 两次破 prompt caching）。
+
+  ➕ **新发现（2026-09-21，回放实测，**不是**假阳性那么单纯）—— R8 的**语义前提**对
+  「否定式措辞」的检查项不成立**：p51 三条是 `是否发生偏差 / 是否发生 OOS/OOT /
+  是否发生变更`，抽取出的 `selected='否'` + `marker='☑'`（**已勾选**）。
+  这三项的**正常答案就是「否」**（无偏差），而 R8 的文案却说
+  "需确认是否已启动偏差处理并在记录中留痕" ⇒ 对"回答否 = 一切正常"的题面，
+  R8 的推断**方向反了**。⚠️ 这与 **B1-12 已明令禁止的做法直接冲突**：
+  B1-12 的结论是"布尔/勾选类处置**不得由措辞词表决定**"（那里改用类型闸门）。
+  所以**不能**用"题目里有没有『是否发生』『无异常』"这类词表去翻转动级
+  （那是把 B1-12 修掉的病再种回来）。可行的方向只有两条，**都需用户决策**：
+  (a) 把文案改成**中性**（陈述事实 + 请人工确认，不替用户判断"否"是好事还是坏事）；
+  (b) 在抽取层拿到**该检查项的选项集合**（「是/否」各自的措辞与勾选态），
+      由规则层按"被勾的那个选项本身是什么"来判定 —— 属 B1-14 的 schema 一并解决。
+  ✅ **2026-09-21 已按 (a) 落地（用户决策）**：`否` 的 warning 文案改为
+  「勾选为“否”（marker），请对照 PDF 原页确认该答案是否为预期
+  （否定式提问的“否”通常即正常答案）」，**删掉**"需确认是否已启动偏差处理"这句
+  **替用户下结论**的措辞。定级**仍为 warning**（对「地面是否干净」这类肯定式题面，
+  否确实需要人看一眼；极性只在文案里**如实提示**，不参与定级 ⇒ 不引入措辞驱动）。
+  判据（`tests/unit/test_cross_page_llm.py::TestCheckConsistency`）：
+  `test_no_polarity_inference` 断言**肯定式（地面是否干净）与否定式（是否发生偏差）
+  题面的文案模板必须逐字一致** —— 这是"未按措辞翻转"的直接判据；
+  `test_checked_no_warning` 加**反向断言** `"偏差处理" not in description`。
+  变异 **M7**（把中性文案改回替用户下结论的旧措辞）⇒ 上述两条**必红**（7/7 CAUGHT）。
+  真实 51 页回放：**定级分布完全不变**（487 / warning 290 / info 159 / critical 38）
+  ⇒ 本次只改文案、未动任何判定 —— 这也是它为什么能安全地紧跟 B1-15① 一起走。
+  ➕ **另一处观测（同轮，未修）**：p39 的 `设备及管路是否及时清洗干净` 出现**两条完全
+  相同的 finding**（同页/同项/同 severity/同描述）⇒ 疑似**同根因重复发射**，
+  与 B1-1（同根因聚合）相邻但不同侧，单独登记为 **B1-17**。
+
+- [x] **B1-13 【P2】时间倒序判据缺"行级溯源"**（Round 48 从 B1-5 拆出）
+  ✅ **2026-09-21 Round 53：代价评估已完成 ⇒ 结论「不做 ①，条目改判」**。
+  评测文档：**`docs/B1-13_ROW_TRACEABILITY_ASSESSMENT.md`**（本轮只读取证，未改生产代码）。
+  - **原前提被推翻**（`devlogs/_verify/probe_b113{,b,c,d,e}.py`，job `6f80145a-47f`）：
+    p38 的两个被引用值在抽取结构里**同属一个 measurement 行、同一列组**
+    （`step3.meas#0.col[清洗罐搅拌开始时间]='19 时 15 分'` /
+    `col[清洗罐搅拌结束时间]='18 时 30 分'`）⇒ **不是"跨行串位"**；
+    原文里**有**这两个字面量（形态为「X 时 Y 分」）⇒ 真差异是 **OCR 误读**（视觉真值 19:04/19:41）。
+  - **语料级否定**：LLM 层 `type=time_reversal` **12 条，0 条跨行**（逐条定位表见文档 §3）。
+    真实机理是四类：值→列绑错（p6 体积 `13:6 m^3` 被当时间）/ 字面量形态不可解析（主线）/
+    缺日期 fallback 跨日（p24）/ LLM 方向算错（p46 `08:42<09:15` 却报倒序）。
+  - **① 的代价**：触及 `page_analyzer` **全静态 system 块**（破 prompt caching，51 页 job
+    省 ~90% system token 的收益归零）、版本号 v4→v5、`semantic_v2`→`v3`、4 处 INSERT +
+    `SCHEMA_VERSION 12→13`、≥8 处契约断言必红；**收益 0 且有负作用**（会为 p38 的误读背书）。
+    **判据与缺陷不同源 ⇒ 不做**。
+  - **替代动作（已登记）**：§6.1 ⇒ **B1-16**（解析器形态，性价比最高）；
+    §6.2 ⇒ 并入 **B1-14**（列级"值→列"绑定与批号字段出处同一解法，一次性定 schema）；
+    §6.3 ⇒ 归 **B1-2**（视觉互证 —— 印证原文备注"B1-2 落地后收益下降"，实测是**归零**）。
+
+- [x] **B1-16 `_parse_time` 不接受「仅时刻 + 中文单位」形态 ⇒ 规则层与护栏双双饿死**（P2，Round 53 从 B1-13 拆出）
+  ✅ **2026-09-21 完成**（`core/rules/parsing.py` + `tests/unit/test_cross_page_analyzer.py`）。
+  现象（`devlogs/_verify/probe_b113f.py` 量化，job `6f80145a-47f`）：「看起来是时刻」的
+  字面量 **162** 个中 **59（36.4%）不可解析**，其中 **51 个是形态本体不被支持**
+  （给了哨兵日期仍失败）：`'09 时 00 分'`、`'19 时 15 分'`、`'21日07时49分'`、
+  `'08时 09分'`、`'20 日 18 时 06 分'`；另 **8 个**是 fallback 生产日期缺失
+  （p26/p47 的 `production_date=''`，连 `'12:10'` 都解不出）。
+  `parsing._parse_time` 只认 `^\s*HH:MM(:SS)?$` 与**带完整日期**的 `H时M分`
+  ⇒ R1/R1b 与 `llm_finding_guard._recompute_time_reversal` **同时饿死**，
+  「判不了 ⇒ 降级」成为这些页的唯一结局（B1-9 已如实降级，但**根因在解析器**）。
+  动作：扩展解析器接受「仅时刻 + 中文单位」与「`N日 H时M分`」（后者按 fallback 日期推月，
+  须保守：day 与 fallback 日相差过大 ⇒ 拒绝，不得猜月）。
+  ⚠️ **两条护栏必须同时立**：① 维持严格匹配语义 —— `'13:6 m^3'`（体积被误绑到时间列）
+  必须**继续**判为不可解析，否则会**激活** p6 那条"体积当时间"的假倒序；
+  ② 接受新形态后**必须复跑真实 51 页**，量化"救活了哪些页 / 新增了几条命中"，
+  不得只跑单测就宣称改进（同 B1-1 纪律）。
+  验收：上列 5 种形态各 1 例 ⇒ 可解析；`'13:6 m^3'` / `'01:01 ~ 01:27'` ⇒ 仍不可解析；
+  真实 51 页前后对比表（新增命中逐条人工核）。
+  变异验证：把新形态分支去掉 ⇒ 对应 fixture 红。
+
+  **实现（三条约束都是"判不了 ≠ 判据确凿"的直接落地）**：
+  - 新增 `_CN_TIME_ONLY_RE`（仅时刻，**分钟必须两位** —— 放成 `\d{1,2}` 会让 `13时6`
+    被读成 13:06，与"被截断的数字"不可区分）、`_CN_DAY_TIME_RE`（`N日 + 时刻`，
+    **整串锚定** —— 否则 `15时36分008232-2412017` 会被截出 `15时36分` 而误收）；
+  - `_DAY_WINDOW_DAYS = 1`：`N日` 与 fallback 生产日期差 >1 天 ⇒ 返回 None。
+    为什么是 1（不是 3/7）：窗口内**月份是确定的**；再放宽就必须在"用本月还是相邻月"
+    之间猜 —— p15 `21日` 配 1月27日（差 6）、p46 `23日` 配伪造当天日期（差 5）
+    都属"输入里没有可用锚点"。
+  - **顺带修掉一个同源缺口**：`_TIME_OF_DAY_RE` 原为 `\d{1,2}[:时]\d{2}`，
+    **不容忍空白** ⇒ 同一种形态只因空格被判成两种精度（`21日07时49分` 是精确点，
+    `09 时 00 分` 退化成"整天"）⇒ 区间被放宽 ⇒ `_interval_after` 更难成立
+    ⇒ **倒序被系统性漏报**（判据与解析器不同源）。改为 `\d{1,2}\s*[:时]\s*\d{2}`。
+
+  **实测（可复现，非自述）**：
+  - 解析器层（`probe_b113f.py` 重跑，同一冻结回放库）：**可解析 103 → 128**，
+    不可解析 **59 → 34**，其中**形态不支持 51 → 12**。
+  - 余下 12 条**逐条核过成因**（`probe_b116_ctx.py`）：**8 条是按设计必须拒**
+    （`'13:6 m^3'` 体积；`'01:01 ~ 01:27'` / `'11:05 - 11:12'` 区间；
+    `'22108时26分'` / `'2109时31分'` / `'22108时13分'` / `'2113时16分'` /
+    `'15时36分008232-2412017'` 批号/日期粘连）；另 **4 条**是 `N日H时M分`
+    但**生产日期本身不可用** —— p45/p46 抽取出的 `production_date` 是伪造的
+    当天日期 `2026-09-18`（与 `22/23日` 差 4–5 天）⇒ 属"输入无可用锚点"，
+    与 **B1-14 / B1-15 同源**，**不得靠放宽窗口去"救"**。
+  - 规则层真实 51 页前后对比（`verify_b116_replay.py`，同开关前后各跑一次）：
+    **总数 487 → 487，critical 38 → 38**（净变化中性）：
+    **−1**：p17 的 `completeness/info`「时间格式无法解析（start=08时 09分 end=10时 10分）」
+    **消失** —— 即该页时刻已可解析（解析器修复的**直接可观测证据**）；
+    **+1**：p38 `time_reversal/warning`（`第22页 12:50 晚于 第38页 20 日 17 时 29 分`）。
+    ⚠️ 新增那条**经人工核原页后判定为假阳性**（`probe_b116_hit.py`）：p38 是**转置表**，
+    该字面同时出现在 `values` 列 ⇒ `time` 槽被污染，与 **B1-14** 的"列级值→列绑定"同源。
+    ⇒ **本修复不能制造新 critical**（`rule_time._literal_has_date` 对无日期成分的字面量
+    返回 False ⇒ 时序判定封顶 warning），也**没有**把假倒序激活；
+    其治本项在 B1-14，**不在本条**（不在 B1-16 里放宽解析器去掩盖它）。
+  - **变异验证 11/11 CAUGHT**（`devlogs/_verify/mutate_b116.py`）：M1/M2 打掉 1c/1d 分支、
+    M3 去整串锚定、M4 放开一位分钟、M5 去日窗口、M6 窗口 1→0、M7 绕过 fallback、
+    M8/M9 去 `ValueError` 兜底、M10 去 `_TIME_OF_DAY_RE` 空白容忍、
+    M11 把 `_TIME_OF_DAY_RE` 放成永远匹配（反向对照）。
+    ⚠️ 两条工程记录：**(a)** 负向/关键锚点必须写成**具名用例** ——
+    `mutation_harness` 按 nodeid **精确**匹配，而 `parametrize` 的中文 id 会被 pytest
+    转义成 `\uXXXX`（用转义串当锚点既不可读又一改就断）；
+    **(b)** M11 **不能**全文件跑（实测子进程 300s 超时 ⇒ **无法判定**）：
+    "永远匹配"让所有 date-only 变精确点，跨页时序语义整体翻转 ⇒ 组合爆炸；
+    故用**最窄目标**（单条反向对照，17s 返回）证明该判据的敏感性。
+  - 全量回归：`pytest tests/unit tests/integration -o addopts="" -q` ⇒
+    **3020 passed / 0 failed**（489s）。
+    ⚠️ 首次全量跑**抓到 5 failed**：新增的两条"精度判定"用例引用了
+    `_parse_time_interval` 但测试文件**没导入它**（`NameError`）——
+    **单跑新增类不会暴露**（那两条在同一个类里也会红，但当时只单跑了正向用例）。
+    ⇒ 印证"改了进产物的东西必须全量跑"，单类通过 ≠ 可提交。
+    修法与文件既有约定一致（`TestParseTimeInterval` 的 `self._iv()` 局部导入），
+    **不为此改动模块级导入面**。
+  - ⚠️ **取证教训（已写入 PITFALLS 三十三）**：变异脚本会**就地改写** `parsing.py`
+    再还原，我曾在它运行**期间**跑探针 ⇒ 读到的是**被变异后的中间态**
+    （探针一度报"109/53"与 `_parse_time('09 时 00 分') is None`，与单测**直接矛盾**）。
+    **凡探针/采样与被测源码可能被并发改写，必须串行**。
+
+- [ ] **B1-14 `清场批号`/`产品批号` 混用同一个 `batch_no` 字段 ⇒ R7 报出的"批号不一致"语义不清**（P2，Round 53 从 B1-10 拆出）
+  现象（B1-10 定位时发现并已渲染原页核验）：job `6f80145a-47f` 的 p50 是
+  `丝裂霉素精制工序清场记录(H3-MPD-10133-R34)`，页面上写的是
+  **`清场批号：1127011N 241203`**（蓝字 `241203`，整页无 `250101`），
+  但抽取把它塞进了 `page_info.batch_no`；R7 于是拿"清场批号"与其余 45 页的
+  "产品批号"做同字段比较 ⇒ 报 critical「跨页批号不一致」。
+  ⚠️ **这不是假阳性**（值确实不同，且 B1-10 的归一化**不该**合并它 —— 日期段
+  `241203` ≠ `250101`），但**文案与定级都可能误导**：清场记录引用他批是 GMP 常见
+  形态，而当前描述写的是"装订错误或混批"。
+  动作：① 抽取阶段给批号**带字段出处**（`batch_no` 之外补 `batch_no_field`，或让
+  `page_info` 区分 `product_batch_no` / `clearance_batch_no`）；② R7 按**同字段**
+  比较，跨字段差异另走一条**独立判据**（并给出相应文案/定级）。
+  ⚠️ 与 B1-13 同属"**输入里没有可用锚点**"一类：治本是补 schema，不是调阈值。
+  🔴 **2026-09-21 定位结论（实测，决定"规则层修不了"）**：探针
+  `devlogs/_verify/probe_b114_field.py` 只读冻结回放库，得到三条硬事实：
+  - `page_info` 的键**并集只有 5 个**：`title` / `file_code` / `version` /
+    `batch_no` / `production_date` —— **没有任何字段出处**（`batch_no_field` 不存在）。
+  - **「清场批号」字样在全库 51 页的结构化 JSON 里 0 命中**（`walk()` 遍历所有
+    键/值/嵌套，含 `ocr_text` 之类）⇒ **标签在抽取时就已丢失**，规则层无从还原。
+  - **标题启发式也区分不了**：`title` 含「清场」的只有 **2 页**（p49/p50），
+    而 **p49 的 `batch_no='1127011N 250101'` 与本批一致、p50 才是 `…241203`**。
+    ⇒ "清场记录页的批号不参与比较"这种按标题放宽的做法**既会误伤 p49、
+    又只是把 p50 一个样本硬编码进去**（且属 B1-12 明令禁止的"措辞驱动"）。
+  ⇒ **本条的验证必须重新抽取**（改 prompt/schema ⇒ 冻结语料失效 ⇒ 前后对比要重跑
+    LLM 链路）。这是一个**有成本、需用户决策**的动作，不要当成纯代码改动推进。
+  验收：构造"清场页引用他批"的 fixture ⇒ 不报「混批」critical（但仍有可追溯的一行）；
+  构造"产品批号真不一致" ⇒ 仍 critical。变异验证：把同字段比较改回混字段 ⇒ 前者红。
+  ➕ **2026-09-21 Round 53 扩围（来自 B1-13 的评估，见
+  `docs/B1-13_ROW_TRACEABILITY_ASSESSMENT.md` §6.2）**：本条的"给值补**出处**"解法
+  同时覆盖**列级「值 → 列」绑定**这一类缺陷 —— 转置表（列名竖排、值竖排）会被压成
+  `measurements=[{time: 第一个值, values: {12 列}}]` 一行，`time` 语义被污染，
+  且**列与值只靠位置对齐**（p38 实测 7 个时刻值要分给 6 个时刻列，多出的 `18 时 30 分`
+  被重复使用）。**两处是同一解法的两个实例 ⇒ 必须一次性定 schema**（避免两次改
+  prompt 版本 + 两次破 prompt caching），故并入本条评估。
+
+
+- [ ] **B1-17 同页同项 finding 完全重复发射（p39 ×2）**（P2，2026-09-21 Round 53 从 B1-15 回放观测）
+  现象（真实 51 页回放，`devlogs/_verify/verify_b115_replay.py` 的 R8 现状清单）：
+  p39 的 `设备及管路是否及时清洗干净` 产出**两条完全相同**的 finding
+  （同 page / 同 type / 同 severity / 同 description）。
+  ⚠️ 与 B1-1（同根因**跨条目**聚合降噪）**不同侧**：这是**同一条**判据在同一次运行里
+  重复收集（更可能是 `steps[]` 里同一检查项出现两次，或注册表/包装层被调用两遍）。
+  动作：**先定位**是哪一层重复（`_check_check_consistency` 的输入里 checks 是否重复项 /
+  `registry` 包装是否多注册 / 落库前是否少了一次去重），**再**决定在哪一层去重；
+  ⚠️ 不要用"按描述字符串集合去重"这类**抹平**做法收尾 —— 那会把**同一页两个步骤
+  里合法的同名检查项**也一起吞掉（真实记录里同一检查项在不同步骤重复出现是正常的）。
+  验收：构造"同一步骤内 checks 重复"⇒ 去重；构造"两个步骤各有一条同名检查项"
+  ⇒ **两条都留**（正向对照，防过度去重）。变异验证：把去重判据去掉 / 放宽成按 item 名去重 ⇒ 各红一条。
+  定位探针：`devlogs/_verify/probe_b117_dup.py`（待建）。
+
+
+### B2 正确性与可观测性
+
+- [x] **B2-1 `_get_analyzed_pages` 改 fail-safe**（P2，本轮新发现）
+  ✅ **2026-09-20 Round 49 已修**。`core/pipeline/stage2.py:_get_analyzed_pages`
+  的 `except Exception: pass` 改为：**视为未分析 + `logger.warning`（带 job_id/page/
+  异常摘要）+ `continue`**。旧行为下**损坏（截断/半写）的 `structured_json`** 会
+  落到 `analyzed.add(page)` ⇒ 该页被**永久**当作"已分析"，retry 不再重跑且**零日志**
+  （用户点重试毫无变化、日志里也无任何线索）。
+  ⚠️ 注意与既有行为的边界：`_parse_error` **合法 JSON** 分支早已 `continue`（旧注释
+  已描述），本条修的是它**下面的**那条静默路径 —— 两者不可混为一谈。
+  护栏 `tests/unit/test_pipeline.py::TestSilentFailureLogging::
+  test_corrupt_structured_json_is_not_treated_as_analyzed`（三类输入：合法+标记 / **损坏** /
+  正常 ⇒ 断言 `analyzed == {3}` 且 caplog 含"无法解析"）；反向控制 = 正常页**必须**
+  仍被判为已分析（修复不得把正常页也算成未分析）。
+  变异验证：改回 `except: pass` ⇒ **红**。
+  现象：`structured_json` 解析失败 ⇒ `except: pass` ⇒ 该页被算作"已分析"⇒ **retry 不重跑 + 零日志**。
+  证据：`core/pipeline/stage2.py:488-497`。
+  动作：解析失败 ⇒ **视为未分析**（可被 retry 重跑）+ 记一条 warning（含 page 与异常摘要）。
+  验收：构造损坏 `structured_json` ⇒ retry 能重新分析该页且有日志；变异验证：改回 `pass` ⇒ 护栏红。
+
+- [x] **B2-2 诊断类静默失败补日志**（P2）
+  ✅ **2026-09-20 Round 49 已修**。三处静默补 `logger.warning`，**控制流一律不变**
+  （保持软失败语义）：
+  ① `core/pipeline/stage1.py` `_pdf_page_diagnostics(ocr_pdf_path)` 失败；
+  ② 同文件「原件诊断 + `ocr_input_normalized_diag` 审计行」失败（这条会让
+     "此件为何被规范化"的**审计行缺失**，必须留痕）；
+  ③ `core/pipeline/self_heal.py` 既往 `ocr_diagnostics` 读取 —— **顺手抽成单一
+     实现点 `_load_prior_diagnostics(db, job_id, pages)`**（原本是内联的 14 行
+     双 `except: pass`，不可单测；抽出后既可测也消除了重复）。
+  为什么必须留痕：这两类失败都会**把失败伪装成正常** —— ① 让"页级诊断全空"与
+  "这份 PDF 真的没有异常页"不可区分；③ 让"既往诊断**读不出来**"与"这页**本来
+  就没有**诊断"不可区分，而 GMP 追溯链要的恰恰是这个区分。
+  护栏 `TestSilentFailureLogging::{test_page_diagnostics_failure_is_logged_and_soft,
+  test_load_prior_diagnostics_logs_corrupt_and_db_error}`；后半条同时断言
+  **DB 失败仍返回空 dict（软失败）而不是抛出**。
+  变异验证：逐处改回静默 ⇒ **4/4 各自打红**（含 DB 失败那处）。
+  证据：`core/pipeline/stage1.py:179`（`_pdf_page_diagnostics`）、
+  `core/pipeline/self_heal.py:727`（`ocr_diagnostics` 解析）。
+  动作：失败时 `logger.warning`（带 job_id/page/原因），**不改变控制流**。
+  验收：注入异常 ⇒ 日志可见；且**不得**因此让整页失败（保持软失败语义）。
+
+- [ ] **B2-3 `self_heal` 的 `to_thread(fitz)` 移入 procpool**（P1，旧）
+  现象：fitz 是 C 扩展、持 GIL 数十秒，会饿死事件循环；且**取消请求在该段最长要等到看门狗 2400s**。
+  证据：`core/pipeline/self_heal.py` 多处 `asyncio.to_thread(fitz...)`；`watchdog.py` 取消阈值。
+  动作：重活走 `core/procpool.py`；并补**段内取消检查点**。
+  验收：人为拉长 fitz 调用 ⇒ 事件循环仍响应 `/health`；取消请求在**秒级**生效（不再等 2400s）。
+  ⚠️ 先做**定位实验**证明当前确实阻塞（不要凭读码改）。
+
+- [ ] **B2-4 Stage3 同步 CPU 移出事件循环**（P1，旧）
+  证据：`core/rules/__init__.py:133` 同步 `spec.check(...)`；`core/stage3.py` 多处同步挂载。
+  动作：与 B2-3 同批处理（走 procpool 或分片让出）。
+  验收：51 页 job 的 `/health` 延迟在 Stage3 期间不劣化。
+
+- [ ] **B2-5 #127 全局性故障仍呈现为绿色成功**（P1，**机制已落地 · 验收未实测**）
+  ⚠️ **2026-09-20 状态更正（勿再当"完全未修"报）**：本条主体已在 **v1.1.6 落地** ——
+  提交 `4513395`（`fix(llm/stage2/stage3): #127 配置级故障类型化 + 首因提升到 job 级 +
+  早停 + 零页产出落 error`）；`core/pipeline/stage2.py` 现有 `config_error` 暂存 dict
+  （`stage2.py:33/56/150/181`）+ `config_error_job_message()`，前端非绿点见 #127-D。
+  **仍未闭合的两处残留**：① **分片路径**（`OCR_SLICES>1`）不传 `config_error`
+  ⇒ job 级首因失效，已单列 **#144**；② **本条的验收动作从未真跑过**（"把 key 改成无效
+  ⇒ 界面明确失败"）—— Round 42 的 7 轮 e2e **全部用可用 key**，所谓"LLM 路径坏了"
+  这一支未覆盖，e2e 驱动也**不做**该轮次（已单列 **B1**）。
+  ⇒ 待 **B1 + #144** 完成后，本条才可勾选。
+  现象（原记录）：LLM key 失效 ⇒ 页级 `_parse_error` ⇒ `partial_review` 时
+  `jobs.error_message` 恒 NULL ⇒ 前端 `upload.js` 是 `bg-success` 绿点、
+  **0 条 finding、无原因** ⇒ 与"记录真的无异常"不可区分。
+  动作：类型化异常透传 + 早停 + job 级信号 + **非绿点** + 机检护栏。
+  验收：把 key 改成无效 ⇒ 界面**明确失败**且给出原因；变异验证：去掉 job 级信号 ⇒ 护栏红。
+
+- [x] **B2-6 `Stage 2` 日志的 `measurements=` 恒为 0（P2，Round 42 实测新发现）**
+  ✅ **2026-09-20 Round 49 已修**。`core/pipeline/stage2.py:_analyze_one` 改为
+  **从 steps 汇总**并**同时打印两个口径**：`steps_count` 与
+  `measurements_count = sum(len(s.get("measurements") or []) for s in steps)`，
+  日志形如 `(confidence=high, steps=2, measurements=4, findings=0, payload=… bytes)`。
+  定位复核（先实证，非推断）：真实 51 页回放库逐页实测，`structured_json`
+  **顶层确无** `measurements` 键（顶层键为 page_info/event_year_groups/steps/
+  findings/time_anomalies/ocr_noise/overall_confidence），值全在
+  `steps[].measurements[].values` ⇒ 旧写法在任何页上都恒为 0。
+  护栏 `tests/unit/test_pipeline.py::TestLogTruthfulness::
+  test_stage2_log_counts_measurements_from_steps`：断言**直接打在日志文本的数字上**，
+  且 fixture 刻意让 `steps=2` 与 `measurements=4` **不相等** —— 否则无法区分
+  "读错键"与"读对了但凑巧相同"。
+  变异验证：把该行改回 `len(structured.get("measurements", []))` ⇒ **红**。
+  现象：逐页日志形如
+  `Stage 2: Page 42/51 LLM done in ...ms (confidence=low, measurements=0, findings=4, ...)`，
+  其中 `measurements` **在任何页上都是 0**，无论实际提取到多少测量值。
+  证据：`core/pipeline/stage2.py:320`
+  `measurements_count = len(structured.get("measurements", []))` —— 读的是**顶层**键，
+  而真实结构里 `measurements` **嵌在 `steps[]` 内部**，顶层根本没有这个键。
+  实测（视觉 + 直查库双证）：
+  - 真实文档 p8 的 `structured_json` 顶层 keys = `page_info / event_year_groups / steps /
+    findings / time_anomalies / ocr_noise / overall_confidence …`，**无 `measurements`**；
+    而 `steps[0].measurements` 有 **7 条**（每个时间点一条），每条含 **13 个**测量值
+    （`进料_压力` / `回流_流量` / `TMPs` …）。
+  - 本轮 real 轮 48 个已完成页**全部** `measurements=0`。
+  - **只影响该日志行**（全仓 `measurements_count` 仅 2 处引用，均为日志）⇒ 不改变功能：
+    `param_out_of_spec` 正常产出（pdf 2 条 / img 12 条 / real 38 条）。
+  影响：**误导排障** —— 看日志会以为「LLM 完全没提取到测量值」，从而去查一个不存在的
+  提取故障；而数据完好地存在 `steps[].measurements[].values` 里。这正是「日志要方便定位」
+  的反面（用户明确关注项）。
+  动作：改为从 steps 汇总，例如
+  `sum(len(s.get("measurements") or []) for s in structured.get("steps") or [])`；
+  并顺带记 `steps` 数与测量值总数（两个口径都可见，避免下次再被单一数字误导）。
+  验收：跑一页含测量值的真实页 ⇒ 日志 `measurements` > 0 且与直查库一致；
+  变异验证：改回读顶层 ⇒ 立刻重回恒 0。
+  ⚠️ 需升版重建。
+
+- [x] **B2-7 TOCTOU：并发上限检查与 INSERT 原子化**（P2，旧）
+  ⚠️ 2026-09-20 重编号：本条原写作 `B2-6`，与上方 Round 42 新增的
+  「`measurements=` 恒为 0」**撞号**（清单里出现两个 `B2-6`）⇒ 此处让位改 `B2-7`，
+  上方 Round 42 那条保持 `B2-6` 不变。
+  证据：`api/jobs/upload.py:99-104`（COUNT 持锁）与 `:349`（INSERT 持锁）之间隔写盘/转 PDF。
+  ✅ **2026-09-20 Round 51 已修**（做法与原文**略有调整**，见下）。
+  **定位（实证）**：把 N=4 个上传用"闸门"同时卡在两道检查之间（首次读盘时等待），
+  在 `MAX_CONCURRENT_JOBS=1` 下实测 **4 个全部成功**（`len(ok)==4`）—— 上限形同虚设。
+  **处置**：把**授权式**配额检查放进 **INSERT 的同一把 `db_lock` 内**
+  （检查与写入之间不释放锁、无 await 让出点）⇒ 对外原子。函数开头保留一道
+  检查，但**明确降级为"尽力而为的前置快检"**（只为避免让用户白传 200MB 大文件，
+  非授权依据）。抽出 `api/jobs._count_active_jobs()` 作**单一实现点**，upload（两道）
+  与 retry 共用（此前 SQL 各写一份）。
+  ⚠️ **为何不用"占位 INSERT"**（原文建议）：占位行需要在**每一条失败路径**上删除
+  （大小超限/页数超限/magic bytes/图片转换失败/去重 409…），任何一条漏删都会留下
+  `pending` 且无 task 的**幽灵任务** —— 它会永久占额度、在列表里可见、且看门狗
+  只监视"pending + 有活 task"（见 `upload.py:404-408`），不会被收敛。
+  改为"检查与真实 INSERT 同锁"后**无需任何占位/清理机制**，语义更简单也更强。
+  **性能未退化**：PDF 写盘仍在锁外，锁内只多一次 COUNT。
+  **验收（已达成）**：`tests/integration/test_api_jobs_upload.py::TestUploadQuotaIsAtomic`
+  —— 闸门确定性复现窗口（**反空断言**：先证 N 个请求都进到窗口）+ 断言成功恰 1 个、
+  其余 409、DB 活跃数恰为 1；另有**正向对照**（额度已满时应在快检即被拒、不得读盘）。
+  **变异 2/2**：① 授权式检查失效 ⇒ 红（红灯原因已核 —— 4 个全成功）；
+  ② 前置快检失效 ⇒ 对照用例红。脚本 `devlogs/_verify/mutate_b27.py`（逐字节还原）。
+  📌 **同族未修（另记 B2-14）**：`retry` 的守卫是**同样的两段式**形状。
+
+- [ ] **B2-14 retry 的并发守卫与状态迁移之间同样有 TOCTOU**（P3，Round 51 修 B2-7 时发现）
+  证据：`api/jobs/actions.py:66-77` 在 `db_lock` 内 COUNT，**释放锁之后**才
+  `await transition_status(...)` 把 job 置为 `pending` ⇒ 两个并发 retry（或
+  retry 与 upload 同时进行）可**双双**通过计数，实际活跃数超出 `MAX_CONCURRENT_JOBS`。
+  与 B2-7 是同一类缺陷，但**修法不同**：`transition_status` 内部**自己取
+  `core/pipeline/db_lock`**（同一把、**非重入**，见 `core/pipeline/state.py:114-136`
+  与 `locks.py:127`）⇒ 不能"持锁再调它"（会死锁），必须改用
+  `_transition_status_unlocked` 并在同一临界区内完成"计数 + 迁移"。
+  因涉及状态机锁语义（并要核对取消/删除路径是否也走该函数），本轮**不动**，
+  单独作为一项处理。验收：并发 retry 脚本卡在 `MAX_CONCURRENT_JOBS`；变异 ⇒ 红。
+
+- [x] **B2-8 分片路径逐片日志把"累计新增"当成"本片新增"（P2，Round 43 新发现）**
+  ✅ **2026-09-20 Round 49 已修**。`core/pipeline/engine.py` 片循环内新增
+  `slice_new`（**片内**计数），日志改为
+  `persisted ({slice_new} this slice, {new_pages} total)` —— 两个口径同时可见，
+  既不丢"共落多少页"也不再说谎。
+  ⚠️ `:611` 的最终汇总 `{new_pages} new pages` 仍用累计值（**那是对的**，未改动）。
+  护栏 `TestLogTruthfulness::test_sliced_log_reports_per_slice_new_pages`：两片规模
+  刻意不同（**1 页 / 2 页**）⇒ 断言 `(1 this slice, 1 total)` / `(2 this slice, 3 total)`；
+  旧写法会打 `(3 new)`（累计），与"本片 2 页"不符 ⇒ 断言必红。
+  变异验证：日志改回 `({new_pages} new)` ⇒ **红**。
+  现象：分片 OCR 的第 2 片起，日志 `Stage 1 (sliced): slice start=N pages=10 persisted (X new)`
+  里的 `X` 是**跨片累计值**，不是本片新增页数。
+  证据：`core/pipeline/engine.py:488` `new_pages = 0`（片循环**外**）→ `:548` `new_pages += 1`
+  → `:556-559` **在片循环内**打印 `({new_pages} new)`。
+  影响：属"**日志说谎**"（用户明确关注项）—— 按日志核对"本片落几页"会被误导。
+  ⚠️ `:611` 的最终汇总用累计值是**对的**，别一起改错。
+  动作：片内日志改为 `({len(pages)} this slice, {new_pages} total)`。
+  验收：跑一次 `OCR_SLICES>1` 的两片输入 ⇒ 第 2 片日志的"this slice"= 本片规模；
+  变异验证：改回原样 ⇒ 第 2 片日志再次显示累计值。
+
+- [x] **B2-9 审计写失败被静默丢弃 + 看门狗自述不含"停滞 job 清单"**（P3×2，Round 43 新发现）—— **R125 已核销**（证据见 §0.1.1）
+  ✅ **2026-10-27 R125 处置完毕**：① 审计写失败升为 `logger.error` + 进程内计数
+  `state.audit_write_failures()`，由 `/api/health/watchdog` 自述（**不重试**：`execute`/`commit`
+  失败时无法判断 INSERT 是否已进事务，重试可能**双写**，反而污染追溯链 —— 条目原文给的
+  "或轻量重试"因此**不采用**）；两个审计写入点（`_audit_log` 与被拒转换）**共用一个计数**，
+  否则自述只覆盖一半路径。② 自述端点新增 `currently_stalled`（直接复用 `find_stalled_jobs`，
+  **不另写查询** —— 两份实现必然漂移，后果是"看门狗认为卡了、自述认为没卡"；limit 20 且
+  **显式**报 `currently_stalled_total` / `_truncated`）；库读不出来时降级为 `None` +
+  `currently_stalled_error`（`[]` = 扫了没卡，`None` = 没扫成，**绝不合并** —— 与 R123
+  `failed_pages` 的 `NULL` vs `[]` 同一条道理）。护栏
+  `tests/unit/test_r125_audit_and_stall_visibility.py`（12 条），变异
+  `devlogs/_verify/r125_mutate.py` ⇒ **10/10 CAUGHT**。
+  ① `core/pipeline/state.py:31-32`：`_audit_log` 失败仅 `logger.warning`，**无重试、无告警**
+  ⇒ GMP 追溯链可能出现**空洞且无信号**（`pipeline_complete`/`stuck_recovery` 等关键动作失败
+  会淹没在一条 warning 里）。
+  ② `core/watchdog.py:501-518` `status_snapshot()` 只回聚合**计数**，
+  而 `find_stalled_jobs()`（`:279`）本可给出具体 job —— 外部监控因此**无法定位是哪个 job 卡了**，
+  与「不看日志也知道卡在哪」的目标有落差。
+  动作：① 关键审计失败升级为 `logger.error` 并计入可观测指标（或轻量重试）；
+  ② 自述端点增加 `currently_stalled`（复用 `find_stalled_jobs`，limit 保护）。
+  验收：① 注入一次 DB 写失败 ⇒ 日志出现 error 级且指标可见；② 造一个停滞 job
+  ⇒ `/api/health/watchdog` 直接给出该 job id 与已停滞秒数。
+
+- [x] **B2-10 前端「过渡期与口径」4 处**（P2×2 + P3×2，Round 43 新发现）
+  ✅ **2026-09-20 Round 50 处置完毕**（4 处全修；机检新增 16 条；**变异 9/9** 全被捕获）。
+
+  **① 两类 error 帧不分（P2）—— 定位（实证）**：`api/jobs/status.py` 确有两类
+  `type=error` 帧，语义相反：`:407` 的 `'进度查询失败'` 发帧后 **`continue`**
+  （设计上应重试、连接不关），`:419` 的 `'任务不存在'` 发帧后 **`return`**（终态）。
+  而 `static/review.js` 只判 `d.type === "error"` 就把两者混为一谈
+  ⇒ **一次 DB 抖动被谎报成"任务已被删除"，同时进度流永久断开**（丢实时更新 + 理由说谎）。
+  **处置：判据改由服务端下发** —— 两类帧各带显式 `terminal`（`False`/`True`），
+  前端经 `PbcStatus.sseErrorAction(d)` 分支：仅 `terminal` 关流；瞬态只把文案换成
+  「进度查询异常，重试中…」并**保持长连**（不 close / 不清轮询定时器）。
+  ⚠️ **不按 `message` 文案判定**：文案属展示层，改文案会静默改变控制流（与"理由说谎"
+  同族）。字段缺失按**瞬态** fail-safe（宁可多留连接，也不谎报任务被删）；服务端
+  **必带该字段**由集成用例锁定，故不会长期缺失。
+
+  **② 终态文案漏中文映射（P2）**：`else` 分支改调 `PbcStatus.statusZh(d.status)`，
+  不再落**裸英文 token**（此前 `review` / `partial_review` / `done` 都显示英文，
+  而同页徽章是中文 ⇒ 同页两处不一致）。
+
+  **③ error 转态期不显示原因（P3）**：新增 `showJobErrorBanner()` —— 按需创建/更新
+  SSR 的**同一条**横幅 `#job-error-banner`（幂等；文案与 SSR 逐字一致；原因走
+  `textContent` 防注入）。终态帧取 `d.message`，普通帧取 `d.error_message`
+  ⇒ **转态即刻可见原因**，不必等 1.5s 自动刷新后由 SSR 给出。
+
+  **④ 状态中文映射第 3 份副本（P3）**：删除 `review.js` 内联 `statusZh`，徽章与进度
+  文案统一走 `PbcStatus.statusZh`（此前**文字与颜色不同源**：颜色早已走共享件）。
+  注：同页另有**合法**的两份映射（finding 状态 / finding 类型）⇒ 机检以"**job 专属键**"
+  精确定位（`ocr_running`/`analyzing`/`partial_review`…），并按 §二十八 做
+  花括号配对的结构化提取，不误伤、不误报。
+
+  **护栏（`tests/unit/test_status_js.py` 新增 4 类共 16 条）**：
+  `sseErrorAction` 纯函数**行为**判据（node 实跑）＋ 错误分支「**包围条件 + 相对位置**」
+  结构化判据（`es.close()` 必须晚于 `terminal` 判定、瞬态分支内不得出现 close/clearInterval）
+  ＋ 提取器**正向对照** `test_detector_is_not_vacuous`（防空断言）＋ 键集覆盖
+  （`JOB_STATUS_ZH` 每个键 JS 侧都必须有）。集成侧：两类帧**各带** `terminal` 字段。
+  **变异验证 9/9**（`devlogs/_verify/mutate_b210.py`，逐字节还原自校验）：瞬态分支短路 /
+  按文案判定 / 恒终态 / 文案退回裸英文 / `statusZh` 原样返回 / 徽章重新内联映射 /
+  不再消费 `error_message` / 两类帧各缺 `terminal` ⇒ **各自打红对应用例**。
+
+  ⚠️ **过程中修掉一个自己写的空断言**：③ 初版判据是 `"d.error_message" in src`。
+  变异 M6（把调用改成 `showJobErrorBanner(undefined)`）**照旧全绿** —— 因为**条件行**
+  `if (d.status === "error" && d.error_message)` 里还有一处同名标识，`in src` 被
+  "另一处提及"满足。已改成钉**消费点本身**（完整调用表达式 + 其包围条件）。教训固化进
+  `docs/PROJECT_PITFALLS.md` **§三十**（连同"验证脚本必须带超时，否则挂起会**留下源码
+  处于变异态**"）。
+
+  ---
+
+  **原始记录（问题陈述，保留备查）**
+  ① **`type:error` 两类帧不分**（P2）：`static/review.js` 只判 `d.type === "error"`
+  就关流并写「任务不存在或已被删除」；而后端 `api/jobs/status.py:402` 的
+  `'进度查询失败'` 是**设计上应重试**的（发帧后 `continue`），只有 `:411` 的
+  `'任务不存在'` 才是终态 ⇒ **瞬态 DB 抖动被误判为"任务被删"**，进度流永久断开 + 文案说谎。
+  ② **终态文案漏中文映射**（P2）：`review.js` 只处理 `cancelling/cancelled/error`，
+  其余落 `else` 显示**原始英文 token**（`partial_review`/`review`/`done`），
+  而同页徽章走 `statusZh` 是中文 ⇒ 同一状态同页两处不一致。
+  ③ **error 转态期不显示原因**（P3）：`review.js` 全文未消费 `error_message`，
+  仅显示"出错"，要等 1.5s 自动刷新后由 SSR 横幅给出。
+  ④ **状态中文映射第 3 份副本**（P3）：`review.js` 自带 `statusZh`，
+  而同页颜色却走共享 `window.PbcStatus.statusDotClass` ⇒ **文字与颜色不同源**。
+  动作：① 按 `d.message` 分支（仅"任务不存在"关流）；② `else` 改调
+  `window.PbcStatus.statusZh(d.status) || d.status`；③ error 分支复用 SSR 的
+  `#job-error-banner`；④ 删本地副本、统一走 `PbcStatus`。
+  验收：① 模拟一次 DB 异常帧 ⇒ 流**不断开**；② 终态过渡期文案为中文；
+  ③ error 转态即刻显示原因；④ 机检断言"状态中文映射只有一处真值"；
+  **变异验证**：逐条改回原样 ⇒ 对应护栏必须红。
+
+- [ ] **B2-11 聚合流 `/live` 在 DB 异常期不 yield 任何帧**（P3，Round 43 新发现）
+  现象：`api/jobs/listings.py:187-192` 异常分支只 `logger.error` + `await asyncio.sleep(...)` + `continue`，
+  **不发送任何帧**；对照单任务流 `api/jobs/status.py:399-404` 异常时仍每 2s 发 `id:` + 错误帧。
+  影响：经反向代理时聚合流可能因**空闲超时**被断（前端有自动重连 + 10s 轮询兜底，
+  故后果是瞬时空窗，非永久丢失）。
+  动作：与单任务流对齐 —— 异常期也发一帧（带 `type` 字段的普通 message 帧，**不得**用 `event: error`）。
+  验收：注入 DB 异常 ⇒ `/live` 仍每 2s 有帧。
+
+- [x] **B2-12 `_check_grounding` 把「当前年份」当幻觉数字 ⇒ 降级理由说谎**（P2，Round 46 发现）
+  ✅ **2026-09-20 Round 49 处置（含一处结论更新，勿再按旧描述报）**。
+  ① **定位结论（先实证，非推断）**：Round 46 记录的现象**已被 B1-4 ① 顺带消除**。
+  51 页真实回放实测：采用「当前日期/当前年份」参照物的条目共 **21 条** ——
+  **15 条被 ① 正确抑制**（理由="依据是墙钟而非记录内部一致性"）、**6 条 fail-open 保留**
+  （如「操作者签名日期早于当前日期」「记录发放年份 > 当前年份+1」凑不出两侧字面量，
+  本就没有被 L2 扣帽子）；**L2 降级中 token 命中「文档自述当前日期」池的残留 = 0 条**
+  （原记录为 14/19）。⇒ 旧现象不再出现，但**护栏缺失**：判据顺序一旦调整
+  （① 提前 fail-open），现象会**静默回归**且无人看得见。
+  ② **处置**：`_check_grounding` 新增 `exclude_dates` 参数，按**年份**排除文档级
+  自述当前日期（`_document_current_dates`），调用点传入 `current_dates`。
+  这样即使 ① fail-open，L2 的理由也不会变成假话 —— "2026" 本就来自系统提示词
+  注入的当天日期，**不该出现在 OCR 原文里**，因此"无法定位"不能等于"幻觉"。
+  ⚠️ 按年份而非整条日期排除：字面量粒度不一（`当前年份 2026` vs `2026.09.18`），
+  取**保守方向**（宁可少扣一次"幻觉"，也不把系统注入值说成编造）。
+  护栏 `tests/unit/test_llm_finding_guard.py::TestL2GroundingExcludesSystemDates`
+  （4 例）**含双向对照**：`test_exclusion_is_load_bearing` 证明"去掉排除集就真会被
+  扣幻觉帽子"（防空断言）、`test_genuinely_fabricated_number_still_flagged` 证明
+  真·凭空数字仍被标出（防把 L2 打哑）、`test_exclusion_tolerates_mixed_literal_granularity`
+  覆盖粒度混合与"池外年份不得被误排除"。
+  变异验证：① 调用点不传排除集、② 去掉内部过滤 ⇒ **各自打红对应用例**。
+  现象：实测 **19 条 grounding 降级里 14 条**是 `suspicious_date` 的"当前年份 2026"，
+  例如「生产日期 2025年01月20日 与 当前年份 2026年09月18日 不符」被降级的理由是
+  "数字（2026）在 OCR 原文中无法定位，疑似提取幻觉"。
+  **"2026"来自系统时钟，本就不该出现在 OCR 原文里** ⇒ 这个理由**是错的**。
+  （降级的**方向**没错 —— 这些条目确实不构成异常 —— 但**理由**会误导排障，
+  与 B2-6「`measurements=` 恒为 0」同属"日志/理由说谎"一类。）
+  动作：L2 的溯源对象应**排除系统注入值**（当前日期/当前年份），或让这类条目改走
+  B1-4 的"与当前日期比较本就无意义"分支 —— 不要扣"凭空捏造"的帽子。
+  验收：回放中"当前年份"型降级不再出现"疑似提取幻觉"字样；变异验证：放宽排除 ⇒ 红。
+
+- [ ] **B2-13 SSR(Python) 与 SSE(JS) 的 job 状态**中文措辞不一致**（P3，Round 50 新发现）
+  现象：同一个 job 状态，**首屏**（Jinja 走 `core/zh_map.py::JOB_STATUS_ZH`）与
+  **SSE 实时更新后**（走 `static/status.js::STATUS_ZH`）显示的中文**不同**：
+
+  | 状态 | SSR(Python) | SSE(JS) |
+  |---|---|---|
+  | `ocr_running` | OCR 解析中 | 识别中 |
+  | `review` | 待复核 | 可复核 |
+  | `partial_review` | 部分完成待复核 | 部分可复核 |
+  | `error` | 失败 | 出错 |
+
+  ⇒ 同一页面**刷新前后文案会变**（用户会以为是不同状态）。B2-10 的 ② / ④ 消除了
+  "英文 vs 中文"的不一致，但**没有**消除"两套中文"的不一致。
+  为何本轮不动：统一措辞 = 改变用户可见文案，需先定"以哪一侧为准"（SSR 侧更贴近
+  `db/schema.sql` 的语义、JS 侧更短），且可能影响既有文案断言（`e2e_*` / 模板测试）。
+  动作（待定）：① 定基准侧；② 让另一侧**派生**（而不是各自维护）；③ 机检两侧
+  **逐值等价**（现只锁颜色 `statusDotClass` 与**键集**，未锁措辞）。
+  验收：同一状态在 SSR 与 SSE 下文案逐字相同；变异验证：改任一侧措辞 ⇒ 红。
+
+### B3 可维护性
+
+- [ ] **B3-1 状态串收敛为单一真值**（P1，旧）
+  现状 ≥4 处：`state.py:35` / `state.py:139` / `api/jobs/__init__.py:111` / `zh_map.py:28`，
+  外加 SQL 字面量 `'pending'`/`'error'`/`'archived'`。
+  动作：一份 `JobStatus` 枚举 + 派生集合（`_ACTIVE`/`_STUCK` 从转移表派生）+ 中文名映射。
+  验收：机检断言"除真值源外无状态字面量"；变异验证：新增一个状态 ⇒ 缺映射处**立即红**。
+
+- [x] **B3-2 procpool 并发度**（P2，旧）
+  现状 `max_workers=1` ⇒ 多 job 时本地 CPU 重活串行。
+  动作：先**实测**单 job 与并发 job 的收益，再决定是否提到 2；不可盲目调大（内存/CPU 争用）。
+  验收：给出实测数据（不是推断）后再改。
+  ✅ **2026-09-20 Round 51：实测后提到 2**。脚本 `devlogs/_verify/bench_procpool.py`
+  （走**真实** `core.procpool.run_cpu` 路径，只替换池大小；12 个 CPU 任务/场景，14 核机）：
+
+  | worker×jobs | 墙钟(s) | 单任务(s) | 子进程 RSS |
+  |---|---|---|---|
+  | 1 × 1 | 1.40 | 0.116 | 59 MB |
+  | 1 × 3 | **1.41** | 0.117 | 59 MB |
+  | 2 × 3 | **0.85** | 0.071 | 125 MB |
+  | 3 × 3 | 0.71 | 0.059 | 190 MB |
+  | 2 × 1 | 1.42 | 0.118 | 119 MB |
+
+  结论：① 单 worker 下 **jobs=1 与 jobs=3 墙钟相同**（1.40 vs 1.41）⇒ 并发 job 完全被
+  串行化、**零收益**；② 3 并发 job 时 1→2 worker **加速 1.64x**，而 `MAX_CONCURRENT_JOBS`
+  默认就是 3 ⇒ 并发是**设计内**场景；③ 每 worker ≈60MB（+60MB ≈ 已记录最坏占用 ~2GB 的 3%）；
+  ④ 提到 3 的**增量只有 1.21x** 而再 +65MB ⇒ 取 **2**。
+  另有一条**与负载无关**的理由：worker 数很少时，一个挂死的 worker 会占住槽位；
+  worker=1 时即占满 ⇒ 故障从"某个 job 卡住"扩散成"整个应用不再处理新任务"。取 2 使
+  爆炸半径减半（`_recycle_pool` 仍是兜底）。
+  ⚠️ **顺带更正一处文档说谎**：原注释称"多 worker 只会增加内存而无吞吐收益"，
+  实测**只对单 job 成立**，已按数据更正（否则会误导后续决策）。
+  护栏：`tests/unit/test_procpool.py::TestPoolConcurrencyIsCalibrated` —— ① 标定值未被
+  无声改动（改它必须先有新测量）；② 并发度由 `_POOL_MAX_WORKERS` **单点**决定，
+  用 **AST** 判据（首版用正则查 `max_workers=<数字>`，**被顶部数据表的注释打红** ⇒
+  §二十八 的文本匹配坑，已改为 AST + 反空断言）。**变异 2/2**（`devlogs/_verify/mutate_b32.py`）。
+
+- [x] **B3-3 `RuleSpec.severity` 与实际发射不一致，且无人消费**（P3，Round 45 修复 B1-9 时发现） —— **R126 已核销**（证据见 §0.1.1）
+  现象：注册表声明 R1a/R1b 的 `severity="warning"`
+  （`core/rules/registry.py:119,121`），但实现里硬编码发 `critical`
+  （`core/rules/rule_time.py`）—— **声明与实现漂移**，且 `RuleSpec.severity`
+  **全仓无任何消费点**（`grep '\.severity\b'` 在 `core/rules`、`core/pipeline`、
+  `api`、`scripts` 均无命中），只有 docstring 说它"用于审计与前端分级"。
+  影响：该字段目前是**纯摆设** —— 任何"以注册表为准"的外部工具（文档生成、
+  前端分级、未来的规则目录页）都会拿到与真实行为不符的严重度。
+  动作：二选一并补护栏 ——
+  ① 让 `severity` 表示"本条规则可能发射的最高严重度"，并在规则注册表单测里
+     **从发射结果反推**校验（需为每条规则造一个命中样本，成本较高）；
+  ② 或明确废弃该字段（改为从实现里派生），避免两处真值。
+  ⚠️ 先定位再决定：B1-9 已把 R1b 变为**同一 type 可发两种严重度**
+  （真倒序 critical / 仅重叠 warning），单一 `severity` 字段本身已不足以表达。
+  验收：机检能抓住"声明与实现不一致"（构造一处漂移 ⇒ 护栏红）。
+
+  ✅ **2026-10-27 R126 处置完毕（走 ②：删字段）**：`RuleSpec` 的 `severity` 字段与
+  23 条构造实参全部删除，docstring 就地写明"严重度是**发射结果**的属性，不是注册表
+  的声明"，并给出 R1a/R1b 的漂移史与"同一 type 两种严重度"这个更根本的理由。
+  **为什么不选 ①**：把声明"改对"只是把第二处真值暂时调齐 —— 它依旧**没有任何
+  校验点**（唯一的消费点是"断言它是三个合法值之一"），下次照样漂；而 ① 要求的
+  "为每条规则造命中样本"成本高且随规则增长。
+  护栏 `tests/unit/test_rule_severity_single_truth.py`（**9 条**，四组不变式：
+  字段集合固定 / 注册表不得传 severity 且位置参数形态固定 / 发射字面量 ∈ 三值词表 /
+  **R1b 对两种输入发两种严重度**这个行为实证）；变异 `devlogs/_verify/r126_mutate.py`
+  ⇒ **6/6 CAUGHT**。
+
+- [x] **B3-4 写路径单一实现点 + 全仓生产死接口清零**（P2 → **已修**，2026-09-20）
+  **① 定位（先定位再动手）**：写全仓 AST 扫描 `devlogs/_lint/deadscan.py`（判据 = 定义在库代码里
+  + **生产侧零引用**；带装饰器的跳过；`tests/` 只算消费方），一次把"还有多少此类死接口"问清 ⇒
+  共 **7 个**（5 个「仅测试引用」+ 2 个「彻底无引用」）。
+  ⚠️ 首版扫描器太粗（把 pytest fixture、FastAPI 路由处理器都算进来，误报 268 个）⇒
+  判据必须与 B3-4 对 `apply_review` 的**原判定同口径**。
+
+  **② 逐项处置（关键：先判"是重复"还是"纯负债"，再决定"接线"还是"删除"）**
+  1. `llm_finding_guard.apply_review` —— 死代码，**且 stage2/stage3 各抄一份并已漂移**（`.rstrip()`）
+     ⇒ ✅ **接线**：两处改用它，重建逻辑只剩一个实现点。
+  2. `kb.store.source_version` —— 死，但 `kb_version()` **内联同一取值** `srcs[sid]['_version']`
+     ⇒ ✅ **统一**：`kb_version()` 改用它。
+  3. `kb.store.entries_by_source` —— 死，但 `entries()` 无参分支**内联同一并集**
+     ⇒ ✅ **统一**：`entries()` 改用它。
+  4. `finding_quality.is_canonical` —— 死，但 `normalize_finding_type()` **内联同一判定**
+     ⇒ ✅ **统一**：改用 `is_canonical()`。
+  5. `rules.registry.rule_by_type` —— **纯死**（与 `rule_coverage` 的 `by_type` **语义不同**：
+     前者含被禁用规则、后者只含启用）⇒ ❌ 删除 + 删其**直接单测**。
+  6. `pipeline.locks.begin_children` —— **冗余第二构造入口**（`ChildTasks(job_id)` 已被
+     `engine.py` / `stage2.py` 直接用）⇒ ❌ 删除 + 修正那条**推荐使用它**的用法注释。
+  7. `rules.year_vote.vote_report` —— **纯死**，docstring 却称"落日志 / audit"
+     ⇒ ❌ 删除 + 登记缺口 **B3-5**。
+
+  ⚠️ **两个关键判断**（避开"一刀切删死代码"的错）：
+  - **#5 不能统一**：`rule_by_type`（全表）与 `rule_coverage` 的 `by_type`（仅启用）**过滤集合不同**，
+    强行合并会改变语义 ⇒ 只能删，不能并。
+  - **#2/#3 不能直接删**：它们在测试里是**独立判据（oracle）**——`test_kb_version_is_combined_and_
+    content_derived` 用各源版本**重算**组合版本、`test_entries_default_is_union_of_sources`
+    用各源并集**重算** `entries()`。删掉函数会**削弱测试判别力** ⇒ 正解是让**生产侧用它们**，
+    既消灭重复又保住对照。
+
+  **③ 护栏**：`tests/unit/test_llm_guard_single_impl.py`（6 例）
+  - (a) 正向：stage2/stage3 必须以 AST 形式调用 `apply_review`；
+  - (b) 反向：`core/pipeline/` 不得直接调底层引擎 `review_llm_findings`（= 绕过唯一入口）；
+  - (c) 反向：物化降级的标记 token `to_severity` 不得出现在 `core/pipeline/`；
+  - **正向对照**：token 必须确实存在于唯一实现点，否则 (c) 是**空断言**（"扫不到"≠"没问题"）；
+  - 断言走 `ast.Constant` **精确等值**而非文本搜索 —— pipeline 里 `｜` 另有合法用途（错误文案），
+    文本搜索会假红。
+
+  **④ 变异验证**：`devlogs/_lint/mutate_b34.py` ——
+  M1 把重建逻辑抄回 stage2 ⇒ (a)(b)(c) **三条全红**；M2 改掉标记 token ⇒ **正向对照红**
+  （证明 (c) 非空断言）；还原后全绿，并做**逐字节还原自校验**。
+  ⚠️ 变异脚本首版用文本模式改源码，**踩到两个静默副作用**：`utf-8-sig` 写回给无 BOM 的文件
+  **加了 BOM**（BOM 是**内容**、会进提交）、通用换行把 CRLF 折成 LF。已改**字节级**并加自校验
+  （记入 `docs/PROJECT_PITFALLS.md` §二十四）。
+
+  **⑤ 验收**：全量 `tests/unit + tests/integration` 通过（基线 2771）；`deadscan` 重跑 =
+  **死接口 0 + 仅测试引用 0**。
+
+- [ ] **B3-5 年投票（YearVote）的归一结论未落审计**（P3，2026-09-20 **由 B3-4 清理暴露**）
+  `core/rules/year_vote.py::vote_report`（自述"投票结果的可审计摘要"）**从未被调用** ⇒
+  把 `2027` 归一成 `2025` 这类**跨页年份投票**的结论，除规则产出的那条 finding 外**没有独立台账**，
+  出问题时无法回答"为什么把 2027 判成 2025、各年支持页数多少、归一理由是什么"。
+  已做的一半：删掉那个"看起来已实现审计"的死函数（它的存在本身在**误导**后来者）。
+  待办：若要可审计，把 `vote.resolve(y)` 的逐票理由落 `audit_log`（至少 `logger.info`）。
+  ⚠️ 这是**功能增强**（会改变输出），需与产品口径确认后再做，**不要顺手接上**。
+
+
+### B4 体验 / 健壮性
+
+- [x] **B4-1 SSE 断点续传与心跳**（P3，**2026-09-20 Round 43 降级并更正**） —— **R66 已核销**（证据见 §0.1）
+  ⚠️ **本条原登记的两项均不成立，勿再当缺陷报**：
+  ① **`id:` 帧早已存在** —— `api/jobs/status.py:401/410/418/422`、`api/jobs/listings.py:194`
+     （含终态 `event: done` 帧也带 `id`）；
+  ② **不需要心跳注释帧** —— 循环**每 2s 必发一个真实数据帧**（`_SSE_POLL_SECONDS=2`），
+     这本身就是天然保活。
+  ③ `Last-Event-ID` **未解析是有意的设计**：每帧都是**幂等全量快照**，
+     重连后立即自愈（`status.py:417` 有注释说明），故"真断点续传"在当前架构下非必需。
+  **保留的真实缺口**（已单列 **B2-11**）：聚合流 `/live` 在 DB 异常期**不 yield 任何帧**，
+  单任务流则每 2s 有帧 ⇒ 只有 `/live` 存在经代理空闲超时的风险。
+  动作：只做 B2-11（对齐单任务流的异常期行为），本条**无需再做**。
+  ⚠️ 不得新增 SSE 事件类型（`error` 是保留字，既有 AST 机检会拦）。
+
+- [ ] **B4-2 凭据卫生：`feishu_app_secret` 明文在 config.json**（P3，本轮新发现）
+  现象：本机 `%APPDATA%/PBC/config.json` 明文存 `feishu_app_id`/`feishu_app_secret`。
+  动作：至少在设置页提示；或支持引用环境变量；评估是否加密存储。
+  验收：文档写明存储位置与风险；若改存储方式需兼容旧配置。
+
+- [x] **B4-3 配置双轨 ⇒ "死 key 假红" 与自查盲区**（P2，Round 41 新发现）
+      ✅ **已完成**（Round 48 修主体 + Round 53 `c751c4a` 补"双轨可见性"；
+      2026-09-21 复核：`config.py` 已有 `CONFIG_SOURCE_APPDATA` 常量 ⇒ 两份配置的
+      来源在代码里可区分、可显示）。⚠️ 回填此前缺失（原为 `[ ]` 无完成标记）——
+      写 `[1.2.0]` 发布说明时补齐，见 **B8 第 6 条**。
+  现象：`config.py:_config_path()` 让**开发模式读仓库根 `config.json`**、**冻结版读
+  `%APPDATA%/PBC/config.json`**。两个文件装的**不是同一把凭据**：仓库那份是已吊销的 K1
+  （实测 `401 {"code":30014,"message":"Token is invalid."}`），`%APPDATA%` 那份才可用（实测 200）。
+  后果：① 开发模式 / 走仓库配置的 e2e **静默拿到死 key**，报 `30014` —— 与"凭据真有问题"
+  不可区分（A4 已记录过一次同类假红）；② `scripts/check_leaked_keys.py:117` 只读仓库那份
+  ⇒ 在只按装版使用的机器上会把"生效值"判成"不存在"，**漏报**（安全护栏漏报比假阳性更糟）。
+  动作：自检脚本与轮换自查**同时读两条路径**；开发模式遇 `30014` 时显式提示"你正在用仓库
+  `config.json` 里的已吊销 key"，而不是笼统的凭据错误。
+  验收：护栏可离线断言"自查工具会读两条路径"（造两个临时 config，断言都被读到）；
+  `DEPLOYMENT.md` 已写明该风险（✅ 本轮已加）。
+
+- [x] **B4-4 【P1】provider 被启动逻辑自动改写并持久化（界面零提示）**（Round 43 确证）
+  ⚠️ 本条即上一轮 §14.4 列为「**未复核**」的那一项，**本轮已确证**（不再是"疑似"）。
+  现象：启动时若 active provider 的 key 未通过 `_is_real_key`，则**自动切到第一个
+  "有真 key"的 provider**，改写 `os.environ["LLM_PROVIDER"]` **并写回配置文件**。
+  证据：`config.py:714-726`（改写 + `_persist_env_to_config`）；判定在 `config.py:659-669`
+  （`_is_real_key` = **子串匹配** `TEST_KEY_PATTERNS`，`config.py:645-656`）。
+  精确表述（**比转述更收敛**）：它**有日志**（`logger.warning("Auto-activating…")`），
+  所以**不是"完全静默"**；真正的问题是 ① 决策**只落日志、界面零提示**，
+  ② **会持久化覆盖用户在设置页的显式选择**，③ 判据是**子串匹配**（真实 key 若含
+  `placeholder` / `xxxxx` / `test-key` 等子串会被判"非真"）。
+  影响：GMP 场景「**你以为的模型 ≠ 实际跑的模型**」，且事后难追溯。
+  动作：① 仅当"**一个 key 都没配**"时才回退；**不得用测试/占位判定做生产切换**；
+  ② 覆盖前在设置页**显式提示**（"已从 X 切到 Y，原因：X 未配置 Key"）；
+  ③ `_is_real_key` 改精确格式校验（如 `sk-` 前缀 + 长度阈值），不要子串。
+  验收：① 造"active 无 key + 另一家有名 key"→ 有提示且**不改写用户显式选择**（若用户已显式选过）；
+  ② 造"active 的 key 含 `placeholder` 子串但格式合法" ⇒ **不得**触发切换；
+  变异验证：去掉提示 ⇒ 护栏红。
+
+  **✅ Round 48（2026-09-20）修复记录**
+
+  **定位（比 Round 43 的转述更收敛）—— 实际有**两份**实现，且互相掩盖**：
+  - 后端 `config.py::load_config()`（**import 期**执行）切换 + `_persist_env_to_config` 落盘；
+  - 前端 `static/settings.js::load()` 又自己切一次（`POST /set_active_provider`）。
+  后端先切完 ⇒ 前端条件 `!activeProv.configured` 恒不成立 ⇒
+  **那条唯一带提示的路径（`autoReason`）被绕过** ⇒ 用户看到的就是"provider 被静默换掉"。
+  ⇒ "界面零提示"的真实机制是**第二实现点把第一实现点的提示屏蔽了**，不只是"没写提示"。
+
+  **处置（三处，全部收敛到单一实现点）**：
+  1. **新增 `config._resolve_active_provider()` —— 决策的唯一实现点**。
+     回退**只允许**在：用户**未显式选择**（配置里没有 `LLM_PROVIDER`）
+     **且** active 的 Key **字面为空** **且** 另有 provider 的 Key 字面非空。
+  2. **删除前端那份本地切换**（连带 `opts.autoReason` 与 `firstConfigured`），
+     改为 `showAutoActivateNotice(current.llm.auto_activated)` —— **只呈现、不决策**。
+  3. **`_is_real_key` 改精确校验**（子串 → 「精确值 + 模板前缀」，并统一
+     `api/settings/read.py` 里**手抄的副本** `_is_real_api_key`）；
+     零消费的旧名 `TEST_KEY_PATTERNS` 一并删除。
+
+  **⚠️ 有意保留的取舍（已写进代码注释）**：切换判定**不再**使用占位启发式
+  ⇒ 一个带**占位 key** 的 provider 也会被当作"已配置"而成为回退候选。
+  这是刻意的：占位 key 会**响亮失败**（401/403，可追溯），
+  而"启发式误判 ⇒ 静默换模型"是**无声**的（GMP 硬伤）。
+  启发式保留在**显示层**（`configured` 标志），且新的提示会把它们串起来：
+  「已自动切换到 X」+ X 显示"未配置" ⇒ 用户立刻可行动。
+
+  **⚠️ 本轮自踩并当场修掉的两个同类错误**（都由新护栏抓出，记入 PITFALLS §二十七）：
+  - 首版前缀表含 `sk-ant-test` ⇒ 朴素 `startswith` 把**真实 key**
+    `sk-ant-testing-real-key-...` 判成占位 —— 正是本次要修的同一类错误。
+    改为"**前缀后必须是非字母**"；
+  - `sk-your-api-key` 是**词模板**（后接字母），前缀规则无法与真实 key 区分
+    ⇒ 从前缀表移到**精确值**表。
+
+  **验收（全部有真实执行证据）**：
+  - `tests/unit/test_config_internals.py`：4 个决策用例（未显式⇒切换+持久化+提示；
+    显式⇒**绝不改写**（并把"持久化即失败"写成断言）；含 `placeholder` 子串的真实 key
+    ⇒ 不切换；全空 ⇒ 不切换）+ `TestIsRealKeyExactMatch` 6 例；
+  - `tests/unit/test_settings_auto_activate.py`（新）：**单一实现点 + 界面可见性**机检 ——
+    判据走 **AST 的"被调用名字"**（不查字面量，否则 docstring 里提到 `_is_real_key`
+    就假红），并带**正向对照**（`setActiveProvider` 必须仍在，防"把功能删光也能过"）；
+  - `tests/integration/test_api_settings.py`：`llm.auto_activated` 契约（两个取值都验，
+    证明它不是恒 `None` 的装饰字段）+ 含子串 key 的 `configured` 必须为 True。
+  - **变异验证（`devlogs/_replay/mutate_b44.py`）5/5 通过**（逐字节还原自校验通过）：
+    改回启发式 ⇒ 红；去掉"显式选择"闸门 ⇒ 红；不再记录决策事实 ⇒ 红；
+    删掉前端渲染**调用点** ⇒ 红；`_is_real_key` 改回子串 ⇒ 红。
+  - ⚠️ 过程中被测试抓出的**实现缺陷**：`read.py` 原用 `from config import AUTO_ACTIVATE_NOTICE`
+    = **导入期取值** ⇒ 状态变化读不到（也不可测）。改为**调用期读属性**
+    （模块名与那个 dict 同名，须 `import config as _config_module` 别名导入）。
+  - ⚠️ **跨测试污染**：`test_api_settings.py` 会注册带 key 的自定义 provider
+    `anthropictest` ⇒ 合并跑时抢走回退候选。已在测试夹具里清 `LLM_PROVIDERS` 使其自洽。
+
+  **✅ Round 48 追加（提交前复核，2026-09-20）—— 「提示渲染」自身的一处隐形契约**
+
+  复核前端时发现：徽标 `#llm-provider-badge`（定义在 `templates/settings.html:127`）
+  的**加载期写入点原本在 `fillOcrForm()` 里**，而 `showAutoActivateNotice()` 排在其**后**
+  ⇒ 徽标文案（`（已自动从 X 切换）`）正确与否，取决于**两个函数的调用顺序**这一
+  **隐形契约**：一旦重排，提示会被静默覆盖回纯名称，而**所有既有断言仍然全绿**。
+  - 处置：把加载期写入**收敛到 `showAutoActivateNotice()` 一处**
+    （无通知时也写回纯名称，否则徽标无人渲染）；`fillOcrForm()` 不再碰徽标。
+    用户显式切换的乐观更新仍留在 `setActiveProvider()`（另一条流程，写入点共 2 个）。
+  - ⚠️ **首版护栏 3 个变异漏过 2 个**（都是"文本断言"的固有盲区）：
+    M2 把写入条件改成 `if (badgeEl && info && …)` ⇒ 无通知时徽标不再渲染，
+    而"函数体含 `display(activeProvider)`"仍被**三元表达式的另一分支**满足（**空断言**）；
+    M3 在函数开头插 `return;` ⇒ 写入成为**运行期死代码**，文本断言完全看不见。
+  - 处置：判据改为**结构化** —— 看写入语句**之前**有没有 `return`、
+    以及它所在 `if` 的**条件表达式**里有没有 `info`。改后 **3/3 全拦**
+    （`devlogs/_lint/mutate_b44b.py`，逐字节还原自校验通过）。
+  - 记录：`tests/unit/test_settings_auto_activate.py::test_badge_write_is_unconditional_and_reachable`。
+
+- [x] **B4-5 KB 条目数口径虚高 + 文档两套数字并存**（P2，Round 43 新发现）
+      ✅ **已完成**（Round 53 `caf6a7c`；2026-09-21 复核：`release_gate.count_kb_entries`
+      已把 `chapters` **分列并明确不计入**语料规模，返回文案里同时透明地列出章节标题条数）。
+      ⚠️ 回填此前缺失（原为 `[ ]` 无完成标记）—— 见 **B8 第 6 条**。
+  实测（本轮亲自跑，可复现）：`scripts/release_gate.count_kb_entries('core/kb/data')` = **477**，
+  而检索器 `core.kb.store.entries()` = **441**；差值 **36** = 4 个 JSON 的 `chapters`
+  （**纯章节标题元数据**：无正文、无 `entry_id`、**检索器根本不索引**）。
+  影响：① 门禁 `kb_corpus` 以 477 通过（下限 200 仍过，但**指标失真**）；
+  ② 文档据此写"477 条"，**夸大规模 8%**；③ 同一事实在两处写法不一
+  （`README.md` 写 441，`ADVERSARIAL_AUDIT.md` / `PLAN_v1.1_EXECUTION.md` 写 477）。
+  动作：`count_kb_entries` **分列**「条目数 / 章节数」（或只统计 `entries`）；
+  文档权威口径统一为 **441**（可检索语料），并说明 477 的构成。
+  验收：门禁报告同时给出两个数字；`grep -rn "477" docs/ README.md` 处已更新或标注；
+  变异验证：把 `chapters` 加回统计 ⇒ 新护栏必须红。
+
+### B5 验证补强
+
+- [ ] **B5-1 CI 增加冻结产物 job**（= #106，挂了两轮未做）
+  动作：CI 装 PyInstaller → 构建 → 跑产物冒烟与分发一致性；**必须先在本机证明该 workflow 能跑通**
+  （未跑过的 CI 配置不算"完成"）。
+  验收：一次真实 CI 运行里 A 组用例真的执行（不再是 artifact-gated skip）。
+
+- [x] **B5-2 #125 巡检首扫空窗** —— **R66 已核销**（证据见 §0.1）；与 `B4` 同缺陷、同一次修复
+  现状：巡检循环"先等一个周期再首扫"⇒ 启动后 60s 内 `last_scan_at` 恒 `null`（冒烟不能立刻断言）。
+  动作：启动即回收一次 + 存活信号无空窗。
+  验收：启动后立刻查 `/api/health/watchdog` 即有 `last_scan_at`。
+
+- [ ] **B5-3 #174 两层重试相乘**
+  现象：SDK 自带 `max_retries` × 我们的重试循环 ⇒ 桩收到 6 个请求（`retries=2` 时）。
+  动作：显式统一为**一层**（关掉 SDK 重试或关掉自己的循环），并让总次数可预测。
+  验收：桩收到的请求数 == 预期值；变异验证：把两层都打开 ⇒ 护栏红。
+
+- [x] **B5-4 生产模型（DeepSeek-V3.2）路径未被 e2e 覆盖**（P2，Round 42 实测新发现）
+      ✅ **已完成**（Round 53 `b94b816`；2026-09-21 复核：**仓库根** `e2e_run.py` 已支持
+      `--model` / `PBC_E2E_MODEL` 覆盖，不再硬编码单一模型）。
+      ⚠️ 回填此前缺失（原为 `[ ]` 无完成标记）—— 见 **B8 第 6 条**。
+      ⚠️ 顺带更正一处**路径笔误**：`e2e_run.py` 在**仓库根**，不是 `tests/`。
+  ⚠️ 2026-09-20 补录：本条此前**只在 `docs/TODO.md` 的 Round 42 段被引用**
+  （"已登记 B5-4"），清单里**没有对应条目** —— 属**悬空引用**，现补齐。
+  现象：`e2e_run.py:308`（**仓库根**；本条原文写作 `tests/e2e_run.py`，属**笔误** ——
+  该文件历史上从未在 `tests/` 下存在过）**硬编码** `siliconflow_model = "Qwen/Qwen2.5-72B-Instruct"`，
+  而本机生效的生产配置是 `SILICONFLOW_MODEL = deepseek-ai/DeepSeek-V3.2`
+  （`%APPDATA%/PBC/config.json`）。两者**都走 OpenAI adapter、协议一致**，
+  故"链路可用"这一结论**有效**；但被测模型 ≠ 生产模型 ⇒ **生产模型这条具体路径本轮未覆盖**。
+  风险：模型特有的输出形态差异（JSON 字段命名/嵌套、数值格式化、日期书写习惯、
+  对 `response_format` 的遵守度）在 Qwen 上通过、在 DeepSeek 上未必。
+  ⚠️ 这不是假设 —— Round 40/42 已实测到同类"模型层"缺陷（B1-4 日期判据方向反、
+  B1-5 串位幻觉），**都出在 LLM 层**，因此换模型重跑是有意义的补强。
+  动作：给 driver 加一个环境变量覆盖（如 `PBC_E2E_MODEL`，**默认值保持现状以免改基线**），
+  用它跑一轮小样本（`--rounds pdf,img`，不必全 51 页），与 Qwen 轮做**同输入对照**。
+  验收：产出两轮对照记录（findings 条数/类型分布/severity 分布差异）；
+  变异验证：把显式传参去掉 ⇒ 断言"被测模型 == 传入模型"必须红。
+
+### B6 泛化（#126）
+
+- [x] **B6-1 用「试用批记录.pdf」做第 2 份真实批记录验证** —— **R76 已核销**（证据见 §0.1）
+  理由：目前**只有一份真实批记录**（丝裂霉素），泛化未验证；规则/阈值可能过拟合。
+  动作：跑完整链路，记录：轮次、误报、漏检、耗时；与第 1 份对比。
+  验收：产出一份对比报告；若发现过拟合 ⇒ 立刻登记缺陷。
+  ✅ **R76 完成**：报告 → `docs/B6-1_GENERALIZATION_REPORT.md`。
+  第 2 份 `试用批记录.pdf`（10 页，华康药业 康泰普利片 10mg / 批号 50008219）跑通：
+  `review` / **51 条** findings / `paddle` / 220s / `gmp_basis 49/51` / 稀疏 OCR 页 0。
+  第 1 份**同版本**基线复跑：`review` / **208 条** / 1287s / `gmp_basis 208/208`。
+  **未发现过拟合的正向证据**（密度 4.08 vs 5.10 条/页；类型各覆盖 10+ 种；零 findings 页均为 0）。
+  ⚠️ 但**两份都无人工标注** ⇒ **召回不可测** ⇒ **不宣称「泛化通过」**；
+  本轮实测风险（非确定 41↔51、基线跨版本、快照丢 WAL）已在报告 §6/§7 登记。
+
+### B7 测试与静态检查的基础设施（Round 48 提交前复核新发现）
+
+- [x] **B7-1 全量测试在单次工具调用里会撞沙箱「每轮删除预算」⇒ 顺序性 flake**（P2）
+  ✅ **2026-09-20 完成（Round 52）**。两条动作都做了，且都没走"只写文档"的省事路：
+  ① **机制上消除**（不是记忆纪律）：`release_gate.run_cmd` 给**子进程**注入
+  `CODEBUDDY_SAFE_DELETE_BULK_THRESHOLD=100000`（新常量 `SANDBOX_BULK_DELETE_THRESHOLD`）。
+  为什么必须**强制赋值**而不是 `setdefault`：宿主**已经**显式给了 50，`setdefault` 会
+  变成空操作而 flake 照旧。为什么只抬阈值而不清安全网：删除仍走回收站，只是不再按
+  次数触发确认 ⇒ 比 `CODEBUDDY_SAFE_DELETE_ENABLED=0` **更保守**。
+  护栏 `TestSandboxDeleteIsolation` 用**真子进程打印自己的环境变量**验证（不是 mock 的假绿）。
+  ② 文档固化进 `CLAUDE.md` 的 "Run tests"（含**真变量名**与"旧文档的 `BULK_THRESHOLD`
+  不是真变量名"的更正）；`CODEBUDDY_SAFE_DELETE_ENABLED=0` 的构建用法仍在原处。
+  ③ 🔴 **顺带修掉一个更严重的护栏漏洞**：`env_only` 原先只做
+  `nodeid.startswith(ENV_ONLY_FAILURE_PREFIXES)` —— **前缀不区分失败原因**，于是
+  `TestServePdf` 里任何**真实回归**（例如 403 变 200）都会被降级成 WARN、门禁退出码为 0。
+  现改为**前缀 + 签名**双命中（`SystemExit` **且** `SAFE_DELETE_BULK_CONFIRM_REQUIRED` /
+  `_BULK_REJECTED` / `_FAIL_CLOSED` 之一，标记串取自 shim 源码常量）；签名取不到
+  （junit 缺失）时**不降级**（fail-closed）。变异 M12/M14 双向验证。
+  **实测判据**：失败点是否是 `SystemExit` 且带 `BULK_CONFIRM_REQUIRED`。
+  **实测（可复现）**：`pytest tests/unit tests/integration` 一次跑完 ⇒
+  `1 failed, 2800 passed`，失败点 `tests/integration/test_main_routes.py::TestServePdf
+  ::test_pdf_non_local_host_returns_403` 的 `finally: pdf_path.unlink(...)`，
+  抛的是沙箱 shim 的 `SystemExit(1)`：
+  `[safe-delete][SAFE_DELETE_BULK_CONFIRM_REQUIRED] {"count":847,"threshold":50,"scope":"turn"}`。
+  **定位（不是猜）**：守卫实现在 `cli/vendor/shim/safe-delete-bulk-guard.cjs`，
+  阈值旋钮 = 环境变量 **`CODEBUDDY_SAFE_DELETE_BULK_THRESHOLD`**（默认 20，
+  本次宿主给 50），作用域 `turn`；shim 侧 `_check_bulk_delete_guard()` 只在
+  `CODEBUDDY_TOOL_CALL_ID` 存在时才检查 ⇒ **是本机沙箱策略，不是应用缺陷**。
+  **决定性验证**：同一份代码、仅加 `CODEBUDDY_SAFE_DELETE_ENABLED=0` ⇒
+  **`2801 passed / 0 failed`**（总数与失败轮一致）⇒ 结论成立：环境性，非回归。
+  动作：① 全量跑法固化为
+  `CODEBUDDY_SAFE_DELETE_ENABLED=0 "$PY" -m pytest tests/unit tests/integration -o addopts="" -q -p no:cacheprovider`；
+  ② 或改 `CODEBUDDY_SAFE_DELETE_BULK_THRESHOLD=<大>`（更保守，不清安全网）。
+  ⚠️ **别把这个 flake 当回归修** —— 更别去改 `test_pdf_non_local_host_returns_403`
+  （它的 cleanup 是正确的）。判据：失败点是否是 `SystemExit` 且带 `BULK_CONFIRM_REQUIRED`。
+  ⚠️ **纠正一处旧记录**：既有文档/记忆里写的构建变量名 `BULK_THRESHOLD` **不是真变量名**
+  （实际生效的是并排设置的 `CODEBUDDY_SAFE_DELETE_ENABLED=0`）；按真名记录，避免误导。
+
+- [ ] **B7-2 全仓 ruff 105 条既存欠账（lint 未进门禁 ⇒ 真缺陷会被噪声淹没）**（P3）
+  实测：`ruff check .` = **105**（F401 未用导入 100 + F841 未用变量 5），
+  分布高度集中：`core/pipeline/__init__.py` 38、`core/rules/__init__.py` 15、
+  `tests/unit/test_pipeline.py` 11、`api/jobs/__init__.py` 4 ……
+  **58/105 在 `__init__.py` 里，而那是刻意的再导出**（该文件 docstring 明说
+  "Public API is re-exported here so `from core.pipeline import X` keeps working"，
+  且 `import asyncio  # noqa: F401` 只标了 1 行）。
+  ⇒ 与 `pyproject.toml` 的自我声明（"F-class = real defects"）**相互矛盾**：
+  105 条噪声的基线意味着**新增一个真缺陷没人看得见**。
+  动作：① `__init__.py` 类走 `[tool.ruff.lint.per-file-ignores]`（或在文件里补 `__all__`）
+  —— **不要删那些导入**（它们就是公开 API）；② 其余 `--fix` 处理（42 条可自动修）。
+  🔴 **禁止无脑 `ruff --fix` 全仓**：`tests/` 里有用字符串 `patch("mod.name")`
+  的导入，对 ruff 是"未使用"，删掉会**改掉 patch 目标是否存在** ⇒ 静默破坏测试。
+  验收：`ruff check .` 归零且全量测试数**不下降**；变异验证：恢复一条真未用导入 ⇒ 必须红。
+
+- [x] **B7-3 门禁无法发现「产物陈旧」 —— 护栏缺口**（P2，2026-09-20 实测）
+  ✅ **2026-09-20 完成（Round 52）**。新增**第 9 项**门禁 `artifact_freshness`
+  （`scripts/release_gate.py`），判据实现集中在**新模块** `scripts/bundle_manifest.py`
+  （CLI `--write` / `--check` 与门禁共用同一份 `verify_artifact`，**只有一处实现**）。
+  **六条判据**（每条都有反向用例 + 定向变异）：
+  ① 入包集合覆盖（新增入包文件必须在清单里，否则是永久盲区）；
+  ② 版本（清单 vs `main.APP_VERSION`，AST 读 `main.py`，不导入模块）；
+  ③ 工作树逐字节 vs 清单（抓"源码改了没重建"）；
+  ④ **产物内可读副本逐字节** vs 清单（抓"产物陈旧" —— 唯一能戳破"版本号一致但字节差"的判据）；
+  ⑤ asar 成员（`electron/main.js`）与 asar 的 `package.json` 版本；
+  ⑥ exe 绑定（清单记录的 `pbc-server.exe` sha256 必须对得上，防清单被挪到别的产物旁）。
+  **SKIP 语义**：仓库里**没有**产物 ⇒ SKIP（≠ PASS，本项回答的是"已存在的产物是否新鲜"，
+  CI/干净克隆不该因此变红）；**有产物但没清单 ⇒ FAIL**（"无法证明新鲜度" ≠ "新鲜"）。
+  🔴 **纠正一处旧记录**：既有记忆写的「比对 `main.APP_VERSION` vs 产物内 `package.json`」
+  **对 PyInstaller 产物不成立** —— 实测 `dist/pbc-server/` 里**没有** `package.json`
+  （只有 `_internal/` 下的 datas），`package.json` 只存在于 **electron 的 `app.asar`** 里，
+  且那份**被 electron-builder 重写**过（源 ~1.6 KB vs 包内 255 B）⇒ 只能比
+  **`version` 字段**，**字节比对必假**。另：`core/`、`api/`、`config.py`、`main.py` 等
+  **在产物里根本没有对应字节**（编译进 exe 内的 PYZ）⇒ 那一层只能靠"工作树 == 清单"，
+  盲区已在模块 docstring 里**显式声明**（判不了 ≠ 判据确凿）。
+  **验收（已达成）**：`test_lag_one_commit_then_sync` = 源码改动而产物不重建 ⇒ 红；
+  重建产物 + 重生成清单 ⇒ 绿。`devlogs/_verify/mutate_b73.py` **15/15 CAUGHT** 且字节级还原。
+  真产物实测：`release_gate --skip-tests` 现在**如实报红**（2 份产物都缺清单；
+  `static/status.js` 5354 B vs 产物 3867 B、`review.js` 97926 B vs 93941 B、
+  `settings.js` 77547 B vs 77231 B —— 三处铁证，比原记录多两处）。
+  **实测铁证（字节级，非推断）**：源码 `static/settings.js`（09-20 16:11，
+  含 B4-4 引入的 `showAutoActivateNotice`/`auto_activated`）与产物内同名文件
+  （`dist/pbc-server/_internal/static/settings.js`、以及 electron 内嵌那份，
+  均 09-18 11:18，**仍含早已删除的 `firstConfigured`/`autoReason`**）
+  **字节不一致**（77547 B vs 77231 B）；而 `release_gate.py --skip-tests`
+  照样 **7/7 全绿**。
+  **机制（三层叠加）**：① `pytest.ini` 为 `testpaths=tests` +
+  `python_files=test_*.py` ⇒ `tests/e2e_*.py` **不被收集**；
+  ② 唯一依赖产物的 `tests/integration/test_frozen_smoke.py` 只有 3 条断言
+  （`/health` 200、上传页含"上传"、`/static/app.css` 200），**都不检查版本或内容**；
+  ③ 含版本断言的 `tests/e2e_frozen.py:50-58`（要求产物版本 == `main.APP_VERSION`）
+  恰在收集范围之外。
+  ⇒ **「改了进产物的模块却没重建」可静默通过全部 8 项门禁**。
+  ⚠️ **纠正一处旧记录**：既有记忆/文档所写「`tests_coverage` 含分发一致性，
+  升版未重建必红」**不成立** —— 门禁里没有任何产物新鲜度判据；那条"红"
+  来自**人手工跑 `e2e_frozen.py`**，是人的纪律，不是门禁的护栏。
+  ⚠️ **危险放大**：当版本号恰好一致（都 1.1.9）时，连"人眼扫一眼版本号"
+  这条兜底都失效 —— 本轮就撞上了这个情形。
+  动作：① 门禁新增 `check_artifact_freshness` —— 既比对版本
+  （`main.APP_VERSION` vs 产物内 `package.json`），也比对**内容**
+  （把进产物的源码 `static/`、`templates/`、`core/`、`api/`、`config.py`、
+  `main.py` 与产物内副本做字节比对；读法现成：`clean_dist.asar_version` 的
+  子进程 seek 模式，`_internal/` 可直接读）；② 或把 `e2e_frozen.py` 的版本
+  断言收进 `test_*.py` 收集范围。
+  验收（必须能失败）：故意让产物落后一个提交 ⇒ 门禁红；产物与源码同步 ⇒ 绿。
+
+- [x] **B7-4 打 tag/发版流程缺「产物新鲜度」前置闸**（P2，由 B7-3 派生）
+  ✅ **2026-09-20 完成（Round 52）**。"复用一个清单文件，构建时生成"这一条已落地：
+  ① 清单 = `dist/pbc-server/build_manifest.json`（schema 1：`app_version` / `git_head` /
+  `git_dirty` / `generated_at` / `files{rel: sha256}` / `artifact{pbc-server.exe: sha256}`）；
+  ② 生成点接进 **`build.ps1` 的 2.6 步**，时机**刻意**卡在 PyInstaller 之后
+  （要绑定 exe 字节）、electron-builder 之前（随 `extraResources` 进
+  `resources\pbc-server\`）⇒ **任何一份产物都能自证**它由哪次提交、哪些字节构建而来；
+  写完后**就地自校验**（`bundle_manifest.py --check`）—— 把"门禁才发现"提前到构建现场；
+  ③ 发版前置闸写进 `CLAUDE.md` 的 **Repo hygiene 规则 11**（与门禁同判据，不会两边漂移）；
+  ④ Bash 构建链（`CLAUDE.md` 的 agent 指令）同步补上该步骤。
+  **验收**：清单与产物不符 ⇒ 门禁 `artifact_freshness` / `bundle_manifest.py --check` 拒绝
+  （exit 1），变异 M1/M2/M11/M15 分别验证"比对被关掉 / 崩溃被吞掉 / 从编排摘掉"都会变红。
+  ⚠️ 与 B7-3 同源的**盲区**（如实声明）：清单是**文本文件**，若有人重建后又改源码并
+  **手工重新生成**清单，本闸看不出来 —— 那是**主动绕过**而非**漏检**；补强手段是
+  ⑤ 把 `bundle_manifest.py` 登记进 `PACKAGING_FILES`（缺它门禁直接 FAIL）。
+  理由：B7-3 说明"版本号一致"根本不蕴含"产物是新构建的"。而分发/打 tag
+  面向的是**产物**，不是源码树。当前打 tag 只需工作树干净，**不要求产物
+  由当前 HEAD 构建**。
+  动作：在发版脚本/检查表里固化一条前置：**产物内 N 个进包文件的 sha256
+  必须等于 HEAD 对应文件的 sha256**（复用一个清单文件，构建时生成）。
+  验收：清单与产物不符 ⇒ 发版闸拒绝。
+
+- [x] **B7-5 「占用探针」三份拷贝各自漂移 + 一个静默假阴性**（P2，2026-09-21 登记并完成）
+  **起因**：打包被 `app.asar` 占用阻塞，而负责"点名持有者"的探针本身坏了 ⇒ 连"锁是不是真的"都判不了。
+
+  **① 一个错误结论被推翻**：旧记录写"`who_holds.py` 对**每个**目标都 segfault（含阴性对照 `README.md`）
+  ⇒ `rstrtmgr.dll` 整体不可用"。**证伪**：当天稍后**两个互相独立**的实现都正常，且对同一目标
+  给出**同一个 PID**（`3544`）⇒ **RM 可用，崩的是探针**。旧版重跑仍稳定 3/3 崩（`3221225477`）。
+
+  **② 两个"看起来很像真因"的假设被实验否掉**（记下来免得再猜）：
+  - ~~"session key 声明成 `c_wchar_p` ⇒ ctypes 按实参长度分配 ⇒ key 短于 32 字符就越界"~~
+    —— `rm_bugrepro_pidlen.py` 取 30/31/32 字符（4/5/6 位 PID）**全部 OK**。
+  - ~~"固定崩在某一句"~~ —— `rm_trace.py`：加一句落盘日志、或**任意加一个启动参数**
+    （`-u` / `-X faulthandler`），崩溃即消失（A 恒崩 / B 恒不崩，各 3/3）。
+  ⇒ 可确证的**性质**只有：**内存安全缺陷，表现依赖堆布局**。推论同样重要：
+  **"加日志后不崩了" 绝不能当作"已修好"**，也别花力气"定位到某一行"。
+
+  **③ 真正危险的缺陷（与崩溃无关）**：旧探针**从不检查 `RmStartSession` 返回值** ⇒
+  会话无效也照旧返回 `rc=0, count=0` ⇒ **静默假阴性**（"查不出来"被当成"没人持有"）。
+  新契约：出错抛 `ProbeError`，让两者**可区分**。
+
+  **④ 收敛实现**（事故直接成因就是**同一逻辑三份拷贝各自漂移**）：RM 调用只剩一处
+  = `devlogs/_verify/who_holds.py`；`rm_probe2.py` 改为只做**正/负对照编排**并输出
+  `VERDICT=USABLE/UNKNOWN`，不再复制 ctypes 代码。
+
+  **⑤ 补上真护栏**（此前的测试对这个类别**零判别力**）：`clean_dist.who_holds()` 是 fail-soft 的
+  ⇒ "实现坏了"与"没人持有"返回值一样，而旧测试只测 fail-soft。
+  新增 `tests/unit/test_clean_dist.py::test_who_holds_names_the_real_holder`：
+  **阳性对照**（子进程真实独占持有 ⇒ 必须具名报出该 PID）+ **反向对照**（释放后必须回空表，
+  防实现退化成"永远报一个 pid"）。
+  变异验证 **2/2 CAUGHT**：M1 `holder 列表恒空`、M2 `session key 缓冲给成 4 个 WCHAR`
+  （M2 还顺带证明：违反 33-WCHAR 契约在 `clean_dist` 里表现为 **`[]`＝静默假阴性**，正是被这条抓住的形态）。
+
+  **⑥ 我在这轮新造的护栏错误（留档）**：重写探针时顺手加了 `if session.value == 0: raise`
+  —— **假警**（Win32 并不保证 RM 句柄非 0），它把**本来成功**的 PH 判成失败、`VERDICT` 掉成
+  `UNKNOWN`，而同轮 NEG/TGT 正常（**自相矛盾即护栏错的信号**）⇒ 已删除。
+  教训：**多余的"安全前置条件"与恒真判据同样有害**。
+
+  **地面真值**：全量 `pytest tests/unit tests/integration` = **3032 收集 / 3030 passed / 2 failed**，
+  两条失败**都是重建前的预期红灯**（产物仍是 1.1.9 构建、源码已 1.2.0）：
+  `test_bundle_manifest::TestAsarReader::test_real_asar_matches_source_for_electron_main`、
+  `test_distribution_parity::test_packaged_app_version_matches_app_version`
+  （后者报文为 `app.asar 内版本 '1.1.9' != main.APP_VERSION '1.2.0'`）⇒ 重建后应转绿。
+  坑档更正见 `docs/PROJECT_PITFALLS.md` §三十二 E（旧结论已标注作废）。
+
+  **⑦ 顺带被仓库护栏抓到一次（记录备查）**：新测试最初用子进程持有文件，被
+  `test_no_unread_pipe_in_test_harnesses` 判红 —— 它的判据是**文本匹配**，
+  连我 docstring 里**引用**那个被禁写法也会命中。护栏给了白名单逃生口
+  （`_PIPE_ALLOW`，需写理由），但**白名单会让该文件整体失去保护** ⇒ 我选择**改自己的措辞**
+  而不是加白名单。这类"文本级护栏"对说明性文字天然过敏，值得将来走 AST。
+
+
+- [ ] **B8 发版收尾（v1.2.0）—— 一次性批次的"不变量"清单**（Round 53 登记）
+
+  ⚠️ **为什么单独立一条**：Round 53 的 8 个提交（`c751c4a`..`5e53fce`）**都没有改 `CHANGELOG.md`**
+  —— 而 Round 43–52 是**逐提交**写的。这是本轮的**刻意选择**（Round 53 整体作为 v1.2.0 一次性发布），
+  但代价是：**"Round 53 的 CHANGELOG 段还没写"这件事在仓库里没有任何痕跡**（grep `CHANGELOG.md`
+  里的 `B1-10`/`B5-4`/`B4-3` 全 0 命中，只有 Round 43-48 的"登记"字样）。
+  ⇒ 立此条把"会漏"变成"漏了会红"。
+
+  1. **`CHANGELOG.md` 的 `[1.2.0]` 段必须覆盖 Round 53 的全部条目**（不是只写最后一条）：
+     `B4-3` / `B4-5` / `B5-4` / `B1-7` / `B1-10` / `B1-12` / `B1-1` / `B1-13`（评估）/ `B1-16`
+     ＋ 即时的 `B1-14` / `B1-15`。**逐条对照 `git log c751c4a..HEAD --oneline` 点名核**，
+     不得凭记忆写（漏条 = 发布说明说谎）。
+     ⚠️ Round 52 的 `B7-1/B7-3/B7-4` 已在 `[Unreleased]` 的 Round 52 小节里 ⇒ **不要重复写**。
+  2. 升版 4 处（`main.APP_VERSION` / `package.json` / `package-lock.json` 顶层 ＋
+     `packages[""]` / `PORTABLE_README.txt`）—— ⚠️ lock 里另有 2 处 `1.1.4` 系**依赖自带**，勿改。
+  3. 重建**三步不许漏中间那步**：Tailwind → PyInstaller → `python scripts/bundle_manifest.py --write`
+     → electron-builder（漏掉清单 ⇒ 门禁 `artifact_freshness` FAIL，属**设计**）。
+  4. 门禁 **9 项**（含 `artifact_freshness`）；产物级 e2e（**`e2e_run.py` —— 在仓库根**，
+     不是 `tests/`；`PBC_E2E_EXE` 指向
+     `dist-electron/win-unpacked/resources/pbc-server/pbc-server.exe`）。
+  5. tag 一律 **annotated**，且与引用它的文档**同树**。
+  6. 🔴 **写发布说明前必须先补齐三个"已提交但 TODO 未回填"的条目**：
+     `B4-3` / `B4-5` / `B5-4` 的提交（`c751c4a` / `caf6a7c` / `b94b816`）已落在 Round 53，
+     但它们的 TODO 条目**仍是 `[ ]` 且无完成标记**（实测 `grep -n "✅ \*\*2026-09-21"`
+     命中里没有这三条）。后果：**发布说明无从取证** —— 若照抄提交标题写，
+     就违反本条"不得凭记忆写"的纪律。
+     2026-09-21 已核实代码确实落地（`CONFIG_SOURCE_APPDATA` 在 `config.py`；
+     `release_gate.count_kb_entries` 已把 `chapters` 分列并不计入；
+     `PBC_E2E_MODEL`/`--model` 已在**仓库根** `e2e_run.py` 生效）⇒ 只补回填、不返工。
+     ⚠️ 这条同时暴露一个**流程缺口**：Round 53 有 3/10 个提交**未回填 TODO**
+     （另有 8/10 未写 CHANGELOG，见第 1 条）⇒ **"提交即回填"目前靠自觉，没有机检**。
+     后续可考虑把"提交信息里点名的条目号必须在 TODO 里有对应完成标记"做成机检（另立条目）。
+  7. 🔴 **顺序硬约束：升版 + CHANGELOG 必须"先提交"，再重建**（2026-09-21 实测确认）。
+     理由：`scripts/bundle_manifest.py` 会把 **`git_head` + `git_dirty`**
+     写进 `dist/pbc-server/build_manifest.json`（`_git(root,"status","--porcelain")`）。
+     若带着未提交的升版去打包，发布产物的清单会写着 **`dirty=True`**
+     ⇒ **产物无法自证"由哪个干净提交构建"**，B7-3/B7-4 那套新鲜度判据的价值被掏空。
+     ⚠️ **由此产生的预期红灯（不是回归，别当 flaky 去"修"）**：
+     升版提交后、重建之前，`tests/unit/test_distribution_parity.py::
+     test_packaged_app_version_matches_app_version` **必然 FAIL** ——
+     实测报 `app.asar 内版本 '1.1.9' != main.APP_VERSION '1.2.0'`。
+     这正是"产物必须与源码同源"的**设计护栏**在起作用；重建后自动转绿。
+     ⇒ 顺序：**升版 4 处 → CHANGELOG → 提交 → 重建 → 门禁 9 项 → 产物 e2e → 提交清单/tag**。
+
+  **验收**：`grep -c "B1-10\|B5-4\|B4-3\|B4-5\|B1-16" CHANGELOG.md` ≥ 5；
+  且 `[1.2.0]` 段里能逐条找到上列 11 个条目号；
+  且 `B4-3`/`B4-5`/`B5-4` 三条在 `docs/TODO.md` 里为 `[x]` 且有完成标记。
+
+### B9 运行时关闭语义（Round 54 对抗性审查产出，2026-09-21）
+
+- [x] **B9-1 「优雅关闭」名不副实：端点不让服务退出 + 强杀兜底是死代码 + 复用孤儿永不终止**（P1，已修）
+  **实测**（`devlogs/_verify/probe_shutdown_semantics.py`，多信号交叉）：
+  `POST /api/shutdown` 返回 200 后 **15s 内进程仍存活、`/health` 仍 200、端口仍占用**；
+  随后 `terminate()` 在 **0.02s** 内杀掉它（`returncode=1`），
+  `data.db-wal` **494 432 B** / `-shm` **32 768 B** **原样残留** ⇒ `close_db()` 从未执行。
+  根因四条：① 端点只取消任务、不触发退出；② `uvicorn.run()` 不返回 `Server`
+  ⇒ 端点**没有**请求退出的通路；③ Windows 上 Node 的 `kill('SIGTERM')` =
+  `TerminateProcess`，Python 侧一行不跑；④ 兜底条件 `!pythonProcess.killed` 恒假
+  （Node 的 `killed` = "信号已发出"），且复用孤儿路径 `pythonProcess === null`
+  ⇒ Step3/4 整体跳过。
+  **修复**：`main.py` 退出通道（响应带 `exit_requested`，延后 0.3s 触发）；
+  `server.py` 显式建 `uvicorn.Server` 并注入 `should_exit`；`electron/main.js` 重写为
+  「请求 → 按端口释放等待 → 超时才强杀」，新增 `childAlive()`/`killProcessTree(targetPid)`；
+  看门狗同源缺陷一并修、`taskkill` 收敛到一处。
+  **验证**：源码模式实测进程 **1.0s 自行退出、returncode 0**、日志出现
+  `main: Shutdown complete.`；护栏 12 条 + **变异 9/9 CAUGHT**；
+  全量 **3042 passed / 2 failed**（两条为重建前预期红灯）。
+
+- [ ] **B9-2 「整机关闭」没有自动化 e2e**（P2，2026-09-21 登记）
+  现在只有**进程级**探针（直接跑 `pbc-server.exe` 并 POST `/api/shutdown`）与
+  **静态**判据（`tests/unit/test_shutdown_graceful_contract.py`）。
+  **Electron 整机路径**（关窗 → `before-quit` → `gracefulShutdown` → 后端退出 → 端口释放）
+  没有任何可重复的自动化验证 —— 而它才是用户真正走的那条路。
+  可做法：`taskkill /pid <BatchSentry.exe> `（**不带 `/F`** = 投递 WM_CLOSE，等价于用户关窗），
+  随后断言 `pbc-server.exe` 已退出、端口已释放、日志有 `Shutdown complete.`。
+  ⚠️ 会拉起 GUI 窗口，须显式声明并考虑在 CI 中跳过。
+
+- [ ] **B9-3 关闭事件本身无审计落库**（P3，2026-09-21 登记）
+  `audit_log.job_id` 是 **NOT NULL** ⇒ 纯关闭事件（无在飞任务时）无处落库；
+  `gracefulShutdown` 旧注释里"audit_log 中有完整的关闭记录"**只对"有在飞任务"成立**。
+  措辞已收紧；若要真正可追溯，需要一张独立的 shutdown 审计表（或在 `jobs` 之外新增
+  `system_events`）。**非必须**，但 GMP 场景下"谁在什么时候关掉了系统"常被问到。
+
+- [ ] **B9-4 dev 模式下的 e2e 隔离不成立（`config.json` 压过环境变量）**（P2，2026-09-21 实测）
+  `config.py::_load_json_config()` **无条件把 config.json 的值写进 `os.environ`**
+  （设计如此：压过"残留 env 值"，防重启回滚），于是注入 `DATABASE_PATH` **无效** ——
+  实测源码模式跑 e2e 时数据落在仓库 `data/pharma.db`（日志 `database_path:` 可证），
+  而非我指定的临时目录。**冻结版不受影响**（`%APPDATA%` 隔离已实测有效）。
+  ⇒ 写"源码态"e2e 时必须知道这一点，否则会**静默污染**开发库
+  （属 PITFALLS §二十九「隔离须覆盖被测代码自身的加载器」同一类）。
+  待办：给 `config.py` 一个**显式**的配置路径覆盖开关（如 `PBC_CONFIG_PATH`），
+  或让 `database_path` 接受绝对路径 env 覆盖（与冻结版口径一致）。
+
+- [x] **B9-5 `artifact_freshness` 恒红：被外部持锁的陈旧目录被当作"产物"**（P1，2026-09-23 结项）
+  宿主（WorkBuddy，Restart Manager 已具名到 PID）长期持有
+  `dist-electron/win-unpacked/resources/app.asar` ⇒ 该目录**不可删**、也**不可重建**
+  （`build.ps1` 自愈到 `dist-electron-out-<ts>/`）。而
+  `bundle_manifest.discover_artifacts()` 会把它一并当产物 ⇒ 缺清单 ⇒ 门禁
+  **永远红**。**恒红与恒真同为零判别力**（PITFALLS §三十一）。
+  ✅ **两条路都做了**（它们治的是不同问题）：
+  1. **收敛**（治字节）：`clean_dist.py --apply --converge-locked` 按**目标粒度**
+     回收内嵌后端 `win-unpacked/resources/pbc-server`（实测只有 `app.asar` 被持锁，
+     该子树可替换），残壳写 `HUSK.md` 具名。目标派生自既有 `EMBEDDED_SERVER` 常量，
+     默认 dry-run、走回收站、逐项先做改名探测。
+     **实测**：已执行 ⇒ `discover_artifacts` 不再返回它，本项转 **PASS**。
+  2. **判据三态**（治判据）：可替换 ⇒ `FAIL`；不可替换 + 具名 ⇒ **第三态 `WARN`**
+     （明确写"仍可被读取并打包分发，勿据此认为可发布"）；不可替换 + **取不到签名**
+     ⇒ 仍 `FAIL`（fail-closed）；**一份新鲜的都没有** ⇒ 一律 `FAIL`。
+     ⚠️ 残余风险（刻意接受、已写进 docstring）：理论上可"把陈旧产物锁住"来降级；
+     四条把可利用面压到"真持句柄 + 能被 RM 具名 + 另有新鲜产物 + 必须具名"。
+  变异验证 10/10 CAUGHT（`devlogs/_verify/mutate_b95.py`）；对照表
+  `devlogs/mutate_b95_control.txt` 证明**只**「不可替换」那一态判定改变，另两态逐字未动。
+  另注：`test_e2e_drivers_can_target_the_shipped_artifact`
+  只管"是否支持覆盖"，不管"默认目标是否陈旧"——本轮探针正是从这条缝漏过去的。
+
+- [ ] **B9-8 收敛后"残壳"仍会被打上宿主锁，导致变体无法靠脚本收敛**（P2，2026-09-23 实测）
+  实测：**新建**的 `dist-electron-out-<ts>/win-unpacked/resources/app.asar` 也会被宿主
+  句柄持有 ⇒ `clean_dist.py --apply` 对**两个** electron 目录都跳过整目录回收。
+  即"多份变体并存"这个状态**无法在会话内靠脚本收敛**（只能等宿主退出后在**外部终端**跑）。
+  现状可接受（`dist_variants` 超阈值只是 WARN），但"变体堆积"的根因未除。
+  待办：给宿主持有场景一个**显式**的收敛路径说明（或在 `--json` 里区分
+  "因锁跳过"与"不该删"）。
+
+- [x] **B9-9 门禁与清理工具会对仓库做**写操作**（改名探测）**（P3，2026-09-23 结项）
+  `release_gate.check_artifact_freshness` 判定"陈旧但不可替换"时会调
+  `clean_dist.named_holders` ⇒ 内部 `_rename_probe` 会把目标**改名再改回**。
+  正常路径无副作用，但**中途被打断**（Ctrl-C / 断电 / 进程被杀）理论上会把对象留在
+  `__lockprobe__.<name>` 名下。
+  ✅ **已改为只读判据**：`_rename_probe` / `_find_locked` 整段删除，换成
+  `can_delete(path)`——`CreateFileW(path, DELETE, FILE_SHARE_READ|WRITE|DELETE,
+  OPEN_EXISTING)` **只请求删除权、不删除**，随后立即 `CloseHandle`。零副作用。
+  ⚠️ **关键陷阱（必须记住）**：**只读判据对目录会低估锁定** ——
+  实测 `dist-electron/win-unpacked/resources`：改名探测 `winerror=5`（拒绝）
+  而只读探测 `winerror=0`（放行）。根因是**目录自身的 DELETE 权限 ≠ 其子项可删**
+  （NTFS 只在真正递归删除时才检查子项句柄）。
+  ⇒ 只读方案**必须全树遍历逐文件判定，不得目录级短路**；目录自身不可删只作为
+  一条**无路径的伪条目**如实上报（`_scan_locked` 记 `(winerror=..)` 开头，
+  `named_holders` 跳过它，避免把"目录"当"持有者"报出去）。
+  **等价性实证**：`devlogs/_verify/probe_lock_equivalence.py` 在真实目标上对比
+  新旧两种口径 ⇒ 报出的被锁文件集合**完全一致（0 不一致）**，最坏 937 文件 0.69s。
+  护栏 42 passed（含 AST 断言"探测路径上无任何写操作"+ 正/反句柄对照 +
+  "不得目录短路"回归）；变异验证 **9/9 CAUGHT**（`devlogs/_verify/mutate_b99.py`）。
+
+- [x] **B9-6 长构建被"回合拆卸"回收时，与"真失败"无法区分**（P1，2026-09-23 结项）
+  把 `build.ps1` 放**后台**跑，回合结束时它的后代进程被回收 ⇒ 任务报
+  **exit 1 且零输出**、`build/pyinstaller.log` **戛然而止无 Traceback**、
+  workpath 为空 —— 与"PyInstaller 崩了"**症状完全一致**（实测改前台同命令 113.8s 一次过）。
+  ✅ **已用运行台账区分**：`build.ps1` 起步写 `build/_run/<runId>.start.json`
+  （含 `git_head` 与 `pid`），每个出口写 `<runId>.finish.json`（含 `rc` 与错误文本）；
+  `scripts/build_status.py` 读台账给**六态**：`none / running / interrupted /
+  failed / completed / unreadable`。
+  核心签名：**「有 start 台账、无 finish 台账」= 被外部终止**（`finally` 在
+  `TerminateProcess` 下不执行，所以"始而无终"是可靠的被杀痕迹，而非猜测）。
+  ⚠️ **实测中撞到更深的一层**：`CommandNotFoundException`（工具缺失）是
+  **statement-terminating** 错误 —— 即使 `$ErrorActionPreference="Continue"` 也会
+  中断语句、**绕过 `Write-Fail`**，于是"工具缺失"被伪装成"被杀"（正是本项要消除的
+  现象，却在实现时先复现了一遍）。修法两层：① `Invoke-Native`/`Invoke-NativeText`
+  内层 catch 显式 `$script:LASTEXITCODE=1`；② 顶层 `trap` 兜底 `Write-Finish 1`。
+  ⚠️ **pid 存活检测不得用 `os.kill(pid, 0)`**：Windows 上它对任意 pid 都像"成功"，
+  会把"已死的构建"读成"还在跑"。改用 `OpenProcess` + `GetExitCodeProcess ==
+  STILL_ACTIVE`。
+  护栏 17 passed（含一条**真实失败路径** E2E：复制 build.ps1 到空 PATH 目录跑，
+  必须判 `failed` 且 rc=1）；变异 **10/10 CAUGHT**（`devlogs/_verify/mutate_b96.py`）。
+  流程约束保留：PITFALLS §三十五 A **长构建一律前台，不得跨回合挂后台**。
+
+- [x] **B9-7 frozen e2e 的 LLM 链路未被覆盖（凭据失效）**（P2，2026-09-23 结项）
+  `.env` 的 `SILICONFLOW_API_KEY` 已被上游拒绝：裸客户端直连
+  `https://api.siliconflow.cn/v1/models` ⇒ `HTTP 401 {"code":30014,"message":"Token is invalid."}`
+  ⇒ 流水线止于 `status=error`，`review/partial_review` 成功路径与 findings 生成
+  **本轮没有验到**（e2e 已如实标注归因，未冒充 PASS）。
+  ➕ `DEEPSEEK_API_KEY` 实测**仅 11 字符**（正常 key 约 35+）⇒ 疑似占位/失效，一并核对。
+  ✅ **结项的三件事（都是"让未覆盖成为一等公民"的工程手段，与能否换到有效 key 无关）**：
+  1. **覆盖清单落盘**：新增 `tests/e2e_coverage.py`，`Coverage` 逐条记
+     `covered / skipped / failed` + 原因 + 自解释 `meaning`，冻结包冒烟每轮落盘
+     `devlogs/e2e_coverage_<ts>.json`（可用 `PBC_E2E_COVERAGE_JSON` 改路径）。
+     判定规则**只有一处实现**（`classify_pipeline`：由终态字符串 + 凭据是否齐备 +
+     上传是否失败推导），故可被单测直接钉住、无需起服务。
+  2. **硬要求 `PBC_E2E_REQUIRE_LLM`**：置 1 ⇒ `llm_config` 与 `llm_pipeline`
+     **两条**只要有一条不是 `covered`，整体 FAIL（退出码 1）并打印
+     `UNMET HARD REQUIREMENTS`。默认关闭。
+     ⚠️ **"默认关闭"≠"无凭据也能跑绿"**：产品自身在未配置 LLM 时**直接 400 拒绝上传**
+     （`api/jobs/upload.py`），那轮冒烟本来就红。这道门拦住的是
+     "其它全绿、只差 LLM 链路"的**假成功** —— 此前它读起来与真正跑通的冒烟一模一样。
+  3. **命名债**：`LLM_KEY_ENV` 由 `PBC_E2E_DEEPSEEK_KEY` 改为 `PBC_E2E_LLM_KEY`
+     （provider-agnostic；旧名仍可读、打印弃用提示、**新名优先**）。同步 3 个驱动
+     + `DEPLOYMENT.md` + PITFALLS。
+     ➕ **顺带修掉同类未爆弹**：`e2e_quick.py` / `e2e_manual.py` 都把
+     `{"llm_provider": "deepseek", ...}` **写死**了（与 §六记录的 401 事故同源，
+     只因样例 PDF 曾是空白页而长期"绿"）⇒ 改为由 `llm_provider()` 派生，并加
+     **AST 护栏**（查 dict 字面量，不查注释文案 —— 注释里刻意留了反例）。
+  **实测**（真实产物 `dist-electron-out-20260921-160111/win-unpacked/resources/pbc-server`）：
+  开 `REQUIRE_LLM=1` ⇒ **EXIT=1** + `UNMET HARD REQUIREMENTS: llm_pipeline=failed`；
+  默认口径 ⇒ 清单如实记 `covered=0 skipped=2 failed=2`（`llm_config`/`ocr_config`
+  = skipped，两条 pipeline = failed）。
+  护栏 55 passed；变异 **20/20 CAUGHT**（`devlogs/_verify/mutate_b97.py`，
+  含"缺凭据被升级成 covered""超时被读成跳过""开关 `"0"` 关不掉""清单记了不生效"
+  "提供方被写死回 deepseek"等）。
+  ⚠️ **残余（环境性，非工程缺陷）**：凭据仍失效 ⇒ LLM 成功路径**仍未真验过**。
+  发版前必须换到有效 key，并用 `PBC_E2E_REQUIRE_LLM=1` 跑一次拿到 `covered`。
+  ➕ 本轮另修 `mutation_harness.expect_satisfied`：`expect` 现在容忍**参数化后缀**
+  （`...::test_x` 命中 `...::test_x[0]`）—— 此前会把**已抓到的变异**判成 MISSED。
+
+- [x] **B9-10 要发出去的那一份产物（`win-unpacked/`）从未被端到端驱动过**（P1，2026-09-23 结项）
+  既有驱动全在**内嵌后端 exe** 层：`tests/e2e_frozen.py` 直接跑
+  `resources/pbc-server/pbc-server.exe`，Round 55 的关闭探针同理
+  （`probe_shutdown_semantics.py`，端口 58871）⇒ **Electron 主进程层是空白**：
+  没人验过"双击 `BatchSentry.exe` 能不能起来、拉起的是不是内嵌后端、
+  渲染进程有没有真加载 `app.asar`、点 X 后是不是真的优雅退出"。
+  ✅ **结项内容**：
+  1. **新增评价标准** `docs/E2E_UNPACKED_ACCEPTANCE.md`：D1–D8 八维（启动可达 /
+     版本自证 / 内嵌后端 / 渲染层 / 主窗口 / 优雅关闭 / checkpoint 收敛 / 数据隔离），
+     每维给出判据、实测方法、通过条件、失败归因口径，并**显式写明已知盲区**。
+  2. **新增驱动** `tests/e2e_unpacked.py`：解析产物一律走
+     `dist-electron*/win-unpacked` 并**按 mtime 取最新**（绝不写死 `dist-electron/`）；
+     隔离用**两把钥匙**；关闭用 `WM_CLOSE` 发给**收敛后的主窗口**；
+     存活判据走 `OpenProcess`+`GetExitCodeProcess`；覆盖清单复用 `tests/e2e_coverage`。
+     **实测 5 次重复：35 passed / 0 failed / 5 skipped，零 flaky**
+     （boot 5.09–5.70 s、主窗 1.01–1.02 s、端口释放恒 0.5 s、进程退出 1.37–2.26 s
+     `exitCode=0`）。
+  3. **新增护栏** `tests/unit/test_e2e_unpacked_guard.py`（16 条结构/AST 断言）+
+     **变异 14/14 CAUGHT**（`devlogs/_verify/mutate_b910.py`）。
+  🔴 **根因（本轮最贵的一条，属环境性）**：宿主 WorkBuddy 以
+  `ELECTRON_RUN_AS_NODE=1` 运行 Electron daemon，该变量**继承给所有子进程**
+  ⇒ `BatchSentry.exe` 以**纯 Node 模式**启动（不加载 `app.asar`、不起 Chromium、
+  0.2–0.7 s 静默 `rc=0`）。旁证：`--version` 打印 `v20.18.3`(Node)、
+  `--xxx` 报 `bad option`+`rc=9`、三份产物行为完全一致。
+  ⇒ 驱动必须**显式 `pop` 该变量**，且这是一条**结构护栏**（删掉它驱动照样"跑完"，
+  但所有断言都在测空气）。已固化 PITFALLS **§三十八**。
+  ⚠️ **本轮两次"误判产品缺陷"，均为探针缺陷**（已改正）：
+  ① "关闭后 Electron 进程残留、连 `taskkill` 都杀不掉" —— 实际是 `WM_CLOSE`
+  发给了 **splash 窗口**（splash 与主窗口都是可见 `Chrome_WidgetWin_1` 且 splash 先出现）；
+  ② "`alive()` 恒返回 True" —— 判据自己不可信，**正负对照**（不存在的 PID / 自己的 PID）
+  才定案。
+  ⚠️ **残余（如实登记，未解决）**：D8 隔离**不完整** —— 真实
+  `%APPDATA%\PBC\logs\backend-boot.log` 每轮都会被写（Electron `bootLog` 走
+  `app.getPath('appData')`，`APPDATA` 环境变量管不到）⇒ 驱动**如实记 SKIP**，
+  不冒充"隔离完全"。另：本驱动只验应用层起停，**LLM/OCR 成功路径仍由
+  `e2e_frozen.py` 负责**（且凭据仍失效，见 B9-7）。
+
+### B10 供应链与守卫时序（Round 58 对抗性审查产出，2026-09-23）
+
+> 报告全文 → `docs/ADVERSARIAL_AUDIT.md` **§17**。
+> **本轮判定：不建议分发**（工程门禁 9/9 全绿，但两条**门禁从未覆盖**的供应链风险成立）。
+> 与前四轮的差别：前四轮审**产品逻辑**，本轮审**产品所依赖的东西**与**守卫的时序位置**。
+
+- [x] **B10-1 本地守卫晚于请求体解析 ⇒ 跨站可触发 CPU 型 DoS**（**P1**，2026-09-23 实测） —— **R66 已核销**（证据见 §0.1）
+  `api/jobs/upload.py:54-60` 的 `is_local_request` 守卫写在**端点函数体第一行**，
+  而 FastAPI 在**调用端点之前**就解析请求体（端点签名要求 `UploadFile`）。
+  **实测（浏览器真实形态：`Host` 由 URL 决定必然合法，跨站身份在 `Origin`）**：
+
+  | 形态 | 1 MB | 4 MB | 8 MB | 16 MB | 状态 |
+  |---|---|---|---|---|---|
+  | 格式正确 + `Origin: evil` | — | — | — | — | **403**（守卫有效）|
+  | 畸形体 + `Origin: evil` | 0.53 s | 1.82 s | 4.19 s | **10.26 s** | **422** |
+  | 负对照：同样大体 → 不存在路径 | 0.01 s | — | 0.06 s | 0.10 s | 404 |
+
+  🔴 **状态是 422 而非 403** ⇒ 请求因请求体校验失败被返回，
+  `is_local_request` **一行都没执行** —— 守卫不是"晚一点"，是**完全没被走到**。
+  负对照证明耗时来自服务端解析（同尺寸不解析仅 0.10 s）。
+  **影响**：单 worker（`server.py` 的 `workers=1`）⇒ 解析期间事件循环被占 ⇒ **UI 无响应**；
+  触发 = 用户访问任意网页（`multipart/form-data` 属 CORS safelist，无 preflight），
+  可重复、体积无上限；看门狗盯的是"停滞 job"，**盯不到卡在解析上的请求** ⇒ 不自愈。
+  **定 P1 不定 P0**：不泄露数据、不执行代码，影响是可用性。
+  **修法三件（缺一不完整）**：① 守卫**前移到 ASGI 中间件**（不读 body 即可 403）；
+  ② 请求体**大小硬上限**（现有 `max_bytes` 在端点内，同样晚于解析）；
+  ③ 升级 `python-multipart`（见 B10-2，其 CVE 有 3 条正是"畸形头部/前导数据 ⇒ DoS"，同源）。
+  **验收（可判定，不是"感觉快了"）**：复用 `devlogs/_verify/probe_browser_scenario.py`
+  ⇒ 畸形大体 + 跨站 `Origin` 必须**毫秒级**返回 403/413，且耗时**不随体积增长**。
+  探针：`devlogs/_verify/probe_parse_before_guard.py`、`probe_browser_scenario.py`。
+
+- [x] **B10-2 依赖漏洞：两个包在不可信输入路径上，且落后多个大版本**（**P1**，2026-09-23 首次扫描） —— **R66 已核销**（证据见 §0.1）
+  `pip-audit -r requirements.txt` ⇒ **50 条公告**（去重 26 条 CVE），全部来自 4 个包：
+
+  | 包 | 锁定 | CVE 数 | 关键条目 | 建议 |
+  |---|---|---|---|---|
+  | **python-multipart** | 0.0.21 | **7** | `CVE-2026-24486` 任意文件写（*Non-Default Configuration*）；`CVE-2026-40347` 大前导/尾随 DoS；`CVE-2026-42561` 无界 part 头 DoS；`CVE-2026-53540` 负 `Content-Length` 全量缓冲；`CVE-2026-53537/53538` 参数走私；`CVE-2026-53539` 二次时间解析 CPU DoS | **≥0.0.31** |
+  | **Pillow** | 10.1.0 | **17** | `CVE-2023-50447` **任意代码执行**；`CVE-2024-28219` 缓冲溢出；`CVE-2026-59199` 堆越界写（`Image.paste`/`crop`）；`CVE-2026-59205/59197` 堆越界写；多条解压炸弹绕过 | **12.3.0** |
+  | requests | 2.32.4 | 1 | `CVE-2026-25645` `extract_zipped_paths()` 临时文件复用 | 2.33.0 |
+  | python-dotenv | 1.2.1 | 1 | `CVE-2026-28684` `set_key` 符号链接跟随 | 1.2.2 |
+
+  **为什么阻断**：`python-multipart` 解析**每一次上传**；`Pillow` 在
+  `api/jobs/upload.py:216-269` 对**用户上传图片**调 `Image.open`/`exif_transpose`/
+  `convert`/**`paste`**/`save`，另有 `core/pipeline/self_heal.py:176`。
+  ⚠️ **边界（不得当作"已确认可利用"）**：这是"版本落后"+"处于不可信输入路径"
+  两条**独立成立**的事实叠加，**不是**已证明的可利用性；`Pillow` 的
+  `ImageMath` **本应用未使用**，`paste` 的 `box` 不由攻击者控制 ⇒ 可利用性**待验**；
+  `requests.extract_zipped_paths` 与 `dotenv.set_key` **全仓零调用** ⇒ 这 2 条
+  **当前不可达**，属"升级顺手带走"，**不构成阻断**。
+  **门禁盲区**：`release_gate.py` 9 项里**没有任何一项**查依赖漏洞 —— 见 B10-4。
+
+- [x] **B10-3 运行时已过安全支持期（Electron 33 EOL 17 个月）**（**P2**，2026-09-23） —— **R66 已核销**（证据见 §0.1）
+  从**产物二进制**读出（不采信 `package.json` 的 `^33.0.0`）：
+  `Electron/33.4.11`、`Chrome/130.0.6723.191`、`node.js/v20.18.3`。
+  Electron **33 于 2025-04-29 EOL**，当前支持线为 **41 / 42 / 43**；
+  Chromium 稳定线已 **M156**（对应 Electron 45）⇒ 落后 **26 个大版本**。
+  **对制药客户尤其要紧**：GMP 供应商审计常有"不得运行已停止安全支持的组件"条款；
+  本地应用读 PDF、渲染 HTML，Chromium 是暴露面最大的组件。
+  ⚠️ **跨 8 个主版本升级不会无害**：`contextIsolation`/`sandbox` 默认值、
+  `setWindowOpenHandler` 行为、`webContents` 事件、electron-builder（25 → 当前）
+  都可能变 ⇒ 必须走"升版 → 重建 → **win-unpacked 级 e2e**"完整链路（B9-10 的驱动正好用得上）。
+
+- [x] **B10-4 门禁新增第 10/11 项：依赖漏洞扫描 + 运行时 EOL 检查**（**P1**，2026-09-23 立） —— **R66 已核销**（证据见 §0.1）
+  本轮暴露的最大**流程**缺口：产品逻辑被四轮审得很细，但**没有任何机检**看着
+  "我们依赖的东西还安不安全"。要求：
+  ① 依赖漏洞项调 `pip-audit`，对"出现在依赖树里的已知 CVE"给**具名 FAIL**（不是 WARN）；
+  ② 运行时 EOL 项从**产物二进制**里读 Electron/Chromium 版本，与一份**显式维护的
+  支持线表**比对（表要写进仓库并在超期时要求人工更新，**不得**每次联网抓取 —— 否则
+  离线构建会误红，且判据随外部数据漂移）；
+  ③ **变异验证**：注入一个已知有漏洞的依赖版本 ⇒ 必须红；把 EOL 阈值调松 ⇒ 必须红。
+  ⚠️ 两条判据都要**fail-closed**（取不到版本 / 扫描失败 ⇒ FAIL，不得记 PASS）。
+
+- [ ] **B10-5 v1.2.1 迭代顺序（Round 58 建议）**（P2，2026-09-23）
+  排序原则：**先堵"能被外部触发"的，再做"能被度量"的，最后做"能被优化"的**。
+  1. 安全收口：B10-1（守卫前移 + 体积上限）→ B10-2（升级 4 个依赖）→
+     B10-3（Electron 升级）→ B10-4（门禁补两项）。
+     ⚠️ 升级会改产物 ⇒ **必须升版 + 重建**，而重建受**宿主持锁**阻塞（B9-8）
+     ⇒ **需用户先完全退出宿主**（§16.4 已确认的唯一解锁方式）。
+  2. 让精度与噪音**可度量**：**B1-3（真实标注集）**是前提 —— 在此之前所有精度数字
+     都只能在"抽样 + 代理指标"层级谈（见 B10-6）；随后 B1-15 / B1-17（根因级噪声源）、
+     降噪 KPI 补齐（`finding_suppressions` 落库）。
+  3. 工程与性能：B2-3 / B2-4（CPU 移出事件循环）｜B7-2（ruff 105 进门禁）｜
+     B8（发版 7 条不变量）｜B9-2/3/4（关闭语义收尾）｜C2（≥120 页实跑）。
+
+- [ ] **B10-6 精度现状：**没有任何可外推的 P/R 数字**（P1，2026-09-23 复核）**
+  唯一的 `P/R/F1 = 1.0/1.0/1.0（TP=10, FP=0, FN=0）`来自**合成集**
+  （`docs/FINDING_GROUND_TRUTH.json`，11 个 case，输入由 `scripts/synthetic_corpus.py` 构造）
+  ⇒ **不可外推**。真实数据只有代理指标：51 页回放 442 →（R1+M2）**272（−38.5%）**、
+  噪声占比 75.8% → 60.7%、critical **29 → 29**（**离线重放/模型化估计，非重跑流水线**）；
+  Round 42 回放 **293 条 / 14 类**；Round 43 抽样直读原页核 5 页**坐实 4 条假 critical**；
+  Round 46 修复后 抑制 26→**13**、降级 42→**55**、保留 **88**、critical 假阳性 **0→0**。
+  **已记录的误检/漏检实例**（说明"精度不是 1.0"）：`_decimal_loss_factor` 曾吃掉
+  真实超差 `25 vs ≤5.0 ℃`；`_check_declared_order` 修复前吞掉 p27（年份差 10 年）
+  与 p38 的 2027 未来日期；**R2 批号投票一次未触发（0 voted）**＝有判据无判别力；
+  `stage2` 对损坏 JSON fail-open ⇒ 静默漏检。
+  ⇒ `C1 无真实标注集 ⇒ 无可信 P/R` **至今成立，且是本轮最重要的精度结论**。
+  **不得**上报表级精度数字给客户/审计。
+
+- [ ] **B10-7 噪音控制：机制成体系，缺的是闭环度量**（P2，2026-09-23 复核）
+  机制已在（LLM 四层收权 L1–L4 + R1/M2/R3/B1-1/spec_guard + 三档严重度），
+  但缺口明确：① **`finding_suppressions` 台账在真实库 0 行** ⇒ 那个"−65.8%"
+  只是**离线重放**，降噪效果**无法在生产上被审计**；② `eval_noise_reduction.py`
+  **自述非端到端**；③ `needs_arbitration`/`structure_warning`/`suppressed` 的 **KPI 未补**
+  ⇒ "降噪有没有过头"**没有自动判据**；④ R2 判据无判别力。
+  ⇒ 控制噪音的正解**不是"再多抑制几条"**，而是：**(a)** 把降噪量变成可在生产上
+  审计的数字；**(b)** 守住"漏检代价 > 误报代价"；**(c)** **优先修假阳性而不是多抑制**
+  —— `B1-15`（勾选为否全是假阳性）与 `B1-17`（同页同项重复发射）是**根因级**噪声源。
+
+---
+
+### B11 分发就绪清单（Round 59 产出，2026-09-23）
+
+> **目标：让构建物能够分发。** 判据与做法全文 → **`docs/RELEASE_READINESS_PLAN.md`**
+> （本段只放**可勾选条目**；B10 是来源，本段是**展开 + 补全判据**）。
+>
+> **分发门槛 = D1–D6 全绿**（详见计划 §0.1）：
+> **D1** 依赖无已知漏洞｜**D2** 运行时在支持期内｜**D3** 跨站在读 body 前被拒｜
+> **D4** LLM/OCR 各至少一次真实成功｜**D5** 磁盘上只有 1 份可分发产物且能自证出处｜
+> **D6** 残余缺陷具名登记。
+>
+> **波次**：**W1** 不碰产物、可立即做（B11-1…B11-6）｜
+> **W2** 改依赖 ⇒ 需重建 ⇒ 🔴 需用户退出宿主（B11-7…B11-10）｜
+> **W3** 需外部条件（B11-11…B11-13）。
+
+#### W1 · 可立即开工（不碰产物、不依赖用户）
+
+> ✅ **W1 已完成（6/6）**｜每项都是"护栏 + 变异验证"**成对**落地，无空护栏。
+> 对照表：`devlogs/mutate_b11_1_control.txt`、`mutate_dedup_control.txt`、
+> `mutate_b11_5_control.txt`、`mutate_b11_6_control.txt`。
+> 五类判据自证陷阱 → **PITFALLS §四十**。
+>
+> | 条目 | 实测证据 | 护栏（用例数） | 变异 |
+> |---|---|---|---|
+> | B11-1 | 守卫前移到 ASGI；探针 **7/7 PASS**，B=**403**（原 422 @8.6 s），B/C 由 87–127× 降到 **0.65–0.82×** | `test_local_guard_middleware.py`（17） | **4/4** |
+> | B11-2 | 门禁 **9 → 11 项**；两项**如实 FAIL**（24 唯一公告/4 包；Electron 33.4.11 ∉ [41,42,43]） | `test_gate_supply_chain.py`（28） | **5/5** |
+> | B11-3 | 实测"**1 完整 + 2 残壳** ⇒ PASS 且**具名列出残壳**"（旧判据此状态为静默 PASS） | 同上 | 含于 5/5 |
+> | B11-4 | `docs/CVE_REACHABILITY.md`：**24 唯一公告 → 6 可达 / 18 不可达**；npm audit 18 包按**分发面**分三层 | 一致性护栏 + AST | **5/5** |
+> | B11-5 | `scripts/perf_baseline.py`：**纯相对**判据（禁用绝对 SLA，含浮点容差） | `test_perf_baseline.py`（29） | **6/6** |
+> | B11-6 | 图片路径 **+2 用例**；并**修掉真缺陷**（见下） | `test_api_image_upload.py`（20） | **5/5** |
+>
+> **W1 期间新发现并已修的真实缺陷（前四轮审查均未覆盖）**
+> 1. 🔴 **头部炸弹 PNG → 500**（`api/jobs/upload.py`）：Pillow 的 `DecompressionBombError`
+>    是 `Exception` **直接子类**（不是 `OSError`/`ValueError`），早先只 catch 后者 ⇒
+>    落到通用 `except` ⇒ **客户端输入问题被报成 500 + 全栈日志**。**78 字节**即可触发。
+>    已修（显式接住 ⇒ 400）+ 补 `test_upload_header_bomb_png_rejected_not_500`。
+> 2. 🟠 **依赖公告计数虚高 2×**（`scripts/audit_deps.py`）：pip-audit 在同一包内**重复列同一公告**
+>    ⇒ **24 条被报成 47 条**。已修（按 id 去重 + 保留 `raw_entry_count`）+ "已提交快照不得含重复 id"真值护栏。
+> 3. 🟠 **`docx` 零消费却被打进产物**：`electron/main.js` 从不 `require('docx')`，
+>    但列为 `dependencies` ⇒ `app.asar` 含 **201 个 `node_modules` 条目 ≈6 MB** 死代码
+>    （含永久供应链面）→ **新登记 B11-17**。
+> 4. 🟡 **两条 magic 用例断言过弱**（只断言 `"图片"`，摘掉闸门照样绿）→ 改断言 `"文件头"`。
+>
+> **门禁实测（提交 `fb29999` 后跑，11 项）**：`OVERALL: fail (pass=8 fail=3 warn=0 skip=0)`。
+> - ✅ **8 PASS**：`worktree_clean`、`no_build_outputs`、
+>   **`dist_variants` —— 1 份完整产物（`-160111`）+ 残壳 2 个（**具名**：`dist-electron`、
+>   `-153526`，缺内嵌后端/PROVENANCE）**（＝ B11-3 新判据生效；旧判据在此状态**静默 PASS 且不具名**）、
+>   `packaging_files`、`rules_wired`、`kb_corpus`、`kb_packaging`、
+>   **`tests_coverage` = 3223 passed / 0 failed / coverage 95.04%**。
+> - 🔴 **3 FAIL 全部是"预期且具名"**（非回归，**不得隐藏**）：
+>   `artifact_freshness`（`main.py`+`api/jobs/upload.py` 已改、产物未重建 ⇒ **W2 重建后转绿**）｜
+>   `dependency_vulns`（**24 条唯一公告 / 4 包**，原始条目 47）｜
+>   `runtime_eol`（Electron **33.4.11** 不在支持线 `[41,42,43]`）。
+> - 报告：`devlogs/gate_report_20260923_130306.json`。
+
+- [x] **B11-1 守卫前移到 ASGI 中间件 + 请求体大小硬上限**（对应 **D3**／**P1**／计划 §SEC-1）
+  **定位已定**：`api/jobs/upload.py:29-33` 的签名要求 `UploadFile = File(...)`
+  ⇒ FastAPI **在调用端点之前**解析 body，而守卫在 `:59` ⇒ **守卫完全没被走到**
+  （实测：畸形体 16 MB = **10.26 s** 且返回 **422 而非 403**；
+  负对照同尺寸不解析仅 0.10 s；格式正确的跨站请求确实被 **403** 挡住 ⇒ 已有加固没白做）。
+  **做三件（缺一不完整）**：
+  ① `main.py` 增 **ASGI 中间件**，**不读 body** 即按 `Host`/`Origin` 返 **403**
+     （复用 `core/security.py::is_local_request`，**不复制第二份判据**）；
+  ② **体积硬上限**：`Content-Length` 超 `UPLOAD_LIMITS["max_bytes"]` ⇒ **413**，
+     **并且**用 `receive` 包装器**流式计数截断** —— ⚠️ **只信 `Content-Length` 会被
+     `chunked`/缺头绕过**，两条都要做；
+  ③ 升级 `python-multipart`（= B11-7）。
+  🔴 **排序陷阱**：Starlette `add_middleware` 是 **LIFO（后加的先执行）**，
+  当前最外层是 `:237` 的 `@app.middleware("http")`。守卫中间件**必须最后注册**，
+  否则它又被压在解析之后 ⇒ 白改。**端点内 `:59` 的守卫保留**（纵深防御）。
+  **验收**：扩展 `probe_browser_scenario.py` 覆盖 3 形态 ——(a) 格式正确+`Origin: evil`⇒403；
+  (b) 畸形体+`Origin: evil`⇒**403/413**；(c) **chunked 无 `Content-Length`**+超大流⇒**413 且中途断开**。
+  判据：**耗时毫秒级且 1→16 MB 不增长**（断言**关系/斜率**，⚠️ 不写"<100 ms"硬阈值）。
+  护栏 `tests/unit/test_local_guard_middleware.py`：行为（跨站拒 + **本机正常上传仍 200**，
+  防"一刀切全拒"式假绿）+ **AST 判据**（注册位置必须是 `add_middleware` 序列的**最后一个**）。
+  **变异 ≥4 方向**：挪回端点内／去掉流式计数只留 `Content-Length`／去掉 `Origin` 检查／
+  调换注册顺序 ⇒ **都要红**。
+  探针：`devlogs/_verify/probe_parse_before_guard.py`、`probe_browser_scenario.py`。
+
+- [x] **B11-2 门禁新增第 10/11 项：依赖漏洞 + 运行时 EOL**（= B10-4／**P1**／计划 §SEC-4）
+  **最大流程缺口**：产品逻辑被四轮审得很细，但**没有任何机检**看着"依赖还安不安全"。
+  ① 第 10 项 `pip-audit` ⇒ 有公告则**具名 FAIL**（不是 WARN）；
+  ② 第 11 项从**产物二进制**读 Electron/Chromium 版本，与**仓库内支持线表**比对
+     —— ⚠️ **不得每次联网抓取**（离线构建会误红 + 判据随外部数据漂移）；
+  ③ 两条都 **fail-closed**（取不到版本／扫描失败 ⇒ **FAIL**，不得记 PASS）；
+  ④ 第 11 项在**产物不存在**时如实 **SKIP 并写进报告**（不是静默 PASS）。
+  **变异 ≥3 方向**：注入已知有漏洞的依赖版本 ⇒ 红｜调松 EOL 阈值 ⇒ 红｜
+  把版本探测改成"读不到就跳过" ⇒ 红。
+
+- [x] **B11-3 `dist_variants` 判据升级**（= 计划 §HYG-2／W1）
+  **本轮实测的判据弱点**：现判据是"`dist-*` 个数 **> 3** 才 WARN"，
+  当前**恰好 3 个**（`dist-electron`、`-153526`、`-160111`，`dist` 不计）⇒ **PASS**。
+  但它数的是**目录个数**，不是"**可分发产物的份数**" ⇒ **最危险的状态（1 真 + 2 残壳）**
+  落在阈值内侧。改为：**"完整产物数 > 1 ⇒ WARN/FAIL"**，残壳另出**具名清单**。
+  ⚠️ 教训（PITFALLS §二十六）：**阈值卡在恰好不触发的位置 = 零判别力**。
+  **变异 3 方向**：1 完整+1 残壳 ⇒ 报警｜2 完整 ⇒ 报警｜**1 完整+2 残壳（今天的状态）⇒ 报警**。
+
+- [x] **B11-4 S2 逐条 CVE 可达性表 + `npm audit`**（= B10-2 的边界／计划 §SEC-5／W1）
+  升级（B11-7）会让这条**自动消失**，但"升完就没事"≠搞清楚；下次换个包又落后时，
+  需要的是**方法**不是运气。做：对 `python-multipart`/`Pillow` 的 CVE 逐条判
+  "进入本应用需要什么前置条件 → 本应用是否满足"，输出**表 + 可达/不可达/待验三分结论**。
+  ⚠️ **不得**含糊写成"可利用"：`CVE-2026-24486`（任意文件写）自带
+  "Non-Default Configuration"；Pillow 的 `Image.paste` 虽被调用，但 `box` 取自 `rgba.size`
+  （**攻击者不直接控制**）。**顺带**补 `npm audit`（Node 侧本轮**完全未跑**）。
+
+- [ ] **B11-5 性能基线回归化**（计划 §PERF-1／§PERF-4／W1）
+  > **状态（Round 59 W1 末）**：**判据已就位 + 已变异验证**，但**① 的实测数据未采集**
+  > ⇒ **不勾完成**。缺口只有一处：需要**一份新鲜产物**才能测（⇒ 落 W2）。
+  > - ✅ 判据：`scripts/perf_baseline.py`（**纯相对**，`本次/参考 ≥ 0.8×`；含浮点容差）。
+  >   护栏 `tests/unit/test_perf_baseline.py`（**29 条**）｜变异 **6/6 CAUGHT**。
+  >   其中用**行为断言**证明"纯相对"：**两侧同比例缩放 ⇒ 结论必须不变**；
+  >   另用 **AST** 断言模块级不得出现 >1 的数值常量。
+  > - ✅ ② 的载体**已存在**：`tests/e2e_unpacked.py:273` 已在记录里写
+  >   `rec["steps"]["boot_s"]`（启动耗时）⇒ 无需新建，只需在下次产物 e2e 时把该值抄进报告。
+  > - ❌ **未做**：① 用 `devlogs/_verify/probe_upload_throughput.py` 在**新鲜产物**上
+  >   实测 32 MB 正常上传吞吐，并与参考基线比 ⇒ **采集后**才能勾这一条。
+
+  性能**不是**分发阻断项（日常上传 **54–104 MB/s**、读端点中位 **2–7 ms**、
+  冷启动 **5.53 s**），要做的是**别让修复把它搞坏**：
+  ① 验收 B11-1 时，**正常 multipart 上传吞吐**（32 MB）须保持 **相对基线 ≥0.8×**
+     （⚠️ 用**相对比**，不写绝对 SLA —— 跨机/杀软扫描会漂移）；
+  ② 启动时间（D1/D5）判据留在 `tests/e2e_unpacked.py` 并**记入报告**，供跨版本同机比对。
+  工具：`devlogs/_verify/probe_upload_throughput.py`（扩展）。
+
+- [x] **B11-6 图片路径专项用例先写好**（= 计划 §FUNC-4 的准备／W1）
+  因 `Pillow` 将跨 **4 个大版本**（B11-7）⇒ 先把用例备好，升级后立即跑：
+  RGBA 白底合成（**看图**，不看代码）｜多页 TIFF / 动画 WEBP **明确拒绝**（非静默截首帧）｜
+  1 亿像素上限（超限被拒且**不 OOM**）｜畸形图片不崩、**不回显 500 堆栈**。
+
+#### W2 · 改依赖 ⇒ 必须升版 + 重建 ⇒ ~~🔴 **需用户先完全退出宿主**~~ → **R66 实测：4 条里 3 条已完成**
+
+- [x] **B11-7 升级 4 个依赖**（对应 **D1**／= B10-2／**P1**／计划 §SEC-2） —— **R66 已核销**（证据见 §0.1）
+  `python-multipart` 0.0.21 → **≥0.0.31**｜`Pillow` 10.1.0 → **12.3.0**｜
+  `requests` 2.32.4 → 2.33.0（顺手，`extract_zipped_paths` **全仓零调用** ⇒ 当前不可达）｜
+  `python-dotenv` 1.2.1 → 1.2.2（顺手，`set_key` **零调用**）。
+  **阻断项只有前两个**：`python-multipart` 解析**每一次上传**；
+  `Pillow` 在 `api/jobs/upload.py:216-269` 处理**用户上传图片**。
+  **验收**：`pip-audit` ⇒ **0 条**（**已由 B11-18 的隔离预演直接证实**：升级后清单
+  RC=0 / "No known vulnerabilities found"）｜全量 pytest + 门禁 **11/11**｜
+  `tests/unit/test_declared_dependencies.py` 跟过｜**B11-6 全绿**｜
+  **B11-18 的新护栏全绿**（它就是为这一刻准备的：**抬版本而不改 `self_heal.py` 就会红**）。
+  ⚠️ 这是"版本落后 + 处于不可信输入路径"两条**独立成立**的事实叠加，
+  **不是**已证明的可利用性（→ B11-4）。
+
+- [x] **B11-8 Electron 升到受支持线**（对应 **D2**／= B10-3／**P2**／计划 §SEC-3） —— **R66 已核销**（证据见 §0.1）
+  产物实测 `Electron/33.4.11`＋`Chrome/130.0.6723.191`＋`Node 20.18.3`；
+  Electron 33 于 **2025-04-29 EOL**（支持线 41/42/43），Chromium 落后 **26 个大版本**。
+  ⚠️ 跨 8 个主版本**不会无害**：`contextIsolation`/`sandbox` 默认值、
+  `setWindowOpenHandler`、`webContents` 事件、`will-navigate`、electron-builder **25 → 当前**。
+  **验收**：产物内 `Chrome/` 版本刷新且**在仓库 EOL 表内**（B11-2）｜
+  `contextIsolation`/`nodeIntegration` **复核不变**（splash 与主窗口**都查**）｜
+  `setWindowOpenHandler`/`will-navigate` **行为复测**（不是"代码没动"就算验过）｜
+  **win-unpacked e2e 全绿**（B9-10 驱动）。
+
+- [x] **B11-9 残壳收敛 + 产物唯一性自证 + 出处判据**（= 计划 §HYG-1/§HYG-3／W2） —— **R66 已核销**（证据见 §0.1）
+  **现状（本轮实测，与上一轮记录不同）**：根目录 **4 个 `dist*`** ——
+  `dist/`（后端 109 MB）｜`dist-electron/`（**275 MB 残壳**）｜
+  `dist-electron-out-20260921-153526/`（**275 MB 残壳**）｜
+  `dist-electron-out-20260921-160111/`（**384 MB 完整**，含 `PROVENANCE.txt`）。
+  残壳的 `HUSK.md` 已具名持有者 **`WorkBuddy(pid=16832)`**，自身写明"**不要再分发本目录**"。
+  **做**：① 用户退出宿主后 `python scripts/clean_dist.py`（先 dry-run）收敛残壳；
+  ② **出处判据**：`git diff --name-only <PROVENANCE.git_head>..HEAD`
+  与 `scripts/bundle_manifest.py` 的**入包清单**取**交集** ——
+  空 ⇒ 无需重建；非空 ⇒ **必须重建**（否则就是"测了 A 发了 B"）。
+  ⚠️ **一律按最新产物解析**（唯一实现 `tests/unit/test_distribution_parity.py::_newest_artifact()`），
+  **绝不**写死 `dist-electron/` —— 那目录里现在躺着的是**残壳**。
+
+- [ ] **B11-10 内存下限写进部署文档 + 长时运行观测**（计划 §PERF-2／W2）
+  `DEPLOYMENT.md` 目前**只有磁盘容量、没有内存要求**；整树 RSS **699 MB** 是**单次采样**。
+  ① 把**实测内存下限**（含峰值常驻）写进 `DEPLOYMENT.md`；
+  ② 补一次**长时运行**观测（≥30 min 或 ≥N 轮作业）⇒ 给出**有/无增长**的结论。
+  ⚠️ 结论允许是"未见增长"，但**必须基于观测**，不得由单次采样推断。
+
+#### W3 · 需外部条件
+
+- [x] **B11-11 LLM 成功路径真验**（对应 **D4**／= B1／计划 §FUNC-1／**分发阻断**）
+  ——**2026-09-23 已验完**。**验收**：终态 = `review`｜findings **>0**｜**直查库**核对
+  （不采信驱动自述）｜抽样直读原页核对"LLM 判得对不对"。
+
+  **状态（Round 59 W3 终态 —— ✅ 三层互证通过）**：
+
+  **① 证据链（三层，逐层收紧）**
+  - **驱动层**（`devlogs/e2e_frozen_d4_v32.log`）：`E2E_RC=0`｜`Total: 26 passed, 0 failed`｜
+    `covered=4 skipped=0 failed=0`｜`status=review`｜`findings count=5`。
+  - **产品权威端点**（`GET /api/jobs/{id}/llm_audit`）：**`success=3/3`（失败 0 次）**
+    —— 这才是"LLM 真被调用过"的判据；**终态绿不蕴含它**（§四十二）。
+  - **直查库**（`data.db`，不采信驱动自述）：job `1759df18-411` = `review` / `error_message=None`；
+    `llm_call_audit` 3 条**全 `success=1`**（`page_analysis` 3134+500 tokens / 22.3 s、
+    `cross_page_llm_fallback` 2.5 s、`cross_page_llm` 5.5 s）；`model` 列 = `deepseek-ai/DeepSeek-V3.2`
+    （**无静默替换**）；findings 5 条，来源分布 `{llm_page:1, llm_cross:1, rule:3}`。
+  - **抽样核对"判得对不对"**：LLM 正确抓出夹具的超规格项
+    （`actual=9.8 mg` vs `spec=10.0 mg`），并触发产品自带的
+    「LLM 独断 critical ⇒ 降为 warning 待人工核对」降级逻辑；
+    夹具的 `ZHANG`/`LI`/`2026-09-17` 落在 findings `#6` 的 `ocr_text` 中。
+
+  **② 两次翻车（都已修，是本轮最有价值的产出）**
+  - **第一次：假绿。** `E2E_RC=0`，但直查库发现 `llm_call_audit` **2/3 失败**、
+    findings 描述写着「**LLM 调用失败: RuntimeError**」⇒ **终态是降级路径达成的，
+    LLM 从未跑通**。根因在**判据本身**（`classify_pipeline` 把"成功终态"当"链路已验"）
+    ⇒ 已修 + 变异 **7/7**，登记为 **B11-19**。
+    修复后同场景复跑 `E2E_RC=1` / `llm_pipeline=failed` ⇒ **判据能红了**（这才是"验完"）。
+  - **第二次：归因错。** 判据修好后仍红，追下去发现**驱动从不注入模型** ⇒ 落到产品默认的
+    **收费**档 `deepseek-ai/DeepSeek-V4-Pro`，撞 `402 balance insufficient`。
+    已给驱动补**模型注入**（复用既有 `PBC_E2E_MODEL`，不另起名字）+ **读回生效值断言**
+    `settings_llm_model_matches`（走 `GET /api/settings → providers[].model`）。
+
+  **③ 两条必须更正的旧结论**
+  - ⚠️ **§四十二 里"该账户无免费 chat 档"已作废**：真因是**余额为 0**（余额为 0 时
+    连免费档也被拒），充值后 `DeepSeek-V3.2` / `Qwen3.5-35B-A3B` / `V4-Pro` /
+    `V3.1-Terminus` **4/4 实测 HTTP 200**。
+  - ⚠️ **模型档位由用户指定**：本项真验用 `deepseek-ai/DeepSeek-V3.2`（DeepSeek 系，
+    最贴近产品默认，避免引入模型特有输出形态的差异）。用户明确要求**只用**
+    `deepseek-ai/DeepSeek-V3.2` 或 `Qwen/Qwen3.5-35B-A3B`（免费档）。
+
+- [x] **B11-12 OCR 成功路径真验**（计划 §FUNC-2）——**2026-09-23 已验完**
+  **验收**：`ocr_backend_used` 是**真实后端**（非 failover 掩盖）｜页数/文本与金标对得上。
+
+  **证据**：
+  - **凭据实测有效**（`devlogs/_verify/probe_ocr_creds.py`）：MinerU `HTTP 200 code=0`；
+    Paddle `HTTP 404 jobId 不存在` = **鉴权已过**（非 401/403）。
+  - **真实后端**：产物级 e2e 报 `ocr_backend_used = mineru`（**非 failover 掩盖**），
+    1 页进 / 1 页出，`failed_pages=None`，可见产物 `page_image` 24241 B。
+  - **文本与金标对得上**：findings `#6` 的 `ocr_text` = `9.8 mg；ZHANG；LI；2026-09-17`，
+    与夹具 `e2e-test-text.pdf` 的实际内容一致；`#8` 正确报出"Charge API 有操作描述但缺执行时间"。
+  - **交叉确认**：直查库 `jobs.ocr_backend_used` 与 findings 的 `ocr_text` 同源一致。
+  ⚠️ 夹具是**合成文本 PDF**；"第 2 份**真实**批记录"的对照仍属 **B11-13** 范围。
+
+- [ ] **B11-13 ≥120 页实跑**（= `C2`／计划 §FUNC-5）
+  51 页已实跑；**200 页上限仍是线性外推未实跑**。跑一份 ≥120 页输入，记录时间/内存/无超时。
+
+#### 不阻断分发（如实登记，不得当成"已解决"）
+
+- [ ] **B11-14 关闭语义收尾 + D8 隔离盲区**（= `B9-2`/`B9-3`/`B9-4` + `FUNC-8`）
+  `B9-2` 整机关闭无自动化 e2e｜`B9-3` 关闭事件无审计落库｜`B9-4` dev 模式 e2e 隔离不成立｜
+  `D8` 的 `bootLog` 写真实 `%APPDATA%\PBC\logs\backend-boot.log`（`app.getPath('appData')`
+  不受 env 控制）⇒ e2e **如实记 SKIP**（这个处理**是正确的**，不冒充"隔离完全"）。
+  产物级优雅关闭**已实证成立** ⇒ 本条为**完善**，非缺陷。
+
+- [ ] **B11-15 CPU 移出事件循环**（= `B2-3`/`B2-4`／计划 §PERF-3）
+  `server.py:68` 的 `workers=1` + 同步解析 ⇒ **这是 S1 能造成 UI 无响应的根因**。
+  SEC-1/B11-1 是**止血**（不读 body 就拒），本条才是**根治**。优先级**低于** B11-1。
+
+- [x] **B11-16 分发形态决策**（✅ **用户已决策**：**便携包（`dir`）**，2026-09-23）
+  `package.json` 的 `win.target` **只有 `dir`**（`nsis` 段存在但**未启用**）⇒
+  是**绿色目录包**、**NSIS 安装器**、还是要**代码签名**？
+  **决定：只做便携包** —— **无需安装器、无需代码签名**。
+  ⇒ §HYG 的产物判据按"绿色目录包"验收；`nsis` 段保留但不启用（不删，留作将来可选）。
+  ⇒ 🔴 **连带影响 B11-9**：既然只发便携包，**残壳收敛的目标就是"磁盘上只有 1 份可分发目录包"**，
+  安装器相关的签名/静默安装判据**全部不需要**。
+
+- [x] **B11-17 删除零消费依赖 `docx`**（新增，W1 发现／W2 执行） —— **R66 已核销**（证据见 §0.1）
+  **事实**：`electron/main.js` 只 `require` 内建模块 + `electron`；全仓（排除
+  `node_modules`/`package-lock`）**没有任何** `require('docx')`。但 `package.json` 把它列在
+  **`dependencies`**（生产依赖）⇒ `electron-builder` 把它的**完整依赖树打进 `app.asar`**：
+  解析 asar 头得 **203 条目 / 201 在 `node_modules/` 下 ≈6 MB**（`docx`,`jszip`,`pako`,
+  `xml-js`,`hash.js`,`nanoid`,`readable-stream` …）。
+  **危害**：① 每个用户白拿一份从不执行的代码树；② 它是**永久的供应链面** ——
+  日后其中任一包爆洞，就自动变成"已分发"（本轮 `npm audit` 18 包里**恰好没有**命中的，
+  属侥幸，不能依赖）。
+  **做**：从 `dependencies` 删除 `docx`；`npm install` 更新 lock；确认 `app.asar` 缩到主进程量级。
+  **验收**：asar 条目数从 203 降到 **< 10**｜重建后产物冒烟通过｜`npm audit` 计数不变或更好。
+  ⚠️ 与其他 W2 项**共用同一次重建**（不要单独为它多建一次）。
+
+- [x] **B11-18 修掉 Pillow 12 的弃用调用 + 把"未来断裂"变成可机检**（新增／W2 预演发现／**与 B11-7 同一提交**） —— **R66 已核销**（证据见 §0.1）
+  **事实（隔离 venv 预演实测，2026-09-23）**：基于 Python311 建 `--system-site-packages`
+  隔离 venv（`…\binaries\python\envs\pbc-pillow12`），**只在该 venv 内**装
+  `Pillow 12.3.0`／`python-multipart 0.0.31`／`python-dotenv 1.2.2`／`requests 2.33.0`
+  ⇒ 跑全量 `tests/unit tests/integration`：**3223 passed / 0 failed**（与升级前**用例数一致**）
+  ⇒ **升级在源码级零破坏**。（**全局 Python311 未动**，升级后逐项核对仍为 10.1.0/0.0.21/1.2.1/2.32.4。）
+  **D1 已被直接证实会转绿**：对升级后的 4 行清单跑 `pip-audit -r`
+  ⇒ **`No known vulnerabilities found`（RC=0）**；且门禁给出的**最低安全版本与本次预演升到的完全一致**。
+  **但冒出 22 条 `DeprecationWarning`**：
+  `core/pipeline/self_heal.py:184,186 — Image.Image.getdata is deprecated and will be
+  removed in Pillow 14 (2027-10-15). Use get_flattened_data instead.`
+  ⚠️ **`Pillow 10.1.0` 不报这条** ⇒ 在**当前门禁环境**里它是"恒绿"的判据（PITFALLS §二十六/§四十同源）。
+  **做**：① `self_heal.py:184,186` 的 `getdata()` → `get_flattened_data()`，
+  **必须与 `requirements.txt` 的版本变更同一提交**（Pillow 10 **没有**该 API，
+  提前改会让当前环境直接跑不起来 —— 源码与锁定清单必须同批变）；
+  ② **护栏已备好并已变异验证**：`tests/unit/test_pillow_api_compat.py`（**10 条**，
+  变异 **7/7 CAUGHT**，对照表 `devlogs/_verify/mutate_pillow_compat.txt`）。
+  它**从 `requirements.txt` 派生阈值**（不手写），所以 **B11-7 一落地就会立刻变红并点名行号**
+  —— 变异 **M1 就是模拟这个场景**（把锁定值抬到 12.3.0）⇒ **CAUGHT**。
+  **验收**：升版后 ① 上述护栏 10 条全绿（⚠️ 届时要按文件内提示**更新**那条"惰性断言"，
+  **不是删掉它**）；② `pytest -W error::DeprecationWarning:core.*` **零命中**
+  —— 这一步用来发现**其它**未登记的弃用，命中的补进 `_DEPRECATED` 登记表。
+  ⚠️ **`pbc-pillow12` venv 的耗时不可当性能结论**：同一套用例在该 venv 里 **12m37s**
+  （基线 **6m09s**）。差异**未归因**，但"**采样环境不同**"（新建 venv 首次导入 + 杀软扫描）
+  足以解释 ⇒ **不得**据此宣称"升依赖导致 2× 性能回归"。B11-5 的吞吐实测**仍须在新鲜产物上做**。
+
+- [x] **B11-19 e2e 覆盖判据的"假绿"**（新增／W3 真验抓出／**已修 + 变异 7/7**／2026-09-23）
+  **事实**：B11-11 首次真跑报 `E2E_RC=0` + `[covered] llm_pipeline` + `status=review`，
+  但直查 `llm_call_audit` ⇒ **3 条调用 2 条失败**（`402`），findings 明写
+  「LLM 调用失败: RuntimeError」⇒ 终态是**降级路径**达成的，**LLM 从未跑通**。
+  **根因**：`tests/e2e_coverage.classify_pipeline` 规则 `if success and ready:` —— 把
+  「到达成功终态」当成「该链路已验」。而 `REQUIRE_LLM=1` 只查 `llm_pipeline` 是否
+  `covered` ⇒ **一条本该拦发版的门禁在真实运行里放行**。
+  ⚠️ 这条警告**是本项目自己写在 B9-7 里的**，但**只用在"没配凭据"这一种情形上**。
+  **修**：`covered` 必须由**产品自己暴露的证据**支撑
+  （`GET /api/jobs/{id}/llm_audit` → `success` 字段 / `ocr_backend_used`），
+  且**判据值禁止由终态推导**（AST 护栏钉住调用点必须传 `llm_call_succeeded`/
+  `ocr_backend_used`；豁免面只限显式 `upload_failed=True`，并**带阳性对照**）。
+  **验**：修复后**同场景复跑** `E2E_RC` 由 **0 → 1** 且点名 `llm_pipeline=failed`；
+  变异 **7/7 CAUGHT**（`devlogs/_verify/mutate_e2e_coverage.txt`）；单测 **45 passed**。
+  **改动范围**：仅 `tests/`（`BUNDLE_SOURCES` 不含 `tests/`）⇒ **不触发重建**。
+  教训 → **PITFALLS §四十二**（"成功终态 ≠ 链路已验"的假绿五类纪律）。
+
+- [x] **B11-20 清理工具的判据「恒假」**（新增／W2 实跑抓出／**已修 + 变异 4/4**／2026-09-23）
+  **事实**：`clean_dist.py --apply` 对两个残壳打印
+  `FAIL — SHFileOperationW rc=2 (0x00000002)`，而**磁盘上它们已经消失**。
+  隔离实验：对**刚建的小目录**调用同样 `ok=False` 但**目录也没了**
+  ⇒ 本机 `SHFileOperationW` **删除成功时亦返回 2** ⇒ 旧实现 `if rc != 0: return False`
+  **恒假**（§二十六：恒真与恒假一样零判别力）。
+  ⚠️ **假失败比假成功更危险** —— 它把操作者/自动化推向 `rm -rf`（本项目明令禁止）。
+  **修**：判据改为**可观测事实**（删前存在 ⇒ 删后必须不存在）；`rc` /
+  `fAnyOperationsAborted` 只降级为说明文字。
+  **验**：变异 **4/4 CAUGHT**（`devlogs/_verify/mutate_clean_dist.py`：回退 rc 判据 /
+  恒 `True` / 丢中止诊断 / 不存在也报成功）；端到端复跑 `--apply` ⇒ **`OK`** 且目录消失。
+  ⚠️ 缺陷潜伏至今的**直接原因**：旧用例把 `to_recycle_bin` **整个 stub 掉**，
+  判定分支**从未被真实执行** ⇒ 新护栏**只替换 Win32 调用**，让真实实现被走到。
+  教训 → **PITFALLS §四十四 A/B**。
+
+- [x] **B11-21 Electron 二进制下载通道 + npm 构建工具链归零**（新增／W2 实跑抓出／2026-09-23）
+  **背景**：`electron` 升到 `43.7.5`（B11-8 的一部分）后，打包**必然失败**。
+  两条独立事实：
+  1. **下载源够不着** —— 官方 GitHub releases 本机**不可达**：直连 `curl=000`、
+     走代理 `502 Bad Gateway`（同刻 `registry.npmjs.org` **可达**、`npm install`
+     455 包成功 ⇒ 只有 GitHub 被挡）。electron-builder 抛的就是那个 `502`。
+  2. **版本拿不到** —— 打包要 `electron-v43.7.5-win32-x64.zip`，它在
+     **npmmirror / 华为云 / 腾讯云 / 清华 全部 404**，而 **43.7.4 在四家全部 200**
+     （互为阳性对照）。⚠️ npm 上 43.7.5 的**包**是存在的 ⇒ "包在" ≠ "二进制可得"。
+  **做**：
+  - `build.ps1` 新增 **Step 3.0**：未设 `ELECTRON_MIRROR` 时指向
+    `https://npmmirror.com/mirrors/electron/`（**不覆盖**外部已设值，保留自建镜像/企业代理口子）。
+  - `package.json` 的 `electron` 钉**精确版本 `43.7.4`**
+    （⚠️ **不能**写 `^43.7.4` —— 那会解析回 43.7.5，又变成拿不到的版本）。
+  - `electron-builder` **25.1.8 → 26.15.3**（major）：消掉 npm 树里
+    **16 条公告（15 high + 1 critical `tar`）** ⇒ `npm audit` **found 0 vulnerabilities**。
+    ⚠️ 说明：本项目 `dependencies` 为**空**，npm 包全是**构建期 devDependencies**、
+    **不随包分发** ⇒ 这 16 条**本就不在 D1 判据范围内**
+    （D1 = "**产物依赖树**里没有已知漏洞"，由 `pip-audit` 对 `requirements.txt` 度量）。
+    此升级属**额外卫生收益**，**不是**门禁要求。
+  **验**：冒烟 `--dir` **RC=0**（配置 schema 兼容）；从产物二进制读回
+  **Electron 43.7.4 / Chrome 150.0.7871.250 / Node 24.21.0**
+  （旧产物为 33.4.11 / Chrome 130 / Node 20.18.3 ⇒ Chromium 前进 20 个大版本）。
+  **验收**：产物内版本落在 `docs/RUNTIME_SUPPORT.json` 的支持线 `[41,42,43]` 内（门禁 `runtime_eol`）。
+  教训 → **PITFALLS §四十五**（"包在"≠"二进制可得"；"网络通"要分域判；绕法要固化进构建入口）。
+
+> **最小分发路径**：`B11-1 → B11-7 → B11-2 → 一次重建 → B11-11`
+> ⇒ D1/D2/D3/D4/D5 全绿 ⇒ 允许分发。
+>
+> **⚠️ 更正（Round 59 续，2026-09-23 实测）**：旧记录写"**重建需用户退出宿主**"——
+> **该结论是错的**，已由三组实测推翻：① Restart Manager 探针显示用户重启宿主后
+> **三处 `app.asar` 全部 free**；② **新建**的 `app.asar`（工作区内/外）**从不被锁**
+> ⇒ "锁"针对的是**已存在的文件句柄**，不是文件名/路径；③ `build.ps1:375` 的既有设计
+> 就是**被占用时自动输出到新的时间戳目录**（归位仅 best-effort，**构建不会失败**），
+> 且实测三步构建的**其余输出路径全部 free**。
+> ⇒ **W2 重建不再被宿主锁阻塞**；真正的阻断只剩 **D1/D2（重建即可修）** 与
+> **D4（外部：账户余额）**。
+>
+> **W1 已完成**；**W2 现已解锁**（B11-7/8/9/10/17/18，一次重建同批做）：
+> - **W2**（B11-7/8/9/10/17/18）⇒ ✅ **锁已释放，可开工**（见上方更正）
+> - **W3**（B11-11/13）⇒ 🔴 **需账户充值**（402）与第 2 份真实批记录；
+>   **B11-12 的"真实后端"半边已验**
+> - B11-5 的**实测基线值**随 W2 重建一并采集（判据已就位，只差一次真实测量）
+
+
+
