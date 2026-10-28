@@ -38,7 +38,7 @@ PyMuPDF==1.26.7
 # ⚠️ Pillow 的求值必须在**同一提交**里连着 `core/pipeline/self_heal.py` 的
 # `get_flattened_data()` 一起改：Pillow 10 没有该方法，单改版本会 AttributeError，
 # 单改代码会在旧环境跑不起来。护栏 `tests/unit/test_pillow_api_compat.py` 钉住这一点。
-Pillow==12.3.0
+Pillow==13.0.0
 
 # 可选：仅当 provider 配置了 protocol=anthropic（如 Claude）时才需要。
 # 所有 OpenAI 协议 provider（DeepSeek / GLM / Kimi / Qwen / MiMo）走上面的
