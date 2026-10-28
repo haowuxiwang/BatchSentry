@@ -287,3 +287,35 @@ class TestNoticeStatesTheScope:
                 "requirements.txt 已不含 PyMuPDF，但 NOTICE 仍在声明它是 AGPL 依赖 —— "
                 "陈旧声明与实现不符"
             )
+
+
+class TestDistributionCarriesTheLicense:
+    """不变式 E：**分发物**必须带上 `LICENSE` 与 `NOTICE`。
+
+    AGPL §4/§5 要求向接收者提供许可证副本 —— 只把 LICENSE 放在**仓库**里不够：
+    交付物是 `dist-electron/win-unpacked/`（双击即用的便携目录），
+    接收者拿不到仓库。R129 实测此前 `build.ps1` / `electron-builder` 配置里
+    **没有**任何把这两个文件复制进产物的步骤（grep `LICENSE|NOTICE` 零命中）。
+    """
+
+    @staticmethod
+    def _extra_resources() -> list[dict]:
+        build = json.loads(_PACKAGE_JSON.read_text(encoding="utf-8"))["build"]
+        return list(build.get("extraResources") or [])
+
+    @pytest.mark.parametrize("name", ["LICENSE", "NOTICE"])
+    def test_license_files_are_shipped_into_the_artifact(self, name: str):
+        shipped = {entry.get("to") or entry.get("from") for entry in self._extra_resources()}
+        assert name in shipped, (
+            f"electron-builder 的 extraResources 没有把 {name} 放进产物 —— "
+            "接收者拿到的便携目录里就没有许可证副本"
+        )
+        assert (_ROOT / name).is_file(), f"{name} 不存在"
+
+    def test_shipped_source_paths_exist(self):
+        """`from` 写错时 electron-builder 会**静默跳过**，必须在这里判红。"""
+        for entry in self._extra_resources():
+            src = entry.get("from")
+            if not src or src.startswith("dist/"):
+                continue  # 构建产物，构建前不存在属正常
+            assert (_ROOT / src).exists(), f"extraResources.from 指向不存在的路径：{src}"
