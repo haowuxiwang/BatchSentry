@@ -62,6 +62,12 @@ CAUSE_SPEC_ZERO_BOUND = "spec_zero_bound"
 CAUSE_LIMIT_LITERAL = "limit_literal_beyond"
 CAUSE_RATIO_IMPLAUSIBLE = "ratio_implausible"
 CAUSE_SPEC_NOT_A_LIMIT = "spec_not_a_limit"
+#: TODO 0-72（2026-10-29 实测）：**关键参数**的手写读数即便落在规格内也不可自动放行。
+#: 为什么挂在这里而不是新开类型：它与上面几类的语义同族 —— 系统**知道这个
+#: "合格"结论没有被证据支撑**（值来自手写，OCR 单读；实测同一格 Paddle 整页、
+#: Paddle 400dpi 裁切、MinerU 三读全为 6.88，而原页是 1.88 ⇒ 越界被判合格）。
+#: 两引擎**同错**意味着"双读一致"不构成证据，所以唯一诚实的处置是交人工。
+CAUSE_KEY_PARAM_UNVERIFIED = "key_param_unverified"
 
 #: 「规格无法核定」的根因全集 —— `expected_type()` 的唯一判据来源。
 #: 不在集合内的 cause（printed/edge_margin/hard）才是真正的「超差」断言。
@@ -74,6 +80,7 @@ UNVERIFIABLE_CAUSES = frozenset({
     CAUSE_LIMIT_LITERAL,
     CAUSE_RATIO_IMPLAUSIBLE,
     CAUSE_SPEC_NOT_A_LIMIT,
+    CAUSE_KEY_PARAM_UNVERIFIED,
 })
 
 KIND_PARAM = "param"
@@ -226,6 +233,10 @@ _UNVERIFIABLE_BODY: dict[str, str] = {
     CAUSE_DECIMAL_LOSS: (
         "实测 {value}{unit} 与规格 {spec} 相差约 10 倍"
         "（疑似 OCR 丢失小数点，如 4.6 读成 46），请对照 PDF 原页人工核对"
+    ),
+    CAUSE_KEY_PARAM_UNVERIFIED: (
+        "记录值「{raw}」来自手写，且该行在原页标为关键参数（▲/★）；手写数字的"
+        "OCR 读数未经复核，即使落在规格 {spec} 内也不能据此放行，请对照原页核对原值"
     ),
 }
 

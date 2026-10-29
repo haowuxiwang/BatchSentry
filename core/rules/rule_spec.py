@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Optional
 
 from core.rules.parsing import (
@@ -20,6 +21,7 @@ from core.rules.finding_aggregate import (
     CAUSE_DECIMAL_LOSS,
     CAUSE_EDGE_MARGIN,
     CAUSE_HARD,
+    CAUSE_KEY_PARAM_UNVERIFIED,
     CAUSE_PRINTED,
     CAUSE_RATIO_IMPLAUSIBLE,
     CAUSE_SIGN_UNCERTAIN,
@@ -35,6 +37,51 @@ from core.rules.finding_aggregate import (
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# 关键参数标记（TODO 0-72）
+# ---------------------------------------------------------------------------
+
+#: 原页用来标注「关键工艺参数」「质量控制点」的符号（页脚有图例：
+#: 「▲有下划线标的为关键工艺参数，★有下划线标的为质量控制点」）。
+_KEY_MARKERS = ("▲", "★")
+#: 标记与规格字面量的最大字符距离。取 90 是因为实测行文形如
+#: `▲pH为 6.8~7.0。` / `★...≤1.5`，而页脚图例里 ▲/★ 不跟规格字面量。
+_MARK_WINDOW_BEFORE = 12
+_MARK_WINDOW_AFTER = 90
+_WS = re.compile(r"\s+")
+_DASHES = re.compile(r"[~～\-－—–至]")
+
+
+def _norm_literal(s) -> str:
+    """抹空白 + 统一区间连接符，使 ``6.8~7.0`` / ``6.8 - 7.0`` 可比。"""
+    return _DASHES.sub("-", _WS.sub("", str(s or "")))
+
+
+def _key_param_marked(page_text: str, spec) -> bool:
+    """该参数的规格字面量是否**紧邻**关键参数标记（▲/★）。
+
+    判定完全确定性（可离线复算）。为什么用"规格字面量"而不是参数名做锚：
+    参数名是 LLM 归并后的（`中和后 pH`），而原页指导栏写的是 `▲pH为 6.8~7.0`
+    —— 名字对不上，规格字面量却能逐字符命中。页脚图例虽有 ▲/★，但窗口内
+    没有规格字面量，故不会误命中。
+    """
+    lit = _norm_literal(spec)
+    if len(lit) < 3 or not page_text:
+        return False
+    text = str(page_text)
+    for mk in _KEY_MARKERS:
+        start = 0
+        while True:
+            i = text.find(mk, start)
+            if i < 0:
+                break
+            seg = text[max(0, i - _MARK_WINDOW_BEFORE): i + _MARK_WINDOW_AFTER]
+            if lit in _norm_literal(seg):
+                return True
+            start = i + 1
+    return False
+
+
 
 # ---------------------------------------------------------------------------
 # R3: param_out_of_spec (rule-judgable only; rest go to llm_queue)
@@ -45,28 +92,33 @@ def _check_param_out_of_spec(pages: list[dict], llm_queue: list[dict]) -> list[d
     findings = []
     for page in pages:
         pno = page["page"]
+        # 关键参数标记只在**原文**里（结构化参数没有这一列），故整页取一次。
+        page_text = page.get("raw_html") or ""
         for step in page["steps"]:
             step_no = step.get("step_no", "?")
             # single-value parameters
             for p in step.get("parameters", []) or []:
-                _judge_param(p, pno, step_no, p.get("name", ""), findings, llm_queue)
+                _judge_param(p, pno, step_no, p.get("name", ""), findings, llm_queue,
+                             page_text=page_text)
             # matrix cells
             for m_idx, m in enumerate(step.get("measurements", []) or []):
                 t = m.get("time", "")
                 for col, val in (m.get("values") or {}).items():
-                    _judge_cell(val, pno, step_no, col, t, findings, llm_queue)
+                    _judge_cell(val, pno, step_no, col, t, findings, llm_queue,
+                                page_text=page_text)
     return findings
 
 
 def _judge_param(p: dict, page: int, step_no, name: str,
-                 findings: list[dict], llm_queue: list[dict]) -> Optional[bool]:
+                 findings: list[dict], llm_queue: list[dict],
+                 page_text: str = "") -> Optional[bool]:
     """单值参数判定 —— 只是 :func:`_judge_value` 的取字段壳（判定逻辑唯一）。"""
     res = _judge_value(
         page=page, step_no=step_no, name=name,
         spec=p.get("spec_range"), actual=p.get("value"),
         unit=p.get("unit") or "", kind=KIND_PARAM, where="",
         value_source=p.get("value_source"),
-        findings=findings, llm_queue=llm_queue,
+        findings=findings, llm_queue=llm_queue, page_text=page_text,
     )
     if res is not None:
         p["in_spec"] = res
@@ -74,14 +126,15 @@ def _judge_param(p: dict, page: int, step_no, name: str,
 
 
 def _judge_cell(val: dict, page: int, step_no, col: str, t: str,
-                findings: list[dict], llm_queue: list[dict]) -> Optional[bool]:
+                findings: list[dict], llm_queue: list[dict],
+                page_text: str = "") -> Optional[bool]:
     """矩阵单元格判定 —— 同上，只是 ``where`` 带时间点。"""
     res = _judge_value(
         page=page, step_no=step_no, name=col,
         spec=val.get("spec"), actual=val.get("actual"),
         unit=val.get("unit") or "", kind=KIND_CELL, where=t,
         value_source=val.get("value_source"),
-        findings=findings, llm_queue=llm_queue,
+        findings=findings, llm_queue=llm_queue, page_text=page_text,
     )
     if res is not None:
         val["in_spec"] = res
@@ -90,7 +143,8 @@ def _judge_cell(val: dict, page: int, step_no, col: str, t: str,
 
 def _judge_value(*, page: int, step_no, name: str, spec, actual, unit: str,
                  kind: str, where: str, value_source,
-                 findings: list[dict], llm_queue: list[dict]) -> Optional[bool]:
+                 findings: list[dict], llm_queue: list[dict],
+                 page_text: str = "") -> Optional[bool]:
     """参数/单元格的**唯一**判定实现。
 
     返回 ``True``（合规）/ ``False``（超差）/ ``None``（不可判，已分流）。
@@ -169,6 +223,19 @@ def _judge_value(*, page: int, step_no, name: str, spec, actual, unit: str,
         return None
     in_spec = _judge(bounds, compare_num)
     if in_spec:
+        # TODO 0-72：**关键参数 + 手写**的「合格」不是证据支撑的结论。
+        # 实测（2026-10-29）：同一格 pH 原页 1.88（越界 6.8~7.0），Paddle 整页、
+        # Paddle 400dpi 裁切、MinerU 三次读全是 6.88 ⇒ 双引擎**同错**，
+        # "二次读一致"不能当证据。既然"值对不对"不可自证，就只能交人工，
+        # 而不是静默返回 True。取值范围：仅原页标了 ▲/★ 的行（见 _key_param_marked）。
+        if value_source == "handwritten" and _key_param_marked(page_text, spec):
+            findings.append(make_oos_finding(
+                page=page, type_=expected_type(CAUSE_KEY_PARAM_UNVERIFIED),
+                severity="info", kind=kind, subject=name,
+                cause=CAUSE_KEY_PARAM_UNVERIFIED,
+                desc_value=actual_num, raw_value=actual, unit=unit or "",
+                spec=spec, where=where,
+            ))
         return True
 
     # ③ 越界可信度 —— 这个"越界"本身可信吗？（CR-12 ①②）
