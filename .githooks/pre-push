@@ -1,0 +1,4 @@
+#!/bin/sh
+# git pre-push 钩子：委托给 Python 实现（单测可覆盖，见 tests/unit/test_pre_push_guard.py）。
+# 启用：git config core.hooksPath .githooks
+exec python "$(git rev-parse --show-toplevel)/scripts/pre_push_guard.py"
