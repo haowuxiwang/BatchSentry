@@ -6,6 +6,55 @@
 ---
 
 ## [Unreleased]
+### 手写读数派生结论降级 + 同源误读去重（Round 132，2026-10-29）—— 0-74 / 0-75
+
+**这一轮回答的是"两份批记录上，BatchSentry 的结论比人眼多说了什么"。** 做法是先把两份真实
+记录（10 页 / 51 页）的 findings 与原页逐条对照（人工看页图 + 机器核对 OCR 字面量），
+再只修**已经定位到具体页与具体格**的两类缺陷 —— 先定位、再解决、最后测试。
+
+**① 51 页交叉核对（取证脚本 `devlogs/_verify/xcheck_slm_r2.py`，产物 gitignored）**：
+183 条 findings 对照全文档 raw OCR + 结构化生产日期，**同源重复 0 条**；"字面量在原文里
+找不到"2 条，逐条看过都能解释 —— p21「实际值」是引号内的**参数名**被脚本当成姓名，
+p36 的 `2026-10-29` 是系统注入的"今天"（不是页内读数）。⇒ 本语料上**未发现幻觉证据**。
+⚠️ 边界：该轮 `llm_cross` 全 0（p0 #145 自身报 `LLM 调用失败: RuntimeError`）⇒ 51 页只验到
+页级链路，跨页语义链路的证据仍来自 10 页轮。
+
+**② 0-74：手写数字的比较结论不再直接定性（`_check_handwritten_numeric_conclusion`）**。
+p9 的 PE 袋平衡表，原页 600 dpi 直读 领用 **30** / 使用 **30** / 损耗 **0**，OCR 把平顶的
+"3" 读成 "2" ⇒ LLM 判「使用数大于领用数」。修法**不是**按文案去猜，而是要求
+**结构化里的机器事实**：`type=mass_balance` + 文案含比较词 + 引用的数字与
+`value_source=handwritten` 的数字**相交** ⇒ 降级为 `info`，`guard_reason` 写明
+"结论依赖手写数值…请对照原页确认读数"。
+刻意**只降级、不抑制**（记录是否真不平衡仍需人工结论），且**fail-open**：拿不到结构化
+手写证据就不动。⚠️ 目前只建模 `mass_balance` 一类，"手写读数派生硬结论"的其它形态未覆盖。
+
+**③ 0-75：同一次误读只报一条，且不准自称"篡改"**。p8 复核人日期实为 `2025.06.30`，OCR 读成
+`2015.6.03`；页级报 `signature_time_anomaly`、跨页又把同一字面量报成 `suspicious_date`
+并写「记录篡改嫌疑」。
+- **去重**（`stage3._same_literal_covered_by`）：判据是**同页 + 同一日期字面量**已由
+  `llm_page`/`llm_cross` 报过 ⇒ 后者抑制，审计 `covered_by=…_same_literal` 单独计数。
+  刻意**只限** `suspicious_date` / `signature_time_anomaly`（"同一处签名日期读数异常"的
+  两种说法）；**排除** `year_contradiction` / `time_reversal` —— 它们断言的是**关系**，
+  实测 51 页 p2 的 #5 与 #7 共享 `2025.01.30` 却是两件事，按字面量合并会**漏报**。
+  规则层条目**豁免**（不得让一条 LLM 误读去删确定性判据）。
+- **措辞**（`llm_finding_guard.sanitize_accusatory_wording`）：仅 `source ∈ LLM_SOURCES`，
+  把「篡改/伪造/造假/捏造」整句改写为"日期读数可能异常（不排除 OCR 误读），需人工核对"，
+  原降级理由**追加**进 `guard_reason`（不覆盖）。规则层文案逐字不动。
+
+**④ 测试**：`tests/unit/test_llm_finding_guard.py` +3（手写降级 / 印刷值不降级 /
+无结构化 fail-open）与 +2（LLM 措辞被改写且留痕 / 规则层豁免）；
+`tests/unit/test_r95_manual_labels.py` +5（同字面量去重 / 不同字面量保留 / 非日期类型保留 /
+规则来源豁免 / 关系类不合并）。定向 **110 passed**；全量门禁见下。
+
+**⑤ 构建物**：本批代码提交后重建，`PROVENANCE.txt` = `git_head cd497b5` /
+`built_at 2026-10-29 10:29:01` / `version 1.2.1`；`dist/pbc-server` 与
+`dist-electron/.../resources/pbc-server` 两份 exe **sha256 一致**（`bdcfad50…`）。
+
+**⑥ 公开面与开源基线仍未齐（承 Round 131，0-79 保持"部分完成"）**：`CODE_OF_CONDUCT.md`、
+Issue/PR 模板、`CODEOWNERS`、`.gitattributes`、`.editorconfig`、`THIRD_PARTY_LICENSES.md`、
+发布 `SHA256SUMS` + tag **仍不存在**；`.github/workflows/ci.yml` 注释引用 `release.yml`，
+但该文件不存在。`package.json` 无 `repository` 字段。
+
 ### 泄漏补救收尾 + 开源治理补位（Round 131，2026-10-29）—— 0-77 / 0-78 / 0-79
 
 **这一轮回答的是"已泄露信息的补救到底做完了没有"。** 结论：**公开面干净，本地收尾了，但
