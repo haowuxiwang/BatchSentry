@@ -6,6 +6,51 @@
 ---
 
 ## [Unreleased]
+### 泄漏补救收尾 + 开源治理补位（Round 131，2026-10-29）—— 0-77 / 0-78 / 0-79
+
+**这一轮回答的是"已泄露信息的补救到底做完了没有"。** 结论：**公开面干净，本地收尾了，但
+公开历史里还留着一个已轮换的 key 字符串**。
+
+**① 旧历史还活着，只是挂在 tag 上（0-77）**。删库重建后，远端 `main` 只有 2 个提交，
+但本地 5 个旧 tag（`v1.0.0` / `v1.1.0` / `v1.1.1` / `v1.1.2` / `v1.1.9`）分别锚定
+**82 / 158 / 164 / 176 / 250** 个旧提交。用 PII 映射表（28 条）扫描：
+- `--remotes`（已发布的全部引用，11 提交）⇒ **0 命中**；
+- `--tags`（250 提交）⇒ **816 处命中**（`.gitignore`、`docs/REGION_ANCHOR_VISUAL_CHECK.md`、`tests/...`）。
+
+`git ls-remote --tags origin` 为空、GitHub `/tags` 页无内容 ⇒ **远端从未泄漏**，
+但只要一次 `git push --tags` 就会把已删库的真实批号/姓名重新公开。
+**处置**：`git tag -d` 5 个 → `git reflog expire --expire=now --all` → `git gc --prune=now`。
+处置后 `history_pii_scan.py --all` = **13 提交 / 0 命中 / 无 unreachable 对象**，
+`git cat-file -t c70a620` 已 Not a valid object（旧提交不可恢复）。
+⚠️ 代价：`release-archive/` 旧包 `PROVENANCE` 里的 `git_head a225fb8` 也一并不可解析 ——
+审计线索只剩归档包本身（用户选择"彻底清除"，此代价已知）。
+
+**② 推送防护（0-77 的后半）**：`.githooks/pre-push` → `scripts/pre_push_guard.py`
+（Python 实现，便于单测）**拒绝推送任何 tag、拒绝推送非 main 分支**；
+确需发版时 `ALLOW_TAG_PUSH=1 git push --tags`。启用：`git config core.hooksPath .githooks`。
+`tests/unit/test_pre_push_guard.py` **8 条**（含真跑进程的退出码契约，不只测纯函数）。
+⚠️ 边界：钩子是**每克隆自行启用**的，不是服务端策略；服务端仍需分支保护（见 0-79 的残余）。
+
+**③ 公开树里还留着一把真 key（0-78）**。`tests/unit/test_no_committed_secrets.py`
+此前用**两段字符串拼接**保存 2026-09-15 泄漏的真 key（51 字符）—— 拼接只骗过了正则，
+GitHub secret scanning 与人工审阅都看不见它。**处置**：删掉字面量，改存 **SHA-256 指纹**
+（`5d855143…e4501`），护栏改为"对每个 `sk-…{32,}` 候选算哈希再比对"——既移除了真值，
+又保留"这把 key 被写回任何文件就能被认出"的能力。docstring 如实声明新边界：
+**无法**识别被拆得更碎（逐字符拼接）的变体。
+⚠️ **残余**：已发布的 2 个提交历史里仍有那个拼接串 —— 该 key 已于 2026-09-28 轮换
+（0-66），**不重写公开历史**（重写会连带 10 条 dependabot 分支与 1 个 PR）。
+
+**④ 开源治理补位（0-79，本轮只做用户选定的两项）**：
+- 新增 `SECURITY.md`：支持版本、**走私密 Advisory** 的报告通道、响应时限、数据边界、
+  密钥轮换、以及"OCR 误读是已知失效模式"的边界声明。
+- `README` 新增「**数据与隐私**」（批记录会发往第三方 OCR/LLM；能否出境由部署方评估）
+  与「**合规边界与免责声明**」（不构成放行结论、未做 21 CFR Part 11 / GMP 附录 11 验证、
+  关键参数手写读数强制转人工）。
+- **仍未做**（0-79 保持部分完成）：`CODE_OF_CONDUCT` / Issue 与 PR 模板 / `CODEOWNERS` /
+  `.gitattributes` / `THIRD_PARTY_LICENSES` 入库清单 / 发布附 `SHA256SUMS` 与 tag。
+- 顺带记录：仓库里唯一被跟踪的二进制是 `docs/BatchSentry_发布说明.pdf`（554 KB，
+  18 页，用映射表扫描 **0 命中**、无 8 位批号形态）；建议后续移到 GitHub Releases。
+
 ### 关键参数的手写读数不再"静默判合格"（Round 130，2026-10-29）—— 0-72
 
 **为什么**：51 页真实批记录 p6「中和后 pH」原页手写 **1.88**（规格 6.8~7.0 ⇒ 越界），

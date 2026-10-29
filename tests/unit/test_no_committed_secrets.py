@@ -23,6 +23,7 @@
 其他厂商自定义前缀、私钥 PEM 块等）**不在覆盖范围内**。
 **不要因为本文件全绿就认为"仓库里没有任何密钥"。**
 """
+import hashlib
 import re
 from pathlib import Path
 
@@ -33,10 +34,11 @@ _ROOT = Path(__file__).resolve().parents[2]
 # 唯一真值：与 DEPLOYMENT.md 第 4 步记录的命令**同一模式**（有测试做绑定）
 _KEY_RE = re.compile(r"sk-[A-Za-z0-9]{32,}")
 
-# 曾经随提交进入 git 历史的真实 LLM 密钥（2026-09-15 发现）。
-# **故意用拼接**构造，使本文件自身不含连串的 `sk-` 字面量 —— 否则只能靠豁免放行，
-# 而豁免会让"往这个文件里加密钥"也逃过检查。
-_LEAKED_KEY = "sk-vprnpmjfzbcinduybbsboaw" + "tjxtrnrhfldbargfwzkieuczu"
+# 曾经随提交进入 git 历史的真实 LLM 密钥（2026-09-15 发现，51 字符）。
+# **公开仓库只留 SHA-256 指纹**：R131 实测发现原先"两段拼接"仍把真串放进了公开树 ——
+# 拼接只能骗过正则，GitHub secret scanning 与人工审阅都看不见它。存指纹的代价是
+# **无法**识别"被拆得更碎"的变体（如逐字符拼接），该边界如实声明。
+_LEAKED_KEY_SHA256 = "5d8551434507d608ac377a41059cc09b73c72f4b315d8b27f757894f126e4501"
 
 # 扫描范围：所有"应当无密钥"的源码 / 文档 / 配置模板目录
 _SCAN_DIRS = (
@@ -101,13 +103,19 @@ def _read(rel: Path) -> str | None:
 def test_no_leaked_key_in_source_tree():
     """工作树任何源文件都不得出现那把**已泄漏的真实密钥**。
 
-    与下面的通用扫描**并列而非重复**：本用例用字符串直接比对，不依赖 `_KEY_RE`。
-    即便有人把正则改松（甚至改到认不出 32 位形态），这条仍然守得住。
+    与下面的通用扫描**并列而非重复**：本用例按**指纹**（SHA-256）比对，不依赖
+    "角色串长什么样"；即便有人把正则改松（甚至改到认不出 32 位形态），这条仍守得住。
     """
-    offenders = [
-        rel.as_posix() for rel in _scanned_files()
-        if (text := _read(rel)) is not None and _LEAKED_KEY in text
-    ]
+    offenders = []
+    for rel in _scanned_files():
+        text = _read(rel)
+        if text is None:
+            continue
+        if any(
+            hashlib.sha256(tok.encode()).hexdigest() == _LEAKED_KEY_SHA256
+            for tok in _KEY_RE.findall(text)
+        ):
+            offenders.append(rel.as_posix())
     assert not offenders, (
         "以下文件仍硬编码着已泄漏的 LLM 密钥（应改为从环境变量读取）：\n"
         + "\n".join(f"  - {o}" for o in offenders)
@@ -146,8 +154,9 @@ def test_secret_scan_positive_control():
     # ① 与真实事故同形态、同量级（48 位）：拼接构造
     synthetic = "DEEPSEEK_API_KEY = " + '"sk-' + "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8" + '"'
     assert find_secrets(synthetic), "护栏未能识别形如真实密钥的串（会给出虚假的干净结论）"
-    # ② 那把真事故密钥本身也必须被通用规则认出（与上面的直接比对互为印证）
-    assert find_secrets("k=" + _LEAKED_KEY), "护栏未能识别已泄漏密钥的形态"
+    # ② 真事故密钥已从仓库移除（只留 SHA-256 指纹）⇒ 用**同形态**合成串验证
+    #    "指纹比对的输入仍然存在"：若通用规则认不出该形态，指纹那条就永远没有候选
+    assert find_secrets("k=" + "sk-" + "Zq7" * 16), "护栏未能识别 51 字符形态的密钥"
     # ③ 反向：夹具 / 占位符（`sk-` 后很快遇 `-` 或不足 32 位）不得命中
     assert not find_secrets("sk-test-fake-key-" + "x" * 32)
     assert not find_secrets("sk-test-key-for-unit-test-only")
