@@ -642,3 +642,98 @@ class TestL2GroundingExcludesSystemDates:
         g = {"description": "记录年份 2027 与当前日期 2026.09 不符", "ocr_text": self.RAW}
         r = _check_grounding(g, self.RAW, exclude_dates={(2026, 9, 18)})
         assert r is not None and "2027" in r, f"2027 不在池内，必须仍被标出：{r}"
+
+
+# ── R132 / 0-74：手写数字派生的算术结论 ⇒ 只降级 ───────────────────────
+
+#: 试用批记录 p9 的最小复现：领用/使用都是手写格，OCR 把领用 30 读成 20。
+STRUCT_P9_HANDWRITTEN = {
+    "page_info": {"production_date": "2026-06-30"},
+    "steps": [{
+        "step_no": "8",
+        "measurements": [{
+            "time": "",
+            "values": {
+                "领用数": {"spec": "", "actual": "20", "value_source": "handwritten"},
+                "使用数": {"spec": "", "actual": "30", "value_source": "handwritten"},
+            },
+        }],
+    }],
+}
+
+#: 同一结论、但两格都是**印刷**值（反向控制：不该被降级）。
+STRUCT_P9_PRINTED = {
+    "page_info": {"production_date": "2026-06-30"},
+    "steps": [{
+        "step_no": "8",
+        "measurements": [{
+            "time": "",
+            "values": {
+                "领用数": {"spec": "", "actual": "20", "value_source": "printed"},
+                "使用数": {"spec": "", "actual": "30", "value_source": "printed"},
+            },
+        }],
+    }],
+}
+
+
+class TestHandwrittenNumericConclusion:
+    """p9 实测：LLM 用两个手写读数判「物料不平衡」。"""
+
+    DESC = "PE袋领用数 20 只、使用数 30 只，使用数大于领用数，物料平衡逻辑存在错误。"
+
+    def test_handwritten_comparison_downgraded(self):
+        kept, down, sup = _review(
+            _f(9, "mass_balance", "warning", self.DESC), {9: STRUCT_P9_HANDWRITTEN},
+        )
+        assert sup == [], "手写读数只降级、不得静默抑制（记录是否平衡仍需核对）"
+        assert len(kept) == 0
+        assert down and down[0]["to_severity"] == "info"
+        assert "手写" in down[0]["reason"], down
+
+    def test_printed_comparison_not_downgraded(self):
+        """反向控制：印刷值之间的真实不平衡不得被这条护栏打哑。"""
+        kept, down, sup = _review(
+            _f(9, "mass_balance", "warning", self.DESC), {9: STRUCT_P9_PRINTED},
+        )
+        assert sup == []
+        assert len(kept) == 1 and not down, (
+            f"印刷值属于强证据，降级即误伤：kept={kept} down={down}"
+        )
+
+    def test_no_structured_fail_open(self):
+        """无结构化数据 ⇒ 无法证明手写 ⇒ 不动（fail-open）。"""
+        kept, down, sup = _review(_f(9, "mass_balance", "warning", self.DESC))
+        assert sup == []
+        assert len(kept) == 1 and not down
+
+
+# ── R132 / 0-75：指控性措辞收口 ────────────────────────────────────────
+
+class TestAccusatoryWording:
+    """p8 实测：单个 OCR 误读（2015 实为 2025）被 LLM 写成「篡改嫌疑」。"""
+
+    DESC = "复核人签名日期 2015.6.03 早于生产日期 2026.06.30，存在明显的日期错误或记录篡改嫌疑。"
+
+    def test_llm_tamper_claim_neutralized(self):
+        final, sup = apply_review(
+            [_f(8, "suspicious_date", "critical", self.DESC,
+                ocr_text="复核人/日期：2015.6.03")],
+        )
+        assert not sup, "日期本身仍需核对，不应整条抑制"
+        assert final, "条目必须保留（降级也要可见）"
+        desc = final[0]["description"]
+        assert "篡改" not in desc and "嫌疑" not in desc, desc
+        assert "需人工核对" in desc, desc
+        assert "日期读数可能异常" in desc, desc
+        assert "篡改" in final[0]["guard_reason"], "改写原因须留痕"
+
+    def test_rule_findings_never_rewritten(self):
+        """范围守卫：规则层文案是确定性判据，不参与措辞改写。"""
+        final, _sup = apply_review(
+            [{"page": 8, "type": "suspicious_date", "severity": "warning",
+              "description": "日期 2015.6.04 疑似篡改", "source": "rule"}],
+        )
+        assert any("篡改" in f["description"] for f in final), (
+            f"规则层条目不应被改写：{final}"
+        )

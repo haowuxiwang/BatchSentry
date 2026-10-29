@@ -719,3 +719,69 @@ class TestCrossSourceDedup:
         assert _overlap_covered_by(
             3, "completeness", "llm_cross", rule, page,
         ) is None
+
+
+class TestSameDateLiteralDedup:
+    """R132 / 0-75：同一页 + 同一日期字面量的日期类主张只留一条。
+
+    实测 p8：同一个 OCR 误读 `2015.6.03` 被 llm_page 报成
+    `signature_time_anomaly`、被 llm_cross 又报成 `suspicious_date`。
+    """
+
+    @staticmethod
+    def _cross(desc, ocr=""):
+        return {"page": 8, "description": desc, "ocr_text": ocr}
+
+    def test_same_literal_on_same_page_is_deduped(self):
+        from core.pipeline.stage3 import _same_literal_covered_by
+
+        covered = {(8, "2015.6.03"): "llm_page"}
+        f = self._cross(
+            "复核人签名日期 2015.6.03 早于生产日期 2026.06.30，存在日期异常",
+            "复核人/日期：2015.6.03",
+        )
+        assert _same_literal_covered_by(
+            f, "suspicious_date", "llm_cross", covered,
+        ) == "llm_page_same_literal"
+
+    def test_different_literal_survives(self):
+        from core.pipeline.stage3 import _same_literal_covered_by
+
+        covered = {(8, "2015.6.03"): "llm_page"}
+        f = self._cross("复核人签名日期 2016.7.04 早于生产日期")
+        assert _same_literal_covered_by(
+            f, "signature_time_anomaly", "llm_cross", covered,
+        ) is None
+
+    def test_non_date_claim_survives(self):
+        """同字面量但类型不属日期主张 ⇒ 不套用（避免吞掉独立缺陷）。"""
+        from core.pipeline.stage3 import _same_literal_covered_by
+
+        covered = {(8, "2015.6.03"): "llm_page"}
+        f = self._cross("签名栏日期 2015.6.03 旁的无姓名栏位")
+        assert _same_literal_covered_by(f, "completeness", "llm_cross", covered) is None
+
+    def test_rule_source_exempt(self):
+        """规则层的日期条目不得被 LLM 同字面量条目吞掉（方向反了）。"""
+        from core.pipeline.stage3 import _same_literal_covered_by
+
+        covered = {(8, "2015.6.03"): "llm_page"}
+        f = self._cross("2015.6.03 日期异常")
+        assert _same_literal_covered_by(f, "suspicious_date", "rule", covered) is None
+
+    def test_relation_claims_not_deduped(self):
+        """反例（51 页 p2 实测）：共享字面量但断言**关系**的条目不得被吞。
+
+        #5 suspicious_date 与 #7 year_contradiction 的 OCR 文本都含
+        2025.01.30，但 #7 讲的是 review 事件年份不一致 —— 是另一件事。
+        """
+        from core.pipeline.stage3 import _same_literal_covered_by
+
+        covered = {(2, "2025.01.30"): "llm_page"}
+        f = self._cross(
+            "车间负责人审核年份（2025）与QA产品负责人审核年份（2022）不一致",
+            "QA：2022.05.09；车间负责人审核/日期：王2025.01.30",
+        )
+        assert _same_literal_covered_by(f, "year_contradiction", "llm_cross", covered) is None
+        g = self._cross("开始时间晚于结束时间 2025.01.30", "2025.01.30")
+        assert _same_literal_covered_by(g, "time_reversal", "llm_cross", covered) is None

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 
 from core.pipeline.state import _audit_log, transition_status
@@ -21,6 +22,57 @@ _TYPE_FAMILY: dict[str, str] = {
 #: 允许被跨源去重抑制的来源。`user_rule` **豁免**：用户显式规则与规则层撞
 #: (page, type) 是正常共存，不是重复。
 _DEDUP_SOURCES = ("llm_cross", "llm_fallback")
+
+
+#: R132 / TODO 0-75：**同一日期字面量**上的日期类主张（跨源/同源去重）。
+#:
+#: 实测（试用批记录 p8）：页级 LLM 报 `signature_time_anomaly`（"复核人签名
+#: 日期 2015.6.03 早于生产日期 2026.06.30"），跨页 LLM 又把同一个 2015.6.03
+#: 说成 `suspicious_date`（"年份早于 2000……篡改嫌疑"）。两条的**证据字面量
+#: 完全相同**（那个 2015 是 OCR 把 2025 读错），只是标签不同 ⇒ 复核页看到
+#: 两张卡片指向同一处、其中一张还升级成指控。
+#:
+#: 判据刻意只认**字面量集合相交**，不认"日期类"泛化。而且**只限两类**：
+#: ``suspicious_date`` 与 ``signature_time_anomaly`` —— 它们是"同一处签名日期
+#: 读数异常"的两种说法（实测 p8 正是如此）。**排除** ``year_contradiction`` /
+#: ``time_reversal``：它们断言的是**关系**（两个审批年份不一致 / 结束早于开始），
+#: 即使文案里出现了同一个字面量也是另一件事。反例实测（51 页 p2）：
+#: #5 suspicious_date 与 #7 year_contradiction 共享 2025.01.30 的 OCR 文本，
+#: 但 #7 讲的是 review 事件年份不一致 —— 按字面量合并会**漏报**。
+_DATE_DEDUP_TYPES = frozenset({"suspicious_date", "signature_time_anomaly"})
+_DATE_LITERAL_RE = re.compile(
+    r"(\d{4})\s*[.\-/年]\s*(\d{1,2})(?:\s*[.\-/月]\s*(\d{1,2})\s*日?)?"
+)
+
+
+def _date_claim_literals(f: dict) -> set[str]:
+    """finding 文案里出现的日期字面量（去空白归一，如 ``2015.6.03``）。"""
+    text = f"{f.get('description') or ''} {f.get('ocr_text') or ''}"
+    return {re.sub(r"\s+", "", m.group(0)) for m in _DATE_LITERAL_RE.finditer(text)}
+
+
+def _same_literal_covered_by(
+    f: dict,
+    ftype: str,
+    src: str,
+    covered: dict[tuple[int, str], str],
+) -> str | None:
+    """同页 + **同一日期字面量**已被其他 LLM 条目报告 ⇒ 返回覆盖者。
+
+    ``covered`` 由 ``(page, literal) -> "llm_page"/"llm_cross"`` 组成。
+    只对 :data:`_DEDUP_SOURCES` 与 :data:`_DATE_DEDUP_TYPES` 生效；
+    规则层的日期条目走 :func:`_overlap_covered_by` 的精确类型判据，不在此处。
+    """
+    # 规则层/用户规则的日期条目**豁免**：规则层用精确类型判据
+    # （`_overlap_covered_by`）。若在这里按字面量吞规则发现，等于让一条
+    # LLM 误读（2015 实为 2025）去删掉确定性判据 —— 方向反了。
+    if src not in _DEDUP_SOURCES or ftype not in _DATE_DEDUP_TYPES:
+        return None
+    for lit in _date_claim_literals(f):
+        owner = covered.get((f["page"], lit))
+        if owner:
+            return f"{owner}_same_literal"
+    return None
 
 
 def _overlap_covered_by(
@@ -383,15 +435,28 @@ async def _run_stage3_cross_analysis(
     # "签名姓名不一致" 被 llm_page 与 llm_cross 各报一次，复核页看到两张
     # 几乎一样的卡片。页级视图更贴近原页证据，保留它、抑制跨页那条。
     cursor = await db.execute(
-        "SELECT page, type FROM findings WHERE job_id = ? AND source = 'llm_page'",
+        "SELECT page, type, description, ocr_text FROM findings "
+        "WHERE job_id = ? AND source = 'llm_page'",
         (job_id,),
     )
+    _llm_page_rows = await cursor.fetchall()
     llm_page_covered: set[tuple] = {
-        (row["page"], row["type"]) for row in await cursor.fetchall()
+        (row["page"], row["type"]) for row in _llm_page_rows
     }
     llm_page_covered = {
         (pg, _TYPE_FAMILY.get(t, t)) for pg, t in llm_page_covered
     }
+    # R132 / 0-75：页级 LLM 在**同一日期字面量**上已有的日期类主张。
+    # 例：p8 llm_page 已把 2015.6.03 报为 signature_time_anomaly ⇒ 跨页 LLM
+    # 再把它报成 suspicious_date 属同源重复（那个 2015 本身就是 OCR 误读）。
+    llm_page_literals: dict[tuple[int, str], str] = {}
+    for row in _llm_page_rows:
+        if str(row["type"] or "") not in _DATE_DEDUP_TYPES:
+            continue
+        for lit in _date_claim_literals({
+            "description": row["description"], "ocr_text": row["ocr_text"],
+        }):
+            llm_page_literals.setdefault((row["page"], lit), "llm_page")
     # R104/P1-4：**规则层已判定"该页签名辨认不可靠"的页**（`signature_unreadable`）。
     #
     # CR-4（R98）的口径是：同一人的工序对**全部**至少有一侧 `confidence: low`
@@ -414,6 +479,9 @@ async def _run_stage3_cross_analysis(
     #: 其中"前提不可判"那一类（P1-4）—— 与"同页同类型重复"是不同理由，
     #: 审计里分开计数，否则回看时会把两种抑制混成一句"已被规则层覆盖"。
     unfounded_self_review = 0
+    #: 同一日期字面量上的重复（0-75）—— 与上面两类理由都不同，单独计数。
+    suppressed_same_literal = 0
+    cross_date_literals: dict[tuple[int, str], str] = {}
     suppressed_detail: list[dict] = []
     skipped_empty_desc = 0
     batch_rows: list[tuple] = []
@@ -465,6 +533,26 @@ async def _run_stage3_cross_analysis(
                 f"({src}) — {_covered_by} already covers this page/type"
             )
             continue
+        # R132 / 0-75：同一页 + 同一日期字面量的日期类主张只留一条。
+        # 先看页级 LLM（Stage 2 已落库），再看本轮的跨页条目。
+        _lit_by = _same_literal_covered_by(f, ftype, src, llm_page_literals)
+        if not _lit_by:
+            _lit_by = _same_literal_covered_by(f, ftype, src, cross_date_literals)
+        if _lit_by:
+            suppressed_same_literal += 1
+            suppressed_detail.append({
+                "page": f["page"], "type": ftype, "source": src,
+                "description": (f.get("description") or "")[:120],
+                "covered_by": _lit_by,
+            })
+            logger.debug(
+                f"[{job_id}] same-literals suppressed: p{f['page']} {ftype} "
+                f"({src}) — {_lit_by} already cites the same date literal"
+            )
+            continue
+        if src in _DEDUP_SOURCES and ftype in _DATE_DEDUP_TYPES:
+            for _lit in _date_claim_literals(f):
+                cross_date_literals.setdefault((f["page"], _lit), "llm_cross")
         # robustness-B4: retry 会重新执行 Stage 3，确定性生成的 findings
         # 按 (job_id, source, page, type, description) 指纹去重。
         fingerprint = (
@@ -507,6 +595,7 @@ async def _run_stage3_cross_analysis(
         f"[{job_id}] DB: findings inserted ({inserted} new + {skipped_llm_page} "
         f"llm_page skipped + {suppressed_overlap} LLM-overlap suppressed "
         f"(unfounded_self_review={unfounded_self_review}), "
+        f"{suppressed_same_literal} same-literal suppressed, "
         f"{skipped_empty_desc} empty-description dropped, "
         f"severity={severity_counts})"
     )
@@ -539,13 +628,14 @@ async def _run_stage3_cross_analysis(
         logger.info(
             f"[{job_id}] DB: {len(_ledger_rows)} 条收权抑制写入台账（可回退）"
         )
-    if suppressed_overlap:
+    if suppressed_overlap or suppressed_same_literal:
         # M2/T2.8 抑制可解释：除计数外落明细（哪页/哪类/被谁覆盖），
         # 让"为什么少了一条"在审计里可逐条回看（GMP 可追溯）。
         await _audit_log(
             db, job_id, "findings_overlap_suppressed",
-            f"count={suppressed_overlap} "
-            f"(其中前提不可判 unfounded_self_review={unfounded_self_review}) — "
+            f"count={suppressed_overlap + suppressed_same_literal} "
+            f"(其中前提不可判 unfounded_self_review={unfounded_self_review}, "
+            f"同日期字面量重复 same_literal={suppressed_same_literal}) — "
             f"llm findings whose (page,type) already covered by deterministic "
             f"rule layer, 或该页签名被规则层判为辨认不可靠（covered_by=rule_unreadable）; "
             f"detail={json.dumps(suppressed_detail[:50], ensure_ascii=False)}",

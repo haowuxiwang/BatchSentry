@@ -146,6 +146,36 @@ _SPECULATIVE_RE = re.compile(
     r"疑似|可能|或许|不确定|不清晰|模糊|看不"
 )
 
+#: R132 / TODO 0-74：**手写数字派生硬结论**的降级闸门。
+#:
+#: 实测（试用批记录 p9）：物料平衡条目「领用数 20 只、使用数 30 只 ⇒ 不平衡」，
+#: 原页三格直读是 领用 30 / 使用 30 / 损耗 0（手写「3」被 OCR 读成「2」）。
+#: 规则层对**超差**已有同类护栏（0-72），但 LLM 的**跨字段算术结论**没有：
+#: 它拿两个手写读数做比较，就把「读数可能错」升级成「记录不平衡」。
+#:
+#: 只对"结论依赖数值比较"的条目生效；且**只在结构化数据确实把参与比较的
+#: 数字标成 handwritten 时**降级（fail-open：无手写证据 ⇒ 不动）。
+_HW_NUMERIC_TYPES = frozenset({"mass_balance"})
+_COMPARISON_RE = re.compile(
+    r"大于|小于|多于|少于|不平衡|不一致|不相等|不等于|超出|不足|超过"
+)
+_NUM_TOKEN_RE = re.compile(r"(?<![\d.])\d+(?:\.\d+)?(?![\d.])")
+
+#: 指控性措辞（R132 / TODO 0-75）：LLM 用「篡改/伪造/造假」给记录定性，
+#: 而它的全部证据常常只是**一个自己也可能读错的 OCR 字面量**（实测 p8
+#: 「复核人签名日期 2015.6.03……记录篡改嫌疑」，原页是 2025.06.30）。
+#: GMP 场景里"疑似篡改"是能改变放行结论的指控，不得由单条弱证据发出。
+_ACCUSATION_RE = re.compile(r"(?:记录)?(?:篡改|伪造|造假|捏造)(?:嫌疑)?")
+_ACCUSATION_REASON = (
+    "文案含「篡改/伪造/造假」指控，但证据仅为单条 OCR 读数（同一读数可能误读）"
+    " ⇒ 改为需人工核对"
+)
+#: 实测原句的整体替换 —— 比逐词替换读起来通顺，且不保留"明显的日期错误"
+#: 这种同样越过证据的定性。
+_ACCUSATION_SENTENCE_RE = re.compile(
+    r"存在明显的日期错误或(?:记录)?篡改嫌疑"
+)
+
 #: 声明先后关系的词表 → 期望的真值关系（"a <词> b" 断言 a 与 b 的关系）
 _ORDER_WORDS = {
     "晚于": "after", "迟于": "after", "after": "after", "later than": "after",
@@ -867,6 +897,89 @@ def _check_speculative(f: dict) -> str | None:
     )
 
 
+def _handwritten_numeric_tokens(structured: dict | None) -> set[str]:
+    """该页结构化抽取里**标为手写**的数值字面量集合（R132 / 0-74）。
+
+    ``value_source`` 由抽取器/OCR 低置信占位符共同决定（``core.rules.base``），
+    是"这个数字是手写填的"的机器事实；``handwritten`` 是 LLM 标注，只作补充。
+    """
+    if not isinstance(structured, dict):
+        return set()
+    out: set[str] = set()
+
+    def _collect(value) -> None:
+        for tok in _NUM_TOKEN_RE.findall(str(value or "")):
+            out.add(tok)
+
+    for step in structured.get("steps") or []:
+        if not isinstance(step, dict):
+            continue
+        for p in step.get("parameters") or []:
+            if isinstance(p, dict) and p.get("value_source") == "handwritten":
+                _collect(p.get("value"))
+        for m in step.get("measurements") or []:
+            if not isinstance(m, dict):
+                continue
+            for cell in (m.get("values") or {}).values():
+                if isinstance(cell, dict) and cell.get("value_source") == "handwritten":
+                    _collect(cell.get("actual"))
+        for note in step.get("handwritten") or []:
+            _collect(note)
+    return out
+
+
+def _check_handwritten_numeric_conclusion(f: dict, structured: dict | None) -> str | None:
+    """L3（弱证据 · 降级）：数值比较结论建立在**手写读数**上（R132 / 0-74）。
+
+    实测 p9：LLM 拿「领用 20 / 使用 30」判"物料平衡错误"，而这两个数都是
+    手写填写的；原页直读领用是 30。手写数字被 OCR 误读 ⇒ 比较的前提可能
+    不成立。此处**只降级、不抑制**：记录是否真的不平衡仍需人工核对原页。
+    """
+    ftype = str(f.get("type") or "")
+    if ftype not in _HW_NUMERIC_TYPES:
+        return None
+    if not _COMPARISON_RE.search(_finding_text(f)):
+        return None
+    cited = set(_NUM_TOKEN_RE.findall(_finding_text(f)))
+    if not cited:
+        return None
+    hw = _handwritten_numeric_tokens(structured)
+    hit = cited & hw
+    if not hit:
+        return None
+    return (
+        f"结论依赖手写数值（{'/'.join(sorted(hit)[:4])}），手写数字 OCR 易误读"
+        f"且未获独立复核 ⇒ 降级为需核对，请对照原页确认读数"
+    )
+
+
+def sanitize_accusatory_wording(f: dict) -> dict | None:
+    """把 LLM 的指控性措辞改为中性表述（R132 / 0-75）。
+
+    只动 ``source ∈ LLM_SOURCES``：规则层文案是确定性判据，且从不使用
+    「篡改/伪造」这类定性。返回**新副本**，``guard_reason`` 记录改写原因
+    （不拼进 description —— 与 CR-1 同一条纪律：内部理由不进用户可见正文）。
+    """
+    if not isinstance(f, dict):
+        return None
+    if str(f.get("source") or "") not in LLM_SOURCES:
+        return None
+    desc = str(f.get("description") or "")
+    if not _ACCUSATION_RE.search(desc):
+        return None
+    new_desc = _ACCUSATION_SENTENCE_RE.sub(
+        "日期读数可能异常（不排除 OCR 误读），需人工核对", desc,
+    )
+    new_desc = _ACCUSATION_RE.sub("需人工核对", new_desc)
+    nf = dict(f)
+    nf["description"] = new_desc.strip()
+    # 已有降级理由时**追加**（不覆盖）：措辞改写与"为什么降级"是两件事，
+    # 但都要在台账里可回看（GMP 可追溯）。
+    _prev = str(nf.get("guard_reason") or "").strip()
+    nf["guard_reason"] = f"{_prev}；{_ACCUSATION_REASON}" if _prev else _ACCUSATION_REASON
+    return nf
+
+
 # ── 主入口 ─────────────────────────────────────────────────────────────
 
 def review_llm_findings(
@@ -1106,6 +1219,7 @@ def review_llm_findings(
             # 顺序即"理由的具体程度"：名字变体比"推测性表述"更具体，
             # 先说清是哪两个字差在哪，别让通用理由盖住它
             or _check_name_variant_claim(f)        # L3 名字 OCR 变体当"不同人"
+            or _check_handwritten_numeric_conclusion(f, structured)  # 0-74 手写读数比较
             or _check_speculative(f)               # L1' 推测性表述
             or _check_production_date_mismatch(f, structured)  # ② 页内基准不一致
             or _l3_down                            # L3 判不了 / 方向反但日期对属记录内
@@ -1322,4 +1436,15 @@ def apply_review(
         _vc += 1
     if _vc:
         logger.info("  validity overdue annotated: %d 条（补「已超出 N 天」）", _vc)
+    # R132 / TODO 0-75：指控性措辞收口。放在**最后**（降级/改判都已完成）：
+    # 无论条目被保留还是降级，用户看到的文案都不得自称"篡改"。
+    _acc = 0
+    for _i, _f in enumerate(out):
+        _nf = sanitize_accusatory_wording(_f)
+        if _nf is None:
+            continue
+        out[_i] = _nf
+        _acc += 1
+    if _acc:
+        logger.info("  accusatory wording neutralized: %d 条（篡改/伪造 → 需人工核对）", _acc)
     return out, suppressed
