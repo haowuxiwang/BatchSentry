@@ -1,6 +1,6 @@
 # TODO —— 活的待办清单
 
-> **复核戳：Round 133（2026-10-30）** ← `tests/unit/test_todo_freshness.py` 机检读这一行；
+> **复核戳：Round 134（2026-10-30）** ← `tests/unit/test_todo_freshness.py` 机检读这一行；
 > 该戳**不得落后于 `CHANGELOG.md` 的最新 Round**。
 >
 > **状态（R66 复核，2026-09-30）——本文件分两层，别混读**：
