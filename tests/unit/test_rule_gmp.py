@@ -107,10 +107,37 @@ class TestSelfReview:
         assert "操作员甲" in fs[0]["description"]
 
     def test_signature_roles_same_person_critical(self):
+        """两侧签名都**显式 high** ⇒ critical（手写体也有可靠读数时允许定性）。"""
+        pages = _norm([_page(1, [_step(1, signatures=[
+            {"role": "operator", "name": "吴伟胜", "confidence": "high"},
+            {"role": "reviewer", "name": "吴伟胜", "confidence": "high"},
+        ])])])
+        fs = _check_self_review(pages)
+        assert _types(fs) == ["self_review"]
+        assert fs[0]["severity"] == "critical"
+
+    def test_signature_without_confidence_is_unreadable(self):
+        """R133：签名槽缺 confidence ≠ 可靠。实证 10 页 p4 原页为两人，旧逻辑误判 critical。"""
         pages = _norm([_page(1, [_step(1, signatures=[
             {"role": "operator", "name": "吴伟胜"},
             {"role": "reviewer", "name": "吴伟胜"},
         ])])])
+        fs = _check_self_review(pages)
+        assert _types(fs) == ["signature_unreadable"]
+        assert fs[0]["severity"] == "info"
+        assert "核对原页笔迹" in fs[0]["description"]
+
+    def test_signature_medium_confidence_is_unreadable(self):
+        """medium 也不够：只有两侧都显式 high 才允许 critical（单一真值：high）。"""
+        pages = _norm([_page(1, [_step(1, signatures=[
+            {"role": "operator", "name": "吴伟胜", "confidence": "medium"},
+            {"role": "reviewer", "name": "吴伟胜", "confidence": "medium"},
+        ])])])
+        assert _types(_check_self_review(pages)) == ["signature_unreadable"]
+
+    def test_printed_fields_still_critical(self):
+        """反向控制：印刷字段相等不受签名置信度新规影响（不得误降）。"""
+        pages = _norm([_page(1, [_step(1, operator="操作员甲", reviewer="操作员甲")])])
         fs = _check_self_review(pages)
         assert _types(fs) == ["self_review"]
         assert fs[0]["severity"] == "critical"
@@ -118,8 +145,8 @@ class TestSelfReview:
     def test_role_aliases_review_and_draft(self):
         """真实数据 role 混杂（draft/review），须归一后判定。"""
         pages = _norm([_page(1, [_step(1, signatures=[
-            {"role": "draft", "name": "冯珠"},
-            {"role": "review", "name": "冯珠"},
+            {"role": "draft", "name": "冯珠", "confidence": "high"},
+            {"role": "review", "name": "冯珠", "confidence": "high"},
         ])])])
         fs = _check_self_review(pages)
         assert _types(fs) == ["self_review"]

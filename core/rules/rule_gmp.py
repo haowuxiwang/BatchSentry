@@ -221,6 +221,13 @@ def _check_self_review(pages: list[dict]) -> list[dict]:
     `signature_unreadable`（info），文案**并列印出两侧的原始识别串**
     （只引用、不断言谁是谁），`operator` 留空，把判断交回复核员看原页笔迹。
     依据：真实 p4/p26/p40/p46 四条 critical 经逐页核图，全部是手写签名误读。
+
+    **R133 收紧**：证据**只**来自签名槽时，`confidence` **缺失**也不得算可靠 ——
+    必须有一对显式 `high` 才允许 `critical`。理由：签名槽天然是手写体，模型漏标
+    置信度是常态（51 页实测 163 个签名里 137 个标 low、16 个 medium、仅 10 个 high），
+    而 10 页记录 p4 两处签名**没有** confidence 字段，旧口径直接判 critical
+    「复核人即操作人」，原页笔迹与姓名实为另一人。印刷字段（`operator`/`reviewer`
+    文本）不受此收紧影响。
     """
     findings: list[dict] = []
     for page in pages:
@@ -240,6 +247,14 @@ def _check_self_review(pages: list[dict]) -> list[dict]:
             ops: set[str] = set()
             revs: set[str] = set()
             low: set[str] = set()
+            high: set[str] = set()
+            #: R133：签名槽天然是手写体 ⇒ "同一人"结论的证据强度取决于 OCR 自报，
+            #: 必须**显式 high** 才允许 critical；缺失 confidence 不等于可靠。
+            #: 实证：10 页记录 p4 两处签名 confidence 缺失，规则判 critical「复核人即
+            #: 操作人 陈诗雨」，而原页笔迹与姓名均为另一人（页图核对）。
+            sig_pairs: set[str] = set()
+            sig_high: set[str] = set()
+            field_pairs: set[str] = set()
             sig_op_raws: dict[str, list[str]] = {}
             sig_rv_raws: dict[str, list[str]] = {}
             for sig in step.get("signatures") or []:
@@ -256,9 +271,14 @@ def _check_self_review(pages: list[dict]) -> list[dict]:
                 elif role in _REVIEWER_ROLES:
                     revs.add(person)
                     sig_rv_raws.setdefault(person, []).append(name_raw)
+                if str(sig.get("confidence") or "").strip().lower() == "high":
+                    sig_high.add(person)
                 if str(sig.get("confidence") or "").strip().lower() == "low":
                     low.add(person)
             same |= (ops & revs)
+            sig_pairs |= (ops & revs)
+            if op and rv and op == rv:
+                field_pairs.add(op)
             for person in sorted(same):
                 slot = hits.setdefault(
                     person,
@@ -268,7 +288,13 @@ def _check_self_review(pages: list[dict]) -> list[dict]:
                     slot["steps"].append(str(step_no))
                 # 只要**有一步**的两侧签名都不低，这条"同一人"就有可靠证据 ⇒
                 # 不得因为同页另一步是低置信而把整条降成 info。
-                slot["solid"] = slot["solid"] or (person not in low)
+                # R133 例外：证据只来自**签名槽**时，缺失 confidence 不算可靠
+                # （必须有一步显式 high）；证据来自**印刷字段**时沿用原口径。
+                if person in sig_pairs and person not in field_pairs:
+                    _reliable = person in sig_high
+                else:
+                    _reliable = person not in low
+                slot["solid"] = slot["solid"] or _reliable
                 # 原始识别串：优先取 signatures[] 的原样名字，缺失时回落到结构化字段
                 for raw in (sig_op_raws.get(person) or ([op_raw] if op_raw else [])):
                     if raw and raw not in slot["op_raws"]:

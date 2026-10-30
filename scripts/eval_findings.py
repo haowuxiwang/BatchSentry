@@ -1,247 +1,191 @@
-"""Finding 离线评测（M2/T2.3）—— precision / recall / F1 + 噪声 KPI。
+"""按人工标注集给一轮 findings 打分（R133）。
 
-定位
-----
-把"降噪靠手感"变成"可证明"。对 `scripts/synthetic_corpus.py` 的合成语料
-（每例埋有已知缺陷）跑**规则层**（纯函数、零 LLM 零 OCR、逐位可复现），
-与 `docs/FINDING_GROUND_TRUTH.json` 的标签比对，输出：
+为什么单独成脚本而不是塞进单测：标注集**含真实批号与页码**，只能放 gitignored 的
+`devlogs/_verify/`；而判分逻辑本身必须可评审、可单测 ⇒ 逻辑入库、数据不入库。
 
-- 逐例 TP/FP/FN 与 missing（漏报清单）、unexpected（误报清单）
-- 汇总 precision / recall / F1
-- 噪声 KPI：`noise_types` 的产出条数占比（当前 = completeness 洪水）
+标注集（gold）格式见 `devlogs/_verify/gold_*.json`，要点：
 
-`known_gap=true` 的用例**不计入** P/R（如 self_review 尚无规则覆盖），
-但仍打印，作为 M4 的可见 TODO —— 规则落地后把 known_gap 翻成 false 即成验收。
+- 每条 label 必须写明 `evidence`（证据来源）。`criterion: true` 才计入召回率 ——
+  它表示"这条缺陷有**独立于当前系统输出**的证据"（页图核对 / OCR 原文结构 /
+  用户裁定）。从旧一轮 system output 抄来的条目只能记 `criterion: false`，
+  否则就是拿系统验证系统（本项目已有的 `FINDING_GROUND_TRUTH.json` 同款纪律）。
+- `expect.min` / `expect.max` 是**条数区间**：GMP 场景里"漏报"和"重复报"
+  都会伤害复核效率，两者都要能判红。
+- `severity_max` 判"过度定性"（如把需核对写成 critical）。
+- 顶层 `forbid_text` 是全文档禁用措辞（指控性文案），任一命中即失败。
 
 用法：
-  python scripts/eval_findings.py                # 文本报告 + 落盘 JSON
-  python scripts/eval_findings.py --json         # 额外打印 JSON
-  python scripts/eval_findings.py --min-f1 0.9   # 低于阈值退出码 1（可作 CI 门禁）
-
-设计：纯离线（不碰 DB/网络/LLM）。规则层的 LLM 兜底/语义两处调用被替换为
-空实现，故不产生任何外部依赖。
+    python scripts/eval_findings.py --findings devlogs/_verify/e2e_sy_r3.json \
+        --gold devlogs/_verify/gold_sy.json
+退出码：0 全通过；1 有判据失败；2 输入不可用（fail-closed，不把"读不到"当通过）。
 """
 from __future__ import annotations
 
 import argparse
-import asyncio
-import importlib.util
 import json
 import sys
-from datetime import datetime
-from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-GT_PATH = REPO_ROOT / "docs" / "FINDING_GROUND_TRUTH.json"
-
-sys.path.insert(0, str(REPO_ROOT))
+SEVERITY_ORDER = {"info": 0, "warning": 1, "critical": 2}
 
 
-def _load_corpus_module():
-    """importlib 按路径加载 scripts/synthetic_corpus.py（scripts/ 非包）。"""
-    path = Path(__file__).parent / "synthetic_corpus.py"
-    spec = importlib.util.spec_from_file_location("synthetic_corpus", path)
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules["synthetic_corpus"] = mod
-    assert spec.loader is not None
-    spec.loader.exec_module(mod)
-    return mod
+def load_findings(path: str) -> list[dict]:
+    """容忍三种外壳：e2e 结果 / {"findings": [...]} / 裸列表。"""
+    with open(path, encoding="utf-8") as fh:
+        data = json.load(fh)
+    if isinstance(data, dict):
+        inner = data.get("findings")
+        if isinstance(inner, dict):
+            inner = inner.get("findings")
+        if isinstance(inner, list):
+            return inner
+        raise ValueError(f"{path}: 找不到 findings 列表")
+    if isinstance(data, list):
+        return data
+    raise ValueError(f"{path}: 无法识别的结构")
 
 
-# ── 加载与校验 ──────────────────────────────────────────────────────────────
+def _text_of(f: dict) -> str:
+    return f"{f.get('description') or ''} {f.get('ocr_text') or ''}".lower()
 
 
-def load_ground_truth(path: Path = GT_PATH) -> dict:
-    return json.loads(path.read_text(encoding="utf-8"))
+def _matches(f: dict, m: dict) -> bool:
+    """label 的 match 条件是否命中这条 finding（不匹配 page 时为文档级）。"""
+    page = m.get("page")
+    if page is not None and f.get("page") != page:
+        return False
+    types = m.get("type_any") or []
+    if types and str(f.get("type") or "") not in types:
+        return False
+    text = _text_of(f)
+    for needle in m.get("text_all") or []:
+        if str(needle).lower() not in text:
+            return False
+    any_of = m.get("text_any") or []
+    if any_of and not any(str(n).lower() in text for n in any_of):
+        return False
+    for needle in m.get("text_none") or []:
+        if str(needle).lower() in text:
+            return False
+    return True
 
 
-def validate_cases(gt: dict, corpus: dict[str, list[dict]]) -> None:
-    """金标与语料的 case_id 必须一一对应（缺一即 RuntimeError）。"""
-    gt_ids = [c["case_id"] for c in gt["cases"]]
-    missing = [c for c in gt_ids if c not in corpus]
-    orphan = [c for c in corpus if c not in gt_ids]
-    if missing or orphan:
-        raise RuntimeError(
-            f"金标/语料 case_id 不一致：金标缺语料={missing}，语料缺金标={orphan}"
-        )
+def evaluate(findings: list[dict], gold: dict) -> dict:
+    """纯函数：返回逐 label 判定 + 全局禁用措辞命中。"""
+    results = []
+    for label in gold.get("labels") or []:
+        hit = [f for f in findings if _matches(f, label.get("match") or {})]
+        exp = label.get("expect") or {}
+        lo, hi = exp.get("min", 0), exp.get("max")
+        problems: list[str] = []
+        if len(hit) < lo:
+            problems.append(f"漏报：命中 {len(hit)} < 下限 {lo}")
+        if hi is not None and len(hit) > hi:
+            problems.append(f"重复：命中 {len(hit)} > 上限 {hi}")
+        sev_max = exp.get("severity_max")
+        if sev_max and hit:
+            worst = max(
+                (SEVERITY_ORDER.get(str(f.get("severity") or "info"), 0) for f in hit)
+            )
+            if worst > SEVERITY_ORDER[sev_max]:
+                problems.append(f"过度定性：最高严重度 {worst} > 允许 {SEVERITY_ORDER[sev_max]}")
+        results.append({
+            "id": label.get("id"),
+            "criterion": bool(label.get("criterion", False)),
+            "evidence": label.get("evidence"),
+            "description": label.get("description"),
+            "hits": len(hit),
+            "expect": {"min": lo, "max": hi, "severity_max": sev_max},
+            "pass": not problems,
+            "problems": problems,
+            "hit_samples": [
+                {
+                    "page": f.get("page"), "source": f.get("source"),
+                    "type": f.get("type"), "severity": f.get("severity"),
+                    "description": (f.get("description") or "")[:120],
+                }
+                for f in hit[:5]
+            ],
+        })
 
+    forbid = gold.get("forbid_text") or []
+    forbidden_hits = [
+        {
+            "page": f.get("page"), "source": f.get("source"), "type": f.get("type"),
+            "word": w, "description": (f.get("description") or "")[:120],
+        }
+        for f in findings
+        for w in forbid
+        if str(w).lower() in _text_of(f)
+    ]
 
-# ── 规则层执行（离线：屏蔽 LLM 两条支路）────────────────────────────────────
-
-
-async def run_rules(pages: list[dict]) -> list[dict]:
-    from unittest.mock import AsyncMock, patch
-
-    from core.rules import analyze_cross_page
-
-    with patch("core.rules._llm_fallback_check", new=AsyncMock(return_value=[])), \
-            patch("core.rules._llm_based_check", new=AsyncMock(return_value=[])):
-        return await analyze_cross_page(pages, job_id="eval")
-
-
-# ── 打分（纯函数）──────────────────────────────────────────────────────────
-
-
-def score_case(case: dict, findings: list[dict], noise_types: set[str]) -> dict:
-    """单例打分：期望/允许/噪声三分，返回 TP/FP/FN 明细。"""
-    expected = {(e["page"], e["type"]) for e in case.get("expect", [])}
-    allowed = set(case.get("allowed_extra_types", []))
-
-    produced_pairs = [(f.get("page"), f.get("type")) for f in findings]
-    produced_set = set(produced_pairs)
-
-    tp = sorted(expected & produced_set)
-    fn = sorted(expected - produced_set)
-    fp = sorted({
-        p for p in produced_set
-        if p not in expected and p[1] not in allowed
-    })
-    noise = sum(1 for _, t in produced_pairs if t in noise_types)
+    criterion = [r for r in results if r["criterion"]]
+    passed = [r for r in criterion if r["pass"]]
     return {
-        "case_id": case["case_id"],
-        "known_gap": bool(case.get("known_gap")),
-        "n_findings": len(findings),
-        "tp": [list(x) for x in tp],
-        "fp": [list(x) for x in fp],
-        "fn": [list(x) for x in fn],
-        "noise": noise,
-        "precision": _safe_div(len(tp), len(tp) + len(fp)),
-        "recall": _safe_div(len(tp), len(tp) + len(fn)),
+        "record": gold.get("record"),
+        "total_findings": len(findings),
+        "labels_total": len(results),
+        "criterion_labels": len(criterion),
+        "criterion_passed": len(passed),
+        "recall_proxy": (
+            round(len(passed) / len(criterion), 4) if criterion else None
+        ),
+        "forbidden_hits": forbidden_hits,
+        "labels": results,
+        "ok": len(passed) == len(criterion) and not forbidden_hits,
     }
 
 
-def _safe_div(a: int, b: int) -> float | None:
-    return round(a / b, 4) if b else None
-
-
-def aggregate(scored: list[dict]) -> dict:
-    """汇总（**排除** known_gap 用例）：micro 口径 P/R/F1。"""
-    active = [s for s in scored if not s["known_gap"]]
-    tp = sum(len(s["tp"]) for s in active)
-    fp = sum(len(s["fp"]) for s in active)
-    fn = sum(len(s["fn"]) for s in active)
-    p = _safe_div(tp, tp + fp)
-    r = _safe_div(tp, tp + fn)
-    f1 = round(2 * p * r / (p + r), 4) if (p and r) else None
-    total = sum(s["n_findings"] for s in active)
-    noise = sum(s["noise"] for s in active)
-    return {
-        "cases_scored": len(active),
-        "cases_known_gap": len(scored) - len(active),
-        "tp": tp, "fp": fp, "fn": fn,
-        "precision": p, "recall": r, "f1": f1,
-        "total_findings": total,
-        "noise_findings": noise,
-        "noise_ratio": _safe_div(noise, total),
-    }
-
-
-# ── 编排 ────────────────────────────────────────────────────────────────────
-
-
-def evaluate() -> dict:
-    gt = load_ground_truth()
-    corpus = _load_corpus_module().build_cases()
-    validate_cases(gt, corpus)
-    noise_types = set(gt.get("noise_types", []))
-
-    scored = []
-    for case in gt["cases"]:
-        findings = asyncio.run(run_rules(corpus[case["case_id"]]))
-        scored.append(score_case(case, findings, noise_types))
-
-    return {
-        "generated_at": datetime.now().isoformat(timespec="seconds"),
-        "ground_truth": str(GT_PATH.relative_to(REPO_ROOT)),
-        "schema_version": gt.get("schema_version"),
-        "summary": aggregate(scored),
-        "cases": scored,
-    }
-
-
-def _print_report(report: dict) -> None:
-    s = report["summary"]
-    print("\n════════ Finding 离线评测（规则层）════════")
-    print(f"{'case':<38}{'n':>4} {'TP':>3} {'FP':>3} {'FN':>3}  P/R")
-    for c in report["cases"]:
-        tag = "  [known_gap]" if c["known_gap"] else ""
-        p = "—" if c["precision"] is None else f"{c['precision']:.2f}"
-        r = "—" if c["recall"] is None else f"{c['recall']:.2f}"
-        print(f"{c['case_id']:<38}{c['n_findings']:>4} "
-              f"{len(c['tp']):>3} {len(c['fp']):>3} {len(c['fn']):>3}  {p}/{r}{tag}")
-        for kind in ("fn", "fp"):
-            for page, ftype in c[kind]:
-                label = "漏报" if kind == "fn" else "误报"
-                print(f"      {label}: p{page} {ftype}")
-    print(f"\n汇总（{s['cases_scored']} 例，排除 {s['cases_known_gap']} 例 known_gap）：")
-    print(f"  precision={s['precision']}  recall={s['recall']}  F1={s['f1']}")
-    print(f"  TP={s['tp']} FP={s['fp']} FN={s['fn']}")
-    print(f"  噪声 KPI：{s['noise_findings']}/{s['total_findings']} "
-          f"条为噪声类型（占比 {s['noise_ratio']}）")
-
-
-def _print_real_samples_note() -> None:
-    """**独立小节**：真实样本口径（**非判据**，不产生 P/R）。
-
-    与 `cases`（合成语料、规则层、逐位可复现）**分开呈现** —— 真实样本
-    **无标签**（`annotation.label is None`）、系统输出**非确定**且来自
-    **旧版本**，混进 F1 会产出"看似权威、实则无据"的精度数字。
-    """
-    print("\n════════ 真实样本口径（**非判据**，不产生 P/R）════════")
-    try:
-        gt = load_ground_truth()
-    except Exception as exc:  # 缺块 / 坏 JSON 不得影响判据路径
-        print(f"  （读不到：{exc}）")
-        return
-    rs = gt.get("real_samples") or {}
-    samples = rs.get("samples") or []
-    if not samples:
-        print("  （未登记真实样本）")
-        return
-    for s in samples:
-        ann = s.get("annotation") or {}
-        loc = s.get("locator") or {}
-        obs = s.get("observed_system_output") or {}
-        print(f"  · {s.get('sample_id')}  标签="
-              f"{'已确认' if ann.get('intent_confirmed') else '未确认'}"
-              f"（intent_confirmed={bool(ann.get('intent_confirmed'))}）")
-        print(f"      标注：规格 `{ann.get('spec_text')}` / 实测 `{ann.get('measured_text')}`")
-        print(f"      定位：{loc.get('filename')} p{loc.get('page')}"
-              f"（job {loc.get('job_id')}）")
-        print(f"      系统输出：该页 {obs.get('page_findings')} 条 findings"
-              f"（{obs.get('page_types')}），"
-              f"param_out_of_spec={obs.get('page_param_out_of_spec')}；"
-              f"实测值命中 {obs.get('measured_value_hits_in_job')} 次")
-    print("  ⚠️ 本口径**不进**上面的 F1；合成集口径与真实样本口径**不可混用**。")
+def _print_report(rep: dict) -> None:
+    print(f"记录: {rep['record']}   findings: {rep['total_findings']}")
+    print(f"判据性标签: {rep['criterion_passed']}/{rep['criterion_labels']} 通过"
+          f"（recall_proxy={rep['recall_proxy']}）")
+    for r in rep["labels"]:
+        flag = "PASS" if r["pass"] else "FAIL"
+        tag = "判据" if r["criterion"] else "回归钉"
+        print(f"  [{flag}] {r['id']} ({tag}, {r['evidence']}) hits={r['hits']} "
+              f"{r['description']}")
+        for p in r["problems"]:
+            print(f"         - {p}")
+        if not r["pass"]:
+            for s in r["hit_samples"]:
+                print(f"         · p{s['page']}/{s['source']}/{s['type']}/"
+                      f"{s['severity']}: {s['description']}")
+    if rep["forbidden_hits"]:
+        print(f"禁用措辞命中 {len(rep['forbidden_hits'])} 处：")
+        for h in rep["forbidden_hits"][:10]:
+            print(f"  · p{h['page']}/{h['source']}/「{h['word']}」: {h['description']}")
+    print("OVERALL:", "pass" if rep["ok"] else "fail")
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description="Finding 离线评测（M2）")
-    ap.add_argument("--json", action="store_true", help="额外打印 JSON")
-    ap.add_argument("--out", default=None, help="报告落盘路径（默认 devlogs/）")
-    ap.add_argument("--min-f1", type=float, default=None,
-                    help="F1 低于该值 → 退出码 1（可作 CI 门禁）")
+    ap = argparse.ArgumentParser(description="按标注集给 findings 打分")
+    ap.add_argument("--findings", required=True)
+    ap.add_argument("--gold", required=True)
+    ap.add_argument("--json-out", default="")
     args = ap.parse_args(argv)
 
-    report = evaluate()
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out = Path(args.out) if args.out else REPO_ROOT / "devlogs" / f"eval_findings_{stamp}.json"
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    try:
+        findings = load_findings(args.findings)
+        with open(args.gold, encoding="utf-8") as fh:
+            gold = json.load(fh)
+    except (OSError, ValueError) as exc:
+        print(f"[FAIL] 输入不可用：{exc}", file=sys.stderr)
+        return 2
+    if not findings:
+        print("[FAIL] findings 为空 —— 空输入不得判通过", file=sys.stderr)
+        return 2
+    if not gold.get("labels"):
+        print("[FAIL] 标注集没有 label —— 空判据不得判通过", file=sys.stderr)
+        return 2
 
-    _print_report(report)
-    _print_real_samples_note()
-    print(f"报告: {out}")
-    if args.json:
-        print(json.dumps(report, ensure_ascii=False, indent=2))
-
-    f1 = report["summary"]["f1"]
-    if args.min_f1 is not None:
-        if f1 is None or f1 < args.min_f1:
-            print(f"F1 门禁未达标：{f1} < {args.min_f1}")
-            return 1
-    return 0
+    rep = evaluate(findings, gold)
+    _print_report(rep)
+    if args.json_out:
+        with open(args.json_out, "w", encoding="utf-8") as fh:
+            json.dump(rep, fh, ensure_ascii=False, indent=2)
+        print(f"报告: {args.json_out}")
+    return 0 if rep["ok"] else 1
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    raise SystemExit(main())

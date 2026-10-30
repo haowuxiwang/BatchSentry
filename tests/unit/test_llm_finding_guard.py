@@ -707,6 +707,25 @@ class TestHandwrittenNumericConclusion:
         assert sup == []
         assert len(kept) == 1 and not down
 
+    def test_handwritten_conclusion_carries_user_caveat(self):
+        """R133：降级之外，**文案**也要说清"不作偏差结论"（0-74 的验收口径）。"""
+        final, _sup = apply_review(
+            [_f(9, "mass_balance", "warning", self.DESC)],
+            structured_by_page={9: STRUCT_P9_HANDWRITTEN},
+        )
+        assert len(final) == 1
+        assert final[0]["severity"] == "info"
+        assert "不作为偏差结论" in final[0]["description"], final[0]["description"]
+
+    def test_printed_conclusion_has_no_caveat(self):
+        """反向控制：印刷值之间的比较不是手写读数，不得补这句附注。"""
+        final, _sup = apply_review(
+            [_f(9, "mass_balance", "warning", self.DESC)],
+            structured_by_page={9: STRUCT_P9_PRINTED},
+        )
+        assert len(final) == 1
+        assert "不作为偏差结论" not in final[0]["description"]
+
 
 # ── R132 / 0-75：指控性措辞收口 ────────────────────────────────────────
 

@@ -1,376 +1,132 @@
-"""M2 评测层单测：金标打分 / 汇总 / 校验 + 语料与金标一致性。
+"""`scripts/eval_findings.py` 的判分契约（R133）。
 
-`scripts/` 非包 → importlib 按路径加载。
+为什么要有：评分脚本是"准确性"的唯一度量入口。它自己错（例如把"没命中"
+判成通过、或把空输入判成通过）会让后续所有拟合都失去意义 —— 这类"判据本身
+fail-open"在本项目已出过多次（见 release_gate 的 fail-closed 先例）。
 """
 from __future__ import annotations
 
-import ast
-import importlib.util
 import json
-import sys
-from pathlib import Path
 
 import pytest
 
-_REPO = Path(__file__).resolve().parents[2]
-_EVAL = _REPO / "scripts" / "eval_findings.py"
-_CORPUS = _REPO / "scripts" / "synthetic_corpus.py"
+import scripts.eval_findings as ev
 
 
-def _load(name: str, path: Path):
-    spec = importlib.util.spec_from_file_location(name, path)
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[name] = mod
-    assert spec.loader is not None
-    spec.loader.exec_module(mod)
-    return mod
+def _f(page=8, ftype="suspicious_date", severity="warning", desc="日期读数异常", source="llm_cross"):
+    return {"page": page, "type": ftype, "severity": severity,
+            "description": desc, "source": source}
 
 
-ef = _load("eval_findings", _EVAL)
-sc = _load("synthetic_corpus", _CORPUS)
+GOLD = {
+    "record": "unit",
+    "forbid_text": ["篡改", "伪造"],
+    "labels": [
+        {
+            "id": "L1", "criterion": True, "evidence": "test", "description": "日期异常只报一条",
+            "match": {"page": 8, "type_any": ["suspicious_date"]},
+            "expect": {"min": 1, "max": 1, "severity_max": "warning"},
+        },
+        {
+            "id": "L2", "criterion": False, "evidence": "pin", "description": "回归钉",
+            "match": {"page": 9}, "expect": {"min": 0},
+        },
+    ],
+}
 
 
-# ── 合成语料 ────────────────────────────────────────────────────────────────
+def test_load_findings_accepts_three_shells(tmp_path):
+    body = [_f()]
+    for name, payload in {
+        "e2e.json": {"job": {"id": "x"}, "findings": {"findings": body}},
+        "wrap.json": {"findings": body},
+        "bare.json": body,
+    }.items():
+        p = tmp_path / name
+        p.write_text(json.dumps(payload), encoding="utf-8")
+        assert ev.load_findings(str(p)) == body, name
 
 
-class TestSyntheticCorpus:
-    def test_build_cases_deterministic(self):
-        assert sc.build_cases() == sc.build_cases()
-
-    def test_each_case_is_page_structures(self):
-        for cid, pages in sc.build_cases().items():
-            assert pages, cid
-            for p in pages:
-                assert set(p) >= {"page", "data"}
-                assert isinstance(p["data"].get("steps"), list)
+def test_load_findings_rejects_garbage(tmp_path):
+    p = tmp_path / "bad.json"
+    p.write_text(json.dumps({"job": {}}), encoding="utf-8")
+    with pytest.raises(ValueError):
+        ev.load_findings(str(p))
 
 
-# ── 金标打分（纯函数）──────────────────────────────────────────────────────
+def test_recall_counts_only_criterion_labels():
+    rep = ev.evaluate([_f()], GOLD)
+    assert rep["criterion_labels"] == 1
+    assert rep["criterion_passed"] == 1
+    assert rep["recall_proxy"] == 1.0
+    # 非判据标签也参与判定，但不进 recall 分母
+    assert rep["labels_total"] == 2
 
 
-class TestScoreCase:
-    NOISE = {"completeness"}
-
-    def test_perfect(self):
-        case = {"case_id": "c", "expect": [{"page": 1, "type": "time_reversal"}]}
-        got = ef.score_case(case, [{"page": 1, "type": "time_reversal"}], self.NOISE)
-        assert got["tp"] == [[1, "time_reversal"]] and not got["fp"] and not got["fn"]
-        assert got["precision"] == 1.0 and got["recall"] == 1.0
-
-    def test_miss_is_fn(self):
-        case = {"case_id": "c", "expect": [{"page": 1, "type": "time_reversal"}]}
-        got = ef.score_case(case, [], self.NOISE)
-        assert got["fn"] == [[1, "time_reversal"]]
-        assert got["recall"] == 0.0
-
-    def test_unexpected_is_fp(self):
-        case = {"case_id": "c", "expect": []}
-        got = ef.score_case(case, [{"page": 2, "type": "param_out_of_spec"}], self.NOISE)
-        assert got["fp"] == [[2, "param_out_of_spec"]]
-        assert got["precision"] == 0.0
-
-    def test_allowed_extra_type_not_fp(self):
-        case = {"case_id": "c", "expect": [], "allowed_extra_types": ["completeness"]}
-        got = ef.score_case(case, [{"page": 1, "type": "completeness"}], self.NOISE)
-        assert got["fp"] == [] and got["noise"] == 1
-
-    def test_noise_counted_singly(self):
-        case = {"case_id": "c", "expect": [], "allowed_extra_types": ["completeness"]}
-        got = ef.score_case(
-            case,
-            [{"page": 1, "type": "completeness"}, {"page": 2, "type": "completeness"}],
-            self.NOISE,
-        )
-        assert got["noise"] == 2 and got["fp"] == []
-
-    def test_no_expected_no_produced_gives_none_rates(self):
-        got = ef.score_case({"case_id": "c", "expect": []}, [], self.NOISE)
-        assert got["precision"] is None and got["recall"] is None
+def test_duplicate_over_max_fails():
+    """同一误读报两条 ⇒ 必须判红（0-75 的验收点）。"""
+    rep = ev.evaluate([_f(), dict(_f(), page=8, description="另一条")], GOLD)
+    l1 = next(r for r in rep["labels"] if r["id"] == "L1")
+    assert not l1["pass"]
+    assert any("重复" in p for p in l1["problems"])
+    assert not rep["ok"]
 
 
-class TestAggregate:
-    def test_excludes_known_gap(self):
-        scored = [
-            {"known_gap": True, "tp": [], "fp": [[1, "x"]], "fn": [[1, "y"]],
-             "n_findings": 1, "noise": 1},
-            {"known_gap": False, "tp": [[1, "a"]], "fp": [], "fn": [],
-             "n_findings": 2, "noise": 0},
-        ]
-        agg = ef.aggregate(scored)
-        assert agg["cases_scored"] == 1 and agg["cases_known_gap"] == 1
-        assert agg["tp"] == 1 and agg["fp"] == 0 and agg["fn"] == 0
-        assert agg["precision"] == 1.0 and agg["recall"] == 1.0 and agg["f1"] == 1.0
-
-    def test_micro_pooling_and_f1(self):
-        scored = [
-            {"known_gap": False, "tp": [[1, "a"], [2, "b"]], "fp": [[3, "c"]],
-             "fn": [[4, "d"]], "n_findings": 3, "noise": 1},
-        ]
-        agg = ef.aggregate(scored)
-        assert agg["tp"] == 2 and agg["fp"] == 1 and agg["fn"] == 1
-        assert agg["precision"] == round(2 / 3, 4)
-        assert agg["recall"] == round(2 / 3, 4)
-
-    def test_all_known_gap_yields_none_f1(self):
-        agg = ef.aggregate([{"known_gap": True, "tp": [], "fp": [], "fn": [],
-                             "n_findings": 0, "noise": 0}])
-        assert agg["f1"] is None
-
-    def test_noise_ratio(self):
-        scored = [{"known_gap": False, "tp": [], "fp": [], "fn": [],
-                   "n_findings": 4, "noise": 3}]
-        assert ef.aggregate(scored)["noise_ratio"] == 0.75
+def test_missing_under_min_fails():
+    rep = ev.evaluate([_f(page=3)], GOLD)
+    l1 = next(r for r in rep["labels"] if r["id"] == "L1")
+    assert not l1["pass"]
+    assert any("漏报" in p for p in l1["problems"])
 
 
-class TestSafeDiv:
-    def test_zero_denominator(self):
-        assert ef._safe_div(0, 0) is None
-
-    def test_rounding(self):
-        assert ef._safe_div(1, 3) == 0.3333
-
-
-# ── 金标 / 语料一致性 ──────────────────────────────────────────────────────
+def test_severity_ceiling_is_enforced():
+    rep = ev.evaluate([_f(severity="critical")], GOLD)
+    l1 = next(r for r in rep["labels"] if r["id"] == "L1")
+    assert not l1["pass"]
+    assert any("过度定性" in p for p in l1["problems"])
 
 
-class TestGroundTruthContract:
-    def test_load_and_shape(self):
-        gt = ef.load_ground_truth()
-        assert gt["schema_version"] == 1
-        assert isinstance(gt["noise_types"], list) and gt["noise_types"]
-        assert gt["cases"]
-
-    def test_case_ids_match_corpus(self):
-        gt = ef.load_ground_truth()
-        corpus = sc.build_cases()
-        ef.validate_cases(gt, corpus)  # 不抛即通过
-
-    def test_mismatch_raises(self):
-        gt = {"cases": [{"case_id": "a"}]}
-        with pytest.raises(RuntimeError, match="不一致"):
-            ef.validate_cases(gt, {"b": []})
-
-    def test_real_baseline_present_but_not_truth(self):
-        gt = ef.load_ground_truth()
-        rb = gt["real_baselines"]
-        assert rb["truth"] is False and rb["jobs"]
+def test_forbidden_wording_anywhere_fails():
+    rep = ev.evaluate([_f(), _f(page=8, desc="存在记录篡改嫌疑")], GOLD)
+    assert len(rep["forbidden_hits"]) == 1
+    assert not rep["ok"], "禁用措辞命中不得判通过"
 
 
-class TestRealBaselineContract:
-    """`real_baselines` 是**惰性数据**：不进判据，且数字自带可比性 / 非确定披露。
-
-    为什么锁这条（R77 第十七批，报告 §6 R-B / 待办 **0-15**）：该块的
-    `total_findings: 784` 是**历史版本 + `mineru`** 的实测，而当前版本 + `paddle`
-    对**同一份**文件实测只有 **208** 条；且真实 job 计数**非确定**（同输入 / 同产物 /
-    同后端两次跑 **41 vs 51**）。该块**没有任何代码消费者**（判据只走合成语料的 F1），
-    但 JSON 的 `description` 自称"金标"、块的 `note` 自称"回归对照"
-    ⇒ 一个照着 784 去"修回归"的人会白干几天。
-    """
-
-    def _rb(self) -> dict:
-        return ef.load_ground_truth()["real_baselines"]
-
-    def test_block_declares_it_is_not_a_criterion(self):
-        rb = self._rb()
-        assert rb.get("criterion") is False, (
-            "real_baselines 必须**显式**声明 `criterion: false` —— 缺了它，这一块读起来就像阈值"
-        )
-        assert rb.get("criterion_note"), "必须写明'为什么不是判据'，否则下一个人还会去比"
-
-    def test_criterion_path_never_reads_real_baselines(self):
-        """**唯一判据是合成语料的 F1** —— 判据路径不得引用 `real_baselines`。
-
-        用 **AST 查名字**（不是文本搜）：注释 / docstring 里提到它不算消费。
-        为什么必须挡：真实 job 计数**非确定**（同输入两次跑差 >20%）⇒ 一旦接进
-        pass/fail，门禁会**随机红 / 绿**，而"随机红"会被当成"产品回归"去修。
-        """
-        tree = ast.parse(_EVAL.read_text(encoding="utf-8"))
-        judge_fns = {"evaluate", "aggregate", "score_case", "validate_cases",
-                     "load_ground_truth", "main"}
-        consumers = []
-        for fn in (n for n in ast.walk(tree)
-                   if isinstance(n, ast.FunctionDef) and n.name in judge_fns):
-            refs = {n.id for n in ast.walk(fn) if isinstance(n, ast.Name)}
-            refs |= {n.value for n in ast.walk(fn)
-                     if isinstance(n, ast.Constant) and isinstance(n.value, str)}
-            if "real_baselines" in refs:
-                consumers.append(fn.name)
-        assert not consumers, (
-            f"判据路径引用了 real_baselines：{consumers} —— 真实 job 计数**非确定**，"
-            "把它接进 pass/fail 会让门禁随机红 / 绿"
-        )
-
-    def test_consumer_detector_is_not_vacuous(self):
-        """防空转：给一段**确实**消费它的源码，检测器必须报出来。"""
-        bad = "def evaluate():\n    gt = load()\n    return gt['real_baselines']\n"
-        parsed = ast.parse(bad)
-        refs = {n.id for n in ast.walk(parsed) if isinstance(n, ast.Name)}
-        refs |= {n.value for n in ast.walk(parsed)
-                 if isinstance(n, ast.Constant) and isinstance(n.value, str)}
-        assert "real_baselines" in refs, "检测器连构造样例都认不出 ⇒ 上一条是空断言"
-
-    def test_every_job_declares_provenance_and_comparability(self):
-        """每个条目必须自报**测量环境** + 是否与当前版本可比。"""
-        for j in self._rb()["jobs"]:
-            jid = j.get("job_id")
-            p = j.get("provenance")
-            assert isinstance(p, dict) and p, f"{jid} 缺 provenance"
-            for k in ("measured_at", "ocr_backend", "llm_model", "app_version",
-                      "reproducible", "reason"):
-                assert k in p, f"{jid} 的 provenance 缺 {k!r}"
-            assert isinstance(p["reproducible"], bool), f"{jid}: reproducible 必须是布尔"
-            assert "comparable_to_current" in j, (
-                f"{jid} 必须显式声明是否与当前版本可比（缺了就会有人默认'可比'）"
-            )
-
-    def test_counts_carry_runs_and_a_range(self):
-        """计数必须带 `runs` + `observed_total_range` —— **单次计数不得当阈值**。"""
-        for j in self._rb()["jobs"]:
-            jid = j.get("job_id")
-            runs = j.get("runs")
-            assert isinstance(runs, int) and runs >= 1, f"{jid}: runs 缺失或非法"
-            rng = j.get("observed_total_range")
-            assert (isinstance(rng, list) and len(rng) == 2
-                    and all(isinstance(x, int) for x in rng)
-                    and rng[0] <= rng[1]), f"{jid}: observed_total_range 非法：{rng!r}"
-            if "total_findings" in j:
-                assert rng[0] <= j["total_findings"] <= rng[1], (
-                    f"{jid}: total_findings={j['total_findings']} 不在 {rng} 内"
-                )
-            if "by_type" in j:
-                assert isinstance(j["by_type"], dict) and all(
-                    isinstance(v, int) for v in j["by_type"].values()
-                ), f"{jid}: by_type 必须是 {type: int}"
-
-    def test_a_multi_run_entry_exists(self):
-        """至少要有一条 `runs >= 2` 的条目 —— 否则"区间"这个概念是空转的。"""
-        multi = [j for j in self._rb()["jobs"] if j.get("runs", 1) >= 2]
-        assert multi, (
-            "没有任何多跑条目 ⇒ observed_total_range 永远退化成点，"
-            "「真实 job 非确定」这件事就没有现场证据"
-        )
-        for j in multi:
-            lo, hi = j["observed_total_range"]
-            assert lo != hi, (
-                f"{j['job_id']}: runs={j['runs']} 却给出退化的区间 [{lo}, {hi}] —— "
-                "若真的一样，请改回 runs=1 并在 reason 里说明"
-            )
+def test_text_and_negative_filters():
+    gold = {
+        "labels": [{
+            "id": "T", "criterion": True, "evidence": "t", "description": "带附注且不含断言",
+            "match": {"text_all": ["不作为偏差结论"], "text_none": ["存在逻辑错误"]},
+            "expect": {"min": 1, "max": 1},
+        }],
+    }
+    ok = ev.evaluate([_f(desc="读数不平衡（不作为偏差结论）")], gold)
+    assert ok["ok"]
+    bad = ev.evaluate([_f(desc="存在逻辑错误（不作为偏差结论）")], gold)
+    assert not bad["ok"]
 
 
-# ── 端到端：规则层跑通且基线可复现 ─────────────────────────────────────────
+def test_main_fails_closed_on_empty_inputs(tmp_path, capsys):
+    gold_p = tmp_path / "gold.json"
+    gold_p.write_text(json.dumps(GOLD), encoding="utf-8")
+    empty = tmp_path / "empty.json"
+    empty.write_text("[]", encoding="utf-8")
+    assert ev.main(["--findings", str(empty), "--gold", str(gold_p)]) == 2
+    assert "不得判通过" in capsys.readouterr().err
+
+    no_labels = tmp_path / "nolabels.json"
+    no_labels.write_text(json.dumps({"labels": []}), encoding="utf-8")
+    findings = tmp_path / "f.json"
+    findings.write_text(json.dumps([_f()]), encoding="utf-8")
+    assert ev.main(["--findings", str(findings), "--gold", str(no_labels)]) == 2
 
 
-def test_evaluate_end_to_end_baseline():
-    """跑全语料（离线规则层），断言基线达标。
-
-    M4 起 R12 落地，`self_review` 用例由 known_gap 转为验收 → 无 known_gap；
-    用例总数 11（原 7 + M4 新增 4）。
-    """
-    report = ef.evaluate()
-    s = report["summary"]
-    assert s["cases_known_gap"] == 0
-    assert s["cases_scored"] == 11
-    assert s["fp"] == 0 and s["fn"] == 0
-    assert s["precision"] == 1.0 and s["recall"] == 1.0 and s["f1"] == 1.0
-    assert s["noise_findings"] > 0
-
-
-class TestRealSampleContract:
-    """`real_samples` 是**真实标注**样本：有来源、**无标签**，且**不进判据**。
-
-    为什么锁这条（R90 第三十三批 / TODO #161）：`用户标注.png` 圈出规格
-    `▲pH 为 6.8~7.0。` 与实测 `中和后 pH 6.88`，但「该行应为 OOS 还是合规」
-    **未与业务方确认**（6.88 落在区间内）⇒ 若有人把它当"真值"接进 P/R，
-    就会得到一个**看似权威、实则无据**的精度数字。
-    """
-
-    def _rs(self) -> dict:
-        return ef.load_ground_truth()["real_samples"]
-
-    def test_block_is_present_and_declares_no_truth(self):
-        rs = self._rs()
-        assert rs.get("criterion") is False, "real_samples 必须**显式**声明 `criterion: false`"
-        assert rs.get("truth_declared") is False, (
-            "real_samples 必须**显式**声明 `truth_declared: false` —— 缺了它，"
-            "这一块读起来就像真值"
-        )
-        assert rs.get("criterion_note"), "必须写明'为什么不是判据'"
-        assert rs.get("samples"), "至少要有一条真实样本，否则本块是空壳"
-
-    def test_every_sample_has_no_label_and_unconfirmed_intent(self):
-        """**无标签 + 意图未确认**：`label` 必须为 `None`，`intent_confirmed` 必须为 `False`。"""
-        for s in self._rs()["samples"]:
-            sid = s.get("sample_id")
-            ann = s.get("annotation") or {}
-            assert ann.get("label") is None, f"{sid}: 未确认意图前 label 必须是 null"
-            assert ann.get("intent_confirmed") is False, (
-                f"{sid}: intent_confirmed 必须是 False（6.88 落在规格内 ⇒ 结论待业务方确认）"
-            )
-            assert ann.get("intent_question"), f"{sid}: 必须写明**待确认的问题**"
-            assert s.get("usable_as_criterion") is False, (
-                f"{sid}: usable_as_criterion 必须是 False"
-            )
-
-    def test_every_sample_has_a_locator(self):
-        """每条样本必须可**回指**到具体 job / 页 / 方法，且显式声明是否做了像素级绑定。"""
-        for s in self._rs()["samples"]:
-            sid = s.get("sample_id")
-            loc = s.get("locator") or {}
-            for k in ("job_id", "filename", "page", "method"):
-                assert loc.get(k), f"{sid} 的 locator 缺 {k!r}"
-            assert isinstance(loc["page"], int) and loc["page"] >= 1, f"{sid}: page 非法"
-            assert "pixel_binding" in loc, (
-                f"{sid}: 必须显式声明是否做了像素级绑定（缺了会有人默认'已绑定'）"
-            )
-
-    def test_observed_output_is_labelled_as_old_version(self):
-        """系统输出必须自报**测量环境**，且不得暗示"当前版本如此"。"""
-        for s in self._rs()["samples"]:
-            sid = s.get("sample_id")
-            o = s.get("observed_system_output") or {}
-            for k in ("measured_at", "app_version", "ocr_backend"):
-                assert k in o, f"{sid} 的 observed_system_output 缺 {k!r}"
-
-    def test_criterion_path_never_reads_real_data_blocks(self):
-        """**判据路径**不得引用 `real_baselines` / `real_samples`。
-
-        用 **AST 查名字**（不是文本搜）：注释 / docstring 里提到它不算消费。
-        为什么必须挡：真实样本**无标签**、系统输出**非确定**（同输入两次跑差 >20%）
-        ⇒ 一旦接进 pass/fail，门禁会**随机红 / 绿**，并产出无据的"精度数字"。
-        """
-        tree = ast.parse(_EVAL.read_text(encoding="utf-8"))
-        judge_fns = {"evaluate", "aggregate", "score_case", "validate_cases",
-                     "load_ground_truth", "main"}
-        offenders = []
-        for fn in (n for n in ast.walk(tree)
-                   if isinstance(n, ast.FunctionDef) and n.name in judge_fns):
-            refs = {n.id for n in ast.walk(fn) if isinstance(n, ast.Name)}
-            refs |= {n.value for n in ast.walk(fn)
-                     if isinstance(n, ast.Constant) and isinstance(n.value, str)}
-            for key in ("real_baselines", "real_samples"):
-                if key in refs:
-                    offenders.append(f"{fn.name}:{key}")
-        assert not offenders, (
-            f"判据路径引用了真实数据块：{offenders} —— 真实样本**无标签**、"
-            "系统输出**非确定**，接进 pass/fail 会产出'看似权威、实则无据'的精度数字"
-        )
-
-    def test_detector_is_not_vacuous_for_real_samples(self):
-        """防空转：给一段**确实**消费它的源码，检测器必须报出来。"""
-        bad = "def evaluate():\n    return load()['real_samples']\n"
-        parsed = ast.parse(bad)
-        refs = {n.id for n in ast.walk(parsed) if isinstance(n, ast.Name)}
-        refs |= {n.value for n in ast.walk(parsed)
-                 if isinstance(n, ast.Constant) and isinstance(n.value, str)}
-        assert "real_samples" in refs, "检测器连构造样例都认不出 ⇒ 上一条是空断言"
-
-    def test_evaluate_report_carries_no_real_sample_content(self):
-        """**口径分离**机检：判据报告（`evaluate()`）不得夹带真实样本内容。
-
-        真实样本口径只在 `main()` 的**文本**输出里以独立小节呈现；若有人把
-        `real_samples` 塞进 `evaluate()` 的返回值，下游任何拿 report 算指标
-        的地方都会被**静默**污染。
-        """
-        blob = json.dumps(ef.evaluate(), ensure_ascii=False)
-        assert "real_samples" not in blob
-        assert "真实样本" not in blob
+def test_main_exit_code_reflects_verdict(tmp_path):
+    gold_p = tmp_path / "gold.json"
+    gold_p.write_text(json.dumps(GOLD), encoding="utf-8")
+    good = tmp_path / "good.json"
+    good.write_text(json.dumps([_f()]), encoding="utf-8")
+    assert ev.main(["--findings", str(good), "--gold", str(gold_p)]) == 0
+    bad = tmp_path / "bad.json"
+    bad.write_text(json.dumps([_f(), _f()]), encoding="utf-8")
+    assert ev.main(["--findings", str(bad), "--gold", str(gold_p)]) == 1

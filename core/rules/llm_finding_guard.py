@@ -156,6 +156,8 @@ _SPECULATIVE_RE = re.compile(
 #: 只对"结论依赖数值比较"的条目生效；且**只在结构化数据确实把参与比较的
 #: 数字标成 handwritten 时**降级（fail-open：无手写证据 ⇒ 不动）。
 _HW_NUMERIC_TYPES = frozenset({"mass_balance"})
+#: 手写读数派生结论的**用户可见**附注（R133）：降级之外还要说清"不作偏差结论"。
+_HW_CAVEAT = "（该结论依赖手写读数，读数未经独立复核 ⇒ 不作为偏差结论，请对照原页核对）"
 _COMPARISON_RE = re.compile(
     r"大于|小于|多于|少于|不平衡|不一致|不相等|不等于|超出|不足|超过"
 )
@@ -953,6 +955,23 @@ def _check_handwritten_numeric_conclusion(f: dict, structured: dict | None) -> s
     )
 
 
+def handwritten_caveat_clause(f: dict) -> str:
+    """手写读数派生结论的**用户可见**附注（R133）。
+
+    0-74 只做了"降级"，文案本身仍写着"物料平衡存在逻辑错误" —— 严重度降了，
+    结论没降。验收口径要求"文案明确读数未经复核 ⇒ 不作为偏差结论"，故补一句
+    **面向复核员**的附注（与 `validity_overdue_clause` 同形态：补事实，不搬内部理由；
+    内部理由仍在 `guard_reason`）。
+    """
+    if str(f.get("type") or "") not in _HW_NUMERIC_TYPES:
+        return ""
+    if not str(f.get("guard_reason") or "").startswith("结论依赖手写数值"):
+        return ""
+    if _HW_CAVEAT in str(f.get("description") or ""):
+        return ""
+    return _HW_CAVEAT
+
+
 def sanitize_accusatory_wording(f: dict) -> dict | None:
     """把 LLM 的指控性措辞改为中性表述（R132 / 0-75）。
 
@@ -1447,4 +1466,19 @@ def apply_review(
         _acc += 1
     if _acc:
         logger.info("  accusatory wording neutralized: %d 条（篡改/伪造 → 需人工核对）", _acc)
+    # R133 / 0-74 收尾：降级只改了严重度，结论句仍然写着"存在逻辑错误" ⇒
+    # 补一句面向复核员的附注（内部理由仍只在 guard_reason，不搬进来）。
+    _hw = 0
+    for _i, _f in enumerate(out):
+        if not isinstance(_f, dict):
+            continue
+        _clause = handwritten_caveat_clause(_f)
+        if not _clause:
+            continue
+        _nf = dict(_f)
+        _nf["description"] = str(_nf.get("description") or "").rstrip() + _clause
+        out[_i] = _nf
+        _hw += 1
+    if _hw:
+        logger.info("  handwritten caveat annotated: %d 条（附「不作为偏差结论」）", _hw)
     return out, suppressed
