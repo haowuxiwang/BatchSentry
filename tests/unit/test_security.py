@@ -160,6 +160,57 @@ class TestValidateExternalUrl:
         assert ok is True
 
 
+class TestEnterprisePrivateEndpointOptIn:
+    """企业内网部署：`PBC_ALLOW_PRIVATE_ENDPOINTS=1` 才放行私网/环回。
+
+    默认（单机桌面）保持 SSRF 纵深；私有化部署时模型/OCR 就在企业内网，
+    否则「数据不出企业」根本无法配置 —— 这是两套部署形态的**唯一**分界。
+    """
+
+    def test_default_rejects_intranet_and_local_model(self, monkeypatch):
+        monkeypatch.delenv("PBC_ALLOW_PRIVATE_ENDPOINTS", raising=False)
+        for url in ("http://10.0.0.8:8000/v1", "http://192.168.1.20:8080",
+                    "http://127.0.0.1:11434/v1"):
+            ok, reason = validate_external_url(url, kind="base_url")
+            assert ok is False, f"{url} 默认必须被拒（SSRF 纵深）"
+            assert "内部地址" in reason
+
+    def test_flag_allows_intranet_base_url(self, monkeypatch):
+        monkeypatch.setenv("PBC_ALLOW_PRIVATE_ENDPOINTS", "1")
+        for url in ("http://10.0.0.8:8000/v1", "http://192.168.1.20:8080",
+                    "http://172.20.0.5:9000/v1", "http://[fd00::1]:8000/v1"):
+            ok, reason = validate_external_url(url, kind="LLM base_url")
+            assert ok is True, f"{url} 应被放行，实际: {reason}"
+
+    def test_flag_allows_localhost_model(self, monkeypatch):
+        """本机推理（Ollama/vLLM）是企业内网部署的常见形态。"""
+        monkeypatch.setenv("PBC_ALLOW_PRIVATE_ENDPOINTS", "true")
+        for url in ("http://127.0.0.1:11434/v1", "http://localhost:1234/v1"):
+            ok, reason = validate_external_url(url, kind="LLM base_url")
+            assert ok is True, f"{url} 应被放行，实际: {reason}"
+
+    def test_flag_still_rejects_cloud_metadata(self, monkeypatch):
+        """link-local 是云元数据端点，与企业内网模型无关 ⇒ 永不放行。"""
+        monkeypatch.setenv("PBC_ALLOW_PRIVATE_ENDPOINTS", "1")
+        for url in ("http://169.254.169.254/latest/meta-data",
+                    "http://[fe80::1]:8080/v1"):
+            ok, reason = validate_external_url(url, kind="base_url")
+            assert ok is False, f"{url} 即便 opt-in 也必须被拒"
+            assert "内部地址" in reason
+
+    def test_flag_still_enforces_https_when_required(self, monkeypatch):
+        monkeypatch.setenv("PBC_ALLOW_PRIVATE_ENDPOINTS", "1")
+        ok, reason = validate_external_url(
+            "http://10.0.0.8:8000/v1", require_https=True, kind="base_url"
+        )
+        assert ok is False and "https" in reason
+
+    def test_flag_does_not_affect_public_https(self, monkeypatch):
+        monkeypatch.setenv("PBC_ALLOW_PRIVATE_ENDPOINTS", "1")
+        ok, _ = validate_external_url("https://api.deepseek.com/v1", kind="base_url")
+        assert ok is True
+
+
 class TestIsLocalRequest:
     """is_local_request — Host + Origin check for Settings CSRF guard.
 

@@ -529,7 +529,7 @@ def _check_check_consistency(pages: list[dict]) -> list[dict]:
                         "description": (
                             f"第{pno}页 检查项「{item[:40]}」勾选为“否”"
                             f"（{marker or '勾选标记'}），请对照 PDF 原页确认该答案"
-                            f"是否为预期（否定式提问的“否”通常即正常答案）"
+                            f"是否为预期"
                         ),
                         "ocr_text": f"item={item[:40]} selected=否",
                         "operator": "",

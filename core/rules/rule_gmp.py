@@ -111,6 +111,18 @@ _BALANCE_DECL_RE = re.compile(
     r"(收率|物料平衡|平衡率|得率|回收率)[^。；;\n]{0,16}?[≥≤<>]=?\s*\d"
 )
 
+#: 领用/使用/损耗三列表（实测 sy p9「PE袋使用的物料平衡计算」）：
+#: 结构化参数名形如「透明PE袋(1100×700) 领用数」，value 尾部才是数量
+#: （前面可能粘着批号，如 `0309 20`）。
+_BALANCE_ROW_RE = re.compile(r"^(?P<item>.*?)\s*(领用数|使用数|损耗数)$")
+_TRAILING_NUM_RE = re.compile(r"(\d+(?:\.\d+)?)\s*$")
+
+
+def _trailing_number(text: str) -> float | None:
+    """取字符串尾部的数字（`0309 20` → 20；`30` → 30）。"""
+    m = _TRAILING_NUM_RE.search(_norm_value(text))
+    return float(m.group(1)) if m else None
+
 
 def _check_mass_balance(pages: list[dict]) -> list[dict]:
     """R11：收率/物料平衡可否核定。
@@ -132,10 +144,24 @@ def _check_mass_balance(pages: list[dict]) -> list[dict]:
             if op and _BALANCE_DECL_RE.search(op):
                 declared_in_text = True
             step_no = step.get("step_no", "?")
+            rows: dict[str, dict] = {}
             for p in step.get("parameters") or []:
                 if not isinstance(p, dict):
                     continue
                 name = _norm_value(p.get("name"))
+                row_m = _BALANCE_ROW_RE.match(name)
+                if row_m:
+                    has_balance_param = True
+                    num = _trailing_number(p.get("value"))
+                    if num is not None:
+                        row = rows.setdefault(row_m.group("item"), {"handwritten": False})
+                        row[row_m.group(2)] = num
+                        row["handwritten"] = (
+                            row["handwritten"]
+                            or str(p.get("value_source") or "").strip().lower()
+                            == "handwritten"
+                        )
+                    continue
                 if not name or not any(k in name for k in _BALANCE_KEYWORDS):
                     continue
                 has_balance_param = True
@@ -168,6 +194,37 @@ def _check_mass_balance(pages: list[dict]) -> list[dict]:
                             f"无法核定物料平衡/收率是否合格，请确认规格来源"
                         ),
                         "ocr_text": f"{name}: value={value} spec=空",
+                        "operator": "",
+                        "source": "rule",
+                    })
+            for item, row in rows.items():
+                issue, used = row.get("领用数"), row.get("使用数")
+                if issue is None or used is None:
+                    continue
+                lost = row.get("损耗数") or 0.0
+                # 使用数不可能超过领用数；使用+损耗超过领用同样不成立 ⇒
+                # 这一处的表内算术自相矛盾（实测 sy p9：OCR 读成 20/30/0，
+                # 原页为 30/30/0）。手写读数未经独立复核 ⇒ 只报 info + 附注，
+                # 不得定性为偏差结论（断言措辞由读数质量决定，R130 口径）。
+                if used > issue or used + lost > issue:
+                    _hw = bool(row["handwritten"])
+                    _caveat = (
+                        "手写读数，未经独立复核 ⇒ 不作为偏差结论，请对照原页核对"
+                        if _hw else "印刷值，请对照原页核对"
+                    )
+                    findings.append({
+                        "page": pno,
+                        "type": "mass_balance",
+                        "severity": "info" if _hw else "warning",
+                        "description": (
+                            f"第{pno}页 工序{step_no} 物料平衡「{item}」"
+                            f"使用数{used:g} / 损耗数{lost:g} 超过领用数{issue:g}"
+                            f"（{_caveat}）"
+                        ),
+                        "ocr_text": (
+                            f"balance_row={item}: 领用={issue:g} 使用={used:g} "
+                            f"损耗={lost:g}"
+                        ),
                         "operator": "",
                         "source": "rule",
                     })
@@ -254,6 +311,7 @@ def _check_self_review(pages: list[dict]) -> list[dict]:
             #: 操作人 陈诗雨」，而原页笔迹与姓名均为另一人（页图核对）。
             sig_pairs: set[str] = set()
             sig_high: set[str] = set()
+            sig_non_high: set[str] = set()
             field_pairs: set[str] = set()
             sig_op_raws: dict[str, list[str]] = {}
             sig_rv_raws: dict[str, list[str]] = {}
@@ -271,9 +329,14 @@ def _check_self_review(pages: list[dict]) -> list[dict]:
                 elif role in _REVIEWER_ROLES:
                     revs.add(person)
                     sig_rv_raws.setdefault(person, []).append(name_raw)
-                if str(sig.get("confidence") or "").strip().lower() == "high":
+                _conf = str(sig.get("confidence") or "").strip().lower()
+                if _conf == "high":
                     sig_high.add(person)
-                if str(sig.get("confidence") or "").strip().lower() == "low":
+                else:
+                    # 缺失 / medium / low 都算"非 high"：签名是手写体，不是
+                    # "证明同一人"的可靠证据（R133 收紧，实测 p4 两人被读成一人）。
+                    sig_non_high.add(person)
+                if _conf == "low":
                     low.add(person)
             same |= (ops & revs)
             sig_pairs |= (ops & revs)
@@ -291,7 +354,10 @@ def _check_self_review(pages: list[dict]) -> list[dict]:
                 # R133 例外：证据只来自**签名槽**时，缺失 confidence 不算可靠
                 # （必须有一步显式 high）；证据来自**印刷字段**时沿用原口径。
                 if person in sig_pairs and person not in field_pairs:
-                    _reliable = person in sig_high
+                    # 该步内**所有**签名槽都显式 high 才算可靠：旁证是
+                    # `test_one_side_low_is_enough_to_downgrade` —— 操作人 high
+                    # 而复核人 low 时不得判 critical（断言"同一人"的证据是两侧签名）。
+                    _reliable = person in sig_high and person not in sig_non_high
                 else:
                     _reliable = person not in low
                 slot["solid"] = slot["solid"] or _reliable

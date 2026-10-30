@@ -160,10 +160,31 @@ async def _suppress_persisted_llm_noise(db, job_id: str) -> dict:
     )
     unreadable = {r[0] for r in await cur.fetchall()}
 
+    # R133 续：规则层已用**同类型**判据覆盖的页 ⇒ LLM 同名类型行是重复卡片。
+    # 与内存路径 `_overlap_covered_by` 的「规则层用精确类型」口径一致（不套
+    # 类型族，避免一条「签名日期倒置」吞掉独立的「签名人不符」）。
+    # 实测 sy_r5：p7 rule/llm 各一条 `signature_time_anomaly`、p8 rule/llm 各
+    # 一条 `suspicious_date`，同一处证据两张卡。
+    cur = await db.execute(
+        "SELECT page, type FROM findings WHERE job_id = ? AND source = 'rule' "
+        "AND type IN ('suspicious_date', 'signature_time_anomaly')", (job_id,),
+    )
+    rule_dates = {(r[0], str(r[1]).lower()) for r in await cur.fetchall()}
+
+    # 规则层已按「领用/使用/损耗」表判定算术不成立（ocr_text 带 balance_row 标记）
+    # ⇒ 同页 LLM 对同一张表的平衡描述是重复卡片。实测 sy_r5 漏报由规则补上、
+    # sy_r6 由 LLM 报出：两者都在时保留规则（确定性），否则报告里会有两张卡。
+    cur = await db.execute(
+        "SELECT page FROM findings WHERE job_id = ? AND source = 'rule' "
+        "AND type = 'mass_balance' AND ocr_text LIKE 'balance_row=%'", (job_id,),
+    )
+    rule_balance_pages = {r[0] for r in await cur.fetchall()}
+
     cur = await db.execute(
         "SELECT id, page, type, severity, description, ocr_text FROM findings "
         "WHERE job_id = ? AND source IN ('llm_page', 'llm_cross') "
-        "AND type IN ('self_review', 'suspicious_date', 'signature_time_anomaly')",
+        "AND type IN ('self_review', 'suspicious_date', 'signature_time_anomaly', "
+        "'mass_balance')",
         (job_id,),
     )
     rows = [dict(r) for r in await cur.fetchall()]
@@ -175,7 +196,19 @@ async def _suppress_persisted_llm_noise(db, job_id: str) -> dict:
 
     keep: dict[tuple, dict] = {}
     for r in rows:
+        if (r["type"] == "mass_balance" and r["page"] in rule_balance_pages
+                and any(k in (r["description"] or "")
+                        for k in ("平衡", "领用", "使用", "损耗"))):
+            drop.setdefault(
+                r["id"], "rule_balance_row（规则层已按领用/使用/损耗表判定，LLM 同表描述为重复）"
+            )
+            continue
         if r["type"] not in _DATE_DEDUP_TYPES:
+            continue
+        if (r["page"], str(r["type"]).lower()) in rule_dates:
+            drop.setdefault(
+                r["id"], "rule_same_type（同页同类型规则判据已覆盖，规则层为权威）"
+            )
             continue
         lits = _date_claim_literals(r)
         if not lits:

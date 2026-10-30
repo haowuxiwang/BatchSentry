@@ -193,6 +193,87 @@ class TestPersistedLlmNoise:
         assert [k["type"] for k in kept] == ["signature_time_anomaly"]
         assert kept[0]["severity"] == "warning", "保留更重的一条"
 
+    async def test_rule_same_type_covers_llm_duplicate(self, doc_db):
+        """规则层已在同页用同类型判据报过 ⇒ LLM 那条是同一处证据的第二张卡。"""
+        db = doc_db
+        for source, sev, desc in (
+            ("rule", "info", "本文档日期年份出现 1 种读法（2015 ⇒ 2025 误读）"),
+            ("llm_page", "info", "复核人日期2015.6.03早于当前年份超过10年"),
+        ):
+            await db.execute(
+                "INSERT INTO findings (job_id, page, type, severity, description, "
+                "source, status) VALUES ('job-doc', 8, 'suspicious_date', ?, ?, ?, "
+                "'pending')",
+                (sev, desc, source))
+        await db.commit()
+
+        from core.pipeline.stage3 import _suppress_persisted_llm_noise
+
+        res = await _suppress_persisted_llm_noise(db, "job-doc")
+        assert res["deleted"] == 1
+        rows = [dict(r) for r in await (
+            await db.execute(
+                "SELECT type, source FROM findings WHERE job_id='job-doc'")
+        ).fetchall()]
+        assert [r["source"] for r in rows] == ["rule"], "规则层判据必须保留"
+
+    async def test_rule_other_type_does_not_suppress(self, doc_db):
+        """`year_contradiction` 断言的是**关系**（两处年份相互矛盾），不是同一件事。"""
+        db = doc_db
+        await db.execute(
+            "INSERT INTO findings (job_id, page, type, severity, description, "
+            "source, status) VALUES ('job-doc', 8, 'year_contradiction', "
+            "'warning', '同页事件年份矛盾', 'rule', 'pending')")
+        await db.execute(
+            "INSERT INTO findings (job_id, page, type, severity, description, "
+            "source, status) VALUES ('job-doc', 8, 'suspicious_date', 'info', "
+            "'复核日期 2015.6.03 早于 2000 年', 'llm_page', 'pending')")
+        await db.commit()
+
+        from core.pipeline.stage3 import _suppress_persisted_llm_noise
+
+        assert (await _suppress_persisted_llm_noise(db, "job-doc"))["deleted"] == 0
+
+    async def test_rule_balance_row_removes_llm_duplicate(self, doc_db):
+        """规则层已按领用/使用/损耗表判定 ⇒ LLM 对同表的描述是第二张卡。"""
+        db = doc_db
+        await db.execute(
+            "INSERT INTO findings (job_id, page, type, severity, description, "
+            "ocr_text, source, status) VALUES ('job-doc', 9, 'mass_balance', 'info', "
+            "'使用数30 超过领用数20（手写读数…）', "
+            "'balance_row=PE袋: 领用=20 使用=30 损耗=0', 'rule', 'pending')")
+        await db.execute(
+            "INSERT INTO findings (job_id, page, type, severity, description, "
+            "source, status) VALUES ('job-doc', 9, 'mass_balance', 'info', "
+            "'PE袋物料平衡数据异常，使用数可能大于领用数', 'llm_cross', 'pending')")
+        await db.commit()
+
+        from core.pipeline.stage3 import _suppress_persisted_llm_noise
+
+        assert (await _suppress_persisted_llm_noise(db, "job-doc"))["deleted"] == 1
+        rows = [dict(r) for r in await (
+            await db.execute(
+                "SELECT source FROM findings WHERE job_id='job-doc'")
+        ).fetchall()]
+        assert [r["source"] for r in rows] == ["rule"]
+
+    async def test_rule_balance_row_on_other_page_keeps_llm(self, doc_db):
+        """不同页的平衡结论可能讲的是另一张表 ⇒ 不得跨页吞。"""
+        db = doc_db
+        await db.execute(
+            "INSERT INTO findings (job_id, page, type, severity, description, "
+            "ocr_text, source, status) VALUES ('job-doc', 9, 'mass_balance', 'info', "
+            "'使用数30 超过领用数20', 'balance_row=PE袋', 'rule', 'pending')")
+        await db.execute(
+            "INSERT INTO findings (job_id, page, type, severity, description, "
+            "source, status) VALUES ('job-doc', 4, 'mass_balance', 'info', "
+            "'第4页 损耗原因需确认', 'llm_cross', 'pending')")
+        await db.commit()
+
+        from core.pipeline.stage3 import _suppress_persisted_llm_noise
+
+        assert (await _suppress_persisted_llm_noise(db, "job-doc"))["deleted"] == 0
+
     async def test_no_rows_is_noop(self, doc_db):
         from core.pipeline.stage3 import _suppress_persisted_llm_noise
 

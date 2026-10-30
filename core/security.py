@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import ipaddress
 import logging
+import os
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
@@ -28,6 +29,24 @@ _BLOCKED_PREFIXES = (
     "192.168.",        # private 192.168/16
     "0.0.0.0",         # unspecified
 )
+
+#: 企业内网部署的显式逃生开关（默认关）。
+#:
+#: 默认拒绝私网/环回是 SSRF 纵深：`validate_external_url` 把关的是**用户填写的**
+#: base_url，放行私网等于允许"让服务端带着 token 请求本机/内网服务"。
+#: 但私有化部署的诉求恰恰相反 —— 模型与 OCR 都在企业内网（如
+#: `http://10.0.0.8:8000/v1` 的 vLLM、`http://127.0.0.1:11434` 的 Ollama），
+#: 数据不出企业。二者只能靠**显式 opt-in** 区分：默认保持拒绝，管理员
+#: 设置 `PBC_ALLOW_PRIVATE_ENDPOINTS=1` 后才放行私网/环回。
+#: link-local（169.254/16、fe80::/10）是云元数据端点，**任何模式下都拒**。
+_ALLOW_PRIVATE_ENV = "PBC_ALLOW_PRIVATE_ENDPOINTS"
+
+
+def allow_private_endpoints() -> bool:
+    """是否允许把外部端点指向私网/环回（企业内网部署开关，默认 False）。"""
+    return os.getenv(_ALLOW_PRIVATE_ENV, "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
 
 
 def _parse_host_as_ip(host: str):
@@ -69,27 +88,29 @@ def _is_blocked_host(host: str) -> bool:
     if not host:
         return True
     host = host.lower().strip("[]")
+    allow_private = allow_private_endpoints()
     # localhost 字面量是 loopback 最常用别名，IP 字面量拦截之外的常见绕过
     # （对抗审查：此前仅拦 IP 字面量，http://localhost:8080 保存时放行，
     # 后续 ocr_client 携带 token 以服务端身份请求本机服务）。
     # 只拦字面量不做 DNS 解析 — 保持既有威胁模型（防 IP 字面量/别名，
     # 不防 DNS rebinding）。
     if host == "localhost" or host.endswith(".localhost"):
-        return True
+        # 企业内网部署时本机模型（Ollama/vLLM）就在 localhost，须放行。
+        return not allow_private
     # Bare hostname check (fast path for IPv4 strings)
-    for prefix in _BLOCKED_PREFIXES:
-        if host.startswith(prefix):
-            return True
+    if not allow_private:
+        for prefix in _BLOCKED_PREFIXES:
+            if host.startswith(prefix):
+                return True
     # IPv4 in ipaddress form: 172.16/12 is tricky to prefix-match, so parse.
     ip = _parse_host_as_ip(host)
-    if ip is not None and (ip.is_loopback or ip.is_link_local
-                           or ip.is_private or ip.is_unspecified):
-        return True
-    # Not an IP literal (it's a hostname like api.deepseek.com). Allow.
-    # We deliberately do NOT do DNS resolution here — that would be slow
-    # and the threat model is direct IP literal in base_url, not DNS
-    # rebinding (which would require the attacker to control DNS for a
-    # hostname they convinced the user to type).
+    if ip is not None:
+        # link-local = 云元数据端点（169.254.169.254 等），**任何模式都拒**：
+        # 它与企业内网模型无关，放行只会扩大 SSRF 面。
+        if ip.is_link_local:
+            return True
+        if ip.is_loopback or ip.is_private or ip.is_unspecified:
+            return not allow_private
     return False
 
 

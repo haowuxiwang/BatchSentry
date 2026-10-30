@@ -379,6 +379,35 @@ curl -X POST http://127.0.0.1:58765/api/settings \
   -d '{"ocr_backend":"mineru","mineru_token":"sk-xxx"}'
 ```
 
+### 企业内网部署（数据不出企业）
+
+默认发行形态是**单机桌面版**：后端只监听 `127.0.0.1`（`APP_HOST`，见 `config.py`），
+入站 API **没有鉴权**，仅靠"非本机请求拒绝"守卫 —— 因此**不能**直接暴露给内网多用户。
+
+要在"批记录与模型调用都不出企业"的前提下跑起来，需要同时满足三条：
+
+1. **模型/OCR 指向内网端点**：`DEEPSEEK_BASE_URL` / `SILICONFLOW_BASE_URL` /
+   `MINERU_BASE_URL` / `PADDLE_OCR_API_URL` 全部可由环境变量或设置页覆盖；
+   例如内网 vLLM `http://10.0.0.8:8000/v1`、本机 Ollama `http://127.0.0.1:11434/v1`。
+2. **显式放行私网端点**：`PBC_ALLOW_PRIVATE_ENDPOINTS=1`（默认关）。默认拒绝私网/环回
+   是 SSRF 纵深（`core/security.validate_external_url`）；开启后放行私网/环回，但
+   **link-local（169.254/16、fe80::/10）任何模式都拒**（云元数据端点）。HTTPS 强制
+   与协议白名单不变。⚠️ 开启即意味着"服务端会带着 token 访问该地址"，只应在受控内网
+   的机器上开启。
+3. **多用户访问走前置代理**：若需要多人同时使用，必须在前端放反向代理/网关做
+   **SSO + 鉴权 + 审计**（本程序不提供账号体系），且后端仍绑定内网回环/受控网段；
+   直接 `APP_HOST=0.0.0.0` 暴露等于把无鉴权的 API 交给整个内网。
+
+数据面：知识库（GMP/ALCOA+/21 CFR Part 11 等）是**随包分发的本地 JSON**，检索不出网；
+无遥测/崩溃上报；上传的 PDF、生成的 `report.md`、SQLite（`data.db`）都只落在
+`%APPDATA%/PBC`。secret 以**明文**存于同目录 `config.json` —— 多用户/共享机器场景应由
+操作系统账户隔离或磁盘加密兜底（当前不做 DPAPI，见 `docs/TODO.md` B4-2）。
+
+⚠️ **换模型必须重新验收**：prompt 契约依赖模型输出 JSON 的字段与文案约束
+（`llm/page_analyzer.py` 的 schema + `llm_finding_guard` 的降级/抑制规则）。企业模型
+（尤其小参数/量化版）可能不遵守 → 上线前用两份真实批记录复跑 `scripts/score_real_run.py`
+与 `devlogs/_verify/gold_*.json`，不得仅凭"接口通了"判定可用。
+
 ### 上传限额调整（按客户文档规模）
 
 体积与页数限额由**单一真值** `config.UPLOAD_LIMITS` 驱动，可用环境变量覆盖

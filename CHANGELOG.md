@@ -6,6 +6,49 @@
 ---
 
 ## [Unreleased]
+### 真实语料标注集 + 已落库噪声清理 + 企业内网接入（Round 133，2026-10-30）—— 0-76 / 0-81 / 0-82 / 0-83
+
+**这一轮把"准确/精确"从人眼对照变成可复跑的分数，并修掉两份真实记录上**同一处证据被报两遍**、
+**物料平衡漏报**与**企业内网模型无法配置**三类具体缺陷。**先定位、再解决、最后测试**。
+
+**① 真实语料的人工标注集 + 评分器（新增，与合成语料评测并存）**
+- `scripts/score_real_run.py`：吃 `e2e_*.json`（三种外壳）与标注集，输出逐条 PASS/FAIL 与 `recall_proxy`。
+  判据：`expect.min/max`（漏报/重复）、`severity_max`（过度定性）、`text_all`/`text_none`（口径）、
+  顶层 `forbid_text`（全局禁用措辞）；**空输入 / 空 labels ⇒ exit 2（fail-closed）**。
+- `tests/unit/test_score_real_run.py`（9 条契约）。
+- 标注集（gitignored，`devlogs/_verify/gold_*.json`）：10 页 5 条（S1–S5）、51 页 3 条（M1–M3）；
+  `criterion: true` 才计入召回，回归钉标 `criterion: false`。
+
+**② 0-81：已落库 llm 行的同源噪声（`_suppress_persisted_llm_noise`）**
+`llm_page` 在 Stage 2 每页完成即落库，Stage 3 的内存护栏看不见这些行 —— 与 0-64 同病根。新增两类清理：
+同页**同类型**规则判据已覆盖（`suspicious_date`/`signature_time_anomaly`，精确类型、不套族）⇒ 删 LLM 行；
+规则层已按「领用/使用/损耗」表判定（`ocr_text` 前缀 `balance_row=`）⇒ 删同页 LLM 同表描述。
+规则层永远是保留方；删行落 `audit_log action=persisted_llm_noise_removed`。
+
+**③ 0-82：物料平衡表算术的确定性判据（R11 扩展）**
+`_check_mass_balance` 按「<品名> 领用数/使用数/损耗数」三列分组：`使用数 > 领用数` 或
+`使用+损耗 > 领用` ⇒ `mass_balance`；手写读数（`value_source=handwritten`）只报 **info** +
+「不作为偏差结论」附注，印刷值才 warning。批号粘连的 `0309 20` 取尾数。
+**动机是实测的召回不可复现**：同输入两次跑，`sy_r5` 漏报 p9、`sy_r6` 由 LLM 报出。
+
+**④ 0-76：删掉 R8 的极性推断**「（否定式提问的"否"通常即正常答案）」—— 题面极性无可靠判据，
+实测 p2「上一次清场**是否在有效期内**」答"否"恰是偏差方向。改为只陈述事实 + 请人工核对。
+
+**⑤ 0-83：企业内网模型/OCR 的显式 opt-in（`PBC_ALLOW_PRIVATE_ENDPOINTS=1`，默认关）**
+默认仍拒私网/环回/`localhost`（SSRF 纵深，单机行为逐字不变）；显式开启后放行私网/环回，
+**link-local（169.254/16、fe80::/10）任何模式都拒**（云元数据端点与企业内网模型无关）。
+HTTPS 强制与协议白名单不变。`tests/unit/test_security.py` 47 passed（含 6 条新增）。
+
+**⑥ 承 Round 133 前段（已提交，本文件此前未记）**：签名槽**显式 `confidence: high`** 才允许
+`self_review critical`（缺失/medium ⇒ `signature_unreadable/info`）；手写数值结论补
+「不作为偏差结论」附注；LLM 的「缺少签名人姓名」补 OCR 漏识口径。
+
+**⑦ 测试与产物**：定向单测 `test_rule_gmp.py` / `test_r121_doc_level_collapse.py` /
+`test_llm_finding_guard.py` / `test_security.py` 全绿；10 页产物级 e2e `sy_r5` **2/4**、
+`sy_r6` **4/4**（评分器有判别力，且暴露了 S2 的 LLM 随机性 ⇒ 由 ③ 的规则兜底）。
+构建物 `1.2.2` 重建后按 `PROVENANCE.txt` 校验两份 exe sha256 一致（见 §⑧）。
+⚠️ **未做**：51 页 `slm_r3` 的最终评分与 GitHub Release 资产上传需在产物重建后复跑/办理。
+
 ### 手写读数派生结论降级 + 同源误读去重（Round 132，2026-10-29）—— 0-74 / 0-75
 
 **这一轮回答的是"两份批记录上，BatchSentry 的结论比人眼多说了什么"。** 做法是先把两份真实

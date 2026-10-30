@@ -91,6 +91,54 @@ class TestMassBalance:
         ])])])
         assert _check_mass_balance(pages) == []
 
+    def test_balance_row_used_exceeds_issued_is_info_with_caveat(self):
+        """实测 sy p9：OCR 读成 领用20/使用30 ⇒ 表内算术不成立。
+
+        手写读数未经独立复核 ⇒ 只能 info +「不作为偏差结论」附注，
+        与 R130 的「断言由读数质量决定」同一口径。
+        """
+        pages = _norm([_page(9, [_step(8, "PE袋使用的物料平衡计算。", parameters=[
+            {"name": "透明PE袋 (1100×700mm ×0.06mm) 领用数", "value": "0309 20",
+             "value_source": "handwritten"},
+            {"name": "透明PE袋 (1100×700mm ×0.06mm) 使用数", "value": "30",
+             "value_source": "handwritten"},
+            {"name": "透明PE袋 (1100×700mm ×0.06mm) 损耗数", "value": "0",
+             "value_source": "handwritten"},
+        ])])])
+        fs = _check_mass_balance(pages)
+        assert _types(fs) == ["mass_balance"]
+        assert fs[0]["severity"] == "info"
+        assert "不作为偏差结论" in fs[0]["description"]
+        assert "使用数30" in fs[0]["description"]
+        assert "领用数20" in fs[0]["description"]
+
+    def test_balance_row_used_plus_loss_exceeds_issued(self):
+        pages = _norm([_page(1, [_step(8, parameters=[
+            {"name": "PE袋 领用数", "value": "10", "value_source": "handwritten"},
+            {"name": "PE袋 使用数", "value": "9", "value_source": "handwritten"},
+            {"name": "PE袋 损耗数", "value": "2", "value_source": "handwritten"},
+        ])])])
+        fs = _check_mass_balance(pages)
+        assert len(fs) == 1 and fs[0]["type"] == "mass_balance"
+
+    def test_balance_row_arithmetic_ok_is_silent(self):
+        """p4 实测 3=2+1：领用 = 使用 + 损耗，不得报警。"""
+        pages = _norm([_page(4, [_step(8, parameters=[
+            {"name": "PE袋 领用数", "value": "3", "value_source": "handwritten"},
+            {"name": "PE袋 使用数", "value": "2", "value_source": "handwritten"},
+            {"name": "PE袋 损耗数", "value": "1", "value_source": "handwritten"},
+        ])])])
+        assert _check_mass_balance(pages) == []
+
+    def test_balance_row_printed_values_warn_without_handwritten_caveat(self):
+        pages = _norm([_page(1, [_step(8, parameters=[
+            {"name": "PE袋 领用数", "value": "10"},
+            {"name": "PE袋 使用数", "value": "12"},
+        ])])])
+        fs = _check_mass_balance(pages)
+        assert fs and fs[0]["severity"] == "warning"
+        assert "不作为偏差结论" not in fs[0]["description"]
+
 
 # ===========================================================================
 # R12 self_review
