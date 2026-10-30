@@ -43,6 +43,8 @@ _DATE_DEDUP_TYPES = frozenset({"suspicious_date", "signature_time_anomaly"})
 _DATE_LITERAL_RE = re.compile(
     r"(\d{4})\s*[.\-/年]\s*(\d{1,2})(?:\s*[.\-/月]\s*(\d{1,2})\s*日?)?"
 )
+#: 规则层聚合行 `ocr_text` 里的页清单（`aggregated kind=… pages=[2, 16]`）。
+_AGG_PAGES_RE = re.compile(r"pages=\[([0-9,\s]*)\]")
 
 
 def _date_claim_literals(f: dict) -> set[str]:
@@ -147,7 +149,7 @@ async def _suppress_persisted_llm_noise(db, job_id: str) -> dict:
     1. **前提不可判的 self_review**：同页规则层已判 `signature_unreadable`
        （无法区分"真同一人"与"OCR 把两人读成一人"）⇒ LLM 的同一人断言无依据，
        删除；规则层那条 info 已保留原始识别串，复核员看原页即可。
-       实证：10 页记录 p4，页图核对为两人，LLM 仍报「均签署为'陈诗雨'」。
+       实证：10 页记录 p4，页图核对为两人，LLM 仍报「均签署为'王小雨'」。
     2. **同一处日期读数被两种类型重复报**：同页 + 同一日期字面量，只留严重度
        最高的一条（同 0-75 口径；`year_contradiction`/`time_reversal` 断言的是
        关系，不在此列）。
@@ -166,10 +168,28 @@ async def _suppress_persisted_llm_noise(db, job_id: str) -> dict:
     # 实测 sy_r5：p7 rule/llm 各一条 `signature_time_anomaly`、p8 rule/llm 各
     # 一条 `suspicious_date`，同一处证据两张卡。
     cur = await db.execute(
-        "SELECT page, type FROM findings WHERE job_id = ? AND source = 'rule' "
+        "SELECT page, type, ocr_text FROM findings WHERE job_id = ? AND source = 'rule' "
         "AND type IN ('suspicious_date', 'signature_time_anomaly')", (job_id,),
     )
-    rule_dates = {(r[0], str(r[1]).lower()) for r in await cur.fetchall()}
+    rule_dates = set()
+    #: 规则层「文档级聚合 + 明确声明日期类不可信」覆盖的页（R133 续）。
+    #: 这类行的 `type` 固定是 `suspicious_date`，而 LLM 同一处 OCR 年份误读可能
+    #: 被标成 `signature_time_anomaly` ⇒ 按「同页同类型」的旧判据压不住，复核页
+    #: 仍会出现两张卡（实测 sy_r7 p8：rule/suspicious_date + llm_page/signature_time_anomaly）。
+    #: 聚合行的 `page_list` 落在 `ocr_text`（`pages=[…]`），故按其中列出的页收敛。
+    rule_date_pages: set[int] = set()
+    for page, ftype, ocr in await cur.fetchall():
+        rule_dates.add((page, str(ftype or "").lower()))
+        txt = str(ocr or "")
+        if not txt.startswith("aggregated kind="):
+            continue
+        rule_date_pages.add(page)
+        m = _AGG_PAGES_RE.search(txt)
+        if m:
+            for tok in m.group(1).split(","):
+                tok = tok.strip()
+                if tok.isdigit():
+                    rule_date_pages.add(int(tok))
 
     # 规则层已按「领用/使用/损耗」表判定算术不成立（ocr_text 带 balance_row 标记）
     # ⇒ 同页 LLM 对同一张表的平衡描述是重复卡片。实测 sy_r5 漏报由规则补上、
@@ -204,6 +224,12 @@ async def _suppress_persisted_llm_noise(db, job_id: str) -> dict:
             )
             continue
         if r["type"] not in _DATE_DEDUP_TYPES:
+            continue
+        if r["page"] in rule_date_pages:
+            drop.setdefault(
+                r["id"],
+                "rule_aggregated_date（同页规则层已聚合日期类判定并声明不可信，LLM 日期行为同源重复）",
+            )
             continue
         if (r["page"], str(r["type"]).lower()) in rule_dates:
             drop.setdefault(

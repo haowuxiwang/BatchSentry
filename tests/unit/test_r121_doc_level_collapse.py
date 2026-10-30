@@ -274,6 +274,55 @@ class TestPersistedLlmNoise:
 
         assert (await _suppress_persisted_llm_noise(db, "job-doc"))["deleted"] == 0
 
+    async def test_rule_aggregated_date_covers_cross_type(self, doc_db):
+        """聚合行声明「日期类判定不可信」⇒ 同页 LLM 的另一日期类型是同源重复。
+
+        实测 sy_r7 p8：规则层聚合出一条 `suspicious_date`（info），LLM 把同一处
+        OCR 年份误读标成 `signature_time_anomaly`（warning）—— 旧判据只比"同页
+        **同类型**"，压不住这两张卡。
+        """
+        db = doc_db
+        await db.execute(
+            "INSERT INTO findings (job_id, page, type, severity, description, "
+            "ocr_text, source, status) VALUES ('job-doc', 8, 'suspicious_date', 'info', "
+            "'本文档日期年份出现 2 种读法……日期类判定不可信', "
+            "'aggregated kind=year_baseline_today count=1 years=[2000, 2015] pages=[8]', "
+            "'rule', 'pending')")
+        await db.execute(
+            "INSERT INTO findings (job_id, page, type, severity, description, "
+            "source, status) VALUES ('job-doc', 8, 'signature_time_anomaly', 'warning', "
+            "'复核人签名日期（2015.6.03）早于检查人签名日期（2025.06.30）', "
+            "'llm_page', 'pending')")
+        await db.commit()
+
+        from core.pipeline.stage3 import _suppress_persisted_llm_noise
+
+        assert (await _suppress_persisted_llm_noise(db, "job-doc"))["deleted"] == 1
+        rows = [dict(r) for r in await (
+            await db.execute(
+                "SELECT source FROM findings WHERE job_id='job-doc'")
+        ).fetchall()]
+        assert [r["source"] for r in rows] == ["rule"], "规则层聚合行必须保留"
+
+    async def test_rule_aggregated_date_covers_pages_from_page_list(self, doc_db):
+        """聚合行落在 `page_list` 的首/任一页，其余页的 LLM 日期行同样收敛。"""
+        db = doc_db
+        await db.execute(
+            "INSERT INTO findings (job_id, page, type, severity, description, "
+            "ocr_text, source, status) VALUES ('job-doc', 2, 'suspicious_date', 'info', "
+            "'日期类判定不可信', "
+            "'aggregated kind=year_baseline_today count=2 years=[2015] pages=[2, 16]', "
+            "'rule', 'pending')")
+        await db.execute(
+            "INSERT INTO findings (job_id, page, type, severity, description, "
+            "source, status) VALUES ('job-doc', 16, 'suspicious_date', 'warning', "
+            "'复核日期2015.6.03早于当前年份超过10年', 'llm_page', 'pending')")
+        await db.commit()
+
+        from core.pipeline.stage3 import _suppress_persisted_llm_noise
+
+        assert (await _suppress_persisted_llm_noise(db, "job-doc"))["deleted"] == 1
+
     async def test_no_rows_is_noop(self, doc_db):
         from core.pipeline.stage3 import _suppress_persisted_llm_noise
 

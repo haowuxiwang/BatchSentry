@@ -139,6 +139,65 @@ class TestMassBalance:
         assert fs and fs[0]["severity"] == "warning"
         assert "不作为偏差结论" not in fs[0]["description"]
 
+    def test_raw_text_fallback_when_structured_missing(self):
+        """结构化漏抽整张表（实测 sy_r7 p9）⇒ 原文三元组兜底仍判得出。"""
+        html = (
+            "<td>领用数 (只)</td><td>使用数 (只)</td><td>损耗数 (只)</td>"
+            "<td>1</td><td>透明PE袋</td><td>3000196</td><td>72502</td><td>0309</td>"
+            "<td>20</td><td>30</td><td>0</td>"
+            "<td>2</td><td>透明PE袋</td><td>3000203</td><td>72504</td><td>0207</td>"
+            "<td>30</td><td>30</td><td>0</td>"
+        )
+        page = _page(9, [_step(8, "PE袋使用的物料平衡计算。")])
+        page["raw_html"] = html
+        fs = _check_mass_balance(_norm([page]))
+        assert len(fs) == 1, "只有 20/30/0 一行算术不成立；30/30/0 正常"
+        assert fs[0]["severity"] == "info", "原文读数无法区分印刷/手写 ⇒ 只许 info"
+        assert "不作为偏差结论" in fs[0]["description"]
+        assert "第1行" in fs[0]["description"]
+        assert fs[0]["ocr_text"].startswith("balance_row=text_row1")
+
+    def test_raw_text_fallback_skipped_when_structured_rows_exist(self):
+        """结构化已有读数（30/30/0 正常）⇒ 不再用原文兜底，避免同表两张卡。"""
+        html = "<td>领用数</td><td>使用数</td><td>损耗数</td><td>20</td><td>30</td><td>0</td>"
+        page = _page(9, [_step(8, parameters=[
+            {"name": "PE袋 领用数", "value": "30"},
+            {"name": "PE袋 使用数", "value": "30"},
+            {"name": "PE袋 损耗数", "value": "0"},
+        ])])
+        page["raw_html"] = html
+        assert _check_mass_balance(_norm([page])) == []
+
+    def test_raw_text_without_header_is_silent(self):
+        """无「领用数」表头的连续数字串（批号/代码）不得误判成表格行。"""
+        html = "<td>72502</td><td>0309</td><td>20</td><td>30</td><td>0</td>"
+        page = _page(9, [_step(8)])
+        page["raw_html"] = html
+        assert _check_mass_balance(_norm([page])) == []
+
+    def test_raw_text_stops_at_next_step_sentence(self):
+        """表格之后的工序句子即表格结束：步骤 10 的压差/温湿度三元组不得混入。
+
+        实测 sy_r7 p9：平衡表后紧跟「9 将过筛后物料转移至…」与
+        「房间号 时间 相对压差 温度 湿度 … 20.6 51.6 11.2」—— 不截断时会
+        多报一条「第3行 领用20.6/使用51.6/损耗11.2」假阳性。
+        """
+        html = (
+            "<td>领用数</td><td>使用数</td><td>损耗数</td>"
+            "<td>1</td><td>透明PE袋</td><td>3000196</td><td>72502</td><td>0309</td>"
+            "<td>20</td><td>30</td><td>0</td>"
+            "<td>2</td><td>透明PE袋</td><td>3000203</td><td>72504</td><td>0207</td>"
+            "<td>30</td><td>30</td><td>0</td>"
+            "<td>9</td><td>将过筛后物料转移至物料复核室等待下一步生产。</td>"
+            "<td>房间号</td><td>时间</td><td>相对压差</td><td>温度</td><td>湿度</td>"
+            "<td>20.6</td><td>51.6</td><td>11.2</td>"
+        )
+        page = _page(9, [_step(8, "PE袋使用的物料平衡计算。")])
+        page["raw_html"] = html
+        fs = _check_mass_balance(_norm([page]))
+        assert len(fs) == 1, "只保留平衡表第1行；环境表的三元组属于另一张表"
+        assert "使用数30" in fs[0]["description"]
+
 
 # ===========================================================================
 # R12 self_review

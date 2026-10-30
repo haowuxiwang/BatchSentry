@@ -124,6 +124,64 @@ def _trailing_number(text: str) -> float | None:
     return float(m.group(1)) if m else None
 
 
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+_PURE_NUM_RE = re.compile(r"^\d+(?:\.\d+)?$")
+_ROW_MARKER_RE = re.compile(r"^\d{1,3}$")
+#: 表格之后的**工序句子**（含句读的长 token）⇒ 表格区到此结束。
+_SENTENCE_RE = re.compile(r"[。！？；]")
+#: 表头之后只扫这么多字符，避免把页脚/下一段工序的数字误当表格行。
+_BALANCE_TEXT_WINDOW = 600
+
+
+def _plain_text(raw_html: str) -> str:
+    """OCR 原文去标签并压缩空白（规则层拿到的 `raw_html` 是 HTML 片段）。"""
+    return re.sub(r"\s+", " ", _HTML_TAG_RE.sub(" ", raw_html or "")).strip()
+
+
+def _balance_triples_from_text(raw_html: str) -> list[tuple[float, float, float]]:
+    """从 OCR 原文的「领用数/使用数/损耗数」表解析 (领用, 使用, 损耗) 三元组。
+
+    为什么需要这条兜底：结构化抽取**可能漏掉**这张表（实测 sy_r7 p9 原文
+    清晰含 `20 30 0`，但 `structured_json` 里没有这三个参数）—— 此时只靠
+    `steps[].parameters` 的 R11 永远看不到数据，确定性判据等于失效。
+
+    解析口径刻意保守（宁可漏、不可错）：
+      - 只认**表头** `领用数/领用数量` 之后 `_BALANCE_TEXT_WINDOW` 字符内的数字；
+      - 三元组之后必须是**行号**（1–3 位整数）且再下一个 token 非纯数字，
+        或已到文本末尾 —— 否则视为批号/代码等无关数字（实测 `72502 0309 20`
+        这类连续数字串若不设此闸门会误判成一行）；
+      - 读到**工序句子**（含句读的长 token）即视为表格结束：p9 表格之后紧接
+        「9 将过筛后物料转移至…」与步骤 10 的压差/温湿度表，后者的
+        `20.6 51.6 11.2` 若不截断会被误读成一行平衡表。
+    """
+    text = _plain_text(raw_html)
+    triples: list[tuple[float, float, float]] = []
+    for head in re.finditer(r"领用(?:数量|数)", text):
+        tokens = text[head.start(): head.start() + _BALANCE_TEXT_WINDOW].split()
+        i, n = 0, len(tokens)
+        found_any = False
+        while i + 2 < n:
+            tok = tokens[i]
+            if found_any and len(tok) >= 6 and _SENTENCE_RE.search(tok):
+                break
+            if not (_PURE_NUM_RE.match(tok) and _PURE_NUM_RE.match(tokens[i + 1])
+                    and _PURE_NUM_RE.match(tokens[i + 2])):
+                i += 1
+                continue
+            nxt = tokens[i + 3] if i + 3 < n else None
+            marker_ok = nxt is None or (
+                _ROW_MARKER_RE.match(nxt)
+                and (i + 4 >= n or not _PURE_NUM_RE.match(tokens[i + 4]))
+            )
+            if marker_ok:
+                triples.append((float(tok), float(tokens[i + 1]), float(tokens[i + 2])))
+                found_any = True
+                i += 3
+                continue
+            i += 1
+    return triples
+
+
 def _check_mass_balance(pages: list[dict]) -> list[dict]:
     """R11：收率/物料平衡可否核定。
 
@@ -139,6 +197,9 @@ def _check_mass_balance(pages: list[dict]) -> list[dict]:
         pno = page["page"]
         declared_in_text = False
         has_balance_param = False
+        #: 结构化里确实解析出了「领用/使用/损耗」行（有读数）⇒ 以结构化为准，
+        #: 不再跑原文兜底（避免同一张表被两条路径各报一次）。
+        structured_rows_seen = False
         for step in page["steps"]:
             op = _norm_value(step.get("operation"))
             if op and _BALANCE_DECL_RE.search(op):
@@ -154,6 +215,7 @@ def _check_mass_balance(pages: list[dict]) -> list[dict]:
                     has_balance_param = True
                     num = _trailing_number(p.get("value"))
                     if num is not None:
+                        structured_rows_seen = True
                         row = rows.setdefault(row_m.group("item"), {"handwritten": False})
                         row[row_m.group(2)] = num
                         row["handwritten"] = (
@@ -228,7 +290,34 @@ def _check_mass_balance(pages: list[dict]) -> list[dict]:
                         "operator": "",
                         "source": "rule",
                     })
-        if declared_in_text and not has_balance_param:
+        raw_rows: list[tuple[float, float, float]] = []
+        if not structured_rows_seen:
+            # 兜底：结构化抽取漏掉整张「领用/使用/损耗」表时，直接读 OCR 原文
+            # （实测 sy_r7 p9：原文有 `20 30 0`，结构化里一条参数都没有 ⇒
+            # 确定性判据在结构化缺失时本会整体失效）。
+            raw_rows = _balance_triples_from_text(page.get("raw_html") or "")
+            for idx, (issue_r, used_r, lost_r) in enumerate(raw_rows, 1):
+                if not (used_r > issue_r or used_r + lost_r > issue_r):
+                    continue
+                # 原文读数**无法区分**印刷/手写，且未经独立复核 ⇒ 永远只报 info，
+                # 并显式带「不作为偏差结论」（R130 口径：断言措辞由读数质量决定）。
+                findings.append({
+                    "page": pno,
+                    "type": "mass_balance",
+                    "severity": "info",
+                    "description": (
+                        f"第{pno}页 物料平衡表第{idx}行：领用数{issue_r:g} / "
+                        f"使用数{used_r:g} / 损耗数{lost_r:g}，表内算术不成立"
+                        f"（OCR 表格读数，未经独立复核 ⇒ 不作为偏差结论，请对照原页核对）"
+                    ),
+                    "ocr_text": (
+                        f"balance_row=text_row{idx}: 领用={issue_r:g} "
+                        f"使用={used_r:g} 损耗={lost_r:g}"
+                    ),
+                    "operator": "",
+                    "source": "rule",
+                })
+        if declared_in_text and not has_balance_param and not raw_rows:
             findings.append({
                 "page": pno,
                 "type": "mass_balance",
@@ -304,11 +393,10 @@ def _check_self_review(pages: list[dict]) -> list[dict]:
             ops: set[str] = set()
             revs: set[str] = set()
             low: set[str] = set()
-            high: set[str] = set()
             #: R133：签名槽天然是手写体 ⇒ "同一人"结论的证据强度取决于 OCR 自报，
             #: 必须**显式 high** 才允许 critical；缺失 confidence 不等于可靠。
             #: 实证：10 页记录 p4 两处签名 confidence 缺失，规则判 critical「复核人即
-            #: 操作人 陈诗雨」，而原页笔迹与姓名均为另一人（页图核对）。
+            #: 操作人 王小雨」，而原页笔迹与姓名均为另一人（页图核对）。
             sig_pairs: set[str] = set()
             sig_high: set[str] = set()
             sig_non_high: set[str] = set()
