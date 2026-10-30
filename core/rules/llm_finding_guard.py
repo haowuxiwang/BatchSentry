@@ -972,6 +972,26 @@ def handwritten_caveat_clause(f: dict) -> str:
     return _HW_CAVEAT
 
 
+_SIG_NAME_MISSING_RE = re.compile(r"(缺少|缺失|未填|空白|为空).{0,8}签名(人)?姓名")
+#: 签名栏"姓名缺失"是 OCR 与手写体最常见的失效方向；断言必须带可核对口径。
+_SIG_NAME_HEDGE = "（OCR 对签名姓名可能漏识别，如原页该栏已签请以原页为准）"
+
+
+def hedge_signature_name_claim(f: dict) -> str:
+    """LLM 断言「签名栏缺少姓名」时补 OCR 漏识别口径（R133）。
+
+    实证：10 页记录 p9 步骤12，原页签名格已签，OCR 只取到日期 ⇒ LLM 报
+    「仅有日期，缺少签名人姓名」。规则层同类条目早已带「如原页已签，属 OCR
+    漏识别」，LLM 侧没有 ⇒ 同一现象两套口径。这里只补口径、不改结论。
+    """
+    if str(f.get("source") or "") not in LLM_SOURCES:
+        return ""
+    desc = str(f.get("description") or "")
+    if "OCR" in desc or not _SIG_NAME_MISSING_RE.search(desc):
+        return ""
+    return _SIG_NAME_HEDGE
+
+
 def sanitize_accusatory_wording(f: dict) -> dict | None:
     """把 LLM 的指控性措辞改为中性表述（R132 / 0-75）。
 
@@ -1481,4 +1501,18 @@ def apply_review(
         _hw += 1
     if _hw:
         logger.info("  handwritten caveat annotated: %d 条（附「不作为偏差结论」）", _hw)
+    # R133 / S4：签名姓名"缺失"断言补 OCR 口径（规则层早已有，LLM 侧没有）。
+    _sn = 0
+    for _i, _f in enumerate(out):
+        if not isinstance(_f, dict):
+            continue
+        _hedge = hedge_signature_name_claim(_f)
+        if not _hedge:
+            continue
+        _nf = dict(_f)
+        _nf["description"] = str(_nf.get("description") or "").rstrip() + _hedge
+        out[_i] = _nf
+        _sn += 1
+    if _sn:
+        logger.info("  signature-name claim hedged: %d 条（补 OCR 漏识别口径）", _sn)
     return out, suppressed

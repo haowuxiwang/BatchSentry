@@ -145,6 +145,60 @@ async def _seed(db, page, desc, *, status="pending", source="llm_page"):
     )
 
 
+class TestPersistedLlmNoise:
+    """R133：已落库 llm 行的同源噪声（Stage 3 内存护栏看不见这些行）。"""
+
+    async def test_unfounded_self_review_is_deleted(self, doc_db):
+        db = doc_db
+        await db.execute(
+            "INSERT INTO findings (job_id, page, type, severity, description, "
+            "source, status) VALUES ('job-doc', 4, 'signature_unreadable', 'info', "
+            "'签名辨认不可靠', 'rule', 'pending')")
+        await db.execute(
+            "INSERT INTO findings (job_id, page, type, severity, description, "
+            "source, status) VALUES ('job-doc', 4, 'self_review', 'warning', "
+            "'执行人与检查人均为同一人', 'llm_page', 'pending')")
+        await db.commit()
+
+        from core.pipeline.stage3 import _suppress_persisted_llm_noise
+
+        res = await _suppress_persisted_llm_noise(db, "job-doc")
+        assert res["deleted"] == 1
+        rows = [dict(r) for r in await (
+            await db.execute("SELECT type, source FROM findings WHERE job_id='job-doc'")
+        ).fetchall()]
+        assert [r["type"] for r in rows] == ["signature_unreadable"]
+        assert rows[0]["source"] == "rule", "只删 LLM 那条，规则层判据必须保留"
+
+    async def test_same_literal_keeps_heaviest(self, doc_db):
+        db = doc_db
+        for ftype, sev, desc in (
+            ("signature_time_anomaly", "warning", "复核日期 2015.6.03 早于检查人日期"),
+            ("suspicious_date", "info", "复核日期 2015.6.03 早于 2000 年"),
+        ):
+            await db.execute(
+                "INSERT INTO findings (job_id, page, type, severity, description, "
+                "source, status) VALUES ('job-doc', 8, ?, ?, ?, 'llm_page', 'pending')",
+                (ftype, sev, desc))
+        await db.commit()
+
+        from core.pipeline.stage3 import _suppress_persisted_llm_noise
+
+        res = await _suppress_persisted_llm_noise(db, "job-doc")
+        assert res["deleted"] == 1
+        kept = [dict(r) for r in await (
+            await db.execute(
+                "SELECT type, severity FROM findings WHERE job_id='job-doc'")
+        ).fetchall()]
+        assert [k["type"] for k in kept] == ["signature_time_anomaly"]
+        assert kept[0]["severity"] == "warning", "保留更重的一条"
+
+    async def test_no_rows_is_noop(self, doc_db):
+        from core.pipeline.stage3 import _suppress_persisted_llm_noise
+
+        assert (await _suppress_persisted_llm_noise(doc_db, "job-doc"))["deleted"] == 0
+
+
 class TestPersistedCollapse:
     async def test_rows_are_merged_in_the_database(self, doc_db):
         db = doc_db

@@ -135,6 +135,83 @@ def _is_unfounded_self_review(
     )
 
 
+async def _suppress_persisted_llm_noise(db, job_id: str) -> dict:
+    """清理**已落库**的 llm 行里两类同源噪声（R133）。
+
+    为什么必须在库上做：`llm_page` 在 Stage 2 每页完成时就已入库，Stage 3 的
+    `_is_unfounded_self_review` / `_same_literal_covered_by` 只看**内存列表**，
+    对已落库的行无效 —— 与 0-64 同一病根（"护栏写好了，但没作用到这类行"）。
+
+    两类（都只动 `llm_page` / `llm_cross`）：
+
+    1. **前提不可判的 self_review**：同页规则层已判 `signature_unreadable`
+       （无法区分"真同一人"与"OCR 把两人读成一人"）⇒ LLM 的同一人断言无依据，
+       删除；规则层那条 info 已保留原始识别串，复核员看原页即可。
+       实证：10 页记录 p4，页图核对为两人，LLM 仍报「均签署为'陈诗雨'」。
+    2. **同一处日期读数被两种类型重复报**：同页 + 同一日期字面量，只留严重度
+       最高的一条（同 0-75 口径；`year_contradiction`/`time_reversal` 断言的是
+       关系，不在此列）。
+    """
+    from core.pipeline import db_lock
+
+    cur = await db.execute(
+        "SELECT page FROM findings WHERE job_id = ? AND source = 'rule' "
+        "AND type = 'signature_unreadable'", (job_id,),
+    )
+    unreadable = {r[0] for r in await cur.fetchall()}
+
+    cur = await db.execute(
+        "SELECT id, page, type, severity, description, ocr_text FROM findings "
+        "WHERE job_id = ? AND source IN ('llm_page', 'llm_cross') "
+        "AND type IN ('self_review', 'suspicious_date', 'signature_time_anomaly')",
+        (job_id,),
+    )
+    rows = [dict(r) for r in await cur.fetchall()]
+
+    drop: dict[int, str] = {}
+    for r in rows:
+        if r["type"] == "self_review" and r["page"] in unreadable:
+            drop[r["id"]] = "unfounded_self_review（同页签名被规则层判为辨认不可靠）"
+
+    keep: dict[tuple, dict] = {}
+    for r in rows:
+        if r["type"] not in _DATE_DEDUP_TYPES:
+            continue
+        lits = _date_claim_literals(r)
+        if not lits:
+            continue
+        for lit in lits:
+            key = (r["page"], lit)
+            prev = keep.get(key)
+            if prev is None:
+                keep[key] = r
+                continue
+            rank = {"info": 0, "warning": 1, "critical": 2}
+            #: 保留更重的一条：prev 更重就丢 r，否则丢 prev（别把方向写反 ——
+            #: 单测 `test_same_literal_keeps_heaviest` 就是这条的判别力来源）。
+            loser = r if rank.get(prev["severity"], 0) >= rank.get(r["severity"], 0) else prev
+            drop.setdefault(
+                loser["id"], f"same_literal({lit}) 同页同字面量重复，已保留更重的一条"
+            )
+
+    if not drop:
+        return {"deleted": 0}
+    async with db_lock:
+        for fid in drop:
+            await db.execute(
+                "DELETE FROM findings WHERE id = ? AND job_id = ?", (fid, job_id),
+            )
+        await db.commit()
+    detail = [{"id": k, "reason": v} for k, v in drop.items()]
+    await _audit_log(
+        db, job_id, "persisted_llm_noise_removed",
+        f"count={len(drop)} — 已落库 llm 行的同源噪声清理（详见 detail）; "
+        f"detail={json.dumps(detail[:40], ensure_ascii=False)}",
+    )
+    logger.info(f"[{job_id}] DB: 清理 %d 条已落库 llm 噪声", len(drop))
+    return {"deleted": len(drop)}
+
+
 async def _collapse_persisted_document_facts(db, job_id: str) -> dict:
     """把**已落库**的页级 LLM「文档级事实」收敛为一条（TODO 0-64）。
 
@@ -603,6 +680,8 @@ async def _run_stage3_cross_analysis(
     # 必须在这里（写入之后）做：p5/p10 那两条都是 `llm_page`，Stage 2 就进库了，
     # 上面那条 `reduce_document_level_facts` 的内存链路根本看不见它们。
     await _collapse_persisted_document_facts(db, job_id)
+    # R133：同病根的第二处 —— 已落库 llm 行不受 Stage 3 内存护栏约束。
+    await _suppress_persisted_llm_noise(db, job_id)
     if _g_sup:
         # B1-6 收权留痕：抑制 ≠ 删除。复用 finding_suppressions 台账
         # （reason + evidence + 可回退），与 stage2 的 spec_guard 同一张表、

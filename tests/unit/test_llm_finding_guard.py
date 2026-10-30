@@ -677,6 +677,30 @@ STRUCT_P9_PRINTED = {
 }
 
 
+class TestSignatureNameHedge:
+    """R133：LLM 断言「签名姓名缺失」必须补 OCR 漏识别口径（与规则层同口径）。"""
+
+    DESC = "步骤12中，岗位负责人签名/日期栏位仅有日期，缺少签名人姓名。"
+
+    def test_llm_claim_gets_ocr_hedge(self):
+        final, _sup = apply_review(
+            [_f(9, "completeness", "warning", self.DESC)]
+        )
+        assert len(final) == 1
+        assert "OCR" in final[0]["description"], final[0]["description"]
+
+    def test_rule_claim_not_touched(self):
+        """规则层文案早已带口径，且属确定性判据 ⇒ 不得改。"""
+        _r = _f(9, "completeness", "warning", self.DESC)
+        _r["source"] = "rule"
+        final, _sup = apply_review([_r])
+        assert "OCR" not in final[0]["description"]
+
+    def test_other_text_unaffected(self):
+        final, _sup = apply_review([_f(9, "completeness", "warning", "表格未填写温度值。")])
+        assert "OCR" not in final[0]["description"]
+
+
 class TestHandwrittenNumericConclusion:
     """p9 实测：LLM 用两个手写读数判「物料不平衡」。"""
 
