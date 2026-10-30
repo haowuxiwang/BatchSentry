@@ -398,6 +398,14 @@ curl -X POST http://127.0.0.1:58765/api/settings \
    **SSO + 鉴权 + 审计**（本程序不提供账号体系），且后端仍绑定内网回环/受控网段；
    直接 `APP_HOST=0.0.0.0` 暴露等于把无鉴权的 API 交给整个内网。
 
+> ⚠️ **前置代理会把 `Host` 改写成上游域名 ⇒ 写接口 403**（R134 审查定位，`docs/TODO.md` 0-84）。
+> `core/security.py::is_local_request` 要求 `Host` 以 `localhost`/`127.0.0.1`/`[::1]` 开头，
+> 用于挡 CSRF 与本机之外的写操作（设置保存、`/api/shutdown` 等）。Nginx/Traefik 默认把
+> `Host` 设为上游（如 `127.0.0.1:端口` 以外的值），照本节部署会出现"读得到、改不了"。
+> 可用的临时办法：代理显式 `proxy_set_header Host 127.0.0.1:$port`（并确保代理本身在
+> 受控网段、只转发已鉴权请求）。**长期方案**（信任代理/CSRF token）尚未实现，不要
+> 简单放宽 `is_local_request` —— 那会把写接口暴露给整段内网。
+
 数据面：知识库（GMP/ALCOA+/21 CFR Part 11 等）是**随包分发的本地 JSON**，检索不出网；
 无遥测/崩溃上报；上传的 PDF、生成的 `report.md`、SQLite（`data.db`）都只落在
 `%APPDATA%/PBC`。secret 以**明文**存于同目录 `config.json` —— 多用户/共享机器场景应由
